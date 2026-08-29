@@ -5,3 +5,7 @@ dist/
 
 # Specs and implementation plans stay local.
 docs/superpowers/
+coverage/
+.claude/worktrees/
+test-results/
+playwright-report/
