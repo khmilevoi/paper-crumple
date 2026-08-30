@@ -275,6 +275,20 @@ function closeQuietly(bitmap: ImageBitmap): void {
 }
 
 /**
+ * The acquisition-to-report mapping for the two arms whose freshness is a property of the arm
+ * rather than the answer to a question: a `Blob`, which is immutable, and a supplier, which is the
+ * caller's own promise (§8.5.1). `urlSource` deliberately does not use this — its freshness is
+ * whatever the conditional request decided.
+ */
+function unchangedReport(
+  got: OwnedBitmap | InstanceType<typeof AssetError> | Aborted,
+): ResupplyResult {
+  if (isAborted(got)) return ABORTED
+  if (got instanceof Error) return got
+  return { ...got, freshness: 'unchanged', warning: undefined }
+}
+
+/**
  * The decode boundary, wrapped. A bitmap obtained after the signal fired is closed here: the caller
  * is not receiving it and therefore cannot close it, and §8.5.4 wants it closed on abort exactly as
  * on success.
@@ -387,12 +401,7 @@ export function blobSource(blob: Blob, env: SourceEnv): NormalizedSource {
     reclaimable: true,
     borrowed: undefined,
     acquire: (o = {}) => load(o.signal),
-    resupply: async (o) => {
-      const got = await load(o.signal)
-      if (isAborted(got)) return ABORTED
-      if (got instanceof Error) return got
-      return { ...got, freshness: 'unchanged', warning: undefined }
-    },
+    resupply: async (o) => unchangedReport(await load(o.signal)),
   }
 }
 
@@ -445,11 +454,6 @@ export function supplierSource(supply: BitmapSupplier): NormalizedSource {
     reclaimable: true,
     borrowed: undefined,
     acquire: (o = {}) => call(o.signal),
-    resupply: async (o) => {
-      const got = await call(o.signal)
-      if (isAborted(got)) return ABORTED
-      if (got instanceof Error) return got
-      return { ...got, freshness: 'unchanged', warning: undefined }
-    },
+    resupply: async (o) => unchangedReport(await call(o.signal)),
   }
 }
