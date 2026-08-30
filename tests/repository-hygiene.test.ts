@@ -10,6 +10,8 @@ interface RootManifest {
   packageManager?: string
   engines?: Record<string, string>
   devEngines?: { runtime?: { name: string; version: string; onFail: string } }
+  scripts?: Record<string, string>
+  devDependencies?: Record<string, string>
 }
 
 describe('.gitattributes', () => {
@@ -44,5 +46,29 @@ describe('the root manifest', () => {
       runtime: { name: 'node', version: '^22.18.0 || >=24.11.0', onFail: 'error' },
     })
     expect(rootManifest.engines).toBeUndefined()
+  })
+
+  it('maps each test tier to its own script, so level 2 cannot be silently dropped', () => {
+    const scripts = rootManifest.scripts ?? {}
+    // Level 1 pulls no browser; the type tier runs beside it (spec 11.1).
+    expect(scripts.test).toBe('vitest run --project unit --project types')
+    expect(scripts['test:types']).toBe('vitest run --project types')
+    // Vitest never installs a browser, so the level-2 script installs one first.
+    expect(scripts['test:gl']).toBe(
+      'playwright install --no-shell chromium && vitest run --project gl',
+    )
+    // `check` is everything CI runs, level 2 included. Build is deliberately not in it.
+    expect(scripts.check).toBe(
+      'pnpm lint && pnpm format:check && pnpm typecheck && pnpm test && pnpm test:gl',
+    )
+    expect(scripts.check).not.toMatch(/pnpm build/)
+  })
+
+  it('pins the whole level-2 toolchain exactly, because this tier asserts byte identity', () => {
+    const dev = rootManifest.devDependencies ?? {}
+    // A floating browser is an unpinned input to a byte comparison (spec 11.1).
+    expect(dev.vitest).toBe('4.1.11')
+    expect(dev['@vitest/browser-playwright']).toBe('4.1.11')
+    expect(dev.playwright).toBe('1.62.1')
   })
 })

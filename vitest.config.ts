@@ -1,7 +1,16 @@
 import { playwright } from '@vitest/browser-playwright'
 import { configDefaults, defineConfig } from 'vitest/config'
 
-const sharedExclude = [...configDefaults.exclude, '**/dist/**']
+const sharedExclude = [
+  ...configDefaults.exclude,
+  '**/dist/**',
+  // Sibling plan worktrees live at .claude/worktrees/* inside this repository, and agent run
+  // scratch lives in .superpowers/. Without these, `vitest run` from the main checkout collects
+  // every sibling's tests — and the gl project opens a browser page for each, against the
+  // ~16 live WebGL2 context cap. eslint.config.js and .prettierignore already exclude both.
+  '**/.claude/**',
+  '**/.superpowers/**',
+]
 
 export default defineConfig({
   test: {

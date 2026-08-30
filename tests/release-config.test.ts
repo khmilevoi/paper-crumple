@@ -26,7 +26,7 @@ describe('Changesets', () => {
     ])
   })
 
-  it('names no fourth package, because the bundle was cancelled', () => {
+  it('names the cancelled unscoped paper-crumple package nowhere in the config', () => {
     expect(JSON.stringify(config)).not.toMatch(/"paper-crumple"/)
   })
 

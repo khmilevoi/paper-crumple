@@ -6,12 +6,12 @@ const root = new URL('../', import.meta.url)
 const workflow = parse(readFileSync(new URL('.github/workflows/ci.yml', root), 'utf8')) as {
   jobs: Record<
     string,
-    { strategy?: { matrix?: Record<string, unknown> }; steps: { run?: string }[] }
+    { strategy?: { matrix?: Record<string, unknown> }; steps?: { run?: string }[] }
   >
 }
 
 const runs = (job: string): string[] =>
-  workflow.jobs[job]!.steps.filter((step) => step.run).map((step) => step.run!)
+  (workflow.jobs[job]?.steps ?? []).filter((step) => step.run).map((step) => step.run!)
 
 describe('the level-1 matrix', () => {
   const matrix = workflow.jobs.level1!.strategy!.matrix!

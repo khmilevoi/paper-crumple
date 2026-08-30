@@ -46,9 +46,7 @@ describe('the workspace glob', () => {
   })
 
   it('keeps tools/ out of the workspace by not making it a package', () => {
-    if (existsSync(join(root, 'tools'))) {
-      expect(existsSync(join(root, 'tools/package.json'))).toBe(false)
-      expect(statSync(join(root, 'tools')).isDirectory()).toBe(true)
-    }
+    expect(statSync(join(root, 'tools')).isDirectory()).toBe(true)
+    expect(existsSync(join(root, 'tools/package.json'))).toBe(false)
   })
 })
