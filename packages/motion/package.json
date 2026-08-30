@@ -1,0 +1,64 @@
+{
+  "name": "@paper-crumple/motion",
+  "version": "0.0.0",
+  "description": "A MotionSource for paper-crumple: the CRMP v1 pack format, its parser, the 3D sheet program, and one export subpath per built-in pack.",
+  "keywords": [
+    "webgl2",
+    "animation",
+    "crmp",
+    "paper-crumple"
+  ],
+  "license": "MIT",
+  "homepage": "https://github.com/paper-crumple/paper-crumple/tree/main/packages/core#readme",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/paper-crumple/paper-crumple.git",
+    "directory": "packages/motion"
+  },
+  "type": "module",
+  "sideEffects": false,
+  "engines": {
+    "node": ">=22"
+  },
+  "files": [
+    "dist"
+  ],
+  "publishConfig": {
+    "access": "public"
+  },
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "default": "./dist/index.js"
+    },
+    "./packs/2x3": {
+      "types": "./dist/packs/2x3.d.ts",
+      "default": "./dist/packs/2x3.js"
+    },
+    "./packs/1x1": {
+      "types": "./dist/packs/1x1.d.ts",
+      "default": "./dist/packs/1x1.js"
+    },
+    "./packs/3x2": {
+      "types": "./dist/packs/3x2.d.ts",
+      "default": "./dist/packs/3x2.js"
+    }
+  },
+  "scripts": {
+    "build": "tsdown"
+  },
+  "dependencies": {},
+  "peerDependencies": {
+    "@paper-crumple/core": "workspace:^",
+    "typescript": ">=5.0"
+  },
+  "peerDependenciesMeta": {
+    "typescript": {
+      "optional": true
+    }
+  },
+  "devDependencies": {
+    "@paper-crumple/core": "workspace:*",
+    "typescript": "catalog:"
+  }
+}
