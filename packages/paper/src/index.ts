@@ -45,3 +45,16 @@ export { simplifyLoop, simplifyPolyline } from './simplify.js'
 
 // --- P8: the seeded randomness the outline is deterministic in (§8.2.1) ---
 export { makeRandom } from './random.js'
+
+// --- P8: the packed hull polygon the handle retains (§8.5) ---
+export {
+  HULL_USE_ALPHA,
+  hullBuffers,
+  hullBytes,
+  hullComponent,
+  hullComponentCount,
+  hullExtent,
+  hullVertexCount,
+  packPolygons,
+} from './hull-shape.js'
+export type { HullShape, PackedHull, UseAlphaHull } from './hull-shape.js'
