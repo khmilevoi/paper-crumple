@@ -1,0 +1,53 @@
+name: ci
+
+on:
+  push:
+    branches: [main, develop]
+  pull_request:
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  level1:
+    name: level 1 · ${{ matrix.os }} · node ${{ matrix.node-version }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest]
+        node-version: ['22.18.0', '24', '26']
+        include:
+          # .gitattributes guards a Windows CRLF failure that only a Windows lane can catch
+          # regressing. One lane is enough; it does not need the whole matrix.
+          - os: windows-latest
+            node-version: '24'
+    steps:
+      - uses: actions/checkout@v7
+      # No `version:` input — the action reads packageManager from package.json, which is the
+      # one place the pnpm version and its integrity hash live.
+      - uses: pnpm/action-setup@v6
+      - uses: actions/setup-node@v7
+        with:
+          node-version: ${{ matrix.node-version }}
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm lint
+      - run: pnpm format:check
+      - run: pnpm typecheck
+      - run: pnpm test
+
+  level2:
+    name: level 2 · webgl2 on swiftshader
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: pnpm/action-setup@v6
+      - uses: actions/setup-node@v7
+        with:
+          node-version: '24'
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm exec playwright install --with-deps chromium
+      - run: pnpm test:gl

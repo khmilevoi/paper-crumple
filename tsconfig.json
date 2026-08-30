@@ -1,0 +1,16 @@
+{
+  "extends": "@paper-crumple/tsconfig/base.json",
+  "compilerOptions": {
+    "noEmit": true,
+    "allowJs": true
+  },
+  "include": [
+    "vitest.config.ts",
+    "eslint.config.js",
+    "eslint.boundaries.js",
+    "tests/**/*.ts",
+    "packages/*/src/**/*.ts",
+    "packages/*/tsdown.config.ts",
+    "tools/**/*.ts"
+  ]
+}

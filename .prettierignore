@@ -1,0 +1,8 @@
+pnpm-lock.yaml
+.superpowers/
+.claude/
+docs/
+.changeset/*.md
+**/*.bin
+**/dist/**
+.turbo/
