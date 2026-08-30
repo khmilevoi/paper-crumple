@@ -22,3 +22,8 @@ export type { DrawScope, GlContext } from './gl.js'
 export type { Program, Target, Texture, TextureDesc } from './forward.js'
 export type { SheetHandle } from './sheet.js'
 export type { MotionClip, MotionFit } from './motion.js'
+
+// --- P3: the knob utilities a slot computes with (§6.3, §6.4, §6.2) ---
+export { hexToRgb, isHex } from './color.js'
+export { atOrAbove, hullCacheKey, maxInvalidation } from './invalidation.js'
+export { pxScale, scaleKnob } from './knobs.js'

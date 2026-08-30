@@ -66,3 +66,34 @@ export type {
 } from './stage-types.js'
 export type { EventName, Events, NoPayload, StageEvent } from './events.js'
 export type { DrawResult, KnobDescriptor, Knobs, MotionKnobs, SheetKnobs, View } from './forward.js'
+
+// --- P3: the knob registry (§6) ---
+export { KNOB_REFERENCE_PX, enumKnob, knobs } from './knobs.js'
+export type {
+  BoolKnob,
+  ColorKnob,
+  EnumKnob,
+  EnumKnobSpec,
+  Hex,
+  IntKnob,
+  Invalidates,
+  KnobBase,
+  KnobUi,
+  NumberKnob,
+  SharedKnob,
+} from './knobs.js'
+export { INVALIDATION_ORDER } from './invalidation.js'
+export type { Flatten, KnobValue, KnobsAt, KnobsOf } from './knob-types.js'
+export { SHARED_KNOBS } from './shared-knobs.js'
+export type { SharedKnobs } from './shared-knobs.js'
+export type {
+  AmbiguousKeys,
+  BoundKnobs,
+  KnobPatch,
+  KnobPatchAt,
+  KnobSetter,
+  NoExcess,
+  OwnKnobs,
+  SpriteKnobPatch,
+  ViewKnobPatch,
+} from './knob-patch.js'
