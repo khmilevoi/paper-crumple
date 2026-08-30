@@ -27,3 +27,47 @@ export type { MotionClip, MotionFit } from './motion.js'
 export { hexToRgb, isHex } from './color.js'
 export { atOrAbove, hullCacheKey, maxInvalidation } from './invalidation.js'
 export { pxScale, scaleKnob } from './knobs.js'
+
+// P5 — the normative resample reference (spec 7.4.1). The GLSL ES 3.00 twin is byte-identical to
+// this by construction; changing either without the other breaks a cross-language contract.
+export {
+  axisPlan,
+  idiv,
+  identityResample,
+  resampleAreaExact,
+  RESAMPLE_MAX_ACCUMULATOR,
+  RESAMPLE_Q,
+  RESAMPLE_T,
+  roundDiv,
+} from './resample.js'
+export type { AxisWindow, ResampleSource } from './resample.js'
+
+// P5 — resolution and derived overscan (spec 7.4.3, 8.6).
+export { SDF_RES_MAX, SDF_RES_MIN, sdfResFor, SIZE_QUANTUM } from './resolution.js'
+export {
+  artworkLongSide,
+  ASPECT_BOUND,
+  checkGuardBand,
+  EDGE_SLOP_REFERENCE_PX,
+  exactFrontLongSide,
+  GUARD_BAND_INNER,
+  GUARD_BAND_OUTER,
+  KNOB_REFERENCE_PX,
+  overscanFor,
+  overscanFromRadius,
+  overscanRadius,
+} from './overscan.js'
+export type { EdgeMode, EdgeParams, GuardCheckInput } from './overscan.js'
+
+// P5 — the byte accounting (spec 8.1, 8.5, 8.9).
+export {
+  cpuSdfBytes,
+  fieldBytes,
+  frontBytes,
+  FRONT_BYTES_PER_TEXEL,
+  handleBytes,
+  poolABytes,
+  poolBBytes,
+  scratchBytes,
+} from './bytes.js'
+export type { CountedBuffer, HandleFacts, ScratchBytes, ScratchRequest } from './bytes.js'

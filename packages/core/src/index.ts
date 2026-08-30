@@ -111,3 +111,8 @@ export type { Run, RunOwner } from './run.js'
 export type { PlayOptions, StagePlayOptions } from './runner.js'
 export type { SkipReason, StagePlayReport } from './collisions.js'
 export type { ViewState } from './view-state.js'
+
+// P5 — resolution (spec 7.4). `sizeForDisplay` is the one name that takes the number of places
+// `devicePixelRatio` is thought about from N to one.
+export { sizeForDisplay } from './resolution.js'
+export type { DisplaySizeRequest } from './resolution.js'
