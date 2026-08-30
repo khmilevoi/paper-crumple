@@ -1,3 +1,5 @@
+import type { Aborted } from './abort.js'
+import { ABORTED, isAborted } from './abort.js'
 import { AssetError } from './errors.js'
 
 /**
@@ -168,3 +170,192 @@ export type SourceFetch = (
   input: string | URL,
   init?: { signal?: AbortSignal; headers?: Record<string, string> },
 ) => Promise<SourceResponse>
+
+export interface SourceEnv {
+  readonly fetch?: SourceFetch
+  readonly createImageBitmap?: SourceDecode
+}
+
+/**
+ * A bitmap, and who closes it. **The stage closes every bitmap it obtained and never closes one it
+ * was given** (§8.5.4), so ownership is carried with the bitmap rather than re-derived from the
+ * arm — it is the one two-valued fact downstream still has to branch on, and it is a fact about
+ * ownership rather than about the union.
+ */
+export interface AcquiredBitmap {
+  readonly bitmap: ImageBitmap
+  readonly owned: boolean
+}
+
+/** A bitmap this module obtained. Every path but the `bitmap` arm produces one. */
+export interface OwnedBitmap extends AcquiredBitmap {
+  readonly owned: true
+}
+
+/**
+ * What the conditional request decided (§8.5.1, amendment 10).
+ *
+ * - `unchanged` — a `304`, or a `Blob`, which is immutable, or a supplier, which is the caller's
+ *   promise. The rebuild proceeds as a rebuild.
+ * - `changed` — a `200`. The bytes moved under a key §8.5.1 promised would not move.
+ * - `unverified` — neither validator was exposed, so nothing was asked and nothing was learned.
+ *   The re-supply proceeds and the same-image contract is documented and unenforced.
+ */
+export type SourceFreshness = 'unchanged' | 'changed' | 'unverified'
+
+export interface ResupplyReport extends OwnedBitmap {
+  readonly freshness: SourceFreshness
+  /** Set iff `freshness === 'changed'`. The sentence, not the channel: emitting is P9's. */
+  readonly warning: string | undefined
+}
+
+export interface AcquireOptions {
+  readonly signal?: AbortSignal
+}
+
+export interface ResupplyOptions extends AcquireOptions {
+  /** Names the sprite in the warning sentence, and is used for nothing else. */
+  readonly key: string
+}
+
+export type AcquireResult = AcquiredBitmap | InstanceType<typeof AssetError> | Aborted
+export type ResupplyResult = ResupplyReport | InstanceType<typeof AssetError> | Aborted
+
+/**
+ * The one internal shape the registry consumes, so nothing downstream branches on the seven-arm
+ * union a second time (§4.1, amendment 9).
+ *
+ * The record **holds no bitmap it would have to close**: the `url` and `blob` arms retain
+ * compressed bytes (§8.5.3), the supplier arm retains a function, and `borrowed` is the consumer's
+ * own and must never be closed. That is why `stage.dispose()` closes nothing — it owns nothing —
+ * and why this interface has no `close` and no `dispose` (§8.5.4).
+ */
+export interface NormalizedSource {
+  readonly kind: SourceKind
+  /**
+   * `true` iff a re-supplier was derived, which is exactly `resupply !== undefined`. It is the
+   * value `FrontLruEntry.reclaimable` takes, and therefore the value §8.8's budget is a ceiling
+   * over: a sprite whose bytes cannot be re-fetched cannot be evicted.
+   */
+  readonly reclaimable: boolean
+  /**
+   * The consumer's own bitmap — set only for the `bitmap` arm, `undefined` for every other.
+   *
+   * **Read it before the first suspension point.** §8.5.4 makes `stage.add(b, { key, pin: true });
+   * b.close()` in the same turn legal and recommended, and that is only true if nothing awaits
+   * between `add()`'s entry and the `sheet.source()` call. `acquire()` returns the same bitmap for
+   * uniformity, but awaiting it has already yielded the turn.
+   */
+  readonly borrowed: ImageBitmap | undefined
+  readonly acquire: (o?: AcquireOptions) => Promise<AcquireResult>
+  /** `undefined` for the three arms no re-supplier can be derived from. */
+  readonly resupply: ((o: ResupplyOptions) => Promise<ResupplyResult>) | undefined
+}
+
+/** A detached bitmap reports zero dimensions; `createImageBitmap` never produces one that does. */
+function isDetached(bitmap: ImageBitmap): boolean {
+  return bitmap.width === 0 || bitmap.height === 0
+}
+
+function abortedNow(signal: AbortSignal | undefined): boolean {
+  return signal !== undefined && signal.aborted
+}
+
+/**
+ * `close()` on an already-detached bitmap is a no-op by specification. The wrapper exists so that a
+ * host object which disagrees turns a cleanup into nothing rather than into an unhandled rejection
+ * on a path that is already unwinding.
+ */
+function closeQuietly(bitmap: ImageBitmap): void {
+  try {
+    bitmap.close()
+  } catch {
+    // Already gone. Nothing above this line can act on it.
+  }
+}
+
+/**
+ * The decode boundary, wrapped. A bitmap obtained after the signal fired is closed here: the caller
+ * is not receiving it and therefore cannot close it, and §8.5.4 wants it closed on abort exactly as
+ * on success.
+ */
+async function decodeBitmap(
+  injected: SourceDecode | undefined,
+  src: Blob | HTMLImageElement | HTMLCanvasElement,
+  signal: AbortSignal | undefined,
+  what: string,
+): Promise<ImageBitmap | InstanceType<typeof AssetError> | Aborted> {
+  // Resolved into an annotated `const` rather than called as `(a ?? b)(src)`: a call on a union of
+  // two function types is a place TypeScript can refuse for reasons that have nothing to do with
+  // this module, and the annotation is where the global is checked against the seam once.
+  const decoder: SourceDecode = injected ?? globalThis.createImageBitmap
+  let bitmap: ImageBitmap
+  try {
+    // `createImageBitmap` is absent in Node and in a worker without it, so `decoder` may be
+    // `undefined` at runtime while typed here; calling it is a TypeError, which this catch turns
+    // into the same AssetError a decode failure produces.
+    bitmap = await decoder(src)
+  } catch (cause) {
+    if (isAborted(cause)) return ABORTED
+    return new AssetError(`could not decode ${what}`, { cause })
+  }
+  if (abortedNow(signal)) {
+    closeQuietly(bitmap)
+    return ABORTED
+  }
+  return bitmap
+}
+
+/**
+ * The `ImageBitmap` arm. Unreclaimable — no re-supplier can be derived from a decoded bitmap — and
+ * **borrowed on every path**: success, `AddError` and abort alike leave it the caller's.
+ */
+export function bitmapSource(
+  bitmap: ImageBitmap,
+): NormalizedSource | InstanceType<typeof AssetError> {
+  if (isDetached(bitmap)) {
+    return new AssetError('the ImageBitmap given to add() is closed or detached')
+  }
+  return {
+    kind: 'bitmap',
+    reclaimable: false,
+    borrowed: bitmap,
+    acquire: async (o = {}) => {
+      if (abortedNow(o.signal)) return ABORTED
+      if (isDetached(bitmap)) {
+        return new AssetError('the ImageBitmap given to add() was closed before it could be read')
+      }
+      return { bitmap, owned: false }
+    },
+    resupply: undefined,
+  }
+}
+
+/**
+ * The `HTMLImageElement` and `HTMLCanvasElement` arms. The element stays the consumer's; the bitmap
+ * minted from it was obtained here, so it is owned. Unreclaimable, because a canvas the consumer
+ * repaints is not the image the key was registered with and the library cannot know when it moved.
+ */
+export function elementSource(
+  kind: 'image' | 'canvas',
+  el: HTMLImageElement | HTMLCanvasElement,
+  env: SourceEnv,
+): NormalizedSource {
+  const what =
+    kind === 'image'
+      ? 'the HTMLImageElement given to add()'
+      : 'the HTMLCanvasElement given to add()'
+  return {
+    kind,
+    reclaimable: false,
+    borrowed: undefined,
+    acquire: async (o = {}) => {
+      if (abortedNow(o.signal)) return ABORTED
+      const bitmap = await decodeBitmap(env.createImageBitmap, el, o.signal, what)
+      if (isAborted(bitmap)) return ABORTED
+      if (bitmap instanceof Error) return bitmap
+      return { bitmap, owned: true }
+    },
+    resupply: undefined,
+  }
+}
