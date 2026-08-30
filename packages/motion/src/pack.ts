@@ -258,11 +258,60 @@ interface CheckedManifest {
   readonly light: readonly [number, number, number]
 }
 
-/** Task 6 fills this in. For now, only what Task 5's tests exercise. */
+/**
+ * Everything a schema library cannot express (spec 9.2): offsets that do not point where the
+ * header implies, a `binBytes` that is not the real file size, frame offsets that are not
+ * strictly increasing or whose blocks overlap, `vertsPerSide²` that is not `vertexCount`,
+ * `indexCount` that is not `6(vertsPerSide-1)²`, a `keyFrames` entry naming a frame that was not
+ * stored. Unknown keys are never a reason to reject.
+ */
 function validateManifest(
   manifest: Record<string, unknown>,
   h: HeaderFacts,
 ): InstanceType<typeof PackError> | CheckedManifest {
+  if (manifest.version !== VERSION) {
+    return new PackError(
+      `pack: manifest version ${String(manifest.version)}, this loader reads ${VERSION}`,
+    )
+  }
+  if (typeof manifest.bucket !== 'string' || manifest.bucket.length === 0) {
+    return new PackError(`pack: manifest bucket ${String(manifest.bucket)} is not a name`)
+  }
+  const aspect = manifest.aspect
+  if (typeof aspect !== 'number' || !Number.isFinite(aspect) || aspect <= 0) {
+    return new PackError(`pack: manifest aspect ${String(aspect)} is not positive`)
+  }
+  // Provenance only. Validated because spec 9.1 lists it; never used to resolve a URL, which is
+  // what the explicit binUrl of loadPack replaced (spec 9.2, 14).
+  if (typeof manifest.bin !== 'string' || manifest.bin.length === 0) {
+    return new PackError(`pack: manifest bin ${String(manifest.bin)} is not a file name`)
+  }
+  if (manifest.vertsPerSide !== h.side) {
+    return new PackError(
+      `pack: the header says ${h.side} verts per side, the manifest vertsPerSide is ${String(manifest.vertsPerSide)}`,
+    )
+  }
+  if (manifest.vertexCount !== h.vertexCount) {
+    return new PackError(
+      `pack: the header says vertexCount ${h.vertexCount}, the manifest says ${String(manifest.vertexCount)}`,
+    )
+  }
+  if (manifest.indexCount !== h.indexCount) {
+    return new PackError(
+      `pack: the header says indexCount ${h.indexCount}, the manifest says ${String(manifest.indexCount)}`,
+    )
+  }
+  if (manifest.frameBytes !== h.layout.bytes) {
+    return new PackError(
+      `pack: manifest frameBytes ${String(manifest.frameBytes)}, the layout strides ${h.layout.bytes}`,
+    )
+  }
+  if (manifest.binBytes !== h.binBytes) {
+    return new PackError(
+      `pack: manifest binBytes ${String(manifest.binBytes)}, the file is ${h.binBytes} bytes`,
+    )
+  }
+
   const rawFrames = manifest.frames
   if (!Array.isArray(rawFrames) || rawFrames.length !== h.frameCount) {
     return new PackError(
