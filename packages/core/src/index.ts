@@ -66,3 +66,8 @@ export type {
 } from './stage-types.js'
 export type { EventName, Events, NoPayload, StageEvent } from './events.js'
 export type { DrawResult, KnobDescriptor, Knobs, MotionKnobs, SheetKnobs, View } from './forward.js'
+
+// P5 — resolution (spec 7.4). `sizeForDisplay` is the one name that takes the number of places
+// `devicePixelRatio` is thought about from N to one.
+export { sizeForDisplay } from './resolution.js'
+export type { DisplaySizeRequest } from './resolution.js'
