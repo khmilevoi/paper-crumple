@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest'
 import { ABORTED, isAborted } from './abort.js'
 import { AssetError } from './errors.js'
-import { readValidator, urlSource } from './source.js'
+import { readValidator, staleSourceWarning, urlSource } from './source.js'
 import { asBitmap, blobOf, stubDecode, stubFetch } from './testing/fake-source.js'
 
 const headersOf = (h: Record<string, string>) => ({
@@ -131,5 +131,134 @@ describe('the url arm: the first acquisition', () => {
     })
     await rec.acquire({ signal: c.signal })
     expect(f.calls).toHaveLength(1)
+  })
+})
+
+/**
+ * Acquires once against a scripted first response, then leaves the rest for the re-supply.
+ *
+ * It asserts rather than throwing on a bad setup: §10.8's ban on `ThrowStatement` is
+ * repository-wide and applies to test sources exactly as it applies to `src/`.
+ */
+const armed = async (script: Parameters<typeof stubFetch>[0]) => {
+  const f = stubFetch(script)
+  const d = stubDecode()
+  const rec = urlSource('/sweater.png', { fetch: f.fetch, createImageBitmap: d.decode })
+  const first = await rec.acquire()
+  expect(first).not.toBeInstanceOf(Error)
+  expect(isAborted(first)).toBe(false)
+  return { f, d, rec }
+}
+
+describe('the conditional re-supply (§8.5.1, amendment 10)', () => {
+  it('issues If-None-Match when an ETag was recorded', async () => {
+    const { f, rec } = await armed([{ headers: { ETag: 'W/"v1"' } }, { status: 304 }])
+    if (rec.resupply === undefined) return expect.fail('a url source is reclaimable')
+    await rec.resupply({ key: 'sweater' })
+    expect(f.calls[1]).toEqual({ input: '/sweater.png', headers: { 'If-None-Match': 'W/"v1"' } })
+  })
+
+  it('issues If-Modified-Since when only a Last-Modified was recorded', async () => {
+    const when = 'Wed, 26 Aug 2026 10:00:00 GMT'
+    const { f, rec } = await armed([{ headers: { 'Last-Modified': when } }, { status: 304 }])
+    if (rec.resupply === undefined) return expect.fail('a url source is reclaimable')
+    await rec.resupply({ key: 'sweater' })
+    expect(f.calls[1].headers).toEqual({ 'If-Modified-Since': when })
+  })
+
+  it('issues both when both were recorded', async () => {
+    const when = 'Wed, 26 Aug 2026 10:00:00 GMT'
+    const { f, rec } = await armed([
+      { headers: { ETag: '"v1"', 'Last-Modified': when } },
+      { status: 304 },
+    ])
+    if (rec.resupply === undefined) return expect.fail('a url source is reclaimable')
+    await rec.resupply({ key: 'sweater' })
+    expect(f.calls[1].headers).toEqual({ 'If-None-Match': '"v1"', 'If-Modified-Since': when })
+  })
+
+  it('304 means unchanged, and the rebuild decodes the retained bytes (§8.5.3)', async () => {
+    const body = blobOf('sweater-v1')
+    const { f, d, rec } = await armed([{ headers: { ETag: '"v1"' }, body }, { status: 304 }])
+    if (rec.resupply === undefined) return expect.fail('a url source is reclaimable')
+    const r = await rec.resupply({ key: 'sweater' })
+    if (r instanceof Error || isAborted(r)) return expect.fail('expected a report')
+    expect(r.freshness).toBe('unchanged')
+    expect(r.warning).toBeUndefined()
+    expect(r.owned).toBe(true)
+    // A 304 has no body by definition, so the retained bytes are what is decoded. The stub records
+    // every body it actually handed out: exactly one, from the first response.
+    expect(d.calls).toEqual([body, body])
+    expect(f.bodies).toEqual([body])
+  })
+
+  it('200 means the bytes moved: changed, with the warning naming the key', async () => {
+    const v1 = blobOf('sweater-v1')
+    const v2 = blobOf('sweater-v2')
+    const { d, rec } = await armed([
+      { headers: { ETag: '"v1"' }, body: v1 },
+      { status: 200, headers: { ETag: '"v2"' }, body: v2 },
+    ])
+    if (rec.resupply === undefined) return expect.fail('a url source is reclaimable')
+    const r = await rec.resupply({ key: 'sweater' })
+    if (r instanceof Error || isAborted(r)) return expect.fail('expected a report')
+    expect(r.freshness).toBe('changed')
+    expect(r.warning).toBe(staleSourceWarning('sweater', '/sweater.png'))
+    expect(d.calls).toEqual([v1, v2])
+  })
+
+  it('re-records the validator from the 200, so the next request is conditional on the new one', async () => {
+    const { f, rec } = await armed([
+      { headers: { ETag: '"v1"' } },
+      { status: 200, headers: { ETag: '"v2"' } },
+      { status: 304 },
+    ])
+    if (rec.resupply === undefined) return expect.fail('a url source is reclaimable')
+    await rec.resupply({ key: 'sweater' })
+    await rec.resupply({ key: 'sweater' })
+    expect(f.calls[1].headers).toEqual({ 'If-None-Match': '"v1"' })
+    expect(f.calls[2].headers).toEqual({ 'If-None-Match': '"v2"' })
+  })
+
+  it('a cross-origin response with both headers withheld re-supplies unverified', async () => {
+    // Documented and unenforced (§8.5.1): the re-supply proceeds, nothing is asked, and a changed
+    // image keeps the old hull. The honest report is `unverified`, never `unchanged`.
+    const { f, rec } = await armed([
+      { headers: { 'Content-Type': 'image/png' } },
+      { headers: { 'Content-Type': 'image/png' } },
+    ])
+    if (rec.resupply === undefined) return expect.fail('a url source is reclaimable')
+    const r = await rec.resupply({ key: 'sweater' })
+    if (r instanceof Error || isAborted(r)) return expect.fail('expected a report')
+    expect(r.freshness).toBe('unverified')
+    expect(r.warning).toBeUndefined()
+    expect(r.owned).toBe(true)
+    // No conditional headers, because there was nothing to be conditional on.
+    expect(f.calls[1].headers).toEqual({})
+  })
+
+  it('returns an AssetError when the conditional request fails outright', async () => {
+    const { rec } = await armed([{ headers: { ETag: '"v1"' } }, { status: 500 }])
+    if (rec.resupply === undefined) return expect.fail('a url source is reclaimable')
+    const r = await rec.resupply({ key: 'sweater' })
+    expect(AssetError.is(r)).toBe(true)
+    expect(String(r)).toContain('500')
+  })
+
+  it('returns ABORTED without issuing the conditional request when the signal fired', async () => {
+    const { f, rec } = await armed([{ headers: { ETag: '"v1"' } }])
+    if (rec.resupply === undefined) return expect.fail('a url source is reclaimable')
+    const c = new AbortController()
+    c.abort()
+    expect(await rec.resupply({ key: 'sweater', signal: c.signal })).toBe(ABORTED)
+    expect(f.calls).toHaveLength(1)
+  })
+})
+
+describe('staleSourceWarning', () => {
+  it('names the key and the source, because a warning nobody can act on is noise', () => {
+    const w = staleSourceWarning('sweater', 'https://cdn.example/sweater.png')
+    expect(w).toContain('sweater')
+    expect(w).toContain('https://cdn.example/sweater.png')
   })
 })

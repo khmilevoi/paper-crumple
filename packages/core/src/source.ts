@@ -486,6 +486,22 @@ export function readValidator(headers: {
 }
 
 /**
+ * The sentence a `200` on a conditional re-supply produces (§8.5.1, amendment 10).
+ *
+ * **This module reports; it does not emit.** There is no stage at this level and therefore no
+ * channel: P9 decides whether this goes out on `stage.warnings` or on an event, and P9 turns the
+ * same report into `replace()` semantics — the hull entry invalidated through the by-key entry
+ * point P8 exposes, so the new artwork gets its own torn edge instead of the previous sprite's.
+ */
+export function staleSourceWarning(key: string, href: string): string {
+  return (
+    `sprite "${key}": the bytes at ${href} changed since it was added. The re-supply is treated ` +
+    'as a replace — the hull entry is invalidated, so the new artwork gets its own torn edge ' +
+    'rather than the one traced from the image this key was registered with.'
+  )
+}
+
+/**
  * The `string` and `URL` arms, which normalise to one path: **the re-supplier is the fetch the
  * library already performed**, so the sprite is reclaimable by construction and §8.8's byte budget
  * bounds it. That is the whole of amendment 9's inversion — a sprite whose bytes cannot be
@@ -500,10 +516,8 @@ export function urlSource(src: string | URL, env: SourceEnv): NormalizedSource {
   // Retained across calls: the compressed bytes as the re-load source (§8.5.3, ~200–800 KB, and
   // arguably the consumer's memory rather than the library's), and the validator the next
   // conditional request is built from. Both are assigned in `take` and used by the `resupply`
-  // function that task 5 will replace; until then, they trigger no-unused-vars.
-  // eslint-disable-next-line @typescript-eslint/no-unused-vars
+  // function implemented below.
   let bytes: Blob | undefined
-  // eslint-disable-next-line @typescript-eslint/no-unused-vars
   let validator: SourceValidator | undefined
 
   // Annotated once, for the reason `decodeBitmap` gives: not a call on a union of two function
@@ -554,11 +568,66 @@ export function urlSource(src: string | URL, env: SourceEnv): NormalizedSource {
     return take(res, o.signal)
   }
 
+  const resupply = async (o: ResupplyOptions): Promise<ResupplyResult> => {
+    if (abortedNow(o.signal)) return ABORTED
+
+    // Neither validator was exposed — the ordinary cross-origin case, and any server that sends
+    // neither header. Nothing can be asked, so nothing is: the re-supply proceeds unconditionally
+    // and the same-image contract is documented and unenforced. Reported as `unverified` rather
+    // than as `unchanged`, because saying so is more honest than papering over it.
+    if (validator === undefined) {
+      const res = await request(o.signal, {})
+      if (isAborted(res)) return ABORTED
+      if (res instanceof Error) return res
+      if (!res.ok) return new AssetError(`re-supply of ${href} returned ${res.status}`)
+      const got = await take(res, o.signal)
+      if (isAborted(got)) return ABORTED
+      if (got instanceof Error) return got
+      return { ...got, freshness: 'unverified', warning: undefined }
+    }
+
+    const headers: Record<string, string> = {}
+    if (validator.etag !== undefined) headers['If-None-Match'] = validator.etag
+    if (validator.lastModified !== undefined) headers['If-Modified-Since'] = validator.lastModified
+
+    // No `cache` option is passed. Under the Fetch standard a request carrying `If-None-Match` or
+    // `If-Modified-Since` under the default cache mode is treated as `no-store`, so the conditional
+    // reaches the origin instead of being answered out of the HTTP cache — which is the only way
+    // the `304` / `200` distinction is visible to script at all. Do not "fix" this by adding
+    // `cache: 'no-cache'`.
+    const res = await request(o.signal, headers)
+    if (isAborted(res)) return ABORTED
+    if (res instanceof Error) return res
+
+    // 304 first: a 304 is not `ok`, and it is the success case here. Its body is empty by
+    // definition, so the rebuild decodes the bytes retained at the first response (§8.5.3) rather
+    // than paying a second round trip for bytes the server just said had not changed.
+    if (res.status === 304) {
+      const retained = bytes
+      if (retained === undefined) {
+        return new AssetError(`re-supply of ${href} answered 304 with nothing retained to decode`)
+      }
+      const bitmap = await decodeBitmap(env.createImageBitmap, retained, o.signal, href)
+      if (isAborted(bitmap)) return ABORTED
+      if (bitmap instanceof Error) return bitmap
+      return { bitmap, owned: true, freshness: 'unchanged', warning: undefined }
+    }
+
+    if (!res.ok) return new AssetError(`re-supply of ${href} returned ${res.status}`)
+
+    // 200. The bytes moved under a key §8.5.1 promised would not move. `take` re-records the
+    // validator from this response, so the next conditional request asks about the new bytes.
+    const got = await take(res, o.signal)
+    if (isAborted(got)) return ABORTED
+    if (got instanceof Error) return got
+    return { ...got, freshness: 'changed', warning: staleSourceWarning(o.key, href) }
+  }
+
   return {
     kind: 'url',
     reclaimable: true,
     borrowed: undefined,
     acquire,
-    resupply: undefined,
+    resupply,
   }
 }

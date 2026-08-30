@@ -7,6 +7,7 @@ import {
   classifySource,
   elementSource,
   supplierSource,
+  urlSource,
 } from './source.js'
 import type { NormalizedSource } from './source.js'
 import {
@@ -323,6 +324,7 @@ describe('the invariant that ties reclaimability to the re-supplier', () => {
       supplierSource(async () => asBitmap(fakeBitmap())),
       elementSource('image', fakeImage(), { createImageBitmap: d.decode }),
       elementSource('canvas', fakeCanvas(), { createImageBitmap: d.decode }),
+      urlSource('/sweater.png', { createImageBitmap: d.decode }),
     ]
     for (const rec of records) {
       expect(rec.reclaimable).toBe(rec.resupply !== undefined)
