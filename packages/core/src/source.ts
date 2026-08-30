@@ -559,6 +559,25 @@ export function urlSource(src: string | URL, env: SourceEnv): NormalizedSource {
     return { bitmap, owned: true }
   }
 
+  /**
+   * Reads an ok response into a re-supply report. The two call sites differ only in what the
+   * conditional decided — `unverified` where neither validator was exposed and nothing could be
+   * asked, `changed` where a `200` said the bytes moved — so the freshness and its warning are
+   * what they pass in.
+   */
+  const takeAsReport = async (
+    res: SourceResponse,
+    o: ResupplyOptions,
+    freshness: SourceFreshness,
+    warning: string | undefined,
+  ): Promise<ResupplyResult> => {
+    if (!res.ok) return new AssetError(`re-supply of ${href} returned ${res.status}`)
+    const got = await take(res, o.signal)
+    if (isAborted(got)) return ABORTED
+    if (got instanceof Error) return got
+    return { ...got, freshness, warning }
+  }
+
   const acquire = async (o: AcquireOptions = {}): Promise<AcquireResult> => {
     if (abortedNow(o.signal)) return ABORTED
     const res = await request(o.signal, {})
@@ -579,11 +598,7 @@ export function urlSource(src: string | URL, env: SourceEnv): NormalizedSource {
       const res = await request(o.signal, {})
       if (isAborted(res)) return ABORTED
       if (res instanceof Error) return res
-      if (!res.ok) return new AssetError(`re-supply of ${href} returned ${res.status}`)
-      const got = await take(res, o.signal)
-      if (isAborted(got)) return ABORTED
-      if (got instanceof Error) return got
-      return { ...got, freshness: 'unverified', warning: undefined }
+      return takeAsReport(res, o, 'unverified', undefined)
     }
 
     const headers: Record<string, string> = {}
@@ -613,14 +628,9 @@ export function urlSource(src: string | URL, env: SourceEnv): NormalizedSource {
       return { bitmap, owned: true, freshness: 'unchanged', warning: undefined }
     }
 
-    if (!res.ok) return new AssetError(`re-supply of ${href} returned ${res.status}`)
-
     // 200. The bytes moved under a key §8.5.1 promised would not move. `take` re-records the
     // validator from this response, so the next conditional request asks about the new bytes.
-    const got = await take(res, o.signal)
-    if (isAborted(got)) return ABORTED
-    if (got instanceof Error) return got
-    return { ...got, freshness: 'changed', warning: staleSourceWarning(o.key, href) }
+    return takeAsReport(res, o, 'changed', staleSourceWarning(o.key, href))
   }
 
   return {
