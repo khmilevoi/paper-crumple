@@ -25,3 +25,7 @@ export {
   targetDimensions,
 } from './sdf.js'
 export type { ComputeSdfOptions, SdfResult } from './sdf.js'
+
+// --- P8: reading a signed field (§8.2) ---
+export type { Loop, Point } from './point.js'
+export { cpuSdfFromAlpha, fieldGradient, moveToDistance, sampleField } from './field.js'
