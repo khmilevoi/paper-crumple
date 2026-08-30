@@ -641,3 +641,33 @@ export function urlSource(src: string | URL, env: SourceEnv): NormalizedSource {
     resupply,
   }
 }
+
+/**
+ * The sprite source path's one entry point (§4.1, amendment 9). Turns any of the seven arms into
+ * the single shape the registry consumes, so **nothing downstream branches on the union a second
+ * time**: P9 reads `kind` for diagnostics, `reclaimable` for the LRU, `borrowed` for §8.5.4's
+ * same-turn rule, and calls `acquire` and `resupply` without knowing which arm it holds.
+ *
+ * Synchronous, and deliberately so: the `bitmap` arm's record must be available before the caller's
+ * first suspension point.
+ */
+export function normalizeSource(
+  src: SpriteSource,
+  env: SourceEnv = {},
+): NormalizedSource | InstanceType<typeof AssetError> {
+  const c = classifySource(src)
+  if (c instanceof Error) return c
+  switch (c.kind) {
+    case 'url':
+      return urlSource(c.src, env)
+    case 'blob':
+      return blobSource(c.src, env)
+    case 'bitmap':
+      return bitmapSource(c.src)
+    case 'image':
+    case 'canvas':
+      return elementSource(c.kind, c.src, env)
+    case 'supplier':
+      return supplierSource(c.src)
+  }
+}

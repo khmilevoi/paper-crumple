@@ -6,10 +6,11 @@ import {
   blobSource,
   classifySource,
   elementSource,
+  normalizeSource,
   supplierSource,
   urlSource,
 } from './source.js'
-import type { NormalizedSource } from './source.js'
+import type { NormalizedSource, SourceKind, SpriteSource } from './source.js'
 import {
   asBitmap,
   blobOf,
@@ -19,6 +20,7 @@ import {
   fakeCanvas,
   fakeImage,
   stubDecode,
+  stubFetch,
 } from './testing/fake-source.js'
 
 describe('classifySource, over the seven arms of the union (§4.1, amendment 9)', () => {
@@ -333,5 +335,47 @@ describe('the invariant that ties reclaimability to the re-supplier', () => {
     if (bitmapRec instanceof Error) return expect.fail('expected a record')
     expect(bitmapRec.reclaimable).toBe(bitmapRec.resupply !== undefined)
     expect(bitmapRec.reclaimable).toBe(false)
+  })
+})
+
+describe('normalizeSource: seven arms in, one shape out', () => {
+  const env = () => ({ createImageBitmap: stubDecode().decode, fetch: stubFetch([{}]).fetch })
+
+  it('resolves every arm of the union to a record', () => {
+    const table: ReadonlyArray<readonly [SpriteSource, SourceKind, boolean]> = [
+      ['/sweater.png', 'url', true],
+      [new URL('https://cdn.example/sweater.png'), 'url', true],
+      [blobOf(), 'blob', true],
+      [asBitmap(fakeBitmap()), 'bitmap', false],
+      [fakeImage(), 'image', false],
+      [fakeCanvas(), 'canvas', false],
+      [async () => asBitmap(fakeBitmap()), 'supplier', true],
+    ]
+    for (const [src, kind, reclaimable] of table) {
+      const rec = normalizeSource(src, env())
+      if (rec instanceof Error) return expect.fail(`${kind} did not normalise`)
+      expect(rec.kind).toBe(kind)
+      expect(rec.reclaimable).toBe(reclaimable)
+      expect(rec.reclaimable).toBe(rec.resupply !== undefined)
+      expect(rec.borrowed === undefined).toBe(kind !== 'bitmap')
+    }
+  })
+
+  it('forwards the classification error rather than inventing a second one', () => {
+    const r = normalizeSource(42 as unknown as SpriteSource)
+    expect(AssetError.is(r)).toBe(true)
+    expect(String(r)).toContain('SpriteSource')
+  })
+
+  it('forwards the detached-bitmap refusal', () => {
+    const b = fakeBitmap()
+    b.close()
+    expect(AssetError.is(normalizeSource(asBitmap(b)))).toBe(true)
+  })
+
+  it('defaults its environment, so production calls it with one argument', () => {
+    // No env: the record is built, and only a call that reaches the boundary needs the globals.
+    const rec = normalizeSource('/sweater.png')
+    expect(rec).not.toBeInstanceOf(Error)
   })
 })
