@@ -1,0 +1,10 @@
+{
+  "extends": "@paper-crumple/tsconfig/base.json",
+  "compilerOptions": {
+    "declaration": true,
+    "emitDeclarationOnly": true,
+    "types": []
+  },
+  "include": ["packages/*/src/**/*.ts"],
+  "exclude": ["**/*.test.ts", "**/*.test-d.ts", "**/*.gl.test.ts"]
+}

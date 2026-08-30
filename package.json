@@ -36,6 +36,7 @@
     "tsdown": "0.22.14",
     "turbo": "2.10.12",
     "typescript": "catalog:",
+    "typescript-5.0": "npm:typescript@5.0.4",
     "typescript-eslint": "8.68.0",
     "vitest": "4.1.11",
     "yaml": "2.9.0"

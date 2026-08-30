@@ -17,7 +17,7 @@
  * | `Program`, `Texture`, `Target`, `TextureDesc` | P6 `core-gl-foundation` | §5.1 |
  * | `View` | P9 `core-stage-sprite-view` | §4.2 |
  * | `DrawResult` | P11 `motion-source`, with P9 as its only reader | §5.3 |
- * | `KnobDescriptor`, `Knobs`, `SheetKnobs`, `MotionKnobs` | P3 `core-knob-registry` | §5.5, §6.1, §6.8 |
+ * | `KnobDescriptor`, `Knobs`, `SheetKnobs`, `MotionKnobs` | P3 `core-knob-registry`, re-exported below | §5.5, §6.1, §6.8 |
  */
 
 /**
@@ -60,32 +60,15 @@ export interface View {}
 export interface DrawResult {}
 
 /**
- * The two members of §6.1's descriptor that this plan's signatures need: the slot contracts
- * expose `readonly knobs: readonly KnobDescriptor[]`, and §6.3's ladder is keyed on
- * `invalidates`. **P3 replaces this with the real
- * `NumberKnob | IntKnob | BoolKnob | ColorKnob | EnumKnob` union.** Every member of that union
- * carries these two, so nothing that compiles against this declaration stops compiling.
+ * §6.1's descriptor union and §5.5's resolved bag. **P3 settled both**, in `./knobs.ts`. They are
+ * re-exported from here rather than moved, so that `index.ts` — an append-only surface at
+ * sync 2 — needs no edit to an existing line.
  */
-export interface KnobDescriptor {
-  readonly key: string
-  readonly invalidates: 'draw' | 'front' | 'hull' | 'field'
-}
+export type { KnobDescriptor, Knobs } from './knobs.js'
 
 /**
- * A resolved knob bag: key to value. **P3 owns `KnobsOf`**, which is what produces one from a
- * descriptor tuple (§6.8), and `KnobValue`, which is what types a single entry.
+ * §5.5's per-slot filtered views. **P3 settled both**, in `./shared-knobs.ts`, as
+ * `Flatten<SharedKnobs & K>` — a widening of P2's placeholder `K`, so a slot written against the
+ * placeholder keeps compiling.
  */
-export type Knobs = Readonly<Record<string, string | number | boolean>>
-
-/**
- * §5.5's filtered view for the sheet slot. **P3 replaces this with
- * `Flatten<SharedKnobs & K>`**, which is a widening of what a slot receives, so a slot written
- * against this declaration keeps compiling.
- */
-export type SheetKnobs<K extends Knobs> = K
-
-/**
- * §5.5's filtered view for the motion slot. **P3 replaces this with
- * `Flatten<SharedKnobs & K>`**, on the same terms as `SheetKnobs`.
- */
-export type MotionKnobs<K extends Knobs> = K
+export type { MotionKnobs, SheetKnobs } from './shared-knobs.js'
