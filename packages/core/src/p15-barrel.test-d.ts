@@ -18,7 +18,15 @@ test('the stable barrel publishes the four names the add signature is written in
  */
 type PublishedFrom<M> = Extract<
   keyof M,
-  'normalizeSource' | 'classifySource' | 'staleSourceWarning'
+  | 'normalizeSource'
+  | 'classifySource'
+  | 'staleSourceWarning'
+  | 'readValidator'
+  | 'urlSource'
+  | 'blobSource'
+  | 'bitmapSource'
+  | 'elementSource'
+  | 'supplierSource'
 >
 
 test('it publishes nothing else from this plan: the machinery is imported by relative path', () => {

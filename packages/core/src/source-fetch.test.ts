@@ -2,7 +2,7 @@ import { describe, expect, it } from 'vitest'
 import { ABORTED, isAborted } from './abort.js'
 import { AssetError } from './errors.js'
 import { readValidator, staleSourceWarning, urlSource } from './source.js'
-import { asBitmap, blobOf, stubDecode, stubFetch } from './testing/fake-source.js'
+import { asBitmap, blobOf, deferredDecode, stubDecode, stubFetch } from './testing/fake-source.js'
 
 const headersOf = (h: Record<string, string>) => ({
   get: (name: string) => {
@@ -74,6 +74,7 @@ describe('the url arm: the first acquisition', () => {
     expect(d.calls).toEqual([body])
     expect(got.bitmap).toBe(asBitmap(d.produced[0]))
     expect(got.owned).toBe(true)
+    expect(d.produced[0].closes).toBe(0)
   })
 
   it('returns an AssetError naming the status on a 404, and never throws', async () => {
@@ -218,6 +219,46 @@ describe('the conditional re-supply (§8.5.1, amendment 10)', () => {
     await rec.resupply({ key: 'sweater' })
     expect(f.calls[1].headers).toEqual({ 'If-None-Match': '"v1"' })
     expect(f.calls[2].headers).toEqual({ 'If-None-Match': '"v2"' })
+  })
+
+  it('does not advance the validator through an attempt aborted mid-decode (§8.5.1)', async () => {
+    // A re-supply that received a 200: if the validator advanced before the decode settled, an
+    // abort firing mid-decode would lose the `changed` report for good — the next re-supply would
+    // ask about the *new* bytes with `If-None-Match` and be answered 304, "unchanged".
+    const f = stubFetch([
+      { headers: { ETag: '"v1"' } },
+      { status: 200, headers: { ETag: '"v2"' } },
+      { status: 200, headers: { ETag: '"v2"' } },
+    ])
+    const d = deferredDecode()
+    const rec = urlSource('/sweater.png', { fetch: f.fetch, createImageBitmap: d.decode })
+    if (rec.resupply === undefined) return expect.fail('a url source is reclaimable')
+
+    // `deferredDecode` defers every call, so the first acquire needs releasing too.
+    const first = rec.acquire()
+    while (d.calls.length < 1) await Promise.resolve()
+    d.release()
+    const acquired = await first
+    expect(acquired).not.toBeInstanceOf(Error)
+    expect(isAborted(acquired)).toBe(false)
+
+    // The second re-supply gets the 200 that would advance the validator to "v2" — then the
+    // signal fires while the decode is still pending.
+    const c = new AbortController()
+    const aborted = rec.resupply({ key: 'sweater', signal: c.signal })
+    while (d.calls.length < 2) await Promise.resolve()
+    c.abort()
+    d.release()
+    expect(await aborted).toBe(ABORTED)
+
+    // A third re-supply must still ask about "v1": the aborted attempt never committed "v2".
+    const third = rec.resupply({ key: 'sweater' })
+    while (d.calls.length < 3) await Promise.resolve()
+    d.release()
+    const r = await third
+    if (r instanceof Error || isAborted(r)) return expect.fail('expected a report')
+    expect(f.calls[2].headers).toEqual({ 'If-None-Match': '"v1"' })
+    expect(r.freshness).toBe('changed')
   })
 
   it('a cross-origin response with both headers withheld re-supplies unverified', async () => {

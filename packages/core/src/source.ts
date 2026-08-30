@@ -115,7 +115,7 @@ export function classifySource(src: unknown): ClassifiedSource | InstanceType<ty
   if (typeof src === 'string') return { kind: 'url', src }
   if (typeof src === 'function') return { kind: 'supplier', src: src as BitmapSupplier }
   if (typeof src !== 'object' || src === null) {
-    return new AssetError(`${typeof src} ${NOT_A_SOURCE}`)
+    return new AssetError(`${src === null ? 'null' : typeof src} ${NOT_A_SOURCE}`)
   }
 
   switch (tagOf(src)) {
@@ -133,8 +133,11 @@ export function classifySource(src: unknown): ClassifiedSource | InstanceType<ty
       return { kind: 'canvas', src: src as HTMLCanvasElement }
   }
 
-  // No tag: an exotic host object, or a double. Shape decides, and `instanceof` closes the two
-  // cases where a real constructor is guaranteed to be in scope in every environment.
+  // No tag: `Symbol.toStringTag` lives on the prototype, so a real URL or Blob — including a
+  // cross-realm one — was already caught by the switch above. Reached only by an object whose
+  // `Symbol.toStringTag` was deleted or shadowed, which the tag switch would otherwise miss;
+  // `instanceof` is a last resort for the two cases where a real constructor is guaranteed to be
+  // in scope in every environment.
   if (src instanceof URL) return { kind: 'url', src }
   if (src instanceof Blob) return { kind: 'blob', src }
   if (isBitmapLike(src)) return { kind: 'bitmap', src }
@@ -551,11 +554,15 @@ export function urlSource(src: string | URL, env: SourceEnv): NormalizedSource {
       return new AssetError(`could not read the body of ${href}`, { cause })
     }
     if (abortedNow(signal)) return ABORTED
-    bytes = blob
-    validator = readValidator(res.headers)
     const bitmap = await decodeBitmap(env.createImageBitmap, blob, signal, href)
     if (isAborted(bitmap)) return ABORTED
     if (bitmap instanceof Error) return bitmap
+    // Committed only once the outcome is actually delivered. Recording them before the decode
+    // would let an abort or a decode failure advance the validator without anyone ever receiving
+    // the `changed` report — and because the next conditional request would then ask about the
+    // new bytes and get a 304, that one-shot signal would be lost for good.
+    bytes = blob
+    validator = readValidator(res.headers)
     return { bitmap, owned: true }
   }
 

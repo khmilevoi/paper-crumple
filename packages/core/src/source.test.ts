@@ -87,6 +87,9 @@ describe('classifySource, over input that is not a source', () => {
     const r = classifySource(42)
     expect(r).toBeInstanceOf(Error)
     expect(String(r)).toContain('SpriteSource')
+    // typeof null === 'object', and null is one of the two likeliest values to arrive from
+    // untyped JavaScript, so it is named rather than reported as "object".
+    expect(String(classifySource(null))).toContain('null')
   })
 })
 
@@ -153,6 +156,7 @@ describe('the element arms: the element is given, the bitmap is obtained', () =>
     expect(d.calls).toEqual([el])
     expect(got.owned).toBe(true)
     expect(got.bitmap).toBe(asBitmap(d.produced[0]))
+    expect(d.produced[0].closes).toBe(0)
   })
 
   it('does the same for an <img>', async () => {
