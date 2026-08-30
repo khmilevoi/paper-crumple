@@ -38,6 +38,12 @@ describe('sizeForDisplay', () => {
     expect(sizeForDisplay({ cssPx: 1, dpr: 1, cap: 384 })).toBe(64)
     expect(sizeForDisplay({ cssPx: 100, dpr: 1, cap: 0 })).toBe(64)
   })
+
+  it('never returns NaN, because a NaN front byte count would silently disable the front LRU eviction loop', () => {
+    expect(sizeForDisplay({ cssPx: NaN, dpr: 2, cap: 384 })).toBe(64)
+    expect(sizeForDisplay({ cssPx: 100, dpr: NaN, cap: 384 })).toBe(64)
+    expect(sizeForDisplay({ cssPx: Infinity, dpr: 2, cap: 384 })).toBe(384)
+  })
 })
 
 describe('sdfResFor', () => {
@@ -69,5 +75,10 @@ describe('sdfResFor', () => {
 
   it('is always a multiple of 64, so the field sizing laws stay integral', () => {
     for (let l = 1; l <= 2048; l += 7) expect(sdfResFor(l) % SIZE_QUANTUM).toBe(0)
+  })
+
+  it('never returns NaN, because a NaN front byte count would silently disable the front LRU eviction loop', () => {
+    expect(sdfResFor(NaN)).toBe(SDF_RES_MIN)
+    expect(sdfResFor(Infinity)).toBe(SDF_RES_MAX)
   })
 })

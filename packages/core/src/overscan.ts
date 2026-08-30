@@ -117,6 +117,10 @@ export function overscanFor(p: EdgeParams): InstanceType<typeof KnobError> | num
  * The artwork's long side: `A = maxSize / (1 + 2p)` (spec 8.5). Artwork resolution is
  * front-derived, never source-derived, and is stored unpadded - the margin belongs to front space
  * and is applied by the seed pass with a uv offset at no cost.
+ *
+ * `maxSize` here is the front's long side, not the stage-level `maxSize` knob - spec 8.6's bucket
+ * scheme makes the two coincide, but a caller reaching for this outside that scheme should pass the
+ * sprite's front, the same value `sdfResFor` (spec 7.4.3) is based on.
  */
 export function artworkLongSide(maxSize: number, overscan: number): number {
   return Math.ceil(maxSize / (1 + 2 * overscan))

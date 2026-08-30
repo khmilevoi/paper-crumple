@@ -104,7 +104,11 @@ export function handleBytes(h: HandleFacts): number {
   return total
 }
 
-/** The tight and loose distance fields for one sprite (spec 8.1). */
+/**
+ * The tight and loose distance fields for one sprite (spec 8.1) - the per-sprite pair only, 2.125
+ * of `poolABytes`' 28.25 bytes per texel. This is **not** the whole Pool A field term; `poolABytes`
+ * uses `POOL_A_FIELD_BYTES_NUMERATOR` for that and never calls this function.
+ */
 export function fieldBytes(sdfRes: number): number {
   return (sdfRes * sdfRes * SPRITE_FIELD_BYTES_NUMERATOR) / 8
 }
