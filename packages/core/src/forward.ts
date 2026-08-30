@@ -4,8 +4,6 @@
  * the honest declaration of "this name exists and its shape is somebody else's".
  */
 
-import type { Knobs } from './knobs.js'
-
 /**
  * # Forward declarations
  *
@@ -69,14 +67,8 @@ export interface DrawResult {}
 export type { KnobDescriptor, Knobs } from './knobs.js'
 
 /**
- * §5.5's filtered view for the sheet slot. **P3 replaces this with
- * `Flatten<SharedKnobs & K>`**, which is a widening of what a slot receives, so a slot written
- * against this declaration keeps compiling.
+ * §5.5's per-slot filtered views. **P3 settled both**, in `./shared-knobs.ts`, as
+ * `Flatten<SharedKnobs & K>` — a widening of P2's placeholder `K`, so a slot written against the
+ * placeholder keeps compiling.
  */
-export type SheetKnobs<K extends Knobs> = K
-
-/**
- * §5.5's filtered view for the motion slot. **P3 replaces this with
- * `Flatten<SharedKnobs & K>`**, on the same terms as `SheetKnobs`.
- */
-export type MotionKnobs<K extends Knobs> = K
+export type { MotionKnobs, SheetKnobs } from './shared-knobs.js'
