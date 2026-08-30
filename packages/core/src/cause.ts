@@ -3,8 +3,9 @@ import type { ErrorGuard } from './errors.js'
 /**
  * A cause chain is consumer data. It can be cyclic, and it can be arbitrarily long, so the
  * walk is iterative, remembers what it has seen and stops at a fixed depth. Both guards are
- * cheap and both have to be here: a `Set` alone does not bound a chain that is long without
- * repeating, and a depth cap alone does not bound a two-node cycle.
+ * cheap. The depth cap is what guarantees termination — it bounds every input, cycles included —
+ * and the `seen` set is what makes a cycle exit at once instead of spinning to the cap, which
+ * matters because `findCause` walks the chain on every call.
  */
 const MAX_CAUSE_DEPTH = 64
 

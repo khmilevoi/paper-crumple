@@ -1,9 +1,11 @@
 import type { View } from './forward.js'
 
 /**
- * No payload. A mapped type with no keys rather than `{}`, which the lint rule forbids and which
- * — as `Record<string, never>` — would collapse `view` to `never` when intersected with the
- * stage-side handler type.
+ * No payload. A mapped type with no keys rather than `{}`, which
+ * `@typescript-eslint/no-empty-object-type` forbids. `Record<string, never>` would also pass the
+ * lint rule, but it states something false about the type — that every string key maps to
+ * `never` — and `NoPayload` is intersected with `{ view: View | null }` in `StageEvent`, where a
+ * reader should not have to work out which member of the intersection wins.
  */
 export type NoPayload = { [K in never]: never }
 

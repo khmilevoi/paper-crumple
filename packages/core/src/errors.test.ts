@@ -95,6 +95,24 @@ describe('construction', () => {
     })
     expect(e.message).toBe('kept')
   })
+
+  it('never lets an init key spoof the class identity (§10.4)', () => {
+    const diagnostics: Record<string, unknown> = {
+      message: 'boom',
+      _tag: 'SheetError',
+      code: 'ERR_SPOOF',
+      name: 'Spoofed',
+      stack: 'not a stack',
+    }
+    const e = new GlError(diagnostics as unknown as { message: string })
+    expect(GlError.is(e)).toBe(true)
+    expect(SheetError.is(e)).toBe(false)
+    expect(e).toBeInstanceOf(GlError)
+    expect(e._tag).toBe('GlError')
+    expect(e.code).toBe('ERR_GL')
+    expect(e.name).toBe('GlError')
+    expect(e.message).toBe('boom')
+  })
 })
 
 describe('Err.is(), which is canonical at package seams (§10.4)', () => {

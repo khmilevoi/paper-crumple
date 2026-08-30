@@ -94,6 +94,23 @@ export abstract class CrumpleError extends Error {
 }
 
 /**
+ * Keys an init object may never set. `message` and `cause` are consumed by `super()`; `_tag`,
+ * `code`, `name` and `stack` are the class's own identity, and letting an init overwrite them
+ * would produce an error for which `GlError.is(e)` is `false` while `e instanceof GlError` is
+ * `true` — the exact disagreement §10.4 relies on `.is()` to avoid. A hand-written literal is
+ * caught by excess-property checking; the route this closes is `new GlError({ message,
+ * ...diagnostics })`, where a slot's diagnostics bag happens to carry `code` or `name`.
+ */
+const RESERVED_INIT_KEYS: ReadonlySet<string> = new Set([
+  'message',
+  'cause',
+  '_tag',
+  'code',
+  'name',
+  'stack',
+])
+
+/**
  * `createTaggedError`, taken from errore under this name. Produces a concrete
  * `CrumpleError` subclass carrying `_tag`, `code`, typed properties, `cause` and a
  * static `.is()`.
@@ -110,12 +127,16 @@ export function taggedError<Tag extends string, P extends object = NoProps>(
     static readonly code: string = code
 
     constructor(a: string | (ErrorExtra<P> & CrumpleErrorInit), b?: ErrorExtra<P>) {
+      // The object branch aliases rather than spreads: `{ ...a }` cannot be assigned to
+      // `Record<string, unknown>` when `a` has generic type `P extends object`, which has no
+      // index signature (TS2322). Aliasing is safe here because `init` is only read,
+      // synchronously, in this constructor — never stored, never mutated, and never handed out.
       const init: Record<string, unknown> =
         typeof a === 'string' ? { ...(b ?? {}), message: a } : (a as Record<string, unknown>)
       super({ message: String(init.message ?? ''), cause: init.cause })
       this.name = tag
       for (const key of Object.keys(init)) {
-        if (key === 'message' || key === 'cause') continue
+        if (RESERVED_INIT_KEYS.has(key)) continue
         Object.defineProperty(this, key, {
           value: init[key],
           enumerable: true,
