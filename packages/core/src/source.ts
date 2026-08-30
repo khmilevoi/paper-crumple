@@ -457,3 +457,108 @@ export function supplierSource(supply: BitmapSupplier): NormalizedSource {
     resupply: async (o) => unchangedReport(await call(o.signal)),
   }
 }
+
+/**
+ * What the first response said about its own identity (§8.5.1, amendment 10). `undefined` where
+ * neither header was exposed.
+ */
+export interface SourceValidator {
+  readonly etag: string | undefined
+  readonly lastModified: string | undefined
+}
+
+/**
+ * **Detection is HTTP, never hashing.** A hash would cost a full decode of the very bytes the
+ * re-supply exists to avoid holding (§8.5.3), so the same-image contract is checked with the two
+ * headers HTTP already defines for it.
+ *
+ * Returns `undefined` when neither is exposed — which is the ordinary cross-origin case, since a
+ * response without `Access-Control-Expose-Headers: ETag` exposes neither to script even when both
+ * are on the wire.
+ */
+export function readValidator(headers: {
+  get(name: string): string | null
+}): SourceValidator | undefined {
+  const etag = headers.get('ETag') ?? undefined
+  const lastModified = headers.get('Last-Modified') ?? undefined
+  if (etag === undefined && lastModified === undefined) return undefined
+  return { etag, lastModified }
+}
+
+/**
+ * The `string` and `URL` arms, which normalise to one path: **the re-supplier is the fetch the
+ * library already performed**, so the sprite is reclaimable by construction and §8.8's byte budget
+ * bounds it. That is the whole of amendment 9's inversion — a sprite whose bytes cannot be
+ * re-fetched cannot be evicted, so the budget is a ceiling only over the arms reached from here
+ * and from `blobSource`.
+ */
+export function urlSource(src: string | URL, env: SourceEnv): NormalizedSource {
+  // The input is handed to `fetch` unchanged. `new URL('/sweater.png')` throws without a base and
+  // there is no base in Node, so the one place a relative path is resolved stays `fetch`'s.
+  const href = typeof src === 'string' ? src : src.href
+
+  // Retained across calls: the compressed bytes as the re-load source (§8.5.3, ~200–800 KB, and
+  // arguably the consumer's memory rather than the library's), and the validator the next
+  // conditional request is built from. Both are assigned in `take` and used by the `resupply`
+  // function that task 5 will replace; until then, they trigger no-unused-vars.
+  // eslint-disable-next-line @typescript-eslint/no-unused-vars
+  let bytes: Blob | undefined
+  // eslint-disable-next-line @typescript-eslint/no-unused-vars
+  let validator: SourceValidator | undefined
+
+  // Annotated once, for the reason `decodeBitmap` gives: not a call on a union of two function
+  // types. `typeof globalThis.fetch` is assignable to `SourceFetch` — narrower parameters, and a
+  // `Response` satisfies `SourceResponse` structurally.
+  const doFetch: SourceFetch = env.fetch ?? globalThis.fetch
+
+  const request = async (
+    signal: AbortSignal | undefined,
+    headers: Record<string, string>,
+  ): Promise<SourceResponse | InstanceType<typeof AssetError> | Aborted> => {
+    try {
+      // `fetch` throws, so it is wrapped rather than called (§10.8).
+      return await doFetch(src, { signal, headers })
+    } catch (cause) {
+      if (isAborted(cause)) return ABORTED
+      return new AssetError(`could not fetch ${href}`, { cause })
+    }
+  }
+
+  /** Reads a response into a bitmap, retaining the bytes and re-recording the validator. */
+  const take = async (
+    res: SourceResponse,
+    signal: AbortSignal | undefined,
+  ): Promise<OwnedBitmap | InstanceType<typeof AssetError> | Aborted> => {
+    let blob: Blob
+    try {
+      blob = await res.blob()
+    } catch (cause) {
+      if (isAborted(cause)) return ABORTED
+      return new AssetError(`could not read the body of ${href}`, { cause })
+    }
+    if (abortedNow(signal)) return ABORTED
+    bytes = blob
+    validator = readValidator(res.headers)
+    const bitmap = await decodeBitmap(env.createImageBitmap, blob, signal, href)
+    if (isAborted(bitmap)) return ABORTED
+    if (bitmap instanceof Error) return bitmap
+    return { bitmap, owned: true }
+  }
+
+  const acquire = async (o: AcquireOptions = {}): Promise<AcquireResult> => {
+    if (abortedNow(o.signal)) return ABORTED
+    const res = await request(o.signal, {})
+    if (isAborted(res)) return ABORTED
+    if (res instanceof Error) return res
+    if (!res.ok) return new AssetError(`fetch of ${href} returned ${res.status}`)
+    return take(res, o.signal)
+  }
+
+  return {
+    kind: 'url',
+    reclaimable: true,
+    borrowed: undefined,
+    acquire,
+    resupply: undefined,
+  }
+}
