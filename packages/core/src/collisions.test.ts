@@ -103,6 +103,14 @@ describe('planStagePlay — the eligible set, fixed at the call', () => {
     expect(e.skipped.map((s) => s.reason)).toEqual(['disposed'])
   })
 
+  it('reports no-sprite before busy, which the disposed case cannot show on its own', () => {
+    // `disposed` short-circuits, so the test above proves only that it beats the other two.
+    // This is the middle arm: not disposed, no sprite, and busy at the same time.
+    const e = planStagePlay([candidate('a', { hasSprite: false, liveOwner: 'view' })])
+    expect(e.start).toEqual([])
+    expect(e.skipped.map((s) => s.reason)).toEqual(['no-sprite'])
+  })
+
   it('carries the view tag, so a skip correlates without a reverse Map<View, id>', () => {
     const e = planStagePlay([candidate('a', { tag: 'tile-7', hasSprite: false })])
     expect(e.skipped[0].tag).toBe('tile-7')
