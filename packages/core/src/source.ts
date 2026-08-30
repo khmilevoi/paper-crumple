@@ -359,3 +359,97 @@ export function elementSource(
     resupply: undefined,
   }
 }
+
+/**
+ * The `Blob` arm. Reclaimable, because the bytes are already in hand and re-supplying is a second
+ * decode of them — and **immutable, so §8.5.1's staleness protocol has no subject here**: there is
+ * nothing to ask a server about and the freshness is `unchanged` by construction rather than by a
+ * request. A `File` from an upload takes this path.
+ */
+export function blobSource(blob: Blob, env: SourceEnv): NormalizedSource {
+  const load = async (
+    signal: AbortSignal | undefined,
+  ): Promise<OwnedBitmap | InstanceType<typeof AssetError> | Aborted> => {
+    if (abortedNow(signal)) return ABORTED
+    const bitmap = await decodeBitmap(
+      env.createImageBitmap,
+      blob,
+      signal,
+      'the Blob given to add()',
+    )
+    if (isAborted(bitmap)) return ABORTED
+    if (bitmap instanceof Error) return bitmap
+    return { bitmap, owned: true }
+  }
+
+  return {
+    kind: 'blob',
+    reclaimable: true,
+    borrowed: undefined,
+    acquire: (o = {}) => load(o.signal),
+    resupply: async (o) => {
+      const got = await load(o.signal)
+      if (isAborted(got)) return ABORTED
+      if (got instanceof Error) return got
+      return { ...got, freshness: 'unchanged', warning: undefined }
+    },
+  }
+}
+
+/**
+ * The supplier arm. Reclaimable by the caller's own promise, which is what it always was: a
+ * function supplier is not something the library can verify, and §8.5.1 leaves it as the caller's
+ * undertaking rather than pretending otherwise.
+ *
+ * **The bitmap belongs to the stage** (§8.5.4), which is why a supplier must mint a fresh one per
+ * call and must never hand back one it also gave to `add()` — the stage will close it. When the
+ * signal fires while the supplier is in flight, the bitmap that arrives is closed here: the caller
+ * is not receiving it and cannot close it.
+ */
+export function supplierSource(supply: BitmapSupplier): NormalizedSource {
+  const call = async (
+    signal: AbortSignal | undefined,
+  ): Promise<OwnedBitmap | InstanceType<typeof AssetError> | Aborted> => {
+    if (abortedNow(signal)) return ABORTED
+
+    let produced: ImageBitmap | Error
+    try {
+      // A consumer's function is not bound by §10.8, so a rejection is an ordinary outcome here.
+      produced = await supply()
+    } catch (cause) {
+      if (isAborted(cause)) return ABORTED
+      return new AssetError('the sprite source supplier failed', { cause })
+    }
+
+    if (isAborted(produced)) return ABORTED
+    if (produced instanceof Error) {
+      // Wrapped rather than forwarded: `AddError` is a closed union and an arbitrary Error is not
+      // a member of it. `findCause` recovers the original.
+      return new AssetError('the sprite source supplier returned an error', { cause: produced })
+    }
+    if (isDetached(produced)) {
+      return new AssetError(
+        'the sprite source supplier returned a closed or detached ImageBitmap; a supplier must ' +
+          'mint a fresh bitmap per call and must never hand back one it also gave to add()',
+      )
+    }
+    if (abortedNow(signal)) {
+      closeQuietly(produced)
+      return ABORTED
+    }
+    return { bitmap: produced, owned: true }
+  }
+
+  return {
+    kind: 'supplier',
+    reclaimable: true,
+    borrowed: undefined,
+    acquire: (o = {}) => call(o.signal),
+    resupply: async (o) => {
+      const got = await call(o.signal)
+      if (isAborted(got)) return ABORTED
+      if (got instanceof Error) return got
+      return { ...got, freshness: 'unchanged', warning: undefined }
+    },
+  }
+}

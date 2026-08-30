@@ -1,7 +1,14 @@
 import { describe, expect, it } from 'vitest'
 import { ABORTED, isAborted } from './abort.js'
 import { AssetError } from './errors.js'
-import { bitmapSource, classifySource, elementSource } from './source.js'
+import {
+  bitmapSource,
+  blobSource,
+  classifySource,
+  elementSource,
+  supplierSource,
+} from './source.js'
+import type { NormalizedSource } from './source.js'
 import {
   asBitmap,
   blobOf,
@@ -185,5 +192,144 @@ describe('the element arms: the element is given, the bitmap is obtained', () =>
     d.release()
     expect(await pending).toBe(ABORTED)
     expect(d.produced[0].closes).toBe(1)
+  })
+})
+
+describe('the blob arm: reclaimable, and immutable so nothing needs checking', () => {
+  it('decodes the retained blob and owns the result', async () => {
+    const b = blobOf()
+    const d = stubDecode()
+    const rec = blobSource(b, { createImageBitmap: d.decode })
+    expect(rec.kind).toBe('blob')
+    expect(rec.reclaimable).toBe(true)
+    expect(rec.borrowed).toBeUndefined()
+    const got = await rec.acquire()
+    if (got instanceof Error || isAborted(got)) return expect.fail('expected a bitmap')
+    expect(d.calls).toEqual([b])
+    expect(got.owned).toBe(true)
+  })
+
+  it('re-supplies from the same blob and reports unchanged by construction (§8.5.1)', async () => {
+    const b = blobOf()
+    const d = stubDecode()
+    const rec = blobSource(b, { createImageBitmap: d.decode })
+    if (rec.resupply === undefined) return expect.fail('a blob is reclaimable')
+    await rec.acquire()
+    const r = await rec.resupply({ key: 'sweater' })
+    if (r instanceof Error || isAborted(r)) return expect.fail('expected a report')
+    // A Blob cannot change under the key, so there is no conditional request to issue and no
+    // warning to raise. The freshness is a property of the arm, not the answer to a question.
+    expect(r.freshness).toBe('unchanged')
+    expect(r.warning).toBeUndefined()
+    expect(r.owned).toBe(true)
+    expect(d.calls).toEqual([b, b])
+  })
+})
+
+describe('the supplier arm: the promise stays the caller, the bitmap becomes the stage (§8.5.4)', () => {
+  it('owns what the supplier returns', async () => {
+    const minted = fakeBitmap()
+    const rec = supplierSource(async () => asBitmap(minted))
+    expect(rec.kind).toBe('supplier')
+    expect(rec.reclaimable).toBe(true)
+    expect(rec.borrowed).toBeUndefined()
+    const got = await rec.acquire()
+    if (got instanceof Error || isAborted(got)) return expect.fail('expected a bitmap')
+    expect(got.bitmap).toBe(asBitmap(minted))
+    expect(got.owned).toBe(true)
+  })
+
+  it('calls the supplier again on re-supply, and reports unchanged: the promise is the caller', async () => {
+    let calls = 0
+    const rec = supplierSource(async () => {
+      calls += 1
+      return asBitmap(fakeBitmap())
+    })
+    if (rec.resupply === undefined) return expect.fail('a supplier is reclaimable')
+    await rec.acquire()
+    const r = await rec.resupply({ key: 'sweater' })
+    if (r instanceof Error || isAborted(r)) return expect.fail('expected a report')
+    expect(calls).toBe(2)
+    expect(r.freshness).toBe('unchanged')
+    expect(r.warning).toBeUndefined()
+  })
+
+  it('wraps an Error the supplier returns, so the return type stays inside AddError', async () => {
+    const inner = new Error('the wardrobe service is down')
+    const rec = supplierSource(async () => inner)
+    const got = await rec.acquire()
+    expect(AssetError.is(got)).toBe(true)
+    expect((got as Error).cause).toBe(inner)
+  })
+
+  it('wraps a supplier that rejects, because a consumer function is not bound by §10.8', async () => {
+    const boom = new RangeError('nope')
+    const rec = supplierSource(() => Promise.reject(boom))
+    const got = await rec.acquire()
+    expect(AssetError.is(got)).toBe(true)
+    expect((got as Error).cause).toBe(boom)
+  })
+
+  it('refuses a closed bitmap: a supplier must mint a fresh one per call', async () => {
+    const stale = fakeBitmap()
+    stale.close()
+    const rec = supplierSource(async () => asBitmap(stale))
+    const got = await rec.acquire()
+    expect(AssetError.is(got)).toBe(true)
+    expect(String(got)).toContain('fresh')
+  })
+
+  it('returns ABORTED without calling the supplier when the signal has already fired', async () => {
+    let calls = 0
+    const rec = supplierSource(async () => {
+      calls += 1
+      return asBitmap(fakeBitmap())
+    })
+    const c = new AbortController()
+    c.abort()
+    expect(await rec.acquire({ signal: c.signal })).toBe(ABORTED)
+    expect(calls).toBe(0)
+  })
+
+  it('closes the bitmap a supplier returned when the signal fires while it was in flight', async () => {
+    const minted = fakeBitmap()
+    let settle = (): void => {}
+    const rec = supplierSource(
+      () =>
+        new Promise<ImageBitmap>((resolve) => {
+          settle = () => resolve(asBitmap(minted))
+        }),
+    )
+    const c = new AbortController()
+    const pending = rec.acquire({ signal: c.signal })
+    c.abort()
+    settle()
+    expect(await pending).toBe(ABORTED)
+    expect(minted.closes).toBe(1)
+  })
+
+  it('reports an aborted supplier as ABORTED rather than as an error', async () => {
+    // A supplier that wired the signal through to its own fetch returns the DOMException shape.
+    const rec = supplierSource(async () => new DOMException('aborted', 'AbortError'))
+    expect(await rec.acquire()).toBe(ABORTED)
+  })
+})
+
+describe('the invariant that ties reclaimability to the re-supplier', () => {
+  it('reclaimable is exactly resupply !== undefined, on every arm (§8.8)', () => {
+    const d = stubDecode()
+    const records: NormalizedSource[] = [
+      blobSource(blobOf(), { createImageBitmap: d.decode }),
+      supplierSource(async () => asBitmap(fakeBitmap())),
+      elementSource('image', fakeImage(), { createImageBitmap: d.decode }),
+      elementSource('canvas', fakeCanvas(), { createImageBitmap: d.decode }),
+    ]
+    for (const rec of records) {
+      expect(rec.reclaimable).toBe(rec.resupply !== undefined)
+    }
+    const bitmapRec = bitmapSource(asBitmap(fakeBitmap()))
+    if (bitmapRec instanceof Error) return expect.fail('expected a record')
+    expect(bitmapRec.reclaimable).toBe(bitmapRec.resupply !== undefined)
+    expect(bitmapRec.reclaimable).toBe(false)
   })
 })
