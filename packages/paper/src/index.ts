@@ -39,3 +39,6 @@ export {
   releaseContourScratch,
   signedArea,
 } from './contours.js'
+
+// --- P8: Douglas-Peucker simplification (§8.2) ---
+export { simplifyLoop, simplifyPolyline } from './simplify.js'
