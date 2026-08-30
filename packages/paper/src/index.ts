@@ -29,3 +29,13 @@ export type { ComputeSdfOptions, SdfResult } from './sdf.js'
 // --- P8: reading a signed field (§8.2) ---
 export type { Loop, Point } from './point.js'
 export { cpuSdfFromAlpha, fieldGradient, moveToDistance, sampleField } from './field.js'
+
+// --- P8: band-limited marching squares on a three-slot scratch cache (§8.2, §8.2.1) ---
+export {
+  CANDIDATE_BAND,
+  CONTOUR_SCRATCH_SLOTS,
+  contourScratchStats,
+  extractContours,
+  releaseContourScratch,
+  signedArea,
+} from './contours.js'
