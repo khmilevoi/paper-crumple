@@ -22,7 +22,7 @@ import type { ViewState } from './view-state.js'
  *
  * One controller drives at most one live run for one host. Every ordering rule §7.1 states is a
  * sequence of synchronous calls in this file, and every one of them is asserted at level 1 — no
- * GL, no DOM, no stage. The host is four methods and a clock wide, and P9 supplies it.
+ * GL, no DOM, no stage. The host is five methods and a clock wide, and P9 supplies it.
  */
 
 /** `'flat'` is pose 0 in every pack, and every crumple ends there. */
@@ -208,10 +208,25 @@ export function createRunController<T = unknown>(
     // points at it, and an `await` on its `Run` would never settle. Cancelling until nothing is
     // live gives every such run the `end` and the `ABORTED` settle it is owed.
     //
-    // It cannot spin: `cancel` is only ever passed `current` itself, and `finish` always clears
-    // `current` before returning. In the assembled library it runs at most once, because P9
-    // wires §7.1's single-slot deferral box between a handler and this controller.
+    // Each iteration consumes exactly one live run, so the loop continues only while a handler
+    // keeps installing a new one: it terminates for any handler that eventually stops doing so,
+    // and would not for one that calls `play()` unconditionally on every `end`. That is the
+    // unbounded-recursion pathology §7.1's single-slot deferral box exists to prevent, and P9
+    // wires that box between a handler and this controller — this loop is defence in depth.
+    // Note the consequence for a caller using the controller directly: a run installed by a
+    // handler is cancelled immediately by the iteration that follows, so the *earlier* call
+    // wins over the later one.
     while (current !== null) cancel(current)
+  }
+
+  // A function, not the inlined `o.signal?.aborted === true` it wraps: `aborted` can flip between
+  // two reads of the same option object — that is the whole point of re-checking it after
+  // `supersede()` — but TS's narrowing does not know that and, having seen one `=== true` check
+  // rule the property out, treats a second textually-identical check on the same reference as
+  // unreachable (TS2367). A fresh call each time is a fresh expression, so nothing narrows across
+  // calls.
+  function signalAborted(signal: AbortSignal | undefined): boolean {
+    return signal !== undefined && signal.aborted
   }
 
   function attachSignal(r: LiveRun, signal: AbortSignal | undefined): void {
@@ -275,9 +290,15 @@ export function createRunController<T = unknown>(
     if (decideCollision(owner, current?.owner ?? null) === 'skip') {
       return settledRun<PlayResult>(ABORTED)
     }
-    if (o.signal?.aborted === true) return settledRun<PlayResult>(ABORTED)
+    if (signalAborted(o.signal)) return settledRun<PlayResult>(ABORTED)
 
     supersede()
+    // Both were read on entry, and `supersede` has since emitted `end` synchronously — a handler
+    // may have disposed the view or aborted the signal from it. Re-read them: a run installed on
+    // a disposed controller can never be torn down again, because `stop` and `dispose` both
+    // return at their `disposed` guard, and a signal aborted before `attachSignal` runs would
+    // never fire its listener.
+    if (disposed || signalAborted(o.signal)) return settledRun<PlayResult>(ABORTED)
 
     const plan = playPlan(from, to, { duration: o.duration, dwells })
     let record: LiveRun | null = null
@@ -311,18 +332,26 @@ export function createRunController<T = unknown>(
     // `runSteps` fires step 0 synchronously, which is what puts `step { pose: from }` in the same
     // synchronous block as `start`. A one-step plan also finishes synchronously, before this
     // assignment — harmless, because a finished stepper has no armed timer for `detach` to clear.
-    r.stepper = runSteps({
+    // `runSteps` fires step 0 synchronously, before it returns the handle — so for the whole of
+    // that first step `r.stepper` is still `null` and `detach` has nothing to cancel. A handler
+    // that stops or disposes the view from `start` or from that first `step` would otherwise
+    // leave the walk running: every remaining pose would render and emit `step` after this run's
+    // own `end`, and neither `stop()` nor `dispose()` could reach it again. The guard covers the
+    // window; the cancel below closes the timer `fire(0)` armed on its way out.
+    const stepper = runSteps({
       timers: host.timers,
       base: r.startedAt,
       steps: plan.steps,
       onStep: (step) => {
-        stepOnce(r, step)
+        if (current === r) stepOnce(r, step)
       },
       onDone: () => {
         r.reachedTo = true
         finish(r)
       },
     })
+    if (current === r) r.stepper = stepper
+    else stepper.cancel()
     return handle.run
   }
 
@@ -338,9 +367,12 @@ export function createRunController<T = unknown>(
     if (decideCollision(owner, current?.owner ?? null) === 'skip') {
       return settledRun<SwapResult>(ABORTED)
     }
-    if (o.signal?.aborted === true) return settledRun<SwapResult>(ABORTED)
+    if (signalAborted(o.signal)) return settledRun<SwapResult>(ABORTED)
 
     supersede()
+    // Both were read on entry, and `supersede` has since emitted `end` synchronously — a handler
+    // may have disposed the view or aborted the signal from it. See `play`.
+    if (disposed || signalAborted(o.signal)) return settledRun<SwapResult>(ABORTED)
 
     const ball = ballPose(poseCount)
     const plan = swapPlan(from, { duration: o.duration, dwells })
@@ -424,28 +456,32 @@ export function createRunController<T = unknown>(
       }
       // The deadline is re-based on leaving the ball, so a stall does not become debt the descent
       // tries to catch up on (§7.2).
-      run.stepper = runSteps({
+      const fallStepper = runSteps({
         timers: host.timers,
         base: host.timers.now(),
         steps: swap.fall.steps,
         onStep: (step) => {
-          stepOnce(run, step)
+          if (current === run) stepOnce(run, step)
         },
         onDone: () => {
           run.reachedTo = true
           finish(run)
         },
       })
+      if (current === run) run.stepper = fallStepper
+      else fallStepper.cancel()
     }
 
     host.setState(plan.rise.steps.length > 1 ? 'crumpling.rise' : 'crumpling.ball')
     host.emit('start', startPayload(from, FLAT_POSE_INDEX, o.duration, ball))
-    r.stepper = runSteps({
+    // Mirrors `play`'s guard: `runSteps` fires step 0 synchronously, before `r.stepper` would be
+    // assigned, so a handler tearing the run down from that first step must be caught here too.
+    const riseStepper = runSteps({
       timers: host.timers,
       base: r.startedAt,
       steps: plan.rise.steps,
       onStep: (step) => {
-        stepOnce(r, step)
+        if (current === r) stepOnce(r, step)
       },
       onDone: () => {
         if (current !== r) return
@@ -462,6 +498,8 @@ export function createRunController<T = unknown>(
         }, plan.hold)
       },
     })
+    if (current === r) r.stepper = riseStepper
+    else riseStepper.cancel()
     return handle.run
   }
 
@@ -476,13 +514,14 @@ export function createRunController<T = unknown>(
 
   function dispose(): void {
     if (disposed) return
-    // The `end` is emitted at `idle`, under the same teardown-before-`end` rule as every other
-    // ending, and the view is marked `disposed` after it.
-    // Loop for the same reason as `supersede`: a run a handler starts during this teardown would
-    // otherwise still be live when the controller is marked disposed, and its eventual completion
-    // would call `setState('idle')` and un-dispose the view.
-    while (current !== null) cancel(current)
+    // Set before the teardown, not after. `dispose()` re-entered from the `end` emitted below
+    // must find the controller already disposed and return at the guard above, or the state is
+    // announced twice; and a `play()` from that same handler is refused rather than installed
+    // and then immediately cancelled. That also makes the loop below provably single-iteration.
     disposed = true
+    // The `end` is emitted at `idle`, under the same teardown-before-`end` rule as every other
+    // ending, and the view is marked `disposed` after it. The loop mirrors `supersede`'s.
+    while (current !== null) cancel(current)
     host.setState('disposed')
   }
 

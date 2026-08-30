@@ -71,9 +71,12 @@ export interface EventBus<M extends EventPayloads = Events> {
    * in which case **the caller runs `fn` itself, synchronously**. That branch is the one that
    * keeps `start` inside the user gesture: a call from a click handler is not inside an emit.
    *
-   * A slot is not a stack: a later `defer` in the same emit overwrites an earlier one, which is
-   * latest-wins applied to the same instant, and it is why depth is one and unbounded
-   * *synchronous* recursion is structurally impossible.
+   * A slot is not a stack: it holds one call, and any later `defer` before the next drain
+   * overwrites it — including one made from a *different* emit in the same synchronous block,
+   * which is the shape a run's `end` / `start` / `step` triple produces. That is latest-wins
+   * applied to the same instant, and it is why depth is one and unbounded *synchronous*
+   * recursion is structurally impossible. A consumer who defers from two handlers in one
+   * synchronous block gets the later call, and only the later call.
    */
   defer(fn: () => void): boolean
   /** Drops every listener and empties the slot. */

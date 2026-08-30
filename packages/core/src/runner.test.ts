@@ -513,3 +513,46 @@ describe('a play() issued from an end handler (§4.5)', () => {
     expect(h.states[h.states.length - 1]).toBe('disposed')
   })
 })
+
+describe('a teardown from inside the run s first step (§4.5)', () => {
+  it('stops the walk when a step handler stops the run, instead of leaking the stepper', () => {
+    const off = h.bus.on('step', () => {
+      off()
+      h.controller.stop()
+    })
+    h.controller.play('flat', 'ball')
+    h.timers.advance(1000)
+    // The stop landed inside step 0, before `r.stepper` had been assigned. Without the guard the
+    // walk carries on: every remaining pose renders and emits `step` after this run's own `end`.
+    expect(h.rendered).toEqual([0])
+    expect(h.timers.pending).toBe(0)
+    expect(names(h.events)).toEqual(['start', 'step', 'end'])
+  })
+
+  it('renders nothing when a start handler disposes the view before the first step', () => {
+    const off = h.bus.on('start', () => {
+      off()
+      h.controller.dispose()
+    })
+    h.controller.play('flat', 'ball')
+    h.timers.advance(1000)
+    // `start` is emitted before `runSteps` is even called, so the run is already dead when step 0
+    // fires. A cancel path must not render (§4.5).
+    expect(h.rendered).toEqual([])
+    expect(h.timers.pending).toBe(0)
+  })
+
+  it('refuses to install a run when an end handler disposed the view mid-supersession', async () => {
+    h.controller.play('flat', 'ball')
+    const off = h.bus.on('end', () => {
+      off()
+      h.controller.dispose()
+    })
+    const run = h.controller.play('ball', 'flat')
+    // The dispose happened inside `supersede`'s `end`. Installing the run anyway would leave it
+    // walking on a disposed controller with no way to stop it.
+    expect(h.controller.live).toBe(false)
+    expect(h.timers.pending).toBe(0)
+    await expect(run).resolves.toBe(ABORTED)
+  })
+})

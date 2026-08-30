@@ -187,6 +187,18 @@ describe('the relay (§7.1: the stage re-emits after the last view listener retu
     expect(() => bus.emit('start', START)).not.toThrow()
     expect(rethrow).toHaveBeenCalledWith(boom)
   })
+
+  it('runs inside the emit, which is what puts a stage handler s call in the deferral box', () => {
+    let deferredInside: boolean | null = null
+    const bus = createEventBus({
+      relay: () => {
+        deferredInside = bus.defer(() => {})
+      },
+    })
+    bus.emit('start', START)
+    // Ordering alone would not catch this: a relay called after `depth -= 1` still runs last.
+    expect(deferredInside).toBe(true)
+  })
 })
 
 describe('the unobserved-error fallback (§10.6)', () => {
@@ -336,6 +348,19 @@ describe('the single-slot re-entrancy box (§7.1)', () => {
     bus.emit('start', START)
     await flush()
     expect(fn).not.toHaveBeenCalled()
+  })
+
+  it('is one slot for the whole synchronous block, not one per emit: the latest call wins', async () => {
+    const bus = createEventBus()
+    const seen: string[] = []
+    bus.on('end', () => bus.defer(() => seen.push('from-end')))
+    bus.on('start', () => bus.defer(() => seen.push('from-start')))
+    // Two sequential emits in one synchronous block — the shape a supersession produces when it
+    // ends one run and starts the next on the same bus.
+    bus.emit('end', { from: 0, to: 5, completed: false })
+    bus.emit('start', START)
+    await flush()
+    expect(seen).toEqual(['from-start'])
   })
 })
 

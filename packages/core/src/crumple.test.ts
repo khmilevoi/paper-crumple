@@ -428,3 +428,17 @@ describe('refusals', () => {
     await expect(run).resolves.toBeUndefined()
   })
 })
+
+describe('a teardown from inside the crumple s first step (§4.5)', () => {
+  it('stops the rise when a step handler stops the run', async () => {
+    const off = h.bus.on('step', () => {
+      off()
+      h.controller.stop()
+    })
+    h.controller.crumple(0, { key: 'b' }, { adopt })
+    await settle()
+    h.timers.advance(2000)
+    expect(h.rendered).toEqual([0])
+    expect(h.timers.pending).toBe(0)
+  })
+})
