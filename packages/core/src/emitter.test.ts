@@ -1,0 +1,377 @@
+import { afterEach, describe, expect, it, vi } from 'vitest'
+import type { EventName, Events, StageEvent } from './events.js'
+import { createEventBus, logUnobserved, rethrowFromMicrotask } from './emitter.js'
+
+const START: Events['start'] = { from: 0, to: 5 }
+const flush = (): Promise<void> => new Promise((r) => queueMicrotask(() => r()))
+
+afterEach(() => {
+  vi.unstubAllGlobals()
+  vi.restoreAllMocks()
+})
+
+describe('on / once (§7.1)', () => {
+  it('returns an unsubscribe closure rather than an Error union, because subscribing cannot fail', () => {
+    const bus = createEventBus()
+    const off = bus.on('start', () => {})
+    expect(typeof off).toBe('function')
+    expect(off).not.toBeInstanceOf(Error)
+  })
+
+  it('emits in registration order', () => {
+    const bus = createEventBus()
+    const seen: string[] = []
+    bus.on('start', () => seen.push('a'))
+    bus.on('start', () => seen.push('b'))
+    bus.on('start', () => seen.push('c'))
+    bus.emit('start', START)
+    expect(seen).toEqual(['a', 'b', 'c'])
+  })
+
+  it('delivers the payload unchanged', () => {
+    const bus = createEventBus()
+    const seen: Array<Events['start']> = []
+    bus.on('start', (e) => seen.push(e))
+    bus.emit('start', START)
+    expect(seen).toEqual([START])
+  })
+
+  it('registers the same function twice and calls it twice', () => {
+    const bus = createEventBus()
+    const fn = vi.fn()
+    bus.on('start', fn)
+    bus.on('start', fn)
+    bus.emit('start', START)
+    expect(fn).toHaveBeenCalledTimes(2)
+  })
+
+  it('unsubscribes, and is idempotent about it', () => {
+    const bus = createEventBus()
+    const fn = vi.fn()
+    const off = bus.on('start', fn)
+    off()
+    off()
+    bus.emit('start', START)
+    expect(fn).not.toHaveBeenCalled()
+    expect(bus.listenerCount('start')).toBe(0)
+  })
+
+  it('does not call a listener unsubscribed by an earlier listener in the same emit', () => {
+    const bus = createEventBus()
+    const later = vi.fn()
+    let off = (): void => {}
+    bus.on('start', () => off())
+    off = bus.on('start', later)
+    bus.emit('start', START)
+    expect(later).not.toHaveBeenCalled()
+  })
+
+  it('does not deliver the current emit to a listener added during it', () => {
+    const bus = createEventBus()
+    const added = vi.fn()
+    bus.on('start', () => {
+      bus.on('start', added)
+    })
+    bus.emit('start', START)
+    expect(added).not.toHaveBeenCalled()
+  })
+
+  it('once fires exactly once and its closure removes it before it fires', () => {
+    const bus = createEventBus()
+    const fired = vi.fn()
+    bus.once('start', fired)
+    bus.emit('start', START)
+    bus.emit('start', START)
+    expect(fired).toHaveBeenCalledTimes(1)
+    expect(bus.listenerCount('start')).toBe(0)
+
+    const never = vi.fn()
+    bus.once('start', never)()
+    bus.emit('start', START)
+    expect(never).not.toHaveBeenCalled()
+  })
+
+  it('clear() drops every listener on every event', () => {
+    const bus = createEventBus()
+    bus.on('start', () => {})
+    bus.on('end', () => {})
+    bus.clear()
+    expect(bus.listenerCount('start')).toBe(0)
+    expect(bus.listenerCount('end')).toBe(0)
+  })
+})
+
+describe('a listener that throws (§7.1)', () => {
+  it('does not interrupt emission, and the exception reaches rethrow exactly once', () => {
+    const rethrow = vi.fn()
+    const bus = createEventBus({ rethrow })
+    const boom = new TypeError('listener blew up')
+    const after = vi.fn()
+    bus.on('start', () => {
+      // eslint-disable-next-line no-restricted-syntax
+      throw boom
+    })
+    bus.on('start', after)
+    bus.emit('start', START)
+    expect(after).toHaveBeenCalledTimes(1)
+    expect(rethrow).toHaveBeenCalledTimes(1)
+    expect(rethrow).toHaveBeenCalledWith(boom)
+  })
+
+  it('hands the thrown value through untouched, even when it is not an Error', () => {
+    const rethrow = vi.fn()
+    const bus = createEventBus({ rethrow })
+    bus.on('start', () => {
+      // eslint-disable-next-line no-restricted-syntax
+      throw 'a string, which is pathological but legal'
+    })
+    bus.emit('start', START)
+    expect(rethrow).toHaveBeenCalledWith('a string, which is pathological but legal')
+  })
+})
+
+describe('rethrowFromMicrotask', () => {
+  it('schedules on a microtask, and the scheduled callback throws the original error', () => {
+    const scheduled: Array<() => void> = []
+    vi.stubGlobal('queueMicrotask', (fn: () => void) => {
+      scheduled.push(fn)
+    })
+    const boom = new RangeError('the original')
+    rethrowFromMicrotask(boom)
+    expect(scheduled).toHaveLength(1)
+    expect(() => scheduled[0]()).toThrow(boom)
+  })
+
+  it('wraps a non-Error so something with a stack reaches the console', () => {
+    const scheduled: Array<() => void> = []
+    vi.stubGlobal('queueMicrotask', (fn: () => void) => {
+      scheduled.push(fn)
+    })
+    rethrowFromMicrotask('not an error')
+    expect(() => scheduled[0]()).toThrow(Error)
+    expect(() => scheduled[0]()).toThrow(/threw a non-Error value/)
+  })
+})
+
+describe('the relay (§7.1: the stage re-emits after the last view listener returns)', () => {
+  it('runs after the last listener and inside the emit', () => {
+    const seen: string[] = []
+    const bus = createEventBus({
+      relay: (event) => {
+        seen.push(`relay:${event}`)
+      },
+    })
+    bus.on('start', () => seen.push('a'))
+    bus.on('start', () => seen.push('b'))
+    bus.emit('start', START)
+    expect(seen).toEqual(['a', 'b', 'relay:start'])
+  })
+
+  it('runs even with no listeners at all', () => {
+    const relay = vi.fn()
+    const bus = createEventBus({ relay })
+    bus.emit('end', { from: 0, to: 5, completed: true })
+    expect(relay).toHaveBeenCalledTimes(1)
+  })
+
+  it('a throwing relay does not escape the emit', () => {
+    const rethrow = vi.fn()
+    const boom = new Error('relay blew up')
+    const bus = createEventBus({
+      rethrow,
+      relay: () => {
+        // eslint-disable-next-line no-restricted-syntax
+        throw boom
+      },
+    })
+    expect(() => bus.emit('start', START)).not.toThrow()
+    expect(rethrow).toHaveBeenCalledWith(boom)
+  })
+
+  it('runs inside the emit, which is what puts a stage handler s call in the deferral box', () => {
+    let deferredInside: boolean | null = null
+    const bus = createEventBus({
+      relay: () => {
+        deferredInside = bus.defer(() => {})
+      },
+    })
+    bus.emit('start', START)
+    // Ordering alone would not catch this: a relay called after `depth -= 1` still runs last.
+    expect(deferredInside).toBe(true)
+  })
+})
+
+describe('the unobserved-error fallback (§10.6)', () => {
+  const orphan = { error: new Error('inside a timer'), observed: false }
+
+  it('fires when nothing is subscribed and the error is unobserved', () => {
+    const onUnobserved = vi.fn()
+    const bus = createEventBus({ onUnobserved })
+    bus.emit('error', orphan)
+    expect(onUnobserved).toHaveBeenCalledWith(orphan.error)
+  })
+
+  it('fires at most once per bus, because logging every dropped frame teaches the console away', () => {
+    const onUnobserved = vi.fn()
+    const bus = createEventBus({ onUnobserved })
+    bus.emit('error', orphan)
+    bus.emit('error', { error: new Error('another'), observed: false })
+    expect(onUnobserved).toHaveBeenCalledTimes(1)
+  })
+
+  it('never fires for an observed error, which the caller is about to narrow', () => {
+    const onUnobserved = vi.fn()
+    const bus = createEventBus({ onUnobserved })
+    bus.emit('error', { error: new Error('returned too'), observed: true })
+    expect(onUnobserved).not.toHaveBeenCalled()
+  })
+
+  it('never fires when a listener is attached', () => {
+    const onUnobserved = vi.fn()
+    const bus = createEventBus({ onUnobserved })
+    bus.on('error', () => {})
+    bus.emit('error', orphan)
+    expect(onUnobserved).not.toHaveBeenCalled()
+  })
+
+  it('is silent by default, which is what a view bus wants — the stage logs, not the view', () => {
+    const spy = vi.spyOn(console, 'error').mockImplementation(() => {})
+    const bus = createEventBus()
+    bus.emit('error', orphan)
+    expect(spy).not.toHaveBeenCalled()
+  })
+
+  it('logUnobserved is the ready-made stage form, and names the way to turn it off', () => {
+    const spy = vi.spyOn(console, 'error').mockImplementation(() => {})
+    const boom = new Error('orphan')
+    logUnobserved(boom)
+    expect(spy).toHaveBeenCalledTimes(1)
+    expect(String(spy.mock.calls[0][0])).toMatch(/stage\.on\('error'/)
+    expect(spy.mock.calls[0][1]).toBe(boom)
+  })
+})
+
+describe('the single-slot re-entrancy box (§7.1)', () => {
+  it('runs a call made outside an emit synchronously, which is what keeps start inside a gesture', () => {
+    const bus = createEventBus()
+    const fn = vi.fn()
+    expect(bus.defer(fn)).toBe(false)
+    expect(fn).not.toHaveBeenCalled()
+  })
+
+  it('stores a call made inside an emit and drains it one microtask later', async () => {
+    const bus = createEventBus()
+    const seen: string[] = []
+    bus.on('end', () => {
+      expect(bus.defer(() => seen.push('deferred'))).toBe(true)
+      seen.push('handler')
+    })
+    bus.emit('end', { from: 0, to: 5, completed: true })
+    expect(seen).toEqual(['handler'])
+    await flush()
+    expect(seen).toEqual(['handler', 'deferred'])
+  })
+
+  it('is a slot and not a stack: the latest call in one emit overwrites the earlier one', async () => {
+    const bus = createEventBus()
+    const seen: string[] = []
+    bus.on('end', () => bus.defer(() => seen.push('first')))
+    bus.on('end', () => bus.defer(() => seen.push('second')))
+    bus.emit('end', { from: 0, to: 5, completed: true })
+    await flush()
+    expect(seen).toEqual(['second'])
+  })
+
+  it('drains after the outermost emit unwinds, not after a nested one', async () => {
+    const bus = createEventBus()
+    const seen: string[] = []
+    bus.on('start', () => {
+      bus.emit('step', { pose: 0, frame: 0, ms: 0 })
+      seen.push('after-nested-emit')
+    })
+    bus.on('step', () => bus.defer(() => seen.push('deferred')))
+    bus.emit('start', START)
+    expect(seen).toEqual(['after-nested-emit'])
+    await flush()
+    expect(seen).toEqual(['after-nested-emit', 'deferred'])
+  })
+
+  it('makes unbounded synchronous recursion structurally impossible', async () => {
+    const bus = createEventBus()
+    let depth = 0
+    const again = (): void => {
+      depth += 1
+      if (depth < 3) bus.emit('start', START)
+    }
+    bus.on('start', () => bus.defer(again))
+    bus.emit('start', START)
+    // Nothing recursed synchronously: the emit unwound with the call still sitting in the slot.
+    expect(depth).toBe(0)
+    await flush()
+    // One microtask in, the chain has started and has not run to completion. Each hop costs a
+    // microtask of its own, which is what bounds the stack; asserting an exact hop count here
+    // would pin the number of ticks `flush()` happens to take rather than the guarantee.
+    expect(depth).toBeGreaterThanOrEqual(1)
+    expect(depth).toBeLessThan(3)
+    await flush()
+    await flush()
+    // And every hop eventually runs: a deferred call is delayed, never dropped.
+    expect(depth).toBe(3)
+  })
+
+  it('re-arms after a drain: a deferred call that defers again is delayed, never dropped', async () => {
+    const bus = createEventBus()
+    const seen: string[] = []
+    bus.on('start', () => {
+      bus.defer(() => {
+        seen.push('first')
+        bus.emit('end', { from: 0, to: 5, completed: true })
+      })
+    })
+    bus.on('end', () => {
+      bus.defer(() => seen.push('second'))
+    })
+    bus.emit('start', START)
+    expect(seen).toEqual([])
+    await flush()
+    await flush()
+    expect(seen).toEqual(['first', 'second'])
+  })
+
+  it('clear() empties the slot as well as the listeners', async () => {
+    const bus = createEventBus()
+    const fn = vi.fn()
+    bus.on('start', () => {
+      bus.defer(fn)
+      bus.clear()
+    })
+    bus.emit('start', START)
+    await flush()
+    expect(fn).not.toHaveBeenCalled()
+  })
+
+  it('is one slot for the whole synchronous block, not one per emit: the latest call wins', async () => {
+    const bus = createEventBus()
+    const seen: string[] = []
+    bus.on('end', () => bus.defer(() => seen.push('from-end')))
+    bus.on('start', () => bus.defer(() => seen.push('from-start')))
+    // Two sequential emits in one synchronous block — the shape a supersession produces when it
+    // ends one run and starts the next on the same bus.
+    bus.emit('end', { from: 0, to: 5, completed: false })
+    bus.emit('start', START)
+    await flush()
+    expect(seen).toEqual(['from-start'])
+  })
+})
+
+describe('the stage-side widening', () => {
+  it('accepts a payload map whose members carry view, which is what StageEvent adds', () => {
+    type StageEvents = { [E in EventName]: StageEvent<E> }
+    const bus = createEventBus<StageEvents>()
+    const seen: Array<StageEvent<'error'>> = []
+    bus.on('error', (e) => seen.push(e))
+    const payload: StageEvent<'error'> = { error: new Error('x'), observed: true, view: null }
+    bus.emit('error', payload)
+    expect(seen).toEqual([payload])
+  })
+})

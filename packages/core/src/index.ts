@@ -97,3 +97,17 @@ export type {
   SpriteKnobPatch,
   ViewKnobPatch,
 } from './knob-patch.js'
+
+// --- P4: the event bus, the run lifecycle and the dwell arithmetic (§7.1, §7.2, §4.4, §4.5) ---
+
+/**
+ * The authored cadence (§7.2). Exported because a consumer chaining two `play()` calls by hand
+ * does **not** reproduce `crumpleTo`'s ball hold and has to insert `DWELL_MS[5]` themselves.
+ * Frozen: it is the library's schedule, not a consumer's scratch array.
+ */
+export { DWELL_MS } from './dwell.js'
+
+export type { Run, RunOwner } from './run.js'
+export type { PlayOptions, StagePlayOptions } from './runner.js'
+export type { SkipReason, StagePlayReport } from './collisions.js'
+export type { ViewState } from './view-state.js'
