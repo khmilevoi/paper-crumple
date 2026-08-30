@@ -17,7 +17,7 @@ describe('partition (§10.7)', () => {
     expect(bad).toEqual([])
   })
 
-  it('treats every Error subclass as an error, ours and the platform�s', () => {
+  it('treats every Error subclass as an error, ours and the platform\u2019s', () => {
     const [ok, bad] = partition<unknown>([new TypeError('t'), new GlError('g'), 'not an error'])
     expect(ok).toEqual(['not an error'])
     expect(bad).toHaveLength(2)
