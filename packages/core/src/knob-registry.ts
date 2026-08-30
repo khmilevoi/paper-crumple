@@ -2,7 +2,7 @@ import { KnobError } from './errors.js'
 import { maxInvalidation } from './invalidation.js'
 import { validateKnobValue } from './knob-validate.js'
 import { SHARED_KNOBS } from './shared-knobs.js'
-import type { Invalidates, KnobDescriptor } from './knobs.js'
+import type { Invalidates, KnobDescriptor, Knobs } from './knobs.js'
 
 export type SlotName = 'sheet' | 'motion'
 export type KnobScope = 'core' | SlotName
@@ -40,6 +40,17 @@ export interface KnobRegistry {
     patch: Readonly<Record<string, unknown>>,
     scope: readonly Invalidates[],
   ): KnobValues | Fault
+  /** Every descriptor's own default, under its namespaced path. */
+  defaults(): KnobValues
+  /** The strongest level a namespaced delta touches, or `undefined` if it touches nothing. */
+  invalidationOf(delta: KnobValues): Invalidates | undefined
+  /**
+   * §5.5's filtered view, **built once at mount and reused**: the returned function closes over
+   * this slot's key list and does no per-draw scan of the other slot's descriptors. It allocates
+   * a fresh bag per call rather than reusing one, because a slot that retains the bag would be an
+   * invisible aliasing bug and the contract cannot forbid retention.
+   */
+  projector(slot: SlotName): (values: KnobValues) => Knobs
 }
 
 const SHARED_KEYS: ReadonlySet<string> = new Set(SHARED_KNOBS.map((d) => d.key))
@@ -153,12 +164,45 @@ export function createKnobRegistry(slots: {
     return out
   }
 
+  const defaults = (): KnobValues => {
+    const out: Record<string, KnobPrimitive> = {}
+    for (const t of targets) out[t.path] = t.descriptor.default
+    return out
+  }
+
+  const invalidationOf = (delta: KnobValues): Invalidates | undefined =>
+    maxInvalidation(
+      Object.keys(delta).flatMap((path) => {
+        const target = byPath.get(path)
+        return target === undefined ? [] : [target.descriptor.invalidates]
+      }),
+    )
+
+  const projector = (slot: SlotName): ((values: KnobValues) => Knobs) => {
+    // Core first, then the slot: "core defaults -> slot defaults", so a slot's own key wins on a
+    // collision with a shared one. Built here, at mount, and never rebuilt.
+    const pairs: Array<readonly [string, string]> = []
+    for (const t of targets) if (t.scope === 'core') pairs.push([t.descriptor.key, t.path])
+    for (const t of targets) if (t.scope === slot) pairs.push([t.descriptor.key, t.path])
+    return (values) => {
+      const bag: Record<string, KnobPrimitive> = {}
+      for (const [key, path] of pairs) {
+        const value = values[path]
+        if (value !== undefined) bag[key] = value
+      }
+      return bag
+    }
+  }
+
   return {
     descriptors: targets.map((t) => t.descriptor),
     bySlot: { core: SHARED_KNOBS, sheet: slots.sheet, motion: slots.motion },
     ambiguous,
     resolve,
     normalise,
+    defaults,
+    invalidationOf,
+    projector,
   }
 }
 
