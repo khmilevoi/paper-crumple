@@ -1,26 +1,32 @@
 import { describe, expect, it } from 'vitest'
 import { RUNNING_STATES, transition, type ViewAction, type ViewState } from './view-state.js'
 
-const ALL_STATES: readonly ViewState[] = [
-  'idle',
-  'playing',
-  'crumpling.rise',
-  'crumpling.ball',
-  'crumpling.fall',
-  'crumpling.recover',
-  'disposed',
-]
+// Keyed by the union rather than listed beside it: an eighth `ViewState` or a ninth `ViewAction`
+// becomes a compile error here, where a hand-written literal array would go on asserting the old
+// seven and the "table is total" test would quietly stop being total.
+const EVERY_STATE: Record<ViewState, true> = {
+  idle: true,
+  playing: true,
+  'crumpling.rise': true,
+  'crumpling.ball': true,
+  'crumpling.fall': true,
+  'crumpling.recover': true,
+  disposed: true,
+}
 
-const ALL_ACTIONS: readonly ViewAction[] = [
-  'show',
-  'play',
-  'crumpleTo',
-  'swapTo',
-  'refresh',
-  'draw',
-  'stop',
-  'dispose',
-]
+const EVERY_ACTION: Record<ViewAction, true> = {
+  show: true,
+  play: true,
+  crumpleTo: true,
+  swapTo: true,
+  refresh: true,
+  draw: true,
+  stop: true,
+  dispose: true,
+}
+
+const ALL_STATES = Object.keys(EVERY_STATE) as readonly ViewState[]
+const ALL_ACTIONS = Object.keys(EVERY_ACTION) as readonly ViewAction[]
 
 describe('the state vocabulary (§4.5)', () => {
   it('is the table exposed, seven states under the table own names, and no `stopped`', () => {
@@ -84,6 +90,18 @@ describe('play, crumpleTo and swapTo', () => {
       expect(t.next, state).toBe('playing')
     }
   })
+
+  it('supersede from crumpleTo and swapTo as well, not only from play', () => {
+    for (const state of RUNNING_STATES) {
+      for (const action of ['crumpleTo', 'swapTo'] as const) {
+        const t = transition(state, action)
+        expect(t.endsLiveRun, `${state}/${action}`).toBe(true)
+        expect(t.startsRun, `${state}/${action}`).toBe(true)
+        expect(t.emits, `${state}/${action}`).toBe(true)
+        expect(t.next, `${state}/${action}`).toBe('crumpling.rise')
+      }
+    }
+  })
 })
 
 describe('show', () => {
@@ -123,6 +141,9 @@ describe('stop (§4.5)', () => {
       const t = transition(state, 'stop')
       expect(t.draws, state).toBe(false)
       expect(t.endsLiveRun, state).toBe(true)
+      // §7.1 owes a live run its `end { completed: false }`; without this line, hardcoding
+      // `emits: false` in the stop row would pass the entire suite.
+      expect(t.emits, state).toBe(true)
       expect(t.next, state).toBe('idle')
     }
   })
@@ -132,6 +153,7 @@ describe('dispose (§4.6)', () => {
   it('ends a live run with completed: false and is terminal', () => {
     const t = transition('playing', 'dispose')
     expect(t.endsLiveRun).toBe(true)
+    expect(t.emits).toBe(true)
     expect(t.draws).toBe(false)
     expect(t.next).toBe('disposed')
   })
