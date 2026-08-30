@@ -9,8 +9,12 @@ import type { Aborted } from './abort.js'
  *
  * The test is `Extract<T, Aborted>` — "is `Aborted` a *member* of this union" — rather than
  * `[Aborted] extends [T]`. The latter is also true for `T = unknown`, which is not a union
- * carrying the sentinel and which the hostile-input suite passes deliberately. The tuple wrapper
- * stops the conditional distributing over a naked type parameter. The property name is a sentence
+ * carrying the sentinel and which the hostile-input suite passes deliberately.
+ *
+ * The tuple brackets around `Extract<T, Aborted>` are this repository's idiom for a `never` test.
+ * They are inert here — the checked type is an alias instantiation rather than a naked type
+ * parameter, so the distribution over `T` has already happened inside `Extract` — but they keep
+ * the test non-distributive if the checked expression is ever simplified. The property name is a sentence
  * because it is what a consumer reads in the compiler's error.
  */
 export type NoAbortedElement<T> = [Extract<T, Aborted>] extends [never]
