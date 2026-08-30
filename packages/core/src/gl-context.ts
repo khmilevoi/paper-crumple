@@ -83,9 +83,9 @@ function compileShader(
 /** One of the two boundaries `eslint.boundaries.js` names, wrapped so it returns instead. */
 function compile(gl: WebGL2RenderingContext, vs: string, fs: string, label: string): Err | Program {
   const vertex = compileShader(gl, gl.VERTEX_SHADER, vs, label)
-  if (vertex instanceof GlError) return vertex
+  if (GlError.is(vertex)) return vertex
   const fragment = compileShader(gl, gl.FRAGMENT_SHADER, fs, label)
-  if (fragment instanceof GlError) {
+  if (GlError.is(fragment)) {
     gl.deleteShader(vertex)
     return fragment
   }
@@ -226,10 +226,10 @@ export function createGlContext(gl: WebGL2RenderingContext): CoreGlContext {
     caps,
     exactByteFetch,
 
-    program(vs, fs, label): InstanceType<typeof GlError> | Program {
-      const compiled = compile(gl, vs, fs, label)
-      if (compiled instanceof GlError) return compiled
-      return { ...(compiled as Program), dispose: tracked(() => (compiled as Program).dispose()) }
+    program(vs, fs, label) {
+      const program = compile(gl, vs, fs, label)
+      if (GlError.is(program)) return program
+      return { ...program, dispose: tracked(() => program.dispose()) }
     },
 
     texture(d: TextureDesc): Err | Texture {
@@ -284,10 +284,10 @@ export function createGlContext(gl: WebGL2RenderingContext): CoreGlContext {
       }
     },
 
-    target(t: Texture): InstanceType<typeof GlError> | Target {
-      const created = createTarget(gl, t, caps.floatRT)
-      if (created instanceof GlError) return created
-      return { ...(created as Target), dispose: tracked(() => (created as Target).dispose()) }
+    target(t: Texture) {
+      const target = createTarget(gl, t, caps.floatRT)
+      if (GlError.is(target)) return target
+      return { ...target, dispose: tracked(() => target.dispose()) }
     },
 
     scope<T>(fn: (s: DrawScope) => T): T {

@@ -111,6 +111,24 @@ describe('Pool A (§8.1)', () => {
     expect(pools.poolA.bytes()).toBe(0)
   })
 
+  it('keeps the slot it already had when a replacement would bust the budget', () => {
+    const { pools, live } = setup()
+    const first = pools.poolA.acquire('field', { width: 192, height: 192, format: 'R16F' })
+    expect(first).not.toBeInstanceOf(GlError)
+    const bytesBefore = pools.poolA.bytes()
+
+    const rejected = pools.poolA.acquire('field', {
+      width: 2048,
+      height: 2048,
+      format: 'RGBA8',
+    })
+    expect(rejected).toBeInstanceOf(GlError)
+    expect((rejected as InstanceType<typeof GlError>).message).toMatch(/Pool A/)
+    // The pool is exactly where it was — the slot's original texture was never disposed.
+    expect(pools.poolA.bytes()).toBe(bytesBefore)
+    expect(live()).toBe(1)
+  })
+
   it('leaves both pools untouched by an exact-path allocation, which is never pooled', () => {
     const { pools } = setup()
     const factory = fakeFactory()

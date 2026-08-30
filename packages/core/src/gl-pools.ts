@@ -154,16 +154,14 @@ export function createScratchPools(o: ScratchPoolsOptions): ScratchPools {
       const held = slots.get(slot)
       if (held !== undefined && sameDesc(held.desc, d)) return held.texture
 
-      // Release first, then allocate, then check: the budget is measured on the texture the
-      // factory actually produced, never on a guess about what it will cost.
-      if (held !== undefined) {
-        held.texture.dispose()
-        slots.delete(slot)
-      }
+      // Allocate first, then check, then release: the budget is still measured on the texture
+      // the factory actually produced, never on a guess about what it will cost — but the slot
+      // being replaced is not destroyed until its replacement is known to fit. A rejected
+      // replacement leaves the pool exactly as it found it.
       const texture = o.gl.texture(d)
-      if (texture instanceof GlError) return texture
+      if (GlError.is(texture)) return texture
 
-      const total = bytesA() + texture.bytes
+      const total = bytesA() - (held?.texture.bytes ?? 0) + texture.bytes
       if (total > budgetA) {
         texture.dispose()
         return new GlError(
@@ -172,6 +170,7 @@ export function createScratchPools(o: ScratchPoolsOptions): ScratchPools {
             `An exact-path build allocates a dedicated, non-pooled set instead.`,
         )
       }
+      if (held !== undefined) held.texture.dispose()
       slots.set(slot, { texture, desc: d })
       return texture
     },
@@ -186,7 +185,7 @@ export function createScratchPools(o: ScratchPoolsOptions): ScratchPools {
     holdArtwork(key, d) {
       const previous = artworkKey
       const texture = this.acquire('artwork', d)
-      if (texture instanceof GlError) return texture
+      if (GlError.is(texture)) return texture
       artworkKey = key
       // The artwork slot's retention just ended for `previous`. If Pool B was waiting on it,
       // that is what starts its idle interval — never earlier.
@@ -220,7 +219,7 @@ export function createScratchPools(o: ScratchPoolsOptions): ScratchPools {
         label: `staging:${key}`,
       }
       const texture = o.gl.texture(d)
-      if (texture instanceof GlError) return texture
+      if (GlError.is(texture)) return texture
       staging = { texture, desc: d }
       stagingKey = key
       return texture

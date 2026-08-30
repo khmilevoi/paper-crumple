@@ -87,7 +87,7 @@ describe('program (§5.1)', () => {
     const { ctx } = open()
     const program = ctx.program(FULLSCREEN_VS, TRIVIAL_FS, 'trivial')
     expect(program).not.toBeInstanceOf(GlError)
-    if (program instanceof GlError) return
+    if (GlError.is(program)) return
     expect(program.label).toBe('trivial')
     expect(program.uniformLocation('uMissing')).toBeNull()
     program.dispose()
@@ -97,7 +97,7 @@ describe('program (§5.1)', () => {
     const { ctx } = open()
     const broken = ctx.program(FULLSCREEN_VS, '#version 300 es\nvoid main() { nope(); }\n', 'bad')
     expect(broken).toBeInstanceOf(GlError)
-    if (!(broken instanceof GlError)) return
+    if (!GlError.is(broken)) return
     expect(broken.message).toMatch(/^bad: fragment shader did not compile/)
   })
 })
@@ -107,7 +107,7 @@ describe('texture (§8.7)', () => {
     const { ctx } = open()
     const texture = ctx.texture({ width: 16, height: 8, format: 'RGBA8', label: 'artwork' })
     expect(texture).not.toBeInstanceOf(GlError)
-    if (texture instanceof GlError) return
+    if (GlError.is(texture)) return
     expect(texture.bytes).toBe(16 * 8 * 4)
     expect(texture.format).toBe('RGBA8')
     texture.dispose()
@@ -138,10 +138,10 @@ describe('target (§5.1)', () => {
     const { ctx } = open()
     const texture = ctx.texture({ width: 12, height: 5, format: 'RGBA8', label: 'front' })
     expect(texture).not.toBeInstanceOf(GlError)
-    if (texture instanceof GlError) return
+    if (GlError.is(texture)) return
     const target = ctx.target(texture)
     expect(target).not.toBeInstanceOf(GlError)
-    if (target instanceof GlError) return
+    if (GlError.is(target)) return
     expect(drawTargetFor(target)).toEqual({
       framebuffer: target.framebuffer,
       viewport: { x: 0, y: 0, w: 12, h: 5 },
@@ -155,11 +155,11 @@ describe('target (§5.1)', () => {
     const { ctx } = open()
     const texture = ctx.texture({ width: 4, height: 4, format: 'R16F', label: 'field' })
     expect(texture).not.toBeInstanceOf(GlError)
-    if (texture instanceof GlError) return
+    if (GlError.is(texture)) return
     const target = ctx.target(texture)
     if (ctx.caps.floatRT) {
       expect(target).not.toBeInstanceOf(GlError)
-      if (!(target instanceof GlError)) target.dispose()
+      if (!GlError.is(target)) target.dispose()
     } else {
       // Not a flake and not a driver bug: caps.floatRT is exactly this question, and a slot
       // reads it before asking. The error names the cap so the reason is in the message.
@@ -225,10 +225,10 @@ describe('scope (§5.1)', () => {
     const { ctx, gl } = open()
     const texture = ctx.texture({ width: 8, height: 8, format: 'RGBA8' })
     expect(texture).not.toBeInstanceOf(GlError)
-    if (texture instanceof GlError) return
+    if (GlError.is(texture)) return
     const target = ctx.target(texture)
     expect(target).not.toBeInstanceOf(GlError)
-    if (target instanceof GlError) return
+    if (GlError.is(target)) return
 
     ctx.scope((s) => {
       s.bindTarget({
@@ -276,7 +276,7 @@ describe('dispose', () => {
     const { ctx, gl } = open()
     const texture = ctx.texture({ width: 4, height: 4, format: 'RGBA8' })
     expect(texture).not.toBeInstanceOf(GlError)
-    if (texture instanceof GlError) return
+    if (GlError.is(texture)) return
     expect(gl.isTexture(texture.handle)).toBe(true)
     ctx.dispose()
     expect(gl.isTexture(texture.handle)).toBe(false)
