@@ -71,8 +71,6 @@ describe('captureGlState / restoreGlState (§5.1)', () => {
     const before = captureGlState(gl)
 
     // Churn every enumerated item, so a missing field in GlState shows up as a diff below.
-    // The five fields churned below (program, sampler, texture2dArray, texture3d, textureCube)
-    // are the five whose restore would otherwise be proven by nothing, because their rest value is null.
     const VS = `#version 300 es
 void main() { gl_Position = vec4(0.0, 0.0, 0.0, 1.0); }
 `
@@ -106,12 +104,15 @@ void main() { oColor = vec4(1.0); }
     gl.bindVertexArray(vao)
     gl.bindFramebuffer(gl.DRAW_FRAMEBUFFER, fbo)
     gl.bindFramebuffer(gl.READ_FRAMEBUFFER, fbo)
-    gl.activeTexture(gl.TEXTURE0 + 2)
+    // These five bindings must land on unit 0, the unit active when `before` was captured,
+    // because §5.1's saved set is "the active texture unit and its bindings" — a binding
+    // on any other unit is deliberately outside the saved set.
     gl.bindTexture(gl.TEXTURE_2D, tex)
-    if (sampler) gl.bindSampler(2, sampler)
+    if (sampler) gl.bindSampler(0, sampler)
     if (tex2dArray) gl.bindTexture(gl.TEXTURE_2D_ARRAY, tex2dArray)
     if (tex3d) gl.bindTexture(gl.TEXTURE_3D, tex3d)
     if (texCube) gl.bindTexture(gl.TEXTURE_CUBE_MAP, texCube)
+    gl.activeTexture(gl.TEXTURE0 + 2)
 
     gl.viewport(1, 2, 3, 4)
     gl.scissor(5, 6, 7, 8)
