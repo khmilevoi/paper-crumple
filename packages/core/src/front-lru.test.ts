@@ -123,6 +123,15 @@ describe('the front LRU', () => {
     expect(lru.usage().bytes).toBe(400)
   })
 
+  it('never evicts the front the caller just inserted, even when the only other front is pinned', () => {
+    add('a', 400)
+    lru.pin('a')
+    add('b', 700)
+    expect(lru.has('b')).toBe(true)
+    expect(slot.released).not.toContain('b')
+    expect(lru.usage().bytes).toBe(1100)
+  })
+
   it('overshoots rather than evicting what it may not, and says so', () => {
     add('a', 900, false)
     lru.pin('a')

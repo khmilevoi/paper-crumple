@@ -86,10 +86,15 @@ export function createFrontLru(o: FrontLruOptions): FrontLru {
 
   function evict(): void {
     // Never evict the most recently used entry: it is the one the caller just asked for, and a
-    // budget smaller than a single front must overshoot rather than throw the work away.
-    while (total > budget && slots.size > 1) {
+    // budget smaller than a single front must overshoot rather than throw the work away. The
+    // Map's iteration order is recency order, so the MRU is the last key - it is excluded from
+    // victim selection outright, which also covers the case where it is the only entry left.
+    while (total > budget && slots.size > 0) {
+      let mru: string | undefined
+      for (const key of slots.keys()) mru = key
       let victim: string | undefined
       for (const [key, slot] of slots) {
+        if (key === mru) continue
         if (evictable(slot)) {
           victim = key
           break
