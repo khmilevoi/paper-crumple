@@ -78,7 +78,7 @@ test('set() returns KnobError | undefined, so `if (err)` narrows and the result 
 })
 
 test('a typo is rejected in an object literal', () => {
-  // @ts-expect-error — 'ambiant' is not a knob; the compiler suggests 'ambient'
+  // @ts-expect-error — 'ambiant' is not a knob, so NoExcess maps it to never; the message is TS2322, not TS2561 (see the "Observed on TypeScript 5.9.3" note on NoExcess)
   set({ ambiant: 0.5 })
 })
 
