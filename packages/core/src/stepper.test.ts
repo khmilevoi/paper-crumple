@@ -177,13 +177,17 @@ describe('runSteps', () => {
     const at: number[] = []
     runSteps({
       timers,
-      base: 500,
+      // Deliberately *not* `timers.now()`. A base equal to the clock cannot tell honouring `base`
+      // apart from ignoring it, and `base` is what keeps the swap's descent from carrying a stall
+      // at the ball as debt. Here the run's clock began 100 ms before this call, so the second
+      // step is due 35 ms from now rather than the authored 135.
+      base: 400,
       steps: playPlan(4, 3).steps,
       onStep: () => at.push(timers.now()),
       onDone: () => {},
     })
     timers.advance(1000)
-    expect(at).toEqual([500, 635])
+    expect(at).toEqual([500, 535])
   })
 })
 
