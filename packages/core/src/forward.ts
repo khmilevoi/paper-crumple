@@ -21,26 +21,12 @@
  */
 
 /**
- * A compiled program handle, returned by `GlContext.program`. **P6 declares its members.**
- * The spec names the type in §5.1 and never gives it a shape.
+ * The four GL resource names §5.1 uses and never shapes. **P6 settled all four**, in
+ * `./gl-resources.ts`, where §8.7's format and layout decision lands. They are re-exported from
+ * here rather than moved, so that `unstable.ts` — an append-only surface — needs no edit to an
+ * existing line.
  */
-export interface Program {}
-
-/**
- * A GPU texture handle, returned by `GlContext.texture`. **P6 declares its members.**
- */
-export interface Texture {}
-
-/**
- * A render target over a `Texture`, returned by `GlContext.target`. **P6 declares its members.**
- */
-export interface Target {}
-
-/**
- * The description `GlContext.texture` allocates from. **P6 declares its members**, which are
- * where §8.7's format and layout decision lands.
- */
-export interface TextureDesc {}
+export type { Program, Target, Texture, TextureDesc } from './gl-resources.js'
 
 /**
  * §4.2's view. **P9 declares its members** — `pose`, `state`, `sprite`, `run`, `tag`,
