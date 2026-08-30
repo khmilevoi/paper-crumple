@@ -71,14 +71,48 @@ describe('captureGlState / restoreGlState (§5.1)', () => {
     const before = captureGlState(gl)
 
     // Churn every enumerated item, so a missing field in GlState shows up as a diff below.
+    // The five fields churned below (program, sampler, texture2dArray, texture3d, textureCube)
+    // are the five whose restore would otherwise be proven by nothing, because their rest value is null.
+    const VS = `#version 300 es
+void main() { gl_Position = vec4(0.0, 0.0, 0.0, 1.0); }
+`
+    const FS = `#version 300 es
+precision highp float;
+out vec4 oColor;
+void main() { oColor = vec4(1.0); }
+`
+    const vShader: WebGLShader | null = gl.createShader(gl.VERTEX_SHADER)
+    const fShader: WebGLShader | null = gl.createShader(gl.FRAGMENT_SHADER)
+    if (vShader) gl.shaderSource(vShader, VS)
+    if (fShader) gl.shaderSource(fShader, FS)
+    if (vShader) gl.compileShader(vShader)
+    if (fShader) gl.compileShader(fShader)
+    const program: WebGLProgram | null = gl.createProgram()
+    if (program && vShader && fShader) {
+      gl.attachShader(program, vShader)
+      gl.attachShader(program, fShader)
+      gl.linkProgram(program)
+      gl.useProgram(program)
+    }
+
     const vao = gl.createVertexArray()
     const fbo = gl.createFramebuffer()
     const tex = gl.createTexture()
+    const sampler: WebGLSampler | null = gl.createSampler()
+    const tex2dArray: WebGLTexture | null = gl.createTexture()
+    const tex3d: WebGLTexture | null = gl.createTexture()
+    const texCube: WebGLTexture | null = gl.createTexture()
+
     gl.bindVertexArray(vao)
     gl.bindFramebuffer(gl.DRAW_FRAMEBUFFER, fbo)
     gl.bindFramebuffer(gl.READ_FRAMEBUFFER, fbo)
     gl.activeTexture(gl.TEXTURE0 + 2)
     gl.bindTexture(gl.TEXTURE_2D, tex)
+    if (sampler) gl.bindSampler(2, sampler)
+    if (tex2dArray) gl.bindTexture(gl.TEXTURE_2D_ARRAY, tex2dArray)
+    if (tex3d) gl.bindTexture(gl.TEXTURE_3D, tex3d)
+    if (texCube) gl.bindTexture(gl.TEXTURE_CUBE_MAP, texCube)
+
     gl.viewport(1, 2, 3, 4)
     gl.scissor(5, 6, 7, 8)
     gl.enable(gl.SCISSOR_TEST)
@@ -105,9 +139,16 @@ describe('captureGlState / restoreGlState (§5.1)', () => {
     restoreGlState(gl, before)
     expect(captureGlState(gl)).toEqual(before)
 
+    gl.deleteProgram(program)
+    gl.deleteSampler(sampler)
     gl.deleteVertexArray(vao)
     gl.deleteFramebuffer(fbo)
     gl.deleteTexture(tex)
+    gl.deleteTexture(tex2dArray)
+    gl.deleteTexture(tex3d)
+    gl.deleteTexture(texCube)
+    if (vShader) gl.deleteShader(vShader)
+    if (fShader) gl.deleteShader(fShader)
   })
 
   it('restores exactly the enumerated set and nothing outside it, which is the point of "exactly"', () => {
