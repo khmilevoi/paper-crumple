@@ -219,6 +219,29 @@ describe('the park (§7.2: park time is never rescaled)', () => {
     const fallAt = stepAt.find((s) => s.pose === 4 && s.at > ballAt)!.at
     expect(fallAt - ballAt).toBe(90)
   })
+
+  it('never rescales the park itself under duration, only its floor', async () => {
+    let resolveTarget: (s: Sprite) => void = () => {}
+    const target = new Promise<Sprite>((r) => {
+      resolveTarget = r
+    })
+    const stepAt: Array<{ pose: number; at: number }> = []
+    h.bus.on('step', (e: Events['step']) => stepAt.push({ pose: e.pose, at: h.timers.now() }))
+    // At 2x the rise costs 990 and the scaled hold is 180 — but the target does not settle for
+    // three seconds, so the park runs far past its floor. That excess is wall time the work took;
+    // multiplying it by `duration` would make a slow load slower still the faster you asked to go.
+    h.controller.crumple(0, target, { adopt, duration: 1970 })
+    h.timers.advance(3000)
+    resolveTarget({ key: 'b' })
+    await settle()
+    h.timers.advance(3000)
+    const leftBallAt = stepAt.find((s) => s.pose === 4 && s.at > 990)!.at
+    const endAt = stepAt[stepAt.length - 1].at
+    expect(leftBallAt).toBeGreaterThanOrEqual(3000)
+    // The descent is the scaled 800, measured from leaving the ball — not 800 plus a share of
+    // the stall, and not the stall scaled.
+    expect(endAt - leftBallAt).toBeCloseTo(800, 6)
+  })
 })
 
 describe('target failure rolls back (§7.1)', () => {
@@ -274,6 +297,21 @@ describe('target failure rolls back (§7.1)', () => {
     h.timers.advance(2000)
     expect(h.errors[0]).toBeInstanceOf(AssetError)
     expect((h.errors[0] as Error).cause).toBeInstanceOf(Error)
+  })
+
+  it('settles a cancelled recovery to the sentinel, not to the target error (§10.5)', async () => {
+    const boom = new SheetError('the pending sprite never built')
+    const run = h.controller.crumple(0, Promise.resolve(boom), { adopt })
+    await settle()
+    // Far enough in to be descending through `crumpling.recover`, with `settleValue` already
+    // holding `boom`, but not far enough to have finished.
+    h.timers.advance(700)
+    expect(h.states[h.states.length - 1]).toBe('crumpling.recover')
+    h.controller.stop()
+    // Cancellation is the last thing that happened, so it decides the settle value. The target's
+    // failure is not lost: it went out on `error` at the ball.
+    await expect(run).resolves.toBe(ABORTED)
+    expect(h.errors).toEqual([boom])
   })
 })
 

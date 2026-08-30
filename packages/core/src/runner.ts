@@ -182,6 +182,12 @@ export function createRunController<T = unknown>(
   function cancel(r: LiveRun): void {
     if (current !== r) return
     r.cancelled = true
+    // The sentinel wins over any value the run had already decided on — including the `AddError`
+    // a failed `crumpleTo` target parks in `settleValue` before it descends through
+    // `crumpling.recover`. §10.5 and amendment 1 make cancellation a *return* and not a failure,
+    // and it is the last thing that happened to this run: a caller who called `stop()` should not
+    // be handed an Error for the run they themselves cancelled. The target's failure is not lost —
+    // it was already reported on the `error` channel at the ball.
     r.settleValue = ABORTED
     finish(r)
   }
