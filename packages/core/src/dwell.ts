@@ -149,3 +149,75 @@ export function playPlan(from: number, to: number, o: PlanOptions = {}): Plan {
   }))
   return { steps, total: offsets[offsets.length - 1] }
 }
+
+/**
+ * The rescale basis for a swap: the rise's gaps, plus the ball's own dwell as the hold, plus the
+ * fall's gaps. Ten gaps from pose 0.
+ */
+export function authoredSwapTotal(from: number, dwells: readonly number[] = DWELL_MS): number {
+  const ball = dwells.length - 1
+  const start = Math.min(Math.max(Math.trunc(from), 0), ball)
+  const rise = authoredTotal(start, ball, dwells)
+  const fall = ball >= 1 ? authoredTotal(ball - 1, 0, dwells) : 0
+  return rise + dwells[ball] + fall
+}
+
+/**
+ * The swap, from pose *p*: `DWELL_MS[p..4]`, then `DWELL_MS[5]` as the ball hold, then
+ * `DWELL_MS[4..1]` — ten gaps across eleven renders from pose 0.
+ *
+ * Three legs rather than one plan, because the middle one is not a gap the stepper walks. **Park
+ * time is never rescaled**: the actual park is `max(hold, timeUntilSettled)`, the excess sits
+ * entirely at the ball, and the deadline is re-based on leaving the ball so a stall does not
+ * become debt the descent tries to catch up on. `fall.steps[0].offset` is therefore `0`: the
+ * fall's offsets are relative to the moment the ball is left, not to the run's start.
+ *
+ * Pose 5 is rendered exactly once, by the outgoing sprite — the sprite, fit and bucket are
+ * swapped *between* the pose-5 render and the pose-4 render (§4.2), which is what makes a bucket
+ * change across a swap invisible rather than merely well hidden. From the ball there is no rise:
+ * §7.1's "a run always renders its `from` pose" gives the single pose-5 render, and §7.2's "no
+ * extra pose-5 render" is the rule that there is not a second one.
+ */
+export interface SwapPlan {
+  /** Renders `from … ball`. Its last gap is `0`; the hold is separate. */
+  readonly rise: Plan
+  /** The scaled ball dwell — the **floor** of the park, not the park. */
+  readonly hold: number
+  /** Renders `ball−1 … 0`, offsets re-based on leaving the ball. */
+  readonly fall: Plan
+  /** `rise.total + hold + fall.total` — what the swap costs when nothing has to be waited for. */
+  readonly total: number
+}
+
+export function swapPlan(from: number, o: PlanOptions = {}): SwapPlan {
+  const dwells = o.dwells ?? DWELL_MS
+  const ball = dwells.length - 1
+  const start = Math.min(Math.max(Math.trunc(from), 0), ball)
+  const authored = authoredSwapTotal(start, dwells)
+  const duration = o.duration === undefined ? undefined : Math.max(0, o.duration)
+  // One multiplier over all ten gaps, the ball dwell included. Each leg is then re-planned with
+  // its own share of the duration, which keeps `playPlan`'s exact-offset arithmetic intact
+  // per leg rather than re-deriving it here.
+  const share = (legAuthored: number): number | undefined =>
+    duration === undefined || authored === 0 ? undefined : (duration * legAuthored) / authored
+
+  const riseAuthored = authoredTotal(start, ball, dwells)
+  const rise = playPlan(start, ball, { dwells, duration: share(riseAuthored) })
+
+  const fallAuthored = ball >= 1 ? authoredTotal(ball - 1, 0, dwells) : 0
+  const fall =
+    ball >= 1
+      ? playPlan(ball - 1, 0, { dwells, duration: share(fallAuthored) })
+      : { steps: [{ pose: 0, gap: 0, offset: 0 }], total: 0 }
+
+  const scaledHold = share(dwells[ball]) ?? dwells[ball]
+  // `total` is `duration` verbatim when one was given, rather than the sum of three separately
+  // rounded legs. It is a documentation figure — the stepper never reads it — and stating it
+  // exactly is what makes `swapPlan(0, { duration: 985 }).total === 985` an equality.
+  return {
+    rise,
+    hold: scaledHold,
+    fall,
+    total: duration ?? rise.total + scaledHold + fall.total,
+  }
+}
