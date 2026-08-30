@@ -16,7 +16,8 @@ export type MatchHandlers<R> = { [tag: string]: (e: never) => R } & { else: (e: 
  * cannot reach a function through the prototype chain. `'else'` is never treated as a tag.
  */
 export function matchError<R>(err: Error, handlers: MatchHandlers<R>): R {
-  const tag: unknown = (err as { _tag?: unknown })._tag
+  const tag: unknown =
+    typeof err === 'object' && err !== null ? (err as { _tag?: unknown })._tag : undefined
   if (typeof tag === 'string' && tag !== 'else' && Object.hasOwn(handlers, tag)) {
     const handler = handlers[tag]
     if (typeof handler === 'function') {
