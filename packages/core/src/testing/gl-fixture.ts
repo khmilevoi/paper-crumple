@@ -11,6 +11,7 @@
  * the seventeenth test onward with a message that reads as a library bug. Release in `afterEach`,
  * never by re-running.
  */
+import { createGlContext, GL_ATTRIBUTES, type CoreGlContext } from '../gl-context.js'
 
 export interface RawGl {
   readonly canvas: HTMLCanvasElement
@@ -30,16 +31,7 @@ export function createRawGl(width = 4, height = 4): RawGl {
   canvas.width = width
   canvas.height = height
   document.body.append(canvas)
-  const ATTRIBUTES: WebGLContextAttributes = {
-    alpha: true,
-    antialias: false,
-    depth: true,
-    stencil: false,
-    premultipliedAlpha: false,
-    preserveDrawingBuffer: true,
-    powerPreference: 'high-performance',
-  }
-  const gl = canvas.getContext('webgl2', ATTRIBUTES) as WebGL2RenderingContext | null
+  const gl = canvas.getContext('webgl2', GL_ATTRIBUTES) as WebGL2RenderingContext | null
   return {
     canvas,
     // Narrowed by the caller's expect(); a null here fails the very first assertion.
@@ -47,6 +39,29 @@ export function createRawGl(width = 4, height = 4): RawGl {
     dispose() {
       gl?.getExtension('WEBGL_lose_context')?.loseContext()
       canvas.remove()
+    },
+  }
+}
+
+export interface GlFixture extends RawGl {
+  readonly ctx: CoreGlContext
+}
+
+/**
+ * A canvas, a context with §7.3's bag, and the `CoreGlContext` over it. `dispose()` releases the
+ * context's resources, loses the WebGL2 context and removes the canvas — all three, because only
+ * the last two return the slot against §4.0's cap of roughly sixteen.
+ */
+export function createGlFixture(width = 4, height = 4): GlFixture {
+  const raw = createRawGl(width, height)
+  const ctx = createGlContext(raw.gl)
+  return {
+    canvas: raw.canvas,
+    gl: raw.gl,
+    ctx,
+    dispose() {
+      ctx.dispose()
+      raw.dispose()
     },
   }
 }
