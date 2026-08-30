@@ -14,4 +14,8 @@
  *
  * @type {string[]}
  */
-export const boundaryFiles = []
+export const boundaryFiles = [
+  // §10.7: `unwrap` / `unwrapAsync` are the consumer-side conversion, and the one place an
+  // abort has to become a throw. Nothing else in @paper-crumple/core throws.
+  'packages/core/src/unwrap.ts',
+]
