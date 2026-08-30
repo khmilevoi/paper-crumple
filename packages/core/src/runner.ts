@@ -1,9 +1,18 @@
-import { ABORTED, type Aborted } from './abort.js'
+import { ABORTED, isAborted, type Aborted } from './abort.js'
 import { decideCollision, decideStop } from './collisions.js'
-import { DWELL_MS, playPlan, resolvePose, type Step } from './dwell.js'
+import { AssetError } from './errors.js'
+import {
+  ballPose,
+  DWELL_MS,
+  playPlan,
+  resolvePose,
+  swapPlan,
+  type Step,
+  type SwapPlan,
+} from './dwell.js'
 import type { Events } from './events.js'
 import type { PoseRef } from './pose.js'
-import type { AddError, PlayResult } from './results.js'
+import type { AddError, PlayResult, SwapResult } from './results.js'
 import { createRun, settledRun, type Run, type RunOwner } from './run.js'
 import { runSteps, type StepperHandle, type TimerHandle, type Timers } from './stepper.js'
 import type { ViewState } from './view-state.js'
@@ -15,6 +24,9 @@ import type { ViewState } from './view-state.js'
  * sequence of synchronous calls in this file, and every one of them is asserted at level 1 — no
  * GL, no DOM, no stage. The host is four methods and a clock wide, and P9 supplies it.
  */
+
+/** `'flat'` is pose 0 in every pack, and every crumple ends there. */
+const FLAT_POSE_INDEX = 0
 
 /** Everything the runner needs from whoever owns the pixels. P9 implements this on a `View`. */
 export interface RunHost {
@@ -50,6 +62,34 @@ export interface StagePlayOptions extends PlayOptions {
   stagger?: number
 }
 
+/**
+ * What `crumpleTo` is handed: the incoming payload, or a promise of it. §4.2's loading indicator
+ * passes an unresolved `stage.add()` straight through, so the promise arm is the ordinary case
+ * and not the exotic one — the view crumples, parks at the ball for as long as the work takes,
+ * and uncrumples into whatever arrives.
+ *
+ * The runner never inspects the payload. `T` is `Sprite` on a real host and the controller is
+ * generic in it so P9 does not have to cast in `adopt`.
+ *
+ * The Error arm is `AddError` and not `Error`: this is exactly what `stage.add()` returns, and
+ * naming it here is what lets the run settle to a legal `SwapResult` without a cast at the point
+ * of settlement.
+ */
+export type CrumpleTarget<T> = T | AddError | Aborted | PromiseLike<T | AddError | Aborted>
+
+export interface CrumpleOptions<T> extends PlayOptions {
+  /**
+   * Called once, at the ball, with the settled non-Error target, **between the pose-5 render and
+   * the pose-4 render** (§4.2). That is where the sprite, fit and bucket are exchanged, which is
+   * what makes a bucket change across a swap invisible rather than merely well hidden.
+   *
+   * Returning an Error is treated exactly as a failed target: `error` is emitted at the ball and
+   * the run descends on the old sprite. That is not an extra mechanism — it is the same rollback,
+   * reached because the exchange itself is the thing that failed.
+   */
+  adopt?: (value: T) => AddError | undefined
+}
+
 export interface RunControllerConfig {
   /**
    * The pack's pose count, which `'ball'` resolves against. **Precondition:
@@ -80,18 +120,30 @@ interface LiveRun {
   settleValue: LiveSettleValue
 }
 
-export interface RunController {
+export interface RunController<T = unknown> {
   /** The live run's owner, or `null` when the host is idle. §4.4 compares against this. */
   readonly owner: RunOwner | null
   readonly live: boolean
   play(from: PoseRef, to: PoseRef, o?: PlayOptions & { owner?: RunOwner }): Run<PlayResult>
+  /**
+   * §4.2's `crumpleTo`, and the `swapTo` composed from it. One run: one `start` carrying
+   * `via: ball`, one `end`. `from` is the view's current pose, which the view owns and passes.
+   */
+  crumple(
+    from: PoseRef,
+    target: CrumpleTarget<T>,
+    o?: CrumpleOptions<T> & { owner?: RunOwner },
+  ): Run<SwapResult>
   /** §4.5: freezes at the current pose, issues no draw, tears down to `idle`. */
   stop(o?: { owner?: RunOwner; all?: boolean }): void
   /** §4.6: ends a live run with `completed: false`; every later call is refused. */
   dispose(): void
 }
 
-export function createRunController(host: RunHost, config: RunControllerConfig): RunController {
+export function createRunController<T = unknown>(
+  host: RunHost,
+  config: RunControllerConfig,
+): RunController<T> {
   const dwells = config.dwells ?? DWELL_MS
   const { poseCount } = config
   let current: LiveRun | null = null
@@ -268,6 +320,145 @@ export function createRunController(host: RunHost, config: RunControllerConfig):
     return handle.run
   }
 
+  function crumple(
+    fromRef: PoseRef,
+    target: CrumpleTarget<T>,
+    o: CrumpleOptions<T> & { owner?: RunOwner } = {},
+  ): Run<SwapResult> {
+    if (disposed) return settledRun<SwapResult>(ABORTED)
+    const owner = o.owner ?? 'view'
+    const from = resolvePose(fromRef, poseCount)
+    if (from instanceof Error) return settledRun<SwapResult>(from)
+    if (decideCollision(owner, current?.owner ?? null) === 'skip') {
+      return settledRun<SwapResult>(ABORTED)
+    }
+    if (o.signal?.aborted === true) return settledRun<SwapResult>(ABORTED)
+
+    supersede()
+
+    const ball = ballPose(poseCount)
+    const plan = swapPlan(from, { duration: o.duration, dwells })
+    let record: LiveRun | null = null
+    const handle = createRun<SwapResult>(() => {
+      if (record !== null) cancel(record)
+    })
+    const r: LiveRun = {
+      owner,
+      from,
+      // Every crumple ends flat: `to` is 0 and `via` marks the ball it rose through.
+      to: FLAT_POSE_INDEX,
+      startedAt: host.timers.now(),
+      settle: (value) => {
+        handle.settle(value)
+      },
+      stepper: null,
+      parkTimer: null,
+      detachSignal: null,
+      errored: false,
+      reachedTo: false,
+      cancelled: false,
+      settleValue: undefined,
+    }
+    record = r
+    current = r
+    attachSignal(r, o.signal)
+
+    // The target is attached now rather than at the ball, so a rejection during the rise is not
+    // lost, and so a target that settles early is simply already settled when the hold elapses.
+    // A one-member box rather than a value plus a flag: a `const` copy of it inside
+    // `leaveBallIfReady` narrows cleanly, where a captured `let` does not.
+    let outcome: { readonly value: T | AddError | Aborted } | null = null
+    const onTargetSettled = (value: T | AddError | Aborted): void => {
+      outcome = { value }
+      leaveBallIfReady(r, plan)
+    }
+    Promise.resolve<T | AddError | Aborted>(target).then(onTargetSettled, (reason: unknown) => {
+      // §10.8: a failing promise resolves to an Error rather than rejecting, so a rejection is a
+      // contract violation by whoever supplied the target. `AssetError` is the member of
+      // `AddError` that says "the thing you asked me to load did not arrive", and the original is
+      // kept as the cause.
+      onTargetSettled(
+        new AssetError({
+          message: 'the crumpleTo target rejected; a paper-crumple promise resolves to an Error',
+          cause: reason,
+        }),
+      )
+    })
+
+    let leftBall = false
+    let holdElapsed = false
+
+    function leaveBallIfReady(run: LiveRun, swap: SwapPlan): void {
+      const settled = outcome
+      if (current !== run || leftBall || !holdElapsed || settled === null) return
+      leftBall = true
+      if (run.parkTimer !== null) {
+        host.timers.clearTimeoutFn(run.parkTimer)
+        run.parkTimer = null
+      }
+      const { value } = settled
+      if (isAborted(value)) {
+        // Cancellation is not a failure: nothing is emitted on `error`, and §4.5's "a cancel path
+        // must not render" means the view freezes at the ball rather than descending.
+        cancel(run)
+        return
+      }
+      // Two casts, both forced by `T` being unconstrained: `instanceof Error` cannot narrow to
+      // `AddError` through it, and the residue after the two guards cannot be narrowed to `T`.
+      // The declared `CrumpleTarget<T>` is what makes both sound.
+      const failure: AddError | undefined =
+        value instanceof Error ? (value as AddError) : o.adopt?.(value as T)
+      if (failure !== undefined) {
+        run.errored = true
+        run.settleValue = failure
+        host.reportError(failure)
+        host.setState('crumpling.recover')
+      } else {
+        host.setState('crumpling.fall')
+      }
+      // The deadline is re-based on leaving the ball, so a stall does not become debt the descent
+      // tries to catch up on (§7.2).
+      run.stepper = runSteps({
+        timers: host.timers,
+        base: host.timers.now(),
+        steps: swap.fall.steps,
+        onStep: (step) => {
+          stepOnce(run, step)
+        },
+        onDone: () => {
+          run.reachedTo = true
+          finish(run)
+        },
+      })
+    }
+
+    host.setState(plan.rise.steps.length > 1 ? 'crumpling.rise' : 'crumpling.ball')
+    host.emit('start', startPayload(from, FLAT_POSE_INDEX, o.duration, ball))
+    r.stepper = runSteps({
+      timers: host.timers,
+      base: r.startedAt,
+      steps: plan.rise.steps,
+      onStep: (step) => {
+        stepOnce(r, step)
+      },
+      onDone: () => {
+        if (current !== r) return
+        // A run that began at the ball entered `crumpling.ball` before its `start`, so it is
+        // already there; re-announcing it would make an observer see the state twice.
+        if (plan.rise.steps.length > 1) host.setState('crumpling.ball')
+        // **Park time is never rescaled**: the hold is `max(scaledBallDwell, timeUntilSettled)`,
+        // and the excess sits entirely at the ball. There is no built-in park timeout; a caller
+        // who needs one passes `signal`.
+        r.parkTimer = host.timers.setTimeoutFn(() => {
+          r.parkTimer = null
+          holdElapsed = true
+          leaveBallIfReady(r, plan)
+        }, plan.hold)
+      },
+    })
+    return handle.run
+  }
+
   function stop(o: { owner?: RunOwner; all?: boolean } = {}): void {
     if (disposed) return
     const r = current
@@ -297,6 +488,7 @@ export function createRunController(host: RunHost, config: RunControllerConfig):
       return current !== null
     },
     play,
+    crumple,
     stop,
     dispose,
   }
