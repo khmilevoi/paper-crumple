@@ -153,10 +153,10 @@ export function createEventBus<M extends EventPayloads = Events>(
   }
 
   function drain(): void {
+    drainQueued = false
     const pending = slot
     slot = null
     if (pending !== null) pending()
-    drainQueued = false
   }
 
   function emit<E extends EventName>(event: E, payload: M[E]): void {

@@ -293,9 +293,37 @@ describe('the single-slot re-entrancy box (§7.1)', () => {
     }
     bus.on('start', () => bus.defer(again))
     bus.emit('start', START)
+    // Nothing recursed synchronously: the emit unwound with the call still sitting in the slot.
     expect(depth).toBe(0)
     await flush()
-    expect(depth).toBe(1)
+    // One microtask in, the chain has started and has not run to completion. Each hop costs a
+    // microtask of its own, which is what bounds the stack; asserting an exact hop count here
+    // would pin the number of ticks `flush()` happens to take rather than the guarantee.
+    expect(depth).toBeGreaterThanOrEqual(1)
+    expect(depth).toBeLessThan(3)
+    await flush()
+    await flush()
+    // And every hop eventually runs: a deferred call is delayed, never dropped.
+    expect(depth).toBe(3)
+  })
+
+  it('re-arms after a drain: a deferred call that defers again is delayed, never dropped', async () => {
+    const bus = createEventBus()
+    const seen: string[] = []
+    bus.on('start', () => {
+      bus.defer(() => {
+        seen.push('first')
+        bus.emit('end', { from: 0, to: 5, completed: true })
+      })
+    })
+    bus.on('end', () => {
+      bus.defer(() => seen.push('second'))
+    })
+    bus.emit('start', START)
+    expect(seen).toEqual([])
+    await flush()
+    await flush()
+    expect(seen).toEqual(['first', 'second'])
   })
 
   it('clear() empties the slot as well as the listeners', async () => {
