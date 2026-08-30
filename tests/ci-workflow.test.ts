@@ -51,4 +51,11 @@ describe('the level-2 lane', () => {
       expect.arrayContaining(['pnpm exec playwright install --with-deps chromium', 'pnpm test:gl']),
     )
   })
+
+  it('runs the level-2 suite in exactly one lane, so a later plan cannot duplicate it', () => {
+    const glLanes = Object.keys(workflow.jobs).filter((job) =>
+      runs(job).some((step) => step.includes('test:gl')),
+    )
+    expect(glLanes).toEqual(['level2'])
+  })
 })
