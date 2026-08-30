@@ -18,22 +18,8 @@ import type { Flatten, KnobsOf } from './knob-types.js'
  * library does not own, and core of all places should not be the one to start.
  */
 export const SHARED_KNOBS = knobs([
-  {
-    key: 'paperColor',
-    kind: 'color',
-    invalidates: 'front',
-    default: '#f7f4ed',
-    binds: undefined,
-    ui: undefined,
-  },
-  {
-    key: 'paperBack',
-    kind: 'color',
-    invalidates: 'front',
-    default: '#e8e2d4',
-    binds: undefined,
-    ui: undefined,
-  },
+  { key: 'paperColor', kind: 'color', invalidates: 'front', default: '#f7f4ed' },
+  { key: 'paperBack', kind: 'color', invalidates: 'front', default: '#e8e2d4' },
 ])
 
 /** The bag every slot receives on top of its own, whatever else it declares. */

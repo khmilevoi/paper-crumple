@@ -1,8 +1,14 @@
 import { describe, expect, it } from 'vitest'
+import type { KnobDescriptor } from './knobs.js'
 import { SHARED_KNOBS } from './shared-knobs.js'
 import { isHex } from './color.js'
 
 describe('the core-declared shared knobs (§6.2, §6.7)', () => {
+  // Viewed as a KnobDescriptor — which is how `stage.knobs` hands these to a panel — `ui` and
+  // `binds` are declared and optional, so the two assertions below read the same property a
+  // consumer reads. The annotation is an assignability proof, not a cast.
+  const descriptors: readonly KnobDescriptor[] = SHARED_KNOBS
+
   it('declares exactly paperColor and paperBack', () => {
     expect(SHARED_KNOBS.map((d) => d.key)).toEqual(['paperColor', 'paperBack'])
   })
@@ -29,10 +35,10 @@ describe('the core-declared shared knobs (§6.2, §6.7)', () => {
   })
 
   it('carries no ui labels, so a consumer bundle pays nothing for a UI core does not own', () => {
-    for (const d of SHARED_KNOBS) expect(d.ui).toBeUndefined()
+    for (const d of descriptors) expect(d.ui).toBeUndefined()
   })
 
   it('binds nothing itself — core is the declarer, slots are the binders', () => {
-    for (const d of SHARED_KNOBS) expect(d.binds).toBeUndefined()
+    for (const d of descriptors) expect(d.binds).toBeUndefined()
   })
 })
