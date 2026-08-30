@@ -42,3 +42,6 @@ export {
 
 // --- P8: Douglas-Peucker simplification (§8.2) ---
 export { simplifyLoop, simplifyPolyline } from './simplify.js'
+
+// --- P8: the seeded randomness the outline is deterministic in (§8.2.1) ---
+export { makeRandom } from './random.js'
