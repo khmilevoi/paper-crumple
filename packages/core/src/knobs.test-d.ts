@@ -48,13 +48,10 @@ test('enumKnob() preserves the value tuple and the key', () => {
 
 test('a default outside values is rejected at the field that is wrong (§6.8)', () => {
   enumKnob({
-    // @ts-expect-error — 'normal' is not one of 'off' | 'normals'
     key: 'debug',
-    // @ts-expect-error — constraint cascade
     invalidates: 'draw',
-    // @ts-expect-error — constraint cascade
     values: ['off', 'normals'],
-    // @ts-expect-error — constraint cascade
+    // @ts-expect-error — 'normal' is not one of 'off' | 'normals'
     default: 'normal',
   })
 })

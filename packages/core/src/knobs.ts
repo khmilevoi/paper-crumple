@@ -131,9 +131,9 @@ export interface EnumKnobSpec extends KnobBase {
  * reports `TS2820: … Did you mean '"normals"'?` at the field that is wrong. Two enum knobs exist
  * in the whole library, so the factory costs nothing (§6.8).
  */
-export function enumKnob<const D extends EnumKnobSpec>(
-  d: D & { readonly default: D['values'][number] },
-): D & { readonly kind: 'enum' } {
+export function enumKnob<const D extends EnumKnobSpec>(d: {
+  readonly [K in keyof D]: K extends 'default' ? D['values'][number] : D[K]
+}): D & { readonly kind: 'enum' } {
   // The assertion is the spread's, not the caller's: TypeScript cannot express that spreading a
   // generic `D` and adding one literal member yields `D & { kind: 'enum' }`.
   return { ...d, kind: 'enum' } as D & { readonly kind: 'enum' }
