@@ -107,7 +107,7 @@ describe('start is synchronous, and the bound is the microtask (amendment 22)', 
 
   it('omits duration rather than writing duration: undefined', () => {
     h.controller.play('flat', 'ball')
-    expect(h.events[0].payload).toEqual({ from: 0, to: 5 })
+    expect(h.events[0].payload).toStrictEqual({ from: 0, to: 5 })
   })
 })
 
@@ -317,6 +317,8 @@ describe('stop (§4.5)', () => {
     h.controller.stop()
     expect(h.rendered).toEqual([])
     expect(h.states[h.states.length - 1]).toBe('idle')
+    // Cancellation is not a failure: the sentinel is a return value and never reaches reportError.
+    expect(h.errors).toEqual([])
   })
 
   it('is scoped: stage.stop() leaves a view-owned run alone', () => {
@@ -478,5 +480,36 @@ describe('the run clock', () => {
     h.controller.play('ball', 'flat')
     h.timers.advance(490)
     expect(secondEnd).toBe(985)
+  })
+})
+
+describe('a play() issued from an end handler (§4.5)', () => {
+  it('does not orphan the run that handler starts, when it starts one during a supersession', async () => {
+    const first = h.controller.play('flat', 'ball')
+    let reentrant: ReturnType<RunController['play']> | null = null
+    const off = h.bus.on('end', () => {
+      off()
+      reentrant = h.controller.play(1, 2)
+    })
+    h.controller.play('ball', 'flat')
+    // Three runs, three ends: the superseded one, the one the handler started, and none left
+    // ticking. Without the loop in `supersede` there are two ends and a leaked timer.
+    expect(names(h.events).filter((n) => n === 'end')).toHaveLength(2)
+    expect(h.timers.pending).toBe(1)
+    expect(h.controller.live).toBe(true)
+    await expect(first).resolves.toBe(ABORTED)
+    await expect(reentrant!).resolves.toBe(ABORTED)
+  })
+
+  it('stays disposed when a handler starts a run during dispose()', () => {
+    h.controller.play('flat', 'ball')
+    const off = h.bus.on('end', () => {
+      off()
+      h.controller.play(1, 2)
+    })
+    h.controller.dispose()
+    expect(h.controller.live).toBe(false)
+    expect(h.timers.pending).toBe(0)
+    expect(h.states[h.states.length - 1]).toBe('disposed')
   })
 })

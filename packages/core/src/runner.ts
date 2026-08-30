@@ -142,7 +142,18 @@ export function createRunController(host: RunHost, config: RunControllerConfig):
    * any explicit deferral.
    */
   function supersede(): void {
-    if (current !== null) cancel(current)
+    // A loop rather than a single cancel. The `end` emitted below reaches the host's listeners
+    // synchronously, and a listener is explicitly allowed to call `play()` from it — that call
+    // installs its own run and leaves `current` pointing at it. A single cancel would return
+    // here with that run still live, and the caller's `current = r` would then orphan it: its
+    // timer would go on firing, its `finish` would no-op forever because `current` no longer
+    // points at it, and an `await` on its `Run` would never settle. Cancelling until nothing is
+    // live gives every such run the `end` and the `ABORTED` settle it is owed.
+    //
+    // It cannot spin: `cancel` is only ever passed `current` itself, and `finish` always clears
+    // `current` before returning. In the assembled library it runs at most once, because P9
+    // wires §7.1's single-slot deferral box between a handler and this controller.
+    while (current !== null) cancel(current)
   }
 
   function attachSignal(r: LiveRun, signal: AbortSignal | undefined): void {
@@ -270,7 +281,10 @@ export function createRunController(host: RunHost, config: RunControllerConfig):
     if (disposed) return
     // The `end` is emitted at `idle`, under the same teardown-before-`end` rule as every other
     // ending, and the view is marked `disposed` after it.
-    if (current !== null) cancel(current)
+    // Loop for the same reason as `supersede`: a run a handler starts during this teardown would
+    // otherwise still be live when the controller is marked disposed, and its eventual completion
+    // would call `setState('idle')` and un-dispose the view.
+    while (current !== null) cancel(current)
     disposed = true
     host.setState('disposed')
   }
