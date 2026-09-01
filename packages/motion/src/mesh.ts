@@ -95,10 +95,8 @@ export function createSheetMesh(
   gl.bindVertexArray(null)
   gl.bindBuffer(gl.ARRAY_BUFFER, null)
 
-  let err: number
-  while ((err = gl.getError()) !== gl.NO_ERROR) {
-    return fail(`GL error 0x${err.toString(16)} while building the VAOs`)
-  }
+  const err = gl.getError()
+  if (err !== gl.NO_ERROR) return fail(`GL error 0x${err.toString(16)} while building the VAOs`)
 
   const indexCount = pack.indexCount
   const frameCount = pack.frameCount
@@ -118,10 +116,6 @@ export function createSheetMesh(
       }
       gl.bindVertexArray(vaos[storedFrame])
       gl.drawElements(gl.TRIANGLES, indexCount, gl.UNSIGNED_SHORT, 0)
-      // Clear any GL errors that might have been generated (e.g., from missing program)
-      while (gl.getError() !== gl.NO_ERROR) {
-        // Clear the error queue
-      }
       return undefined
     },
 

@@ -5,7 +5,7 @@ import { createSheetMesh, type SheetMesh } from './mesh.js'
 import type { Pack } from './pack.js'
 import { parsePack } from './pack.js'
 import pack2x3 from './packs/2x3.js'
-import { ATTR } from './shaders.js'
+import { ATTR, SHEET_FS, SHEET_VS } from './shaders.js'
 import { createGlFixture, type GlFixture } from './testing/gl-fixture.js'
 
 let fixture: GlFixture | null = null
@@ -38,6 +38,20 @@ function build(f: GlFixture): SheetMesh {
   return mesh as SheetMesh
 }
 
+/**
+ * Binds the real sheet program so `draw()`'s own `drawElements` has one current — WebGL2 raises
+ * `INVALID_OPERATION` without it, which would make `gl.getError()` assertions below unfalsifiable
+ * for a reason that has nothing to do with the mesh (Fix round 1, Important 1 and 2).
+ */
+function bindSheetProgram(f: GlFixture): () => void {
+  const program = f.ctx.program(SHEET_VS, SHEET_FS, 'sheet')
+  if (program instanceof Error) {
+    expect.fail(`sheet program failed to compile: ${program.message}`)
+  }
+  f.gl.useProgram(program.handle)
+  return () => program.dispose()
+}
+
 describe('the sheet mesh (§8.4)', () => {
   it('preconfigures one VAO per stored frame — twelve, not one', () => {
     const f = open()
@@ -58,22 +72,26 @@ describe('the sheet mesh (§8.4)', () => {
   it('draws every stored frame without a GL error and without a bufferSubData', () => {
     const f = open()
     const mesh = build(f)
+    const disposeProgram = bindSheetProgram(f)
     f.ctx.scope(() => {
       for (let i = 0; i < mesh.frameCount; i++) expect(mesh.draw(i)).toBeUndefined()
     })
     expect(f.gl.getError()).toBe(f.gl.NO_ERROR)
+    disposeProgram()
     mesh.dispose()
   })
 
   it('rejects a frame outside 0..frameCount-1 with a GlError, and draws nothing', () => {
     const f = open()
     const mesh = build(f)
+    const disposeProgram = bindSheetProgram(f)
     f.ctx.scope(() => {
       expect(GlError.is(mesh.draw(-1))).toBe(true)
       expect(GlError.is(mesh.draw(12))).toBe(true)
       expect(GlError.is(mesh.draw(1.5))).toBe(true)
     })
     expect(f.gl.getError()).toBe(f.gl.NO_ERROR)
+    disposeProgram()
     mesh.dispose()
   })
 
