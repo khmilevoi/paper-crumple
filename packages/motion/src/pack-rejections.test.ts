@@ -133,6 +133,13 @@ describe('the frame table', () => {
     reject(readTinyBin(), withManifest({ frames: [a, { ...b, bbox: [0, 0, 0] }] }), /bbox/)
   })
 
+  it('rejects a non-number alphaFloor', () => {
+    const [a, b] = frames()
+    reject(readTinyBin(), withManifest({ frames: [a, { ...b, alphaFloor: null }] }), /alphaFloor/)
+    reject(readTinyBin(), withManifest({ frames: [a, { ...b, alphaFloor: '0.5' }] }), /alphaFloor/)
+    reject(readTinyBin(), withManifest({ frames: [a, { ...b, alphaFloor: true }] }), /alphaFloor/)
+  })
+
   it('rejects a null frame entry as a PackError, never a thrown TypeError', () => {
     const [a] = frames()
     let result: unknown

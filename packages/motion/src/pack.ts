@@ -336,12 +336,17 @@ function validateManifest(
     if (i > 0 && index <= frames[i - 1]!.index) {
       return new PackError(`pack: frame indices must strictly increase (frame ${i} is ${index})`)
     }
-    const alphaFloor = Number(entry.alphaFloor)
-    if (!Number.isFinite(alphaFloor) || alphaFloor < 0 || alphaFloor > 1) {
+    if (
+      typeof entry.alphaFloor !== 'number' ||
+      !Number.isFinite(entry.alphaFloor) ||
+      entry.alphaFloor < 0 ||
+      entry.alphaFloor > 1
+    ) {
       return new PackError(
         `pack: frame ${i} alphaFloor ${String(entry.alphaFloor)} is not in 0 … 1`,
       )
     }
+    const alphaFloor = entry.alphaFloor
     const bbox = entry.bbox
     if (!Array.isArray(bbox) || bbox.length !== 6 || !bbox.every((c) => Number.isFinite(c))) {
       return new PackError(`pack: frame ${i} bbox is not a six-element numeric array`)
