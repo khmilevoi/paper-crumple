@@ -78,10 +78,9 @@ describe('the six debug views', () => {
     expect(DEBUG_VIEWS).toHaveLength(6)
     expect(DEBUG_VIEWS[0]).toBe('composite')
     // 'composite' is index 0 and is the fall-through; the other five are explicit branches.
-    expect(SHEET_FS).toContain('if (uDebug == 1)')
-    expect(SHEET_FS).toContain('if (uDebug == 2)')
-    expect(SHEET_FS).toContain('if (uDebug == 3)')
-    expect(SHEET_FS).toContain('if (uDebug == 4)')
-    expect(SHEET_FS).toContain('if (uDebug == 5)')
+    for (let i = 1; i < DEBUG_VIEWS.length; i++) {
+      expect(SHEET_FS).toContain(`if (uDebug == ${i})`)
+    }
+    expect(SHEET_FS).not.toContain('if (uDebug == 6)')
   })
 })
