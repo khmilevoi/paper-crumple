@@ -1,5 +1,5 @@
 ---
-'@paper-crumple/core': patch
+'@paper-crumple/core': minor
 ---
 
 Add the sprite source path: `SpriteSource`, its normalisation, and the derived re-supplier.
