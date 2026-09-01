@@ -27,7 +27,7 @@ function reference(source: ResampleSource, dstW: number, dstH: number): Uint8Cla
     dstW,
     dstH,
   )
-  expect(result).not.toBeInstanceOf(SheetError)
+  expect(SheetError.is(result)).toBe(false)
   return result as Uint8ClampedArray
 }
 
@@ -44,12 +44,18 @@ function onGpu(
     dstW,
     dstH,
   )
-  expect(result).not.toBeInstanceOf(GlError)
+  expect(GlError.is(result)).toBe(false)
   return result as Uint8ClampedArray
 }
 
 /** The first index where two buffers differ, or -1. Named so a failure reads as a texel. */
 function firstDifference(a: Uint8ClampedArray, b: Uint8ClampedArray, width: number): string {
+  if (a.length !== b.length) {
+    return `length mismatch: gpu ${a.length} bytes vs reference ${b.length} bytes`
+  }
+  if (a.length === 0) {
+    return 'both buffers are empty: no bytes were compared'
+  }
   for (let i = 0; i < a.length; i++) {
     if (a[i] !== b[i]) {
       const texel = Math.floor(i / 4)
@@ -114,7 +120,7 @@ describe('the GLSL twin is byte-identical to the reference (§7.4.1, §7.4.2)', 
     const { ctx } = open()
     const source = makeSource(64, 48, 7)
     const gpu = resampleOnGpu(ctx, source, { x: 5, y: 7, w: 16, h: 16 }, 8, 8)
-    expect(gpu).not.toBeInstanceOf(GlError)
+    expect(GlError.is(gpu)).toBe(false)
     const cpu = resampleAreaExact(source, { x: 5, y: 7, w: 16, h: 16 }, 8, 8)
     expect(firstDifference(gpu as Uint8ClampedArray, cpu as Uint8ClampedArray, 8)).toBe('identical')
   })
