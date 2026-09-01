@@ -16,11 +16,11 @@
  * 3. A mismatched caller-supplied target returns a `GlError` instead of throwing (§10.8).
  * 4. The pass count is a field of the result, not mutable state on the builder.
  *
- * `blurField` — pass B, the looseness blur — is task 6's addition to this file; it is not part of
- * `SdfBuilder` yet, so this module compiles only the three programs pass A needs (seed, step,
- * resolve).
+ * `blurField` — pass B, the looseness blur — is task 6's addition: `SdfBuilder` now compiles a
+ * fourth program (`BLUR_FS`) alongside the three pass A needs (seed, step, resolve).
  */
 import { GlError } from '@paper-crumple/core'
+import type { Size } from '@paper-crumple/core'
 import type {
   ArtworkPool,
   DrawScope,
@@ -33,6 +33,13 @@ import { drawTargetFor, FULLSCREEN_VS } from '@paper-crumple/core/unstable'
 
 /** Range of the 8-bit encoding, in source pixels. Only used on the no-float-RT fallback. */
 export const BYTE_RANGE_PX = 128
+
+/**
+ * The loose field is a heavily blurred field: it has no detail left to lose, so it is stored at
+ * 1/LOOSE_DIV of the tight field's size on each axis. That is a 16x pixel saving on pass B and,
+ * more importantly, it keeps the tap count sane at the wide blur radii the reference look needs.
+ */
+export const LOOSE_DIV = 4
 
 const COORD_HEADER = (byteMode: boolean): string => `#version 300 es
 precision highp float;
@@ -130,6 +137,57 @@ void main() {
   ${byteOut ? 'outColor = vec4(clamp(d * uEncode.x + uEncode.y, 0.0, 1.0));' : 'outColor = vec4(d, 0.0, 0.0, 1.0);'}
 }`
 
+// Pass B. Blurring the *distance field* is the whole trick: blurring the alpha would only
+// soften the outline, but blurring the field pulls the zero level set across concavities, so
+// the paper bridges the gap between two legs instead of walking down into it.
+// Works in uv, not texels, so the horizontal half can downsample at the same time: the loose
+// field is smooth by construction, so it is stored at a quarter of the tight field's resolution
+// on each axis. That is a 4x pixel saving and a 2x tap saving on the most expensive pass here.
+const BLUR_FS = (byteOut: boolean): string => `#version 300 es
+precision highp float;
+uniform sampler2D uField;
+uniform vec2 uDecode;
+uniform vec2 uEncode;
+uniform vec2 uOutSize;
+uniform vec2 uStepUv;   // one tap, in uv
+uniform float uSigma;   // in output texels
+uniform int uRadius;
+// Maps output uv into the input field's own uv space. Identity for a runtime field; for a
+// pre-baked one it undoes the transparent padding the engine adds around the artwork, so the
+// blurred result always lands in padded-texture space no matter where the input came from.
+// This port never attaches a pre-baked field (loadBakedField/attachBakedField stay out of this
+// package, per §3.3), so these three uniforms are always the identity here — left in place,
+// with this comment, rather than deleted, so the shader keeps matching sdf.js verbatim.
+uniform vec2 uInScale;
+uniform vec2 uInOffset;
+// Working-texture pixels per unit of the input field's uv, for the same linear extrapolation
+// outside the field's rectangle that pass C does. Without it a baked field's clamped border
+// starves this blur and the loose envelope balloons.
+uniform vec2 uInPxPerUv;
+out vec4 outColor;
+
+float sampleField(sampler2D field, vec2 outUv, vec2 decode) {
+  vec2 p = outUv * uInScale + uInOffset;
+  vec2 inside = clamp(p, 0.0, 1.0);
+  float d = texture(field, inside).r * decode.x + decode.y;
+  return d - length((p - inside) * uInPxPerUv);
+}
+void main() {
+  vec2 uv = gl_FragCoord.xy / uOutSize;
+  float sum = 0.0;
+  float wsum = 0.0;
+  float inv = 1.0 / (2.0 * uSigma * uSigma);
+  for (int i = -uRadius; i <= uRadius; i++) {
+    float fi = float(i);
+    float w = exp(-fi * fi * inv);
+    float d = sampleField(uField, uv + uStepUv * fi, uDecode);
+    sum += d * w;
+    wsum += w;
+  }
+  float d = sum / wsum;
+  ${byteOut ? 'outColor = vec4(clamp(d * uEncode.x + uEncode.y, 0.0, 1.0));' : 'outColor = vec4(d, 0.0, 0.0, 1.0);'}
+}`
+
 export const SDF_POOL_SLOTS = Object.freeze({
   inA: 'sdf.inA',
   inB: 'sdf.inB',
@@ -177,11 +235,53 @@ export interface BuildFieldOptions {
   readonly slot?: string
 }
 
+/** Pass B's result: the blurred, downsampled loose field. */
+export interface LooseField {
+  readonly target: Target
+  readonly width: number
+  readonly height: number
+  readonly decode: readonly [number, number]
+  readonly rangePx: number
+  /** Field texels to front pixels, derived from `frontLongSide`, not from the input field. */
+  readonly pxScale: number
+  /** Gaussian radius, in output texels: `min(64, max(1, ceil(sigma * 2.5)))`. */
+  readonly radius: number
+  /** `radius * 2 + 1` — how many samples each of the two separable passes takes per texel. */
+  readonly taps: number
+  /** Echoes the input `sigmaPx`, so a caller (task 9's renderer) can derive `LOOSE_PUSH`. */
+  readonly sigmaPx: number
+}
+
+export interface BlurFieldOptions {
+  readonly field: Field
+  /** In front pixels, from `sigmaFor(looseness, frontLongSide)`. */
+  readonly sigmaPx: number
+  /** The long side of the front, which sets `outPxScale` from the OUTPUT, not from the input. */
+  readonly frontLongSide: number
+}
+
 export interface SdfBuilder {
   readonly contract: FieldContract
   fieldTargetDesc(w: number, h: number): TextureDesc
   buildField(o: BuildFieldOptions): InstanceType<typeof GlError> | Field
+  blurField(o: BlurFieldOptions): InstanceType<typeof GlError> | LooseField
   dispose(): void
+}
+
+/** `max(2, round(n / LOOSE_DIV))` per axis — the size the loose field is stored at. */
+export function looseSizeFor(field: Size): Size {
+  return {
+    w: Math.max(2, Math.round(field.w / LOOSE_DIV)),
+    h: Math.max(2, Math.round(field.h / LOOSE_DIV)),
+  }
+}
+
+/**
+ * `sigmaPx` in *source* pixels, scaled by the front's own long side, so the looseness knob
+ * means the same thing for a 300 px shoe and a 768 px avatar.
+ */
+export function sigmaFor(looseness: number, frontLongSide: number): number {
+  return looseness ** 1.6 * 0.2 * frontLongSide
 }
 
 type Err = InstanceType<typeof GlError>
@@ -215,6 +315,13 @@ export function createSdfBuilder(ctx: GlContext, pool: ArtworkPool): Err | SdfBu
     seed.dispose()
     step.dispose()
     return resolve
+  }
+  const blur = ctx.program(FULLSCREEN_VS, BLUR_FS(byteMode), 'paper.sdf.blur')
+  if (GlError.is(blur)) {
+    seed.dispose()
+    step.dispose()
+    resolve.dispose()
+    return blur
   }
 
   const contract: FieldContract = byteMode
@@ -253,6 +360,23 @@ export function createSdfBuilder(ctx: GlContext, pool: ArtworkPool): Err | SdfBu
     const texture = pool.acquire(slot, d)
     if (GlError.is(texture)) return texture
     return ctx.target(texture)
+  }
+
+  // Pass B's own slots (`loose`, `blur`) are re-acquired on every `blurField` call — that is
+  // what makes the looseness knob "cheap enough to run live off a slider" — so the render
+  // target wrapping each slot's pooled texture is cached here and only rebuilt when the pool
+  // hands back a different texture (a resize). Pass A's ping-pong halves never need this: they
+  // are internal to one `buildField` call and never handed back to a caller to compare.
+  const blurTargets = new Map<string, Target>()
+  function acquireBlurTarget(slot: string, d: TextureDesc): Err | Target {
+    const texture = pool.acquire(slot, d)
+    if (GlError.is(texture)) return texture
+    const cached = blurTargets.get(slot)
+    if (cached !== undefined && cached.texture.handle === texture.handle) return cached
+    const target = ctx.target(texture)
+    if (GlError.is(target)) return target
+    blurTargets.set(slot, target)
+    return target
   }
 
   function buildField(o: BuildFieldOptions): Err | Field {
@@ -356,14 +480,84 @@ export function createSdfBuilder(ctx: GlContext, pool: ArtworkPool): Err | SdfBu
     }
   }
 
+  function blurField(o: BlurFieldOptions): Err | LooseField {
+    const { field, sigmaPx, frontLongSide } = o
+    const size = looseSizeFor({ w: field.width, h: field.height })
+    const outDesc = fieldTargetDesc(size.w, size.h)
+
+    const out = acquireBlurTarget(SDF_POOL_SLOTS.loose, outDesc)
+    if (GlError.is(out)) return out
+    // The horizontal half's shared scratch is a Pool A slot rather than a private `Map` entry:
+    // it is dead the moment the vertical half reads it, so every sprite in a grid can share one.
+    const tmp = acquireBlurTarget(SDF_POOL_SLOTS.blur, outDesc)
+    if (GlError.is(tmp)) return tmp
+
+    // Deliberately derived from the output, not the input: a baked field may be at any
+    // resolution and cover a different rectangle, but the output always covers the front.
+    const outPxScale = frontLongSide / Math.max(out.width, out.height)
+    const sigma = Math.max(0.35, sigmaPx / outPxScale)
+    const radius = Math.min(64, Math.max(1, Math.ceil(sigma * 2.5)))
+
+    // Working-texture pixels per unit of uv, for both taps — a consistent stick in front-pixel
+    // units, independent of tmp/out's own resolution, matching `decode`'s own scale.
+    const paddedHeight = (frontLongSide * out.height) / out.width
+
+    const blurFail = ctx.scope((s: DrawScope): Err | undefined => {
+      const { gl } = ctx
+      gl.useProgram(blur.handle)
+      gl.uniform1f(blur.uniformLocation('uSigma'), sigma)
+      gl.uniform1i(blur.uniformLocation('uRadius'), radius)
+      gl.uniform2f(blur.uniformLocation('uEncode'), contract.encode[0], contract.encode[1])
+      gl.uniform2f(blur.uniformLocation('uOutSize'), out.width, out.height)
+      // Always the identity: this port never attaches a pre-baked field (see BLUR_FS's comment).
+      gl.uniform2f(blur.uniformLocation('uInScale'), 1, 1)
+      gl.uniform2f(blur.uniformLocation('uInOffset'), 0, 0)
+      gl.uniform2f(blur.uniformLocation('uInPxPerUv'), frontLongSide, paddedHeight)
+
+      // Horizontal half: reads the tight field, downsamples to `out`'s width on the way in.
+      s.bindTarget(drawTargetFor(tmp))
+      gl.activeTexture(gl.TEXTURE0)
+      gl.bindTexture(gl.TEXTURE_2D, field.target.texture.handle)
+      gl.uniform1i(blur.uniformLocation('uField'), 0)
+      gl.uniform2f(blur.uniformLocation('uDecode'), field.decode[0], field.decode[1])
+      gl.uniform2f(blur.uniformLocation('uStepUv'), 1 / out.width, 0)
+      gl.drawArrays(gl.TRIANGLES, 0, 3)
+
+      // Vertical half: reads the scratch, writes the loose field.
+      s.bindTarget(drawTargetFor(out))
+      gl.activeTexture(gl.TEXTURE0)
+      gl.bindTexture(gl.TEXTURE_2D, tmp.texture.handle)
+      gl.uniform1i(blur.uniformLocation('uField'), 0)
+      gl.uniform2f(blur.uniformLocation('uDecode'), contract.decode[0], contract.decode[1])
+      gl.uniform2f(blur.uniformLocation('uStepUv'), 0, 1 / out.height)
+      gl.drawArrays(gl.TRIANGLES, 0, 3)
+      return undefined
+    })
+    if (blurFail !== undefined) return blurFail
+
+    return {
+      target: out,
+      width: out.width,
+      height: out.height,
+      decode: contract.decode,
+      rangePx: contract.rangePx,
+      pxScale: outPxScale,
+      radius,
+      taps: radius * 2 + 1,
+      sigmaPx,
+    }
+  }
+
   return {
     contract,
     fieldTargetDesc,
     buildField,
+    blurField,
     dispose() {
       seed.dispose()
       step.dispose()
       resolve.dispose()
+      blur.dispose()
       // The pool owns the coord and field textures backing every slot above, and disposes its
       // own on `pool.dispose()` — this builder never holds a texture Pool A did not hand it.
     },

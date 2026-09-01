@@ -3,7 +3,7 @@ import { GlError } from '@paper-crumple/core'
 import { createScratchPools, drawTargetFor, poolABytes } from '@paper-crumple/core/unstable'
 import type { ScratchPools } from '@paper-crumple/core/unstable'
 import { createGlFixture, type PaperGlFixture } from './testing/gl-fixture.js'
-import { createSdfBuilder } from './gl-sdf.js'
+import { createSdfBuilder, looseSizeFor, sigmaFor } from './gl-sdf.js'
 
 let fixture: PaperGlFixture | null = null
 let pools: ScratchPools | null = null
@@ -268,6 +268,136 @@ describe('Pool A holds every scratch target this module spends', () => {
     expect(GlError.is(field)).toBe(false)
     if (GlError.is(field)) return
     expect(pools!.poolA.bytes()).toBeLessThanOrEqual(poolABytes(ARTWORK, FIELD))
+    builder.dispose()
+  })
+})
+
+describe('pass B, the looseness blur', () => {
+  it('stores the loose field at 1/4 of the tight field on each axis', () => {
+    expect(looseSizeFor({ w: 192, h: 192 })).toEqual({ w: 48, h: 48 })
+    expect(looseSizeFor({ w: 5, h: 5 })).toEqual({ w: 2, h: 2 })
+  })
+
+  it('scales sigma with the sprite, so the knob reads the same on a shoe and an avatar', () => {
+    expect(sigmaFor(0, 384)).toBe(0)
+    expect(sigmaFor(1, 384)).toBeCloseTo(0.2 * 384, 6)
+    expect(sigmaFor(0.5, 384)).toBeCloseTo(0.5 ** 1.6 * 0.2 * 384, 6)
+  })
+
+  it('pulls the zero level set outward across a concavity, which is the whole trick', () => {
+    const { ctx } = open()
+    const builder = createSdfBuilder(ctx, pools!.poolA)
+    expect(GlError.is(builder)).toBe(false)
+    if (GlError.is(builder)) return
+    const artwork = pools!.poolA.holdArtwork('sprite', {
+      width: ARTWORK.w,
+      height: ARTWORK.h,
+      format: 'RGBA8UI',
+      filter: 'NEAREST',
+      label: 'a',
+    })
+    expect(GlError.is(artwork)).toBe(false)
+    if (GlError.is(artwork)) return
+    // Two legs with a deep notch between them: the loose field must bridge the notch.
+    const bytes = new Uint8Array(ARTWORK.w * ARTWORK.h * 4)
+    for (let y = 0; y < ARTWORK.h; y++) {
+      for (let x = 0; x < ARTWORK.w; x++) {
+        const leg = (x > 8 && x < 24) || (x > 40 && x < 56)
+        const p = (y * ARTWORK.w + x) * 4
+        bytes[p] = bytes[p + 1] = bytes[p + 2] = 255
+        bytes[p + 3] = leg && y > 8 ? 255 : 0
+      }
+    }
+    ctx.scope(() => {
+      const { gl } = ctx
+      gl.bindTexture(gl.TEXTURE_2D, artwork.handle)
+      gl.texSubImage2D(
+        gl.TEXTURE_2D,
+        0,
+        0,
+        0,
+        ARTWORK.w,
+        ARTWORK.h,
+        gl.RGBA_INTEGER,
+        gl.UNSIGNED_BYTE,
+        bytes,
+      )
+    })
+    const tight = builder.buildField({
+      artwork,
+      artworkUv: [1, 1, 0, 0],
+      width: FIELD,
+      height: FIELD,
+      sourceLongSide: ARTWORK.w,
+    })
+    expect(GlError.is(tight)).toBe(false)
+    if (GlError.is(tight)) return
+    const loose = builder.blurField({
+      field: tight,
+      sigmaPx: sigmaFor(0.5, ARTWORK.w),
+      frontLongSide: ARTWORK.w,
+    })
+    expect(GlError.is(loose)).toBe(false)
+    if (GlError.is(loose)) return
+    expect(loose.width).toBe(FIELD / 4)
+    expect(loose.taps).toBe(loose.radius * 2 + 1)
+    expect(loose.sigmaPx).toBeCloseTo(sigmaFor(0.5, ARTWORK.w), 6)
+
+    // Sample inside the notch, at its widest point (x ~= 32, equidistant from both legs). The
+    // tight field reads a clearly negative (outside) distance there; the loose field, blurred
+    // across the notch, must read a distance closer to (or past) the zero level set than the
+    // tight field did — that pull-outward is the entire reason pass B exists.
+    const tightD = readDistance(
+      ctx,
+      drawTargetFor(tight.target),
+      builder.contract.bits,
+      tight.decode,
+      32,
+      32,
+    )
+    const looseD = readDistance(
+      ctx,
+      drawTargetFor(loose.target),
+      builder.contract.bits,
+      loose.decode,
+      Math.floor(32 / 4),
+      Math.floor(32 / 4),
+    )
+    expect(tightD).toBeLessThan(-3)
+    expect(looseD).toBeGreaterThan(tightD + 1)
+    builder.dispose()
+  })
+
+  it('re-runs alone: a second blur reuses the tight field and touches no seed pass', () => {
+    const { ctx } = open()
+    const builder = createSdfBuilder(ctx, pools!.poolA)
+    expect(GlError.is(builder)).toBe(false)
+    if (GlError.is(builder)) return
+    const artwork = pools!.poolA.holdArtwork('sprite', {
+      width: ARTWORK.w,
+      height: ARTWORK.h,
+      format: 'RGBA8UI',
+      filter: 'NEAREST',
+      label: 'a',
+    })
+    expect(GlError.is(artwork)).toBe(false)
+    if (GlError.is(artwork)) return
+    const tight = builder.buildField({
+      artwork,
+      artworkUv: [1, 1, 0, 0],
+      width: FIELD,
+      height: FIELD,
+      sourceLongSide: ARTWORK.w,
+    })
+    expect(GlError.is(tight)).toBe(false)
+    if (GlError.is(tight)) return
+    const a = builder.blurField({ field: tight, sigmaPx: 4, frontLongSide: ARTWORK.w })
+    const b = builder.blurField({ field: tight, sigmaPx: 16, frontLongSide: ARTWORK.w })
+    expect(GlError.is(a)).toBe(false)
+    expect(GlError.is(b)).toBe(false)
+    if (GlError.is(a) || GlError.is(b)) return
+    expect(b.target).toBe(a.target)
+    expect(b.sigmaPx).not.toBe(a.sigmaPx)
     builder.dispose()
   })
 })
