@@ -24,16 +24,21 @@ const CANDIDATES = ['python3', 'python'] as const
 export function pythonExecutable(env: NodeJS.ProcessEnv = process.env): Error | string {
   const explicit = env.PYTHON?.trim()
   const candidates = explicit ? [explicit] : [...CANDIDATES]
+  let lastFailure: Error | undefined
   for (const candidate of candidates) {
     const probe = spawnSync(candidate, ['-V'], { encoding: 'utf8' })
-    if (probe.error || probe.status !== 0) continue
+    const banner = `${probe.stdout}${probe.stderr}`.trim()
     // Python 2 printed the banner on stderr; check both rather than assume.
-    if (/^Python 3\./.test(`${probe.stdout}${probe.stderr}`.trim())) return candidate
+    if (!probe.error && probe.status === 0 && /^Python 3\./.test(banner)) return candidate
+    lastFailure =
+      probe.error ??
+      new Error(`${candidate} -V exited ${String(probe.status)}: ${banner || '(no output)'}`)
   }
   return new Error(
     `no Python 3 interpreter found (tried ${candidates.join(', ')}). ` +
       'Set PYTHON=<path to python> — tools/bake/pack.py is the reference pack writer and its ' +
       'cross-language fixture check is level 1 (spec 11).',
+    { cause: lastFailure },
   )
 }
 

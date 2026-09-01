@@ -246,5 +246,5 @@ if __name__ == '__main__':
                               {'fps': 24, 'frames': 8, 'storeEvery': 4, 'stage1End': 4, 'seed': 0, 'blender': 'fixture'})
         print('wrote', os.path.join(sys.argv[2], 'tiny.json'), manifest['binBytes'], 'bytes')
     else:
-        print('usage: python bake/pack.py --fixture <dir>')
+        print('usage: python tools/bake/pack.py --fixture <dir>')
         sys.exit(2)

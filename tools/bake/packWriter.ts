@@ -25,7 +25,14 @@ import { encodeOct } from '../../packages/motion/src/oct.js'
 /** `round(v, 5)`, spelled the way `pack.py` spells it. */
 const round5 = (v: number): number => Math.round(v * 1e5) / 1e5
 
-/** One stored frame, in the shape `pack.py`'s `build_pack` takes. */
+/**
+ * One stored frame, in the shape `pack.py`'s `build_pack` takes.
+ *
+ * `pack.py` honours a per-frame `alphaFloor` override (`fr.get('alphaFloor', ...)`, which
+ * `crumple.py` sets on every frame); `FrameSpec` has no such field, so this twin cannot reproduce
+ * a bake whose override diverges from the computed ramp. Today `crumple.py` only ever passes what
+ * the ramp would already compute, so the two agree — this is a latent gap, not a live bug.
+ */
 export interface FrameSpec {
   /** The **simulation** frame number, not a stored slot (spec 9.1). */
   readonly index: number
