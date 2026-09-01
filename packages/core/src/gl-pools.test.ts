@@ -103,6 +103,76 @@ describe('Pool A (§8.1)', () => {
     expect(live()).toBe(1)
   })
 
+  it('reallocates a slot whose sampling changed, which no field on the handle would reveal', () => {
+    const { pools, live } = setup()
+    const first = pools.poolA.acquire('field', { width: 192, height: 192, format: 'R16F' })
+    // Same size, same format, different filter. Handing back the held texture would hand back
+    // the old sampling silently — no error, no reallocation, and nothing to notice it by.
+    const sharper = pools.poolA.acquire('field', {
+      width: 192,
+      height: 192,
+      format: 'R16F',
+      filter: 'NEAREST',
+    })
+    expect(sharper).not.toBe(first)
+    const wrapped = pools.poolA.acquire('field', {
+      width: 192,
+      height: 192,
+      format: 'R16F',
+      filter: 'NEAREST',
+      wrap: 'REPEAT',
+    })
+    expect(wrapped).not.toBe(sharper)
+    expect(live()).toBe(1)
+  })
+
+  it('reuses a slot whose optionals only spell out the defaults they already had', () => {
+    const { pools, live } = setup()
+    // R16F is not an integer format, so a bare desc already means LINEAR / CLAMP_TO_EDGE
+    // (gl-resources §8.7). Comparing the raw optionals would reallocate an identical texture.
+    const first = pools.poolA.acquire('field', { width: 192, height: 192, format: 'R16F' })
+    const spelled = pools.poolA.acquire('field', {
+      width: 192,
+      height: 192,
+      format: 'R16F',
+      filter: 'LINEAR',
+      wrap: 'CLAMP_TO_EDGE',
+    })
+    expect(spelled).toBe(first)
+    // RGBA8UI is integer, so NEAREST is its default and naming it changes nothing either.
+    const integer = pools.poolA.acquire('ui', { width: 64, height: 64, format: 'RGBA8UI' })
+    const spelledInteger = pools.poolA.acquire('ui', {
+      width: 64,
+      height: 64,
+      format: 'RGBA8UI',
+      filter: 'NEAREST',
+    })
+    expect(spelledInteger).toBe(integer)
+    // `label` is diagnostic only, so it is outside the comparison.
+    const labelled = pools.poolA.acquire('field', {
+      width: 192,
+      height: 192,
+      format: 'R16F',
+      label: 'field:sdf',
+    })
+    expect(labelled).toBe(first)
+    expect(live()).toBe(2)
+  })
+
+  it('drops the one slot release() names and leaves every other slot alone', () => {
+    const { pools, live } = setup()
+    pools.poolA.acquire('field', { width: 192, height: 192, format: 'R16F' })
+    pools.poolA.acquire('mask', { width: 192, height: 192, format: 'R8' })
+    pools.poolA.release('field')
+    expect(pools.poolA.bytes()).toBe(192 * 192)
+    expect(live()).toBe(1)
+    // A no-op for a slot the pool does not hold, and for one already released.
+    pools.poolA.release('field')
+    pools.poolA.release('never-held')
+    expect(pools.poolA.bytes()).toBe(192 * 192)
+    expect(live()).toBe(1)
+  })
+
   it('refuses to grow past §8.1 budget, which is what stops one thumbnail resizing the stage', () => {
     const { pools } = setup()
     const tooBig = pools.poolA.acquire('rogue', { width: 2048, height: 2048, format: 'RGBA8' })
@@ -167,6 +237,22 @@ describe("Pool B's idle release outlives the artwork slot's retention (§8.1, §
     expect(pools.poolB.bytes()).toBe(0)
   })
 
+  it('starts the interval when the artwork slot is released, because that ends a retention too', () => {
+    const { pools, timers, live } = setup()
+    pools.poolB.acquire('shirt', SOURCE)
+    pools.poolA.holdArtwork('shirt', { width: ARTWORK.w, height: ARTWORK.h, format: 'RGBA8' })
+    pools.poolB.releaseIdle('shirt')
+
+    // A release ends the artwork slot's retention exactly as a displacement does. Observing only
+    // the displacement pins 3 796 392 B of staging until dispose().
+    pools.poolA.release('artwork')
+    timers.advance(POOL_B_IDLE_MS - 1)
+    expect(pools.poolB.bytes()).toBe(poolBBytes(SOURCE))
+    timers.advance(1)
+    expect(pools.poolB.bytes()).toBe(0)
+    expect(live()).toBe(0)
+  })
+
   it('cancels the interval when the same sprite comes back, without reallocating', () => {
     const { pools, timers, live } = setup()
     const first = pools.poolB.acquire('shirt', SOURCE)
@@ -185,6 +271,38 @@ describe("Pool B's idle release outlives the artwork slot's retention (§8.1, §
     pools.poolB.acquire('coat', { w: 512, h: 512 })
     expect(pools.poolB.bytes()).toBe(poolBBytes({ w: 512, h: 512 }))
     expect(live()).toBe(1)
+  })
+
+  it('reports the sprite each pool is holding across hold, release and re-hold (§8.5)', () => {
+    const { pools, timers } = setup()
+    const artwork: TextureDesc = { width: ARTWORK.w, height: ARTWORK.h, format: 'RGBA8' }
+
+    expect(pools.poolA.artworkKey()).toBeNull()
+    expect(pools.poolB.key()).toBeNull()
+
+    pools.poolB.acquire('shirt', SOURCE)
+    pools.poolA.holdArtwork('shirt', artwork)
+    expect(pools.poolA.artworkKey()).toBe('shirt')
+    expect(pools.poolB.key()).toBe('shirt')
+
+    // A displacement moves the artwork key; Pool B's slot is not on Pool A's clock.
+    pools.poolA.holdArtwork('coat', artwork)
+    expect(pools.poolA.artworkKey()).toBe('coat')
+    expect(pools.poolB.key()).toBe('shirt')
+
+    // A release ends the retention, so the key it reports must end with it.
+    pools.poolA.release('artwork')
+    expect(pools.poolA.artworkKey()).toBeNull()
+
+    pools.poolA.holdArtwork('shirt', artwork)
+    expect(pools.poolA.artworkKey()).toBe('shirt')
+
+    pools.poolB.acquire('coat', { w: 512, h: 512 })
+    expect(pools.poolB.key()).toBe('coat')
+    pools.poolB.releaseIdle('coat')
+    timers.advance(POOL_B_IDLE_MS)
+    expect(pools.poolB.key()).toBeNull()
+    expect(pools.poolA.artworkKey()).toBe('shirt')
   })
 
   it('disposes everything and cancels every pending timer, so a stage teardown leaks nothing', () => {

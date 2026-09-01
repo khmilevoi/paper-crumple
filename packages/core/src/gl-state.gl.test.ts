@@ -37,6 +37,15 @@ describe('pinAmbientState (§7.4.1)', () => {
     expect(gl.getParameter(gl.UNPACK_ALIGNMENT)).toBe(1)
   })
 
+  it('pins the readback side as well, because readPixels pads a row the way an upload does', () => {
+    const gl = open()
+    pinAmbientState(gl)
+    // PACK_ALIGNMENT defaults to 4, and every byte this tier compares comes back through
+    // readPixels. The 7x5 -> 11x3 case has 44-byte rows: divisible by 4, not by 8, so a slot
+    // that left an 8 behind would pad every row and shift every byte after the first.
+    expect(gl.getParameter(gl.PACK_ALIGNMENT)).toBe(1)
+  })
+
   it('turns off everything §7.4.1 lists and opens the whole colour mask', () => {
     const gl = open()
     pinAmbientState(gl)

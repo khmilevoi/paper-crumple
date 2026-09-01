@@ -21,7 +21,7 @@ import { poolABytes, poolBBytes } from './bytes.js'
 import { GlError } from './errors.js'
 import type { Size } from './geometry.js'
 import type { GlContext } from './gl.js'
-import type { Texture, TextureDesc } from './gl-resources.js'
+import { INTEGER_FORMATS, type Texture, type TextureDesc } from './gl-resources.js'
 import { systemTimers, type TimerHandle, type Timers } from './stepper.js'
 
 /**
@@ -102,8 +102,36 @@ interface Slot {
   readonly desc: TextureDesc
 }
 
+/** The slot `holdArtwork` keeps the sprite in. Named once, because `release` must know it too. */
+const ARTWORK_SLOT = 'artwork'
+
+/**
+ * `TextureDesc.filter` and `.wrap` are optional and `gl-context` resolves them against documented
+ * defaults, so a comparison must resolve them too: `undefined` and an explicitly written
+ * `'LINEAR'` on a float format are the same texture, and reallocating between them would throw
+ * away a live texture to build its twin.
+ */
+function effectiveFilter(d: TextureDesc): 'NEAREST' | 'LINEAR' {
+  return d.filter ?? (INTEGER_FORMATS.has(d.format) ? 'NEAREST' : 'LINEAR')
+}
+
+function effectiveWrap(d: TextureDesc): 'CLAMP_TO_EDGE' | 'REPEAT' {
+  return d.wrap ?? 'CLAMP_TO_EDGE'
+}
+
+/**
+ * Whether re-acquiring `b` is asking for the thing `a` already allocated. Sampling counts: a
+ * handle carries no filter and no wrap, so a caller handed back the old sampling has no field
+ * by which to notice. `label` does not — it is diagnostic only.
+ */
 function sameDesc(a: TextureDesc, b: TextureDesc): boolean {
-  return a.width === b.width && a.height === b.height && a.format === b.format
+  return (
+    a.width === b.width &&
+    a.height === b.height &&
+    a.format === b.format &&
+    effectiveFilter(a) === effectiveFilter(b) &&
+    effectiveWrap(a) === effectiveWrap(b)
+  )
 }
 
 export function createScratchPools(o: ScratchPoolsOptions): ScratchPools {
@@ -146,6 +174,16 @@ export function createScratchPools(o: ScratchPoolsOptions): ScratchPools {
     }, POOL_B_IDLE_MS)
   }
 
+  /**
+   * The artwork slot has stopped holding `previous`, and now holds `next` — a key when another
+   * sprite displaced it, `null` when the slot was released outright. Either way the retention
+   * ended, and if Pool B was waiting on exactly that, this is what starts its idle interval —
+   * never earlier. Both callers come through here so a release cannot forget half of it.
+   */
+  function endArtworkRetention(previous: string | null, next: string | null): void {
+    if (previous !== null && previous !== next && idleDeferredFor === previous) armIdle(previous)
+  }
+
   const poolA: ArtworkPool = {
     budget: budgetA,
     bytes: bytesA,
@@ -180,18 +218,21 @@ export function createScratchPools(o: ScratchPoolsOptions): ScratchPools {
       if (held === undefined) return
       held.texture.dispose()
       slots.delete(slot)
+      if (slot !== ARTWORK_SLOT) return
+      // Releasing the slot ends its retention as surely as displacing its key does. Leaving the
+      // key set here is what kept `releaseIdle` deferring forever and pinned Pool B's staging
+      // texture until `dispose()`.
+      const previous = artworkKey
+      artworkKey = null
+      endArtworkRetention(previous, null)
     },
 
     holdArtwork(key, d) {
       const previous = artworkKey
-      const texture = this.acquire('artwork', d)
+      const texture = this.acquire(ARTWORK_SLOT, d)
       if (GlError.is(texture)) return texture
       artworkKey = key
-      // The artwork slot's retention just ended for `previous`. If Pool B was waiting on it,
-      // that is what starts its idle interval — never earlier.
-      if (previous !== null && previous !== key && idleDeferredFor === previous) {
-        armIdle(previous)
-      }
+      endArtworkRetention(previous, key)
       return texture
     },
 

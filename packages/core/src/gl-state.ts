@@ -175,6 +175,9 @@ export function pinAmbientState(gl: WebGL2RenderingContext): void {
   gl.pixelStorei(gl.UNPACK_PREMULTIPLY_ALPHA_WEBGL, 0)
   // Tightly packed rows: an R8 mask of odd width has no padding.
   gl.pixelStorei(gl.UNPACK_ALIGNMENT, 1)
+  // The mirror of the pin above on the readback side. `readPixels` pads its rows to
+  // PACK_ALIGNMENT, which defaults to 4, and every byte this tier compares comes back through it.
+  gl.pixelStorei(gl.PACK_ALIGNMENT, 1)
 
   gl.disable(gl.BLEND)
   gl.disable(gl.SCISSOR_TEST)

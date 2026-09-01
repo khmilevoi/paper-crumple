@@ -5,6 +5,7 @@ import {
   FIXTURE_HEIGHT,
   FIXTURE_WIDTH,
   fixtureSource,
+  makeRandom,
 } from './testing/resample-corpus.js'
 
 const committed = new Uint8Array(
@@ -37,5 +38,19 @@ describe('the committed raw-byte fixture (§11)', () => {
       'the fixture must contain LF bytes for this guard to mean anything',
     ).toBeGreaterThan(0)
     expect(committed.byteLength, 'CRLF-mangled: check .gitattributes *.bin binary').toBe(1728)
+  })
+})
+
+describe('the corpus PRNG spans the whole byte range (§11)', () => {
+  it('keeps its low bits, which is the whole input space byte identity is claimed over', () => {
+    // `state * 1103515245` overflows the float mantissa once `state` approaches 2^31, and the
+    // bits it discards are exactly the ones `state % 256` reads. Written that way the generator
+    // emits 18 of 256 possible values, 74.8% of them zero, and the byte-identity suites below
+    // prove identity over that sliver rather than over a byte. `Math.imul` is the fix, and this
+    // is the assertion that stops it regressing.
+    const random = makeRandom(11)
+    const seen = new Set<number>()
+    for (let i = 0; i < 4096; i++) seen.add(random())
+    expect(seen.size).toBe(256)
   })
 })
