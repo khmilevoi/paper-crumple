@@ -32,14 +32,28 @@ import type { Loop, Point } from './point.js'
 import { makeRandom, noise1d } from './random.js'
 import { simplifyLoop } from './simplify.js'
 
-/** Douglas-Peucker tolerance in reference px for angularity 0 and 1. */
+/**
+ * Douglas-Peucker tolerance in reference px for angularity 0 and 1 — reference pixels, not texels.
+ * Feeds `toleranceFor`, whose output is reference px too; a caller working in texels (as
+ * `BuildHullOptions.tolerance` and `PackedHull.tolerance` do) must multiply by the downstream `k =
+ * pxScale / texel` conversion before using either constant as a texel value.
+ */
 export const TOL_SMOOTH_PX = 1
 export const TOL_ANGULAR_PX = 7
 
-/** Wavelength, in reference px, of the slow variation of the target distance along the contour. */
+/**
+ * Wavelength, in reference px, of the slow variation of the target distance along the contour —
+ * reference pixels, not texels. `BuildHullOptions.wavelength` (default `60`) is in texels; a caller
+ * deriving its wavelength from this constant must multiply by `k = pxScale / texel` first.
+ */
 export const DISTANCE_WAVELENGTH_PX = 170
 
-/** Douglas-Peucker tolerance, reference px, for an angularity in 0..1. */
+/**
+ * Douglas-Peucker tolerance, reference px, for an angularity in 0..1 — reference pixels, not texels.
+ * `BuildHullOptions.tolerance` is texels; scale this by `k = pxScale / texel` before passing it in,
+ * rather than relying on `buildHull`'s own `tolerance ?? toleranceFor(angularity)` fallback, which
+ * resolves to reference px unconverted.
+ */
 export function toleranceFor(angularity: number): number {
   const a = Number.isFinite(angularity) ? Math.min(1, Math.max(0, angularity)) : 0
   return TOL_SMOOTH_PX + (TOL_ANGULAR_PX - TOL_SMOOTH_PX) * Math.pow(a, 1.5)
@@ -57,9 +71,18 @@ export interface BuildHullOptions {
   /** 0..1. */
   readonly angularity: number
   readonly seed: number
-  /** Douglas-Peucker tolerance in texels; derived from `angularity` when absent. */
+  /**
+   * Douglas-Peucker tolerance, texels. Omitting it falls back to `toleranceFor(angularity)`, which
+   * yields **reference pixels, not texels** — roughly 5x too large if read as a texel count. A
+   * caller working in texels should pass `toleranceFor(angularity) * k` (where `k = pxScale /
+   * texel`) rather than relying on the default.
+   */
   readonly tolerance?: number
-  /** Texels; how slowly the target distance drifts along the contour. */
+  /**
+   * Texels; how slowly the target distance drifts along the contour. Default `60` is already texels.
+   * `DISTANCE_WAVELENGTH_PX` (170) is the reference-px equivalent — multiply it by `k = pxScale /
+   * texel` before using it here, do not pass it through unconverted.
+   */
   readonly wavelength?: number
   /** Texels between the repair pass's samples. */
   readonly sampleStep?: number
@@ -113,6 +136,8 @@ export function buildHull({
   }
   const lo = Math.max(0, Math.min(minDist, maxDist))
   const hi = Math.max(lo, maxDist)
+  // Units seam: `tolerance` (when given) is texels, but the `toleranceFor` fallback is reference px
+  // — an unconverted default here reads roughly 5x larger than an explicit texel tolerance would.
   const tol = tolerance ?? toleranceFor(angularity)
   const rand = makeRandom(seed)
   const seedInt = Math.floor(seed) | 0

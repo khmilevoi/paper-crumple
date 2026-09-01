@@ -256,6 +256,14 @@ export interface ComputeSdfOptions {
 
 export interface SdfResult {
   readonly data: Uint8Array
+  /**
+   * Signed distance, in SOURCE pixels at this reduced field resolution (`width` x `height`), not
+   * texels — see the pipeline comment at the top of this file. `buildHull` (`hull.ts`) expects its
+   * `field` in texels; a consumer feeding this array to `buildHull` must convert source pixels to
+   * texels first (`cpuSdfFromAlpha` coincides with texels only because it runs at texel resolution,
+   * where 1 texel == 1 source pixel — that is an accident of that call site, not a property of this
+   * field).
+   */
   readonly field: Float32Array
   readonly width: number
   readonly height: number
@@ -264,7 +272,14 @@ export interface SdfResult {
   readonly sourceHeight: number
 }
 
-/** Full bake: alpha in, quantised SDF map plus sidecar metadata out. */
+/**
+ * Full bake: alpha in, quantised SDF map plus sidecar metadata out.
+ *
+ * `field` is source pixels at the reduced (`width` x `height`) resolution, not texels — see
+ * `SdfResult.field`. Feeding it straight into `buildHull`, which expects texels, is a units
+ * mismatch unless the two happen to coincide (1 texel == 1 source pixel), as they do for
+ * `cpuSdfFromAlpha` but not in general.
+ */
 export function computeSdf({ alpha, width, height, size, rangePx }: ComputeSdfOptions): SdfResult {
   const full = signedDistanceField(alpha, width, height)
   const target = targetDimensions(width, height, size)
