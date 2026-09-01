@@ -21,6 +21,15 @@ export interface GlCaps {
  */
 export interface GlContext {
   readonly caps: GlCaps
+  /**
+   * §8.5.3 — true iff `uint(texelFetch(rgba8Tex, p, 0) * 255.0 + 0.5)` recovers the uploaded byte
+   * on this driver. Probed once at context creation. With it true a slot may upload an
+   * `ImageBitmap` straight into a normalised `RGBA8` texture and read the bytes back out of it,
+   * dropping the `RGBA8UI` staging texture and its `ArrayBufferView` — 3.8 MB of heap. The
+   * `usampler2D` form stays the **normative** definition and the fallback, so a `false` here
+   * costs performance and never correctness.
+   */
+  readonly exactByteFetch: boolean
   program(vs: string, fs: string, label: string): InstanceType<typeof GlError> | Program
   texture(d: TextureDesc): InstanceType<typeof GlError> | Texture
   target(t: Texture): InstanceType<typeof GlError> | Target
