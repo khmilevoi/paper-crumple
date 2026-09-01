@@ -30,14 +30,16 @@
 import { knobs } from '@paper-crumple/core'
 import type { KnobDescriptor } from '@paper-crumple/core'
 import { SDF_RES_MAX, SDF_RES_MIN, SIZE_QUANTUM, sdfResFor } from '@paper-crumple/core/unstable'
-import type { EdgeParams } from '@paper-crumple/core/unstable'
+import type { EdgeMode, EdgeParams } from '@paper-crumple/core/unstable'
 
 /**
+ * Core's `EdgeMode`, re-exported under this package's name. Never re-declare the union.
+ *
  * The three front modes. `hull` and `torn` are `paper.js:25`'s own `EDGE_MODES`; `both` is the
  * third mode `edge.js` adds on top of them — the hull polygon as the silhouette, decorated by the
  * torn shader path — and it never crosses into the 2D engine's own `edgeMode` uniform.
  */
-export type PaperEdgeMode = 'hull' | 'torn' | 'both'
+export type PaperEdgeMode = EdgeMode
 
 export const COMMON_KNOBS = knobs([
   {

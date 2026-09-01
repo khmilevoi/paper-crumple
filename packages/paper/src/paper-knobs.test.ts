@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest'
 import type { KnobDescriptor } from '@paper-crumple/core'
+import type { EdgeMode } from '@paper-crumple/core/unstable'
 import {
   COMMON_KNOBS,
   descriptorsFor,
@@ -9,7 +10,15 @@ import {
   resolveSdfRes,
   SDF_RES_KNOB,
   TORN_KNOBS,
+  type PaperEdgeMode,
 } from './paper-knobs.js'
+
+// Type assertion: PaperEdgeMode must remain an alias of core's EdgeMode.
+// This ensures a future divergence fails the build rather than passing silently.
+const _checkPaperEdgeModeSameAsEdgeMode: EdgeMode = null as unknown as PaperEdgeMode
+const _checkEdgeModeSameAsPaperEdgeMode: PaperEdgeMode = null as unknown as EdgeMode
+void _checkPaperEdgeModeSameAsEdgeMode
+void _checkEdgeModeSameAsPaperEdgeMode
 
 const keysOf = (d: readonly KnobDescriptor[]): string[] => d.map((k) => k.key).sort()
 
