@@ -2,7 +2,7 @@ import { PackError } from '@paper-crumple/core'
 import { describe, expect, it } from 'vitest'
 
 import { parsePack } from './pack.js'
-import { readTinyBin, readTinyManifest } from './testing/fixture.js'
+import { readTinyBin, readTinyManifest } from '../test/fixture.js'
 
 /** The fixture manifest with one top-level key replaced. */
 function withManifest(patch: Record<string, unknown>): unknown {

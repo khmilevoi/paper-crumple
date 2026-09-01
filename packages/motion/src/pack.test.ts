@@ -3,7 +3,7 @@ import { describe, expect, it } from 'vitest'
 
 import type { Pack } from './pack.js'
 import { decodeFrame, frameBytes, parsePack, setKeyFrames } from './pack.js'
-import { readTinyBin, readTinyManifest } from './testing/fixture.js'
+import { readTinyBin, readTinyManifest } from '../test/fixture.js'
 
 /**
  * A cast and not a `throw`: ESLint bans every `ThrowStatement` in this repository, tests

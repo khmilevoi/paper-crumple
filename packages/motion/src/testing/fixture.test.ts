@@ -6,7 +6,7 @@ import {
   readTinyBin,
   readTinyJsonBytes,
   readTinyManifest,
-} from './fixture.js'
+} from '../../test/fixture.js'
 
 describe('the tiny fixture', () => {
   it('is the 320-byte binary the bake writers must reproduce', () => {

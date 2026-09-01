@@ -3,9 +3,10 @@
  *
  * **Level-1 tests cannot `fetch` a `file://` URL at all** — undici implements no `file:` scheme
  * on any current Node, and a browser has no filesystem either — so the fixture is read through
- * `node:fs` and its bytes are injected into `parsePack`. This file is never a tsdown entry and
- * `files: ["dist"]` keeps it out of the tarball; nothing under `src/` outside `testing/` may
- * import it.
+ * `node:fs` and its bytes are injected into `parsePack`. This file lives under
+ * `packages/motion/test/`, outside `src/` entirely, which is what keeps `node:fs` out of the
+ * published bundle **and** out of the TypeScript 5.0 floor check that `tests/typescript-50.test.ts`
+ * runs over every package's `src` tree.
  */
 import { readFileSync } from 'node:fs'
 import { fileURLToPath } from 'node:url'
@@ -15,7 +16,7 @@ export const TINY_BIN_BYTES = 320
 /** `json.dumps(..., sort_keys=True, indent=1) + '\n'`, LF, exactly this many bytes. */
 export const TINY_JSON_BYTES = 653
 
-const FIXTURES = new URL('../../test/fixtures/', import.meta.url)
+const FIXTURES = new URL('./fixtures/', import.meta.url)
 
 function read(name: string): Uint8Array<ArrayBuffer> {
   // A Buffer from readFileSync is a view into a pooled ArrayBuffer, so `.buffer` is the whole

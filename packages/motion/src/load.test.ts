@@ -2,7 +2,7 @@ import { AssetError, PackError } from '@paper-crumple/core'
 import { describe, expect, it } from 'vitest'
 
 import { loadPack } from './load.js'
-import { readTinyBin, readTinyManifest } from './testing/fixture.js'
+import { readTinyBin, readTinyManifest } from '../test/fixture.js'
 
 /** A fetch that answers exactly one URL with the fixture bytes. */
 function stubFetch(answer: (url: string) => Response | Promise<Response>): {
