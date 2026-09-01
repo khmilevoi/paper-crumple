@@ -4,6 +4,10 @@ import { SheetError } from '../errors.js'
 import { fakeGlContext, fakeMotion, fakeSheet } from './fake-slots.js'
 import { asBitmap, fakeBitmap } from './fake-source.js'
 
+/** The resolved sheet knobs `build()` requires. The two colour knobs have no default here because
+ * the resolved bag is by definition already resolved — a fake is driven with real values. */
+const sheetKnobs = { paperColor: '#ffffff', paperBack: '#eeeeee' } as const
+
 describe('the fake slots', () => {
   it('satisfy the two contracts and record every call', async () => {
     const ctx = fakeGlContext()
@@ -20,7 +24,7 @@ describe('the fake slots', () => {
     expect(handle.rect).toEqual({ x: 0, y: 0, w: 40, h: 20 })
     expect(sheet.calls.source).toHaveLength(1)
 
-    const front = sheet.build(handle, { w: 64, h: 32 }, {})
+    const front = sheet.build(handle, { w: 64, h: 32 }, sheetKnobs)
     if (front instanceof Error) return expect.fail(front.message)
     expect(front.bytes).toBe(64 * 32 * 4)
     expect(sheet.calls.build).toHaveLength(1)
@@ -48,7 +52,7 @@ describe('the fake slots', () => {
     const sheet = fakeSheet()
     const handle = await sheet.source(asBitmap(fakeBitmap()), { maxSize: 64, exact: false })
     if (handle instanceof Error || isAborted(handle)) return expect.fail('source refused')
-    const front = sheet.build(handle, { w: 8, h: 8 }, {})
+    const front = sheet.build(handle, { w: 8, h: 8 }, sheetKnobs)
     if (front instanceof Error) return expect.fail(front.message)
     sheet.releaseFront(front)
     sheet.release(handle)

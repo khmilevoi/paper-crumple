@@ -127,7 +127,7 @@ export interface DirectStage extends StageCommon {
   resize(w: number, h: number): InstanceType<typeof GlError> | undefined
   /** Not `HTMLCanvasElement | OffscreenCanvas`: a `direct` surface is by definition the element
    *  the consumer appends, so the `as HTMLCanvasElement` cast disappears from consumer code. */
-  readonly surface: Surface & { canvas: HTMLCanvasElement }
+  readonly surface: Omit<Surface, 'canvas'> & { readonly canvas: HTMLCanvasElement }
 }
 
 export interface HostedStage extends StageCommon {
