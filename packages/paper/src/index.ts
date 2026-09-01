@@ -83,3 +83,14 @@ export type {
 // that sprite's least-recently-used variant, with no error and no warning.
 export { HULL_CACHE_VARIANTS_PER_SPRITE, hullCache } from './hull-cache.js'
 export type { HullCache, HullCacheKey, HullCacheStats } from './hull-cache.js'
+
+// --- P8: the alpha-mask geometry the sheet fit and the verify jobs read (§8.3, §11) ---
+export {
+  ALPHA_BBOX_THRESHOLD,
+  alphaBbox,
+  components,
+  holes,
+  SHEET_MARGIN_FRAC,
+  sheetRect,
+} from './mask.js'
+export type { AlphaBox, HolesReport } from './mask.js'
