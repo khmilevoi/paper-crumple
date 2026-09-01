@@ -11,7 +11,7 @@ import {
 } from './hull.js'
 import type { HullCanvas, HullRasterContext } from './hull.js'
 import { hullComponent, hullComponentCount, hullVertexCount, packPolygons } from './hull-shape.js'
-import { discAlpha } from './test-fixtures.js'
+import { annulusAlpha, discAlpha } from './test-fixtures.js'
 
 const W = 64
 const H = 64
@@ -138,6 +138,25 @@ describe('buildHull', () => {
       seed: 3,
     })
     expect(hullComponentCount(out.hull)).toBe(0)
+  })
+
+  it('drops the hole of an annulus, which the tracer sees as a negative-area loop', () => {
+    // A ring far from the field border: the outer contour keeps its component, the inner
+    // contour around the hole is a negative-area loop and is dropped before simplification.
+    const width = 100
+    const height = 100
+    const field = cpuSdfFromAlpha(annulusAlpha(width, height, 50, 50, 35, 15), width, height)
+    const out = buildHull({
+      field,
+      width,
+      height,
+      minDist: 3,
+      maxDist: 8,
+      angularity: 0.5,
+      seed: 3,
+    })
+    expect(out.stats.dropped).toBeGreaterThanOrEqual(1)
+    expect(hullComponentCount(out.hull)).toBeGreaterThanOrEqual(1)
   })
 })
 
