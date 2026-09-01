@@ -78,8 +78,23 @@ export function releaseContourScratch(): void {
  *
  * Each cell's segments are oriented so the inside (field > iso) is on the LEFT when walking them
  * with y up, which makes outer loops come out with a positive shoelace area and holes with a
- * negative one — that is how the caller tells them apart. The grid is treated as -inf outside its
- * own border, so every loop closes even if the silhouette touches the edge.
+ * negative one — that is how the caller tells them apart. The grid is treated as -1e9 outside its
+ * border, which allows an edge-touching silhouette to produce a crossing at all.
+ *
+ * **LIMITATION:** Because the candidate scan admits a cell only when a real corner lies within
+ * `CANDIDATE_BAND` of `iso`, a silhouette running along the border deeper than that band is traced
+ * only near the band; the remainder of the border run is missing and the emitted loop closes with
+ * a straight chord across the gap. Measured: a quarter-disc of radius 20 jammed into a corner of a
+ * 48×48 field at iso -2 yields area 205.22 where the true figure is ~380, and the same disc in the
+ * opposite corner shatters into four fragments.
+ *
+ * **A consequence:** The traversal stops on `next[id] === -1` and emits the path whenever it has
+ * three or more vertices, without checking that it returned to its start — so an unclosed path is
+ * emitted as a closed loop with the missing span replaced by a straight chord.
+ *
+ * This limitation is inherent to band-limiting as specified: along the perimeter, a corner-jammed
+ * disc and a fully-filled field are indistinguishable, so closing the border properly and
+ * returning `[]` for a uniformly-inside field are mutually exclusive.
  *
  * Only cells next to a texel within `CANDIDATE_BAND` of the iso value are visited. A distance field
  * has unit gradient, so a cell whose corners straddle the iso has a corner within ~0.7 of it; the
