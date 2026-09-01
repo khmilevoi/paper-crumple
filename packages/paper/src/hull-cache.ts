@@ -24,6 +24,13 @@ export interface HullCacheStats {
 
 export interface HullCache {
   get(key: HullCacheKey): HullShape | undefined
+  /**
+   * Registers `hull` under `key`, marking it as the sprite's most recently used variant.
+   *
+   * A sprite holds at most `HULL_CACHE_VARIANTS_PER_SPRITE` (4) variants. Setting a fifth **silently
+   * evicts** that sprite's least-recently-used variant — no error, no warning. A later `get` for the
+   * evicted variant simply misses, and the caller rebuilds it.
+   */
   set(key: HullCacheKey, hull: HullShape): void
   /**
    * §18 amendment 10. Drops **every** variant registered under `spriteKey` — every `sdfRes`, every

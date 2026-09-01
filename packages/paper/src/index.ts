@@ -79,5 +79,7 @@ export type {
 } from './hull.js'
 
 // --- P8: the hull cache and its invalidate-by-key entry point (§8.2.1, §18 amendment 10) ---
+// `set` caps each sprite at `HULL_CACHE_VARIANTS_PER_SPRITE` (4) variants; a fifth silently evicts
+// that sprite's least-recently-used variant, with no error and no warning.
 export { HULL_CACHE_VARIANTS_PER_SPRITE, hullCache } from './hull-cache.js'
 export type { HullCache, HullCacheKey, HullCacheStats } from './hull-cache.js'
