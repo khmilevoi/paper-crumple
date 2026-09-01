@@ -69,12 +69,12 @@ describe('managedBackingStore', () => {
   it('sizes the destination to round(cssSize x dpr)', () => {
     expect(
       managedBackingStore({
-        cssSize: { w: 150, h: 75 },
+        cssSize: { w: 150, h: 100 },
         dpr: 2,
         front: { w: 1024, h: 1024 },
         current: { w: 300, h: 150 },
       }),
-    ).toEqual({ w: 300, h: 150 })
+    ).toEqual({ w: 300, h: 200 })
   })
 
   it('caps at the front size, because a destination past the front resamples by definition', () => {

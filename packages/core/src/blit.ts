@@ -95,6 +95,6 @@ export function managedBackingStore(o: {
   const dpr = Number.isFinite(o.dpr) && o.dpr > 0 ? o.dpr : 1
   const w = Math.min(Math.max(1, Math.round(o.cssSize.w * dpr)), Math.max(1, o.front.w))
   const h = Math.min(Math.max(1, Math.round(o.cssSize.h * dpr)), Math.max(1, o.front.h))
-  if (o.cssSize.w === o.cssSize.h && w === o.current.w && h === o.current.h) return null
+  if (w === o.current.w && h === o.current.h) return null
   return { w, h }
 }
