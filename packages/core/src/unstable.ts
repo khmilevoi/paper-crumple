@@ -71,3 +71,46 @@ export {
   scratchBytes,
 } from './bytes.js'
 export type { CountedBuffer, HandleFacts, ScratchBytes, ScratchRequest } from './bytes.js'
+
+// --- P6: the GL foundation (§5.1, §7.3, §7.4.1, §8.1, §8.5.3) ---
+
+// The context itself. `GlContext`, `DrawScope`, `Program`, `Target`, `Texture` and `TextureDesc`
+// are already exported above by P2 and are not re-exported here; P6 gave the last four their
+// members in `./gl-resources.ts` and `./forward.ts` re-exports them from there.
+export { createGlContext, GL_ATTRIBUTES } from './gl-context.js'
+export type { CoreGlContext } from './gl-context.js'
+
+// The resource tables §8.7 decides, so a slot prices a texture the way the budget does.
+export {
+  drawTargetFor,
+  FLOAT_FORMATS,
+  INTEGER_FORMATS,
+  TEXTURE_FORMAT_BYTES,
+  TEXTURE_FORMAT_GL,
+  textureBytes,
+  uploadBytes,
+} from './gl-resources.js'
+export type { GlFormatNames, TextureFormat } from './gl-resources.js'
+
+// §8.5.3's probe, exported because a slot may want to re-run it against its own context.
+export { probeExactByteFetch } from './gl-probe.js'
+
+// The GPU timer of `caps.timer`. `null` when the extension is absent; there is no stub.
+export { createGpuTimer } from './gl-timer.js'
+export type { GpuTimer } from './gl-timer.js'
+
+// §8.1's two pools. Their sizing laws are P5's (`poolABytes`, `poolBBytes`, already above);
+// the pools themselves, their slots, their lifetimes and Pool B's idle interval are P6's.
+export { createScratchPools, POOL_B_IDLE_MS } from './gl-pools.js'
+export type {
+  ArtworkPool,
+  ScratchPools,
+  ScratchPoolsOptions,
+  StagingPool,
+  TextureFactory,
+} from './gl-pools.js'
+
+// The GLSL ES 3.00 sources. `RESAMPLE_FS` is the byte-identical twin of `identityResample`
+// above; a slot that runs it gets the reference's output and a slot that edits it breaks a
+// cross-language contract.
+export { EXACT_BYTE_FETCH_FS, FULLSCREEN_VS, RESAMPLE_FS, RESAMPLE_UNIFORMS } from './gl-shaders.js'
