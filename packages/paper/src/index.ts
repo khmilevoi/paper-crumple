@@ -58,3 +58,22 @@ export {
   packPolygons,
 } from './hull-shape.js'
 export type { HullShape, PackedHull, UseAlphaHull } from './hull-shape.js'
+
+// --- P8: the hull build, its measurement and its rasterisation (§8.2, §8.2.1) ---
+export {
+  buildHull,
+  DISTANCE_WAVELENGTH_PX,
+  measureHull,
+  rasterizeHull,
+  toleranceFor,
+  TOL_ANGULAR_PX,
+  TOL_SMOOTH_PX,
+} from './hull.js'
+export type {
+  BuildHullOptions,
+  HullBuild,
+  HullCanvas,
+  HullMeasure,
+  HullRasterContext,
+  HullStats,
+} from './hull.js'
