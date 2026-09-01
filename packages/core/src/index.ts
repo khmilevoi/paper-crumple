@@ -116,3 +116,12 @@ export type { ViewState } from './view-state.js'
 // `devicePixelRatio` is thought about from N to one.
 export { sizeForDisplay } from './resolution.js'
 export type { DisplaySizeRequest } from './resolution.js'
+
+// --- P15: the sprite source path (§4.1, §8.5.1, §8.5.4, amendments 9 and 10) ---
+// Four type-only names, and no machinery. `SpriteSource` is the type of `add`'s first parameter,
+// `PinFor` composes into its options bag so a bare ImageBitmap without `pin: true` does not
+// typecheck, `PinnedSource` is what `PinFor` tests against, and `BitmapSupplier` is what a
+// consumer writing a supplier annotates. `normalizeSource` and the record it returns are internal
+// to the package: P9 imports them from './source.js' by relative path, exactly as it imports the
+// front LRU, because `add`'s public shape is P9's to design.
+export type { BitmapSupplier, PinFor, PinnedSource, SpriteSource } from './source.js'
