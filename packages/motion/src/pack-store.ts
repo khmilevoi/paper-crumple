@@ -54,6 +54,7 @@ export function createPackStore(o: PackStoreOptions): PackStore {
   const pending = new Map<string, Promise<LoadError | Pack>>()
   const refs = new Map<string, number>()
   const evictors: ((bucket: string, pack: Pack) => void)[] = []
+  let disposed = false
 
   function evict(bucket: string): void {
     const pack = packs.get(bucket)
@@ -72,7 +73,8 @@ export function createPackStore(o: PackStoreOptions): PackStore {
     })
       .then((result) => {
         // Only success is cached; a failure must stay retryable.
-        if (!(result instanceof Error)) packs.set(bucket, result)
+        // Do not resurrect the pack if the store was disposed while the fetch was in flight.
+        if (!(result instanceof Error) && !disposed) packs.set(bucket, result)
         return result
       })
       .finally(() => pending.delete(bucket))
@@ -103,7 +105,11 @@ export function createPackStore(o: PackStoreOptions): PackStore {
       // it receives nothing it could later release.
       if (opts?.signal?.aborted === true) return ABORTED
 
-      refs.set(bucket, (refs.get(bucket) ?? 0) + 1)
+      // Only take a reference if the pack is actually in the store. If the store was disposed
+      // while the fetch was in flight, the pack was not stored, so no reference is needed.
+      if (packs.has(bucket)) {
+        refs.set(bucket, (refs.get(bucket) ?? 0) + 1)
+      }
       return result
     },
 
@@ -125,6 +131,7 @@ export function createPackStore(o: PackStoreOptions): PackStore {
     },
 
     dispose() {
+      disposed = true
       for (const bucket of [...packs.keys()]) evict(bucket)
       packs.clear()
       pending.clear()

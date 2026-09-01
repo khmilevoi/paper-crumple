@@ -175,6 +175,16 @@ describe('the refcount', () => {
     expect(s.get('2x3')).toBeUndefined()
     expect(s.refs('1x1')).toBe(0)
   })
+
+  it('does not resurrect a pack if in-flight fetch completes after dispose', async () => {
+    const f = bytesFetch(20)
+    const s = store([pack2x3], f.fetch)
+    const inFlight = s.acquire('2x3')
+    s.dispose()
+    await inFlight
+    expect(s.get('2x3')).toBeUndefined()
+    expect(s.refs('2x3')).toBe(0)
+  })
 })
 
 describe('the fetch itself (§14)', () => {
