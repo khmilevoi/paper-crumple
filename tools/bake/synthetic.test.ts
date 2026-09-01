@@ -46,8 +46,14 @@ describe('the synthetic pack generator', () => {
     const corner = 3 * (64 * 65 + 64)
     expect(frame0.positions[corner]).toBe(1)
     expect(frame0.positions[corner + 1]).toBe(1)
-    expect(pack.frames[0]!.alphaFloor).toBe(0)
-    expect(pack.frames[11]!.alphaFloor).toBe(1)
+    // Assert the full smoothstep ramp: all 12 frames' alphaFloor values with the interior curve guarded.
+    // Values rounded to 4 decimals by the writer; tolerance of 1e-4 is appropriate.
+    const alphaFloorValues = pack.frames.map((f) => f.alphaFloor)
+    const expectedAlphaFloor = [0, 0, 0, 0, 0, 0, 0.0741, 0.2593, 0.5, 0.7407, 0.9259, 1]
+    expect(alphaFloorValues.length).toBe(12)
+    for (let i = 0; i < 12; i++) {
+      expect(alphaFloorValues[i]).toBeCloseTo(expectedAlphaFloor[i]!, 4)
+    }
   })
 
   it('shrinks in xy by the last frame, so the ball reads as compact', () => {
