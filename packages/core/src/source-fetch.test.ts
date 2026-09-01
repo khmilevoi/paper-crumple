@@ -278,6 +278,18 @@ describe('the conditional re-supply (§8.5.1, amendment 10)', () => {
     expect(f.calls[1].headers).toEqual({})
   })
 
+  it('an empty ETag is treated as absent: re-supplies unverified with no If-None-Match', async () => {
+    // `ETag: ''` is not the same as the header being withheld, but sending `If-None-Match: ''`
+    // back would be an invalid conditional request. Blank is absent.
+    const { f, rec } = await armed([{ headers: { ETag: '' } }, {}])
+    if (rec.resupply === undefined) return expect.fail('a url source is reclaimable')
+    const r = await rec.resupply({ key: 'sweater' })
+    if (r instanceof Error || isAborted(r)) return expect.fail('expected a report')
+    expect(r.freshness).toBe('unverified')
+    expect(r.warning).toBeUndefined()
+    expect(f.calls[1].headers).toEqual({})
+  })
+
   it('returns an AssetError when the conditional request fails outright', async () => {
     const { rec } = await armed([{ headers: { ETag: '"v1"' } }, { status: 500 }])
     if (rec.resupply === undefined) return expect.fail('a url source is reclaimable')

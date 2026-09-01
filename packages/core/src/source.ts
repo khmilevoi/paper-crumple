@@ -228,10 +228,19 @@ export type ResupplyResult = ResupplyReport | InstanceType<typeof AssetError> | 
  * The one internal shape the registry consumes, so nothing downstream branches on the seven-arm
  * union a second time (§4.1, amendment 9).
  *
- * The record **holds no bitmap it would have to close**: the `url` and `blob` arms retain
- * compressed bytes (§8.5.3), the supplier arm retains a function, and `borrowed` is the consumer's
- * own and must never be closed. That is why `stage.dispose()` closes nothing — it owns nothing —
- * and why this interface has no `close` and no `dispose` (§8.5.4).
+ * The record holds no bitmap, and therefore nothing that needs an explicit `close()` — that is why
+ * `stage.dispose()` closes nothing — it owns nothing — and why this interface has no `close` and no
+ * `dispose` (§8.5.4). It does retain compressed bytes on the re-suppliable arms (`url` and `blob`,
+ * §8.5.3, on the order of 200–800 KB per sprite), which the §8.8 byte budget does not count and
+ * which only GC releases; the supplier arm retains a function, and `borrowed` is the consumer's own
+ * and must never be closed.
+ *
+ * **`acquire` and `resupply` are not safe to overlap on the same record.** `bytes` and `validator`
+ * are per-record state committed only when an outcome is delivered, not per call, so the caller must
+ * let one `acquire()`/`resupply()` settle before starting the next. Two overlapping `resupply()`
+ * calls — or a `resupply()` started before the first `acquire()` has settled — can read a stale
+ * `validator`, producing either a duplicate `changed` report or an `unverified` for a source that
+ * does have a validator.
  */
 export interface NormalizedSource {
   readonly kind: SourceKind
@@ -482,10 +491,20 @@ export interface SourceValidator {
 export function readValidator(headers: {
   get(name: string): string | null
 }): SourceValidator | undefined {
-  const etag = headers.get('ETag') ?? undefined
-  const lastModified = headers.get('Last-Modified') ?? undefined
+  const etag = blankToUndefined(headers.get('ETag'))
+  const lastModified = blankToUndefined(headers.get('Last-Modified'))
   if (etag === undefined && lastModified === undefined) return undefined
   return { etag, lastModified }
+}
+
+/**
+ * An empty or whitespace-only header value is treated exactly as an absent one: a response
+ * carrying `ETag: ''` must not produce a validator that later sends an invalid
+ * `If-None-Match: ''`.
+ */
+function blankToUndefined(value: string | null): string | undefined {
+  if (value === null || value.trim() === '') return undefined
+  return value
 }
 
 /**
