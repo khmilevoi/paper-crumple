@@ -1,0 +1,294 @@
+import { describe, expect, it } from 'vitest'
+import { cpuSdfFromAlpha } from './field.js'
+import {
+  buildHull,
+  DISTANCE_WAVELENGTH_PX,
+  measureHull,
+  rasterizeHull,
+  toleranceFor,
+  TOL_ANGULAR_PX,
+  TOL_SMOOTH_PX,
+} from './hull.js'
+import type { HullCanvas, HullRasterContext } from './hull.js'
+import { hullComponent, hullComponentCount, hullVertexCount, packPolygons } from './hull-shape.js'
+import { annulusAlpha, discAlpha } from './test-fixtures.js'
+
+const W = 64
+const H = 64
+
+/** A disc of radius 16 at the centre of a 64x64 field. */
+function discField(): Float32Array {
+  return cpuSdfFromAlpha(discAlpha(W, H, 32, 32, 16), W, H)
+}
+
+const BAND = { minDist: 3, maxDist: 8 }
+
+function build(o: Partial<{ seed: number; angularity: number; minDist: number; maxDist: number }>) {
+  return buildHull({
+    field: discField(),
+    width: W,
+    height: H,
+    minDist: o.minDist ?? BAND.minDist,
+    maxDist: o.maxDist ?? BAND.maxDist,
+    angularity: o.angularity ?? 0.5,
+    seed: o.seed ?? 3,
+  })
+}
+
+/** A `HullCanvas` that records the 2D calls it is given instead of drawing them. */
+function recorder(): { calls: string[]; ctx: HullRasterContext; canvas: HullCanvas } {
+  const calls: string[] = []
+  const ctx: HullRasterContext = {
+    fillStyle: '',
+    clearRect: (x, y, w, h) => calls.push(`clearRect(${x},${y},${w},${h})`),
+    beginPath: () => calls.push('beginPath'),
+    moveTo: (x, y) => calls.push(`moveTo(${x},${y})`),
+    lineTo: (x, y) => calls.push(`lineTo(${x},${y})`),
+    closePath: () => calls.push('closePath'),
+    fill: (rule) => calls.push(`fill(${rule})`),
+  }
+  const canvas: HullCanvas = { width: 0, height: 0, getContext: () => ctx }
+  return { calls, ctx, canvas }
+}
+
+describe('toleranceFor', () => {
+  it('interpolates the two authored tolerances with a 1.5 power', () => {
+    expect(TOL_SMOOTH_PX).toBe(1)
+    expect(TOL_ANGULAR_PX).toBe(7)
+    expect(DISTANCE_WAVELENGTH_PX).toBe(170)
+    expect(toleranceFor(0)).toBeCloseTo(1, 10)
+    expect(toleranceFor(1)).toBeCloseTo(7, 10)
+    expect(toleranceFor(0.7)).toBeCloseTo(1 + 6 * Math.pow(0.7, 1.5), 10)
+  })
+
+  it('clamps out-of-range and non-finite angularity rather than propagating NaN', () => {
+    expect(toleranceFor(-1)).toBeCloseTo(1, 10)
+    expect(toleranceFor(5)).toBeCloseTo(7, 10)
+    expect(toleranceFor(Number.NaN)).toBeCloseTo(1, 10)
+  })
+})
+
+describe('buildHull', () => {
+  it('uses the artwork alpha itself when both distances are zero', () => {
+    const out = build({ minDist: 0, maxDist: 0 })
+    expect(out.hull.kind).toBe('use-alpha')
+    expect(out.stats.components).toBe(0)
+  })
+
+  it('builds one polygon around one island', () => {
+    const out = build({})
+    expect(out.hull.kind).toBe('polygons')
+    expect(hullComponentCount(out.hull)).toBe(1)
+    expect(hullVertexCount(out.hull)).toBeGreaterThanOrEqual(3)
+    expect(out.stats.components).toBe(1)
+    expect(out.stats.vertices).toBe(hullVertexCount(out.hull))
+    expect(out.stats.rawVertices).toBeGreaterThan(out.stats.vertices)
+    expect(out.stats.ms).toBeGreaterThanOrEqual(0)
+  })
+
+  it('is deterministic in its inputs, which is what the hull cache stands in for', () => {
+    const a = build({})
+    const b = build({})
+    expect(a.hull.kind).toBe('polygons')
+    if (a.hull.kind !== 'polygons' || b.hull.kind !== 'polygons') return
+    expect(Array.from(a.hull.points)).toEqual(Array.from(b.hull.points))
+    expect(Array.from(a.hull.offsets)).toEqual(Array.from(b.hull.offsets))
+    expect(a.hull.iso).toBe(b.hull.iso)
+  })
+
+  it('gives a different outline for a different seed', () => {
+    const a = build({ seed: 3 })
+    const b = build({ seed: 4 })
+    if (a.hull.kind !== 'polygons' || b.hull.kind !== 'polygons') return
+    expect(Array.from(a.hull.points)).not.toEqual(Array.from(b.hull.points))
+  })
+
+  it('traces at the middle of the band and records the tolerance it used', () => {
+    const out = build({ angularity: 0.5 })
+    if (out.hull.kind !== 'polygons') return
+    expect(out.hull.iso).toBeCloseTo(-(3 + 8) / 2, 10)
+    expect(out.hull.tolerance).toBeCloseTo(toleranceFor(0.5), 10)
+  })
+
+  it('honours an explicit tolerance over the one angularity would derive', () => {
+    const out = buildHull({
+      field: discField(),
+      width: W,
+      height: H,
+      minDist: 3,
+      maxDist: 8,
+      angularity: 0.5,
+      seed: 3,
+      tolerance: 2.5,
+    })
+    if (out.hull.kind !== 'polygons') return
+    expect(out.hull.tolerance).toBe(2.5)
+  })
+
+  it('drops a degenerate loop rather than emitting a two-vertex piece of paper', () => {
+    // A field with no inside at all traces nothing, so nothing is packed and nothing is dropped.
+    const empty = new Float32Array(W * H).fill(-50)
+    const out = buildHull({
+      field: empty,
+      width: W,
+      height: H,
+      minDist: 3,
+      maxDist: 8,
+      angularity: 0.5,
+      seed: 3,
+    })
+    expect(hullComponentCount(out.hull)).toBe(0)
+  })
+
+  it('drops the hole of an annulus, which the tracer sees as a negative-area loop', () => {
+    // A ring far from the field border: the outer contour keeps its component, the inner
+    // contour around the hole is a negative-area loop and is dropped before simplification.
+    const width = 100
+    const height = 100
+    const field = cpuSdfFromAlpha(annulusAlpha(width, height, 50, 50, 35, 15), width, height)
+    const out = buildHull({
+      field,
+      width,
+      height,
+      minDist: 3,
+      maxDist: 8,
+      angularity: 0.5,
+      seed: 3,
+    })
+    expect(out.stats.dropped).toBeGreaterThanOrEqual(1)
+    expect(hullComponentCount(out.hull)).toBeGreaterThanOrEqual(1)
+  })
+})
+
+describe('measureHull', () => {
+  it('keeps every vertex inside the band and no chord closer than minDist', () => {
+    const field = discField()
+    const out = buildHull({
+      field,
+      width: W,
+      height: H,
+      minDist: 3,
+      maxDist: 8,
+      angularity: 0.5,
+      seed: 3,
+    })
+    if (out.hull.kind !== 'polygons') return
+    const m = measureHull(field, W, H, out.hull)
+    // moveToDistance stops within 0.02 texels of its target, so the band holds to 0.05.
+    expect(m.vertexMin).toBeGreaterThanOrEqual(3 - 0.05)
+    expect(m.vertexMax).toBeLessThanOrEqual(8 + 0.05)
+    // The repair pass treats a sample as too close at `-(lo - 0.25)`, so 0.25 texels of slack.
+    expect(m.segmentMin).toBeGreaterThanOrEqual(3 - 0.3)
+  })
+})
+
+describe('rasterizeHull', () => {
+  it('offsets texel centres to pixel centres and fills with non-zero winding', () => {
+    const { calls, ctx, canvas } = recorder()
+    const hull = packPolygons(
+      [
+        [
+          [0, 0],
+          [4, 0],
+          [0, 3],
+        ],
+      ],
+      0,
+      1,
+    )
+    expect(rasterizeHull(hull, 8, 6, canvas)).toBe(canvas)
+    expect(canvas.width).toBe(8)
+    expect(canvas.height).toBe(6)
+    expect(ctx.fillStyle).toBe('#fff')
+    expect(calls).toEqual([
+      'clearRect(0,0,8,6)',
+      'beginPath',
+      'moveTo(0.5,0.5)',
+      'lineTo(4.5,0.5)',
+      'lineTo(0.5,3.5)',
+      'closePath',
+      'fill(nonzero)',
+    ])
+  })
+
+  it('unions every component into one path, so a pair of sneakers is one fill', () => {
+    const { calls, canvas } = recorder()
+    const hull = packPolygons(
+      [
+        [
+          [0, 0],
+          [1, 0],
+          [0, 1],
+        ],
+        [
+          [5, 5],
+          [6, 5],
+          [5, 6],
+        ],
+      ],
+      0,
+      1,
+    )
+    rasterizeHull(hull, 8, 8, canvas)
+    expect(calls.filter((c) => c === 'beginPath')).toHaveLength(1)
+    expect(calls.filter((c) => c === 'closePath')).toHaveLength(2)
+    expect(calls.filter((c) => c.startsWith('fill('))).toEqual(['fill(nonzero)'])
+  })
+
+  it('skips a component with fewer than three vertices', () => {
+    const { calls, canvas } = recorder()
+    const hull = packPolygons(
+      [
+        [
+          [0, 0],
+          [1, 0],
+        ],
+      ],
+      0,
+      1,
+    )
+    rasterizeHull(hull, 8, 8, canvas)
+    expect(calls.filter((c) => c.startsWith('moveTo'))).toEqual([])
+  })
+
+  it('returns undefined when the canvas cannot give a 2D context, rather than throwing', () => {
+    const canvas: HullCanvas = { width: 0, height: 0, getContext: () => null }
+    const hull = packPolygons(
+      [
+        [
+          [0, 0],
+          [1, 0],
+          [0, 1],
+        ],
+      ],
+      0,
+      1,
+    )
+    expect(rasterizeHull(hull, 8, 6, canvas)).toBeUndefined()
+    // The size is still applied: the caller sees a canvas that was prepared and not drawn into.
+    expect(canvas.width).toBe(8)
+    expect(canvas.height).toBe(6)
+  })
+
+  it('reads back what it wrote, so hullComponent and the path agree', () => {
+    const loop = hullComponent(
+      packPolygons(
+        [
+          [
+            [2, 3],
+            [7, 3],
+            [7, 9],
+          ],
+        ],
+        0,
+        1,
+      ),
+      0,
+    )
+    expect(loop).toEqual([
+      [2, 3],
+      [7, 3],
+      [7, 9],
+    ])
+  })
+})
