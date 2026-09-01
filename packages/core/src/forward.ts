@@ -42,8 +42,18 @@ export interface View {}
 /**
  * What `MotionSource.draw` reports back. §5.3 names the type and never gives its members.
  * **P11 declares them**, with P9 as their only reader.
+ *
+ * The two members are exactly what §8.4's batching claim needs to be checkable. Sorting by
+ * `sortKey` yields "up to 36 VAO binds and exactly one program bind", and `(sortKey, frame)`
+ * names the VAO that was bound uniquely — a stage that wants to verify the bind count has the
+ * pair it needs and nothing it would have to interpret.
  */
-export interface DrawResult {}
+export interface DrawResult {
+  /** The `sortKey` of the fit that was drawn. Opaque to the core (§5.3). */
+  readonly sortKey: string
+  /** The stored-frame slot whose VAO was bound. */
+  readonly frame: number
+}
 
 /**
  * §6.1's descriptor union and §5.5's resolved bag. **P3 settled both**, in `./knobs.ts`. They are
