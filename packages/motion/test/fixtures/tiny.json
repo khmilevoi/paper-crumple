@@ -1,0 +1,56 @@
+{
+ "aspect": 1.0,
+ "bin": "tiny.bin",
+ "binBytes": 320,
+ "bucket": "tiny",
+ "frameBytes": 84,
+ "frames": [
+  {
+   "alphaFloor": 0.0,
+   "bbox": [
+    -1.0,
+    -1.0,
+    0.0,
+    1.0,
+    1.0,
+    0.0
+   ],
+   "index": 0,
+   "offset": 152
+  },
+  {
+   "alphaFloor": 1.0,
+   "bbox": [
+    -1.0,
+    -1.0,
+    -0.25,
+    1.0,
+    1.0,
+    0.25
+   ],
+   "index": 4,
+   "offset": 236
+  }
+ ],
+ "indexCount": 24,
+ "keyFrames": [
+  0,
+  4
+ ],
+ "light": [
+  -0.39993,
+  0.5499,
+  0.73325
+ ],
+ "sim": {
+  "blender": "fixture",
+  "fps": 24,
+  "frames": 8,
+  "seed": 0,
+  "stage1End": 4,
+  "storeEvery": 4
+ },
+ "version": 1,
+ "vertexCount": 9,
+ "vertsPerSide": 3
+}
