@@ -9,3 +9,4 @@ coverage/
 .claude/worktrees/
 test-results/
 playwright-report/
+.vitest-attachments/
