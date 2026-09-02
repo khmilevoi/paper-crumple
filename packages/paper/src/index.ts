@@ -94,3 +94,58 @@ export {
   sheetRect,
 } from './mask.js'
 export type { AlphaBox, HolesReport } from './mask.js'
+
+// --- P10: the knob descriptors and the edgeMode factory option (§6.4-§6.7) ---
+export {
+  COMMON_KNOBS,
+  defaultsFor,
+  descriptorsFor,
+  edgeParamsFrom,
+  HULL_KNOBS,
+  resolveSdfRes,
+  SDF_RES_KNOB,
+  TORN_KNOBS,
+} from './paper-knobs.js'
+export type { PaperEdgeMode } from './paper-knobs.js'
+
+// --- P10: the rect §8.3 derives without a readback ---
+export { growBox, scaleBox, sheetRectFromExtent, signedFieldExtent } from './extent.js'
+
+// --- P10: the handle that holds no image data, and §8.6's frozen reserve ---
+export { checkReserve, freezeOverscan, handleBytesFor, handleFactsFor } from './handle.js'
+export type { OverscanReserve, PaperSheetHandle } from './handle.js'
+
+// --- P10: the tiles (§14). The four baked files live on the ./tiles subpath, never here. ---
+// `PaperTileSet` itself is declared in `tile-set.ts` (not `paper-tiles.ts`, which only consumes
+// it) — the plan's own table names the wrong module for this one type; the code is authoritative.
+export { NEUTRAL_TILE_BYTE, TILE_NAMES } from './paper-tiles.js'
+export type { MountedTiles, TileName } from './paper-tiles.js'
+export type { PaperTileSet } from './tile-set.js'
+
+// --- P10: the GL halves — the jump-flood field, the blur, and the ported shader (§5.1, §15) ---
+export { createSdfBuilder, looseSizeFor, SDF_POOL_SLOTS, sigmaFor } from './gl-sdf.js'
+export type {
+  BlurFieldOptions,
+  BuildFieldOptions,
+  Field,
+  FieldContract,
+  LooseField,
+  SdfBuilder,
+} from './gl-sdf.js'
+export {
+  DEBUG_MODES,
+  FIBRE_TILE_PX,
+  LOOSE_PUSH,
+  MAX_FOLDS,
+  PAPER_FS,
+  PAPER_UNIFORMS,
+  SHEET_TILE_PX,
+} from './paper-shader.js'
+export { createPaperRenderer } from './paper-renderer.js'
+export type { FrontRenderRequest, PaperRenderer } from './paper-renderer.js'
+export { createResampler } from './artwork.js'
+export type { ArtworkSlot, ResampleOptions, Resampler } from './artwork.js'
+
+// --- P10: the slot itself (§5.2) ---
+export { paperSheet } from './sheet.js'
+export type { PaperSheet, PaperSheetOptions } from './sheet.js'
