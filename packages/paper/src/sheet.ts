@@ -206,13 +206,30 @@ interface Mounted {
    *  cannot call `.dispose()` on it without this map. */
   readonly frontTextures: WeakMap<SheetFront, { texture: Texture }>
   /**
-   * Task 12's own addition: what `build()` last left the shared Pool A field slots holding.
-   * `buildField`/`blurField` write into one shared `sdf.tight` / `sdf.loose` slot apiece (§8.1) —
-   * there is no per-sprite storage for a field — so a later `build()` call can only skip pass A
-   * (the jump flood) when it is asking for exactly what this record already holds: the same
-   * sprite, at the same requested size. `null` until the first `build()` call, and reset to
-   * `null` whenever `ensurePools` disposes and rebuilds the pools this record's `Field`s point
-   * into (a size a later sprite needs that this mount's Pool A was not sized for).
+   * Task 12's own addition: what the last `buildField`/`blurField` call (from either `source()`
+   * or `build()`) left the shared Pool A field slots holding. `buildField`/`blurField` write into
+   * one shared `sdf.tight` / `sdf.loose` slot apiece (§8.1) — there is no per-sprite storage for a
+   * field — so a later `build()` call can only skip pass A (the jump flood) when it is asking for
+   * exactly what this record already holds: the same sprite, at the same requested size. `null`
+   * until the first `source()`/`build()` call, and reset to `null` whenever `ensurePools` disposes
+   * and rebuilds the pools this record's `Field`s point into (a size a later sprite needs that
+   * this mount's Pool A was not sized for).
+   *
+   * **Fix round 1, finding 1 — investigated, found unreachable, no change made to this record's
+   * own keying.** The worry: `build(A)` after `build(B)` (or `source(B)`) at the same bucket size
+   * could reuse a stale `spriteKey === A` record while the physical slot actually holds `B`'s
+   * field. It cannot, by construction: `build()`'s own step 3 (above) refuses with
+   * `SourceExpiredError` whenever `pools.poolA.artworkKey() !== handle.spriteKey`, and the ONLY
+   * way `artworkKey` becomes `A` again after having been displaced is another `source(A)` call —
+   * which (since this fix round) unconditionally re-runs `buildField`/`blurField` and re-writes
+   * THIS record for `A` before returning. So every path that reaches the field-cache check below
+   * with `handle.spriteKey === A` has, as its own precondition, a physical slot that the most
+   * recent `source(A)`/`build(A)` call itself just wrote — never another sprite's leftover.
+   * Confirmed empirically, not just argued: `source(A)`, `build(A)`, `source(B)` at the same
+   * bucket size, `build(A)` again returns `SourceExpiredError` on that second call, not a front
+   * built from `B`'s field — see `sheet.gl.test.ts`'s own "does not serve another sprite's stale
+   * field" test and this round's report for the exact repro and both directions of the
+   * measurement.
    */
   lastFieldBuild: {
     readonly spriteKey: string
@@ -767,8 +784,7 @@ export function paperSheet(options?: PaperSheetOptions): PaperSheet {
     if (GlError.is(tight)) return tight
 
     // Step 8: blurField — sigma off `looseness`, which a `hull`-only sheet does not even declare
-    // as a knob (`numKnob` falls back to 0, the field's own no-blur floor). Not otherwise
-    // consumed here: `build()` (task 12) re-derives it against the sprite's real knob values.
+    // as a knob (`numKnob` falls back to 0, the field's own no-blur floor).
     const looseness = numKnob(values, 'looseness', 0)
     const blurred = sdf.blurField({
       field: tight,
@@ -776,6 +792,23 @@ export function paperSheet(options?: PaperSheetOptions): PaperSheet {
       frontLongSide,
     })
     if (GlError.is(blurred)) return blurred
+
+    // Fix round 1, finding 3 (the doubled pass B): `m.lastFieldBuild` used to start `null` and
+    // stay that way until `build()`'s own first call — so the very passes just run above were
+    // thrown away and `build()`'s first call for this sprite always redid both, unconditionally,
+    // even though its own `size` is `front` (this call's own front dims) on the ordinary path
+    // (source() then build() at the size just sourced). Recording them here means that first
+    // `build()` call sees a cache hit instead: `tightReusable` requires the SAME spriteKey and the
+    // SAME `size` (§8.1's shared-slot rule this record exists to serve), which a `build()` call
+    // for a DIFFERENT requested size, or a different sprite having taken the slot since, correctly
+    // fails — falling through to a fresh `buildField`/`blurField`, exactly as before this change.
+    m.lastFieldBuild = {
+      spriteKey,
+      size: { w: front.w, h: front.h },
+      tight,
+      looseness,
+      loose: blurred,
+    }
 
     // Test-only hook (fix round 1, finding 2 — see `__afterFieldForTest`'s own doc comment on
     // `PaperSheet`): fires synchronously, before the `await` below ever yields, so a test-driven
@@ -953,17 +986,18 @@ export function paperSheet(options?: PaperSheetOptions): PaperSheet {
         cause: reserve,
       })
     }
-    // checkReserve is a "front-class slider" guard (task 12 brief's own wording): a live
-    // `looseness` drag is field-tier, not front-tier, and is handled entirely by step 5's pass-B
-    // re-run below, never by re-deriving the margin. So every field-tier knob (`looseness`,
-    // `sdfRes`) is pinned back to this factory's default for this check alone — otherwise
-    // dragging `looseness` off its default, which step 5 exists to make cheap, would trip the
-    // very guard `overscanHeadroom` is the documented escape from.
-    const fieldTierKeys = knobDescriptors.filter((d) => d.invalidates === 'field')
+    // Fix round 1, finding 2 (was wrong): a previous version pinned every field-tier knob
+    // (`looseness`, `sdfRes`) back to this factory's default before deriving `edgeParams`, on the
+    // theory that `checkReserve` is a "front-class slider" guard and `looseness` is field-tier.
+    // That is false: core's own `overscanRadius` (`overscan.ts`) takes the LIVE `looseness` as a
+    // real term of `r_torn`/`r_both` (the `0.45*sigma` blur lead and the `0.6*looseness*tearAmp`
+    // tear bracket) — pinning it silently disabled the one guard `overscanHeadroom` exists to be
+    // the escape hatch from. `checkReserve` gets the sprite's live `knobValues` verbatim, exactly
+    // as the brief's own step 4 states; a caller who genuinely needs to drag `looseness` past the
+    // frozen reserve gets the "re-add required" `SheetError` this check exists to produce, and one
+    // who needs the room reserves it up front with a larger `overscanHeadroom` (spec 8.6).
     const defaults = defaultsFor(edgeMode)
-    const marginValues: Record<string, string | number | boolean> = { ...knobValues }
-    for (const d of fieldTierKeys) marginValues[d.key] = defaults[d.key]!
-    const reserveCheck = checkReserve(reserve, edgeParamsFrom(edgeMode, marginValues))
+    const reserveCheck = checkReserve(reserve, edgeParamsFrom(edgeMode, knobValues))
     if (reserveCheck !== undefined) return reserveCheck
 
     // Step 5 (spec 6.3, engine.js's own setLooseness): pass A (the tight SDF field) depends only

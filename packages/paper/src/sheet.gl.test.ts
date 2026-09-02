@@ -442,7 +442,20 @@ describe('build() (spec 5.2, 8.1, 8.5, 8.7)', () => {
   // A must draw at most a handful of times, and one that silently re-ran it cannot.
   it('re-runs pass B alone when only looseness moved', async () => {
     const ctx = open()
-    const sheet = paperSheet({ edgeMode: 'torn' })
+    // Fix round 1, finding 2: `checkReserve` now sees the LIVE `looseness` (core's own
+    // `overscanRadius` genuinely takes it as a term of `r_torn`), so the 0.65 build below needs
+    // enough `overscanHeadroom` to still clear the reserve frozen at this factory's defaults —
+    // computed from the same formula `checkReserve` itself uses, not guessed. Kept well short of
+    // `overscanFromRadius`'s own asymmetric-margin regime at large `p` (checked empirically while
+    // writing this round: `source()`'s pre-existing `artworkUv` mapping only centres the artwork
+    // for small `p`, and a `looseness` delta as large as 0.9 pushes `p` far enough to trip the
+    // guard band on its own, independent of the reserve check this test is actually about).
+    const radiusAtDefault = overscanRadius(edgeParamsFrom('torn', defaultsFor('torn')))
+    const radiusAtLooser = overscanRadius(
+      edgeParamsFrom('torn', { ...defaultsFor('torn'), looseness: 0.65 }),
+    )
+    const headroom = radiusAtLooser / radiusAtDefault - 1 + 0.05
+    const sheet = paperSheet({ edgeMode: 'torn', overscanHeadroom: headroom })
     sheet.mount(ctx)
     const bitmap = await compactSprite()
     const handle = await sheet.source(bitmap, { maxSize: 128, exact: false })
@@ -455,14 +468,19 @@ describe('build() (spec 5.2, 8.1, 8.5, 8.7)', () => {
 
     const drawArrays = vi.spyOn(ctx.gl, 'drawArrays')
 
+    // Fix round 1, finding 3 (the doubled pass B): `source()` now leaves its own pass A/B result
+    // in `lastFieldBuild`, so a `build()` at a size that does NOT match `source()`'s own front
+    // (a non-square 140x100 request against this sprite's own square 128x128 front) still forces
+    // a genuinely cold pass A here — the scenario this assertion is about (a same-size, same-knob
+    // `build()` reusing `source()`'s own work outright is covered separately, below).
     drawArrays.mockClear()
-    const a = sheet.build(handle, { w: 128, h: 128 }, defaultsFor('torn') as never)
+    const a = sheet.build(handle, { w: 140, h: 100 }, defaultsFor('torn') as never)
     const firstDraws = drawArrays.mock.calls.length
 
     drawArrays.mockClear()
-    const b = sheet.build(handle, { w: 128, h: 128 }, {
+    const b = sheet.build(handle, { w: 140, h: 100 }, {
       ...defaultsFor('torn'),
-      looseness: 0.9,
+      looseness: 0.65,
     } as never)
     const secondDraws = drawArrays.mock.calls.length
 
@@ -481,6 +499,133 @@ describe('build() (spec 5.2, 8.1, 8.5, 8.7)', () => {
 
     sheet.releaseFront(a)
     sheet.releaseFront(b)
+    sheet.dispose()
+  })
+})
+
+describe('task 12 fix round 1 (findings 1, 2, 3)', () => {
+  // Finding 1's own premise ("build(A) after source(B) at the same bucket size reuses stale
+  // cachedField.tight/loose and silently renders B's field into A's front") does NOT hold for
+  // this module as written: `build()`'s own step 3 refuses with `SourceExpiredError` the moment
+  // the artwork slot no longer holds the handle's own spriteKey, and `source(B)` is the only thing
+  // that can displace it — so this exact sequence never reaches the field-cache code at all. This
+  // is the repro from the report's own measurement (run once with, once conceptually without any
+  // field-cache change — the outcome does not depend on the field cache because execution never
+  // gets there), kept as a permanent regression test: a future change that let `build()` skip past
+  // step 3 would have to also re-litigate the field cache's own safety, and this is what would
+  // catch it landing wrong.
+  it("refuses build(A) once another sprite has taken the slot — never a front built from the other sprite's field (finding 1)", async () => {
+    const ctx = open()
+    const sheet = paperSheet()
+    sheet.mount(ctx)
+
+    const bitmapA = await sprite(48, 32)
+    const handleA = await sheet.source(bitmapA, { maxSize: 128, exact: false })
+    bitmapA.close()
+    expect(GlError.is(handleA) || SheetError.is(handleA) || isAborted(handleA)).toBe(false)
+    if (GlError.is(handleA) || SheetError.is(handleA) || isAborted(handleA)) return
+
+    // `front` here is 48x32's own long-side-128 resample, not a square 128x128 — deliberately not
+    // the same size `source()` itself used, so this test does not also exercise finding 3's own
+    // same-size reuse path; the two are independent claims.
+    const size = { w: 128, h: 96 }
+    const frontA1 = sheet.build(handleA, size, defaultsFor('hull') as never)
+    expect(frontA1 instanceof Error, String((frontA1 as Error)?.message)).toBe(false)
+    if (frontA1 instanceof Error) {
+      sheet.dispose()
+      return
+    }
+
+    // Sprite B: same dimensions and the same `maxSize`, so `ensurePools` reuses the SAME Pool A /
+    // `SdfBuilder` rather than disposing and rebuilding — the exact "same bucket size" case
+    // finding 1 named, and the one case where a naive cache could be tempted to reuse across
+    // sprites.
+    const bitmapB = await sprite(48, 32)
+    const handleB = await sheet.source(bitmapB, { maxSize: 128, exact: false })
+    bitmapB.close()
+    expect(GlError.is(handleB) || SheetError.is(handleB) || isAborted(handleB)).toBe(false)
+
+    const frontA2 = sheet.build(handleA, size, defaultsFor('hull') as never)
+    // Never a silently-wrong front built from B's field: A's own artwork slot was displaced the
+    // moment source(B) ran, and build() must say so rather than render something.
+    expect(SourceExpiredError.is(frontA2)).toBe(true)
+
+    sheet.releaseFront(frontA1)
+    sheet.dispose()
+  })
+
+  // Finding 2 (was wrong before this round): a build() that drags `looseness` past what the
+  // frozen reserve can cover must be refused, naming "re-add required" and `overscanHeadroom` —
+  // never silently pass because the check was reading a pinned default instead of the live value.
+  it('names "re-add required" and overscanHeadroom when looseness drags past the frozen reserve (finding 2)', async () => {
+    const ctx = open()
+    // Zero overscanHeadroom (this factory's own default): the reserve is exactly this mode's own
+    // default-knob radius, with no room to spare for a live drag.
+    const sheet = paperSheet({ edgeMode: 'torn' })
+    sheet.mount(ctx)
+    const bitmap = await compactSprite()
+    const handle = await sheet.source(bitmap, { maxSize: 128, exact: false })
+    bitmap.close()
+    expect(GlError.is(handle) || SheetError.is(handle) || isAborted(handle)).toBe(false)
+    if (GlError.is(handle) || SheetError.is(handle) || isAborted(handle)) return
+
+    const size = { w: 128, h: 128 }
+    const first = sheet.build(handle, size, defaultsFor('torn') as never)
+    expect(first instanceof Error, String((first as Error)?.message)).toBe(false)
+    if (first instanceof Error) {
+      sheet.dispose()
+      return
+    }
+
+    const dragged = sheet.build(handle, size, {
+      ...defaultsFor('torn'),
+      looseness: 0.9,
+    } as never)
+    expect(SheetError.is(dragged)).toBe(true)
+    if (!SheetError.is(dragged)) {
+      sheet.releaseFront(first)
+      sheet.dispose()
+      return
+    }
+    expect(dragged.message).toContain('re-add required')
+    expect(dragged.message).toContain('overscanHeadroom')
+
+    sheet.releaseFront(first)
+    sheet.dispose()
+  })
+
+  // Finding 3 (the doubled pass B): a build() at the exact size and knob values source() itself
+  // just used must consume source()'s own pass A/B work, not redo it — the claim is "zero field
+  // draws", stronger than "fewer than the first build in the OTHER test above" (which deliberately
+  // uses a different size so it keeps testing a genuinely cold pass A).
+  it("consumes source()'s own field build when the first build() matches its size and knobs exactly (finding 3)", async () => {
+    const ctx = open()
+    const sheet = paperSheet({ edgeMode: 'hull' })
+    sheet.mount(ctx)
+    const bitmap = await compactSprite()
+    const handle = await sheet.source(bitmap, { maxSize: 128, exact: false })
+    bitmap.close()
+    expect(GlError.is(handle) || SheetError.is(handle) || isAborted(handle)).toBe(false)
+    if (GlError.is(handle) || SheetError.is(handle) || isAborted(handle)) return
+
+    const drawArrays = vi.spyOn(ctx.gl, 'drawArrays')
+    drawArrays.mockClear()
+    // 128x128: exactly this sprite's own `front` (a square 64x64 source at maxSize 128).
+    const front = sheet.build(handle, { w: 128, h: 128 }, defaultsFor('hull') as never)
+    const draws = drawArrays.mock.calls.length
+    drawArrays.mockRestore()
+
+    expect(front instanceof Error, String((front as Error)?.message)).toBe(false)
+    if (front instanceof Error) {
+      sheet.dispose()
+      return
+    }
+    // renderFront's own one draw call, and nothing from either field pass — a regression that
+    // stopped reusing source()'s own work would push this back into double digits (pass A alone
+    // is `2 * (schedule.length + 1) + 1`).
+    expect(draws).toBe(1)
+
+    sheet.releaseFront(front)
     sheet.dispose()
   })
 })
