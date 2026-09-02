@@ -355,27 +355,30 @@ export function createSdfBuilder(ctx: GlContext, pool: ArtworkPool): Err | SdfBu
     }
   }
 
-  /** Acquire a Pool A texture and wrap it in a fresh render target. */
+  // `ctx.target()` allocates a brand-new WebGLFramebuffer on every call, but `pool.acquire()`
+  // hands back the *same* Texture (same `.handle`) whenever a slot's desc has not changed. Every
+  // slot this builder touches — Pass A's ping-pong halves as much as Pass B's `loose`/`blur` —
+  // is re-acquired on every `buildField`/`blurField` call (that is what makes the looseness knob
+  // "cheap enough to run live off a slider"), so without caching, every call leaked one
+  // framebuffer per slot. The Target wrapping each slot's pooled texture is cached here and only
+  // rebuilt when the pool hands back a different texture identity or size (a resize/replace).
+  const targetsBySlot = new Map<string, Target>()
   function acquireTarget(slot: string, d: TextureDesc): Err | Target {
     const texture = pool.acquire(slot, d)
     if (GlError.is(texture)) return texture
-    return ctx.target(texture)
-  }
-
-  // Pass B's own slots (`loose`, `blur`) are re-acquired on every `blurField` call — that is
-  // what makes the looseness knob "cheap enough to run live off a slider" — so the render
-  // target wrapping each slot's pooled texture is cached here and only rebuilt when the pool
-  // hands back a different texture (a resize). Pass A's ping-pong halves never need this: they
-  // are internal to one `buildField` call and never handed back to a caller to compare.
-  const blurTargets = new Map<string, Target>()
-  function acquireBlurTarget(slot: string, d: TextureDesc): Err | Target {
-    const texture = pool.acquire(slot, d)
-    if (GlError.is(texture)) return texture
-    const cached = blurTargets.get(slot)
-    if (cached !== undefined && cached.texture.handle === texture.handle) return cached
+    const cached = targetsBySlot.get(slot)
+    if (
+      cached !== undefined &&
+      cached.texture.handle === texture.handle &&
+      cached.width === texture.width &&
+      cached.height === texture.height
+    ) {
+      return cached
+    }
+    if (cached !== undefined) cached.dispose()
     const target = ctx.target(texture)
     if (GlError.is(target)) return target
-    blurTargets.set(slot, target)
+    targetsBySlot.set(slot, target)
     return target
   }
 
@@ -485,11 +488,11 @@ export function createSdfBuilder(ctx: GlContext, pool: ArtworkPool): Err | SdfBu
     const size = looseSizeFor({ w: field.width, h: field.height })
     const outDesc = fieldTargetDesc(size.w, size.h)
 
-    const out = acquireBlurTarget(SDF_POOL_SLOTS.loose, outDesc)
+    const out = acquireTarget(SDF_POOL_SLOTS.loose, outDesc)
     if (GlError.is(out)) return out
     // The horizontal half's shared scratch is a Pool A slot rather than a private `Map` entry:
     // it is dead the moment the vertical half reads it, so every sprite in a grid can share one.
-    const tmp = acquireBlurTarget(SDF_POOL_SLOTS.blur, outDesc)
+    const tmp = acquireTarget(SDF_POOL_SLOTS.blur, outDesc)
     if (GlError.is(tmp)) return tmp
 
     // Deliberately derived from the output, not the input: a baked field may be at any
@@ -559,7 +562,11 @@ export function createSdfBuilder(ctx: GlContext, pool: ArtworkPool): Err | SdfBu
       resolve.dispose()
       blur.dispose()
       // The pool owns the coord and field textures backing every slot above, and disposes its
-      // own on `pool.dispose()` — this builder never holds a texture Pool A did not hand it.
+      // own on `pool.dispose()` — this builder never holds a texture Pool A did not hand it. The
+      // framebuffers wrapping those textures are this builder's own, though (see
+      // `acquireTarget`'s comment), so they are released here.
+      for (const target of targetsBySlot.values()) target.dispose()
+      targetsBySlot.clear()
     },
   }
 }

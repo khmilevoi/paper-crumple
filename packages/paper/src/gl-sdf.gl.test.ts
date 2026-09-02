@@ -1,4 +1,4 @@
-import { afterEach, describe, expect, it } from 'vitest'
+import { afterEach, describe, expect, it, vi } from 'vitest'
 import { GlError } from '@paper-crumple/core'
 import { createScratchPools, drawTargetFor, poolABytes } from '@paper-crumple/core/unstable'
 import type { ScratchPools } from '@paper-crumple/core/unstable'
@@ -268,6 +268,67 @@ describe('Pool A holds every scratch target this module spends', () => {
     expect(GlError.is(field)).toBe(false)
     if (GlError.is(field)) return
     expect(pools!.poolA.bytes()).toBeLessThanOrEqual(poolABytes(ARTWORK, FIELD))
+    builder.dispose()
+  })
+
+  it('reuses one WebGLFramebuffer per pool slot across repeated builds and blurs', () => {
+    // `pool.acquire` already reuses the pooled Texture across calls; the bug this covers is that
+    // `ctx.target()` used to be called fresh on every acquire, allocating a brand-new
+    // WebGLFramebuffer each time even though the Texture underneath never changed — a leak on
+    // every `buildField`/`blurField`, i.e. on every slider move (§source rebuilds on every move).
+    // This counts actual `gl.createFramebuffer()` calls, the real observable behind the leak, not
+    // just output pixels: a build that reused textures but still leaked framebuffers would still
+    // pass a pixel-only test.
+    const { ctx } = open()
+    const builder = createSdfBuilder(ctx, pools!.poolA)
+    expect(GlError.is(builder)).toBe(false)
+    if (GlError.is(builder)) return
+    const artwork = pools!.poolA.holdArtwork('sprite', {
+      width: ARTWORK.w,
+      height: ARTWORK.h,
+      format: 'RGBA8UI',
+      filter: 'NEAREST',
+      label: 'a',
+    })
+    expect(GlError.is(artwork)).toBe(false)
+    if (GlError.is(artwork)) return
+
+    const createFramebuffer = vi.spyOn(ctx.gl, 'createFramebuffer')
+
+    const buildOnce = () =>
+      builder.buildField({
+        artwork,
+        artworkUv: [1, 1, 0, 0],
+        width: FIELD,
+        height: FIELD,
+        sourceLongSide: ARTWORK.w,
+      })
+
+    const first = buildOnce()
+    expect(GlError.is(first)).toBe(false)
+    if (GlError.is(first)) return
+    const firstLoose = builder.blurField({ field: first, sigmaPx: 4, frontLongSide: ARTWORK.w })
+    expect(GlError.is(firstLoose)).toBe(false)
+
+    // One framebuffer per distinct pool slot this round touched (the two ping-pong pairs, the
+    // resolved tight field, and pass B's loose/scratch pair) — never zero, or this assertion
+    // would be vacuous.
+    const afterFirstRound = createFramebuffer.mock.calls.length
+    expect(afterFirstRound).toBeGreaterThan(0)
+
+    for (let i = 0; i < 5; i++) {
+      const field = buildOnce()
+      expect(GlError.is(field)).toBe(false)
+      if (GlError.is(field)) return
+      const loose = builder.blurField({ field, sigmaPx: 4, frontLongSide: ARTWORK.w })
+      expect(GlError.is(loose)).toBe(false)
+    }
+
+    // Five more build+blur rounds against the same sizes must not create a single additional
+    // WebGLFramebuffer: every pool slot's target is cached and reused, not rebuilt.
+    expect(createFramebuffer.mock.calls.length).toBe(afterFirstRound)
+
+    createFramebuffer.mockRestore()
     builder.dispose()
   })
 })
