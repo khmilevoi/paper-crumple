@@ -3,6 +3,8 @@ import type { BuiltStage } from './config'
 import type { Sample } from './samples'
 
 const HERO_SLOT = 'hero-slot'
+const GRID_SLOT = 'grid'
+const GRID_COLS = 3
 
 /**
  * `blit` supplies its own 2D canvas per view and the stage blits into it. `direct` has one
@@ -63,4 +65,135 @@ export async function mountHero(
   const sprite = view.sprite
   if (sprite === null) return new Error('playground: mount returned a view with no sprite')
   return { view, sprite }
+}
+
+/** `key` also selects the fold preset (`pc.presetForImageId`), which is the whole point of the
+ *  grid: printed beside every tile, it is what makes "a broadcast does not fold the grid in
+ *  unison" legible rather than merely felt. */
+function gridTileLabel(sample: Sample): HTMLElement {
+  const label = document.createElement('div')
+  label.className = 'grid-tile-label'
+  label.textContent = `${sample.label} — preset ${pc.presetForImageId(sample.id)}`
+  return label
+}
+
+/**
+ * One `stage.mount` (blit) or `add` + `view` + `show` (direct) per sample, in a loop — no
+ * `mountAll`, for the same reason `mountHero` composes by hand: a batch return type cannot stay
+ * honest about which sprites and views already landed when the signal fires mid-loop.
+ *
+ * Every sample's key doubles as its fold-preset seed and may already be live on this stage: the
+ * hero (`mountHero`) added its sample under that same key before `mountGrid` ever runs, since
+ * both share one `BuiltStage`. `add()` refuses a live key rather than silently rebuilding it
+ * (§4.1), so a tile whose sample matches the hero's reuses the existing sprite through
+ * `view()` + `show()` instead — the same composition docs/USAGE.md §1 shows for a grid thumbnail
+ * sharing a hero's front texture.
+ */
+export async function mountGrid(
+  built: BuiltStage,
+  samples: readonly Sample[],
+  signal: AbortSignal,
+): Promise<{ views: Map<string, pc.View>; failures: Error[] } | pc.Aborted> {
+  if (signal.aborted) return pc.ABORTED
+
+  const slot = document.getElementById(GRID_SLOT)
+  const views = new Map<string, pc.View>()
+  const failures: Error[] = []
+  if (slot === null) {
+    failures.push(new Error('playground: #grid is missing from index.html'))
+    return { views, failures }
+  }
+  slot.replaceChildren()
+
+  if (built.present === 'direct') {
+    // One surface, six more rects of it — laid out below the hero's own rect rather than over
+    // it. `resize` never shrinks the surface (docs/USAGE.md §5), so the hero's already-fixed
+    // rect stays valid after the surface grows to make room for the grid.
+    const surface = built.stage.surface
+    const originalW = surface.width
+    const originalH = surface.height
+    const rows = Math.ceil(samples.length / GRID_COLS)
+    const tileW = Math.max(1, Math.floor(originalW / GRID_COLS))
+    const tileH = Math.max(1, Math.floor(originalH / 2))
+    const resized = built.stage.resize(originalW, originalH + tileH * rows)
+    if (resized instanceof Error) {
+      failures.push(resized)
+      return { views, failures }
+    }
+
+    for (let i = 0; i < samples.length; i += 1) {
+      const sample = samples[i]
+      const col = i % GRID_COLS
+      const row = Math.floor(i / GRID_COLS)
+      const rect = { x: col * tileW, y: originalH + row * tileH, w: tileW, h: tileH }
+
+      const existing = built.stage.get(sample.id)
+      let sprite = existing
+      if (sprite === undefined) {
+        const added = await built.stage.add(sample.url, { key: sample.id, signal })
+        if (added === pc.ABORTED) continue
+        if (added instanceof Error) {
+          failures.push(added)
+          continue
+        }
+        sprite = added
+      }
+
+      const view = built.stage.view({ rect, tag: sample.id })
+      if (view instanceof Error) {
+        failures.push(view)
+        continue
+      }
+      const shown = view.show(sprite)
+      if (shown instanceof Error) {
+        failures.push(shown)
+        continue
+      }
+
+      views.set(sample.id, view)
+      slot.append(gridTileLabel(sample))
+    }
+
+    return { views, failures }
+  }
+
+  for (const sample of samples) {
+    const tile = document.createElement('div')
+    tile.className = 'grid-tile'
+    const canvas = document.createElement('canvas')
+    canvas.className = 'grid-tile-canvas'
+    tile.append(canvas, gridTileLabel(sample))
+    slot.append(tile)
+
+    // `mount` composes `add` + `view` + `show`, and `add` refuses a key that is already live —
+    // which this sample's key is, exactly when it is also the hero's currently-shown sprite.
+    const already = built.stage.get(sample.id)
+    if (already !== undefined) {
+      const view = built.stage.view({ canvas, fit: 'contain', tag: sample.id })
+      if (view instanceof Error) {
+        failures.push(view)
+        continue
+      }
+      const shown = view.show(already)
+      if (shown instanceof Error) {
+        failures.push(shown)
+        continue
+      }
+      views.set(sample.id, view)
+      continue
+    }
+
+    const view = await built.stage.mount(
+      { key: sample.id, src: sample.url, canvas, fit: 'contain', tag: sample.id },
+      { signal },
+    )
+    if (view === pc.ABORTED) continue
+    if (view instanceof Error) {
+      failures.push(view)
+      continue
+    }
+    views.set(sample.id, view)
+  }
+
+  return { views, failures }
 }

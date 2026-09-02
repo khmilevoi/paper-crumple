@@ -74,3 +74,60 @@ main {
   font-family: var(--mono);
   font-size: 0.85rem;
 }
+
+#transport {
+  margin: 0.75rem 0;
+  padding: 0.75rem;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  font-family: var(--mono);
+  font-size: 0.8rem;
+}
+
+.transport-row {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  margin: 0.4rem 0;
+}
+
+.transport-readout,
+.transport-summary,
+.transport-status,
+.transport-cadence {
+  color: var(--fg-dim);
+}
+
+.transport-report {
+  white-space: pre-wrap;
+  color: var(--fg-dim);
+  margin: 0.25rem 0;
+}
+
+#grid {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.5rem;
+}
+
+.grid-tile {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 0.25rem;
+}
+
+.grid-tile-canvas {
+  width: 96px;
+  height: 96px;
+  background: var(--panel-bg);
+  border: 1px solid var(--border);
+}
+
+.grid-tile-label {
+  font-family: var(--mono);
+  font-size: 0.7rem;
+  color: var(--fg-dim);
+  max-width: 110px;
+  text-align: center;
+}

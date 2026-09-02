@@ -2,10 +2,11 @@ import * as pc from '@paper-crumple/core'
 import type { BuiltStage, DemoConfig } from './config'
 import { DEFAULT_SAMPLE_ID, SAMPLES } from './samples'
 import { DEFAULT_CONFIG, buildStage } from './config'
-import { mountHero } from './scene'
+import { mountGrid, mountHero } from './scene'
 import { createPanel } from './panel'
 import type { SetTarget } from './panel'
 import { createConfigPanel } from './config-panel'
+import { createTransport } from './transport'
 
 const line = document.getElementById('version-line')
 const knobCount = document.getElementById('knob-count')
@@ -75,6 +76,11 @@ function onCount(sheet: number, motion: number): void {
 }
 
 const panel = createPanel(onSet, onCount)
+const transport = createTransport(report)
+
+// The grid's mounted views, kept so a rebuild's `transport.bind` always describes the stage that
+// is actually live — mirroring `live` above for the same reason.
+let gridViews: Map<string, pc.View> = new Map()
 
 // One `AbortController` per build, owned here (task 5 brief's rebuild sequence). A config change
 // aborts whatever build is in flight, disposes the currently-live stage — idempotent, and after
@@ -87,6 +93,7 @@ let buildController: AbortController | null = null
 function report(text: string): void {
   if (line) line.textContent = text
   configPanel.setStatus(text)
+  transport.setStatus(text)
 }
 
 async function rebuild(next: DemoConfig): Promise<void> {
@@ -121,9 +128,20 @@ async function rebuild(next: DemoConfig): Promise<void> {
     return
   }
 
+  const grid = await mountGrid(built, SAMPLES, controller.signal)
+  if (grid === pc.ABORTED) {
+    // Same reasoning as the hero above: this build never went live, so nothing else will
+    // dispose it.
+    built.stage.dispose()
+    return
+  }
+  for (const f of grid.failures) console.warn('playground: grid mount failure', f)
+  gridViews = grid.views
+
   currentConfig = next
   live = { built, view: mounted.view, sprite: mounted.sprite }
   panel.rebuild(built, mounted.view, mounted.sprite)
+  transport.bind(built, mounted.view, gridViews)
 
   configPanel.setStatus(
     `rebuilt in ${built.buildMs.toFixed(1)} ms · ${built.stage.warnings.length} warnings · ` +
