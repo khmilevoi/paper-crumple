@@ -37,7 +37,7 @@ import type {
   Texture,
 } from '@paper-crumple/core/unstable'
 
-import { fitSheet } from './buckets.js'
+import { BUCKETS, fitSheet } from './buckets.js'
 import { FIBRE_TILE_PX, MOTION_KNOBS } from './knobs.js'
 import type { MotionLookKnobs } from './knobs.js'
 import { createSheetMesh } from './mesh.js'
@@ -160,7 +160,15 @@ export function bakedMotion(
     },
 
     fit(rect: Rect, override: string | null = null) {
-      const f = fitSheet(rect.w, rect.h, override)
+      // `override` conflates two concepts at the call site (core's stage.ts): a genuine bucket id,
+      // which this source recognises and must honour, and an opaque fold-preset token minted by
+      // `presetForImageId()` that this slot never authored (core preset.ts §4.1, §5.3: a slot must
+      // map an unrecognised override deterministically onto one of its own presets and must not
+      // error on it). Motion has exactly one preset per bucket, so "its own preset" for an
+      // unrecognised token is the aspect-derived bucket — i.e. treat it exactly like `null`.
+      const bucketOverride =
+        override === null || BUCKETS.some((b) => b.id === override) ? override : null
+      const f = fitSheet(rect.w, rect.h, bucketOverride)
       if (f instanceof Error) return f
       return {
         // §5.3 gives `fit` no `maxSize`, so `frontSize` is the bucket-shaped box that covers the

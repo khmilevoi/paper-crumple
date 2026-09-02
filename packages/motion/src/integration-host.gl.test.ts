@@ -58,25 +58,31 @@ describe('the minimal level-2 host', () => {
       { premultiplyAlpha: 'none', colorSpaceConversion: 'none' },
     )
     const sprite = await host.stage.add(bitmap, { key: 'a', pin: true })
-    // KNOWN DEFECT (finding for closeout, not fixable from this test-only file): stage.ts's
-    // buildSprite() unconditionally passes presetForImageId(key) — an opaque 8-hex-digit
+    // stage.ts's buildSprite() unconditionally passes presetForImageId(key) — an opaque 8-hex-digit
     // fold-preset token, D5 — as motion.fit()'s `override` on every add()/mount(). §4.1's own
     // contract (packages/core/src/preset.ts) is that "a slot maps an unrecognised override
     // deterministically onto one of its own presets and does not error on it", and
     // packages/core/src/preset.test.ts:9 pins the token as "a legal override string anywhere".
-    // packages/motion/src/source.ts:163 instead forwards that token straight into
-    // packages/motion/src/buckets.ts's fitSheet(), which treats `override` as a literal bucket id
-    // (one of '2x3' | '1x1' | '3x2', §9.3) and returns a MotionError for anything else. An 8-hex
-    // FNV-1a digest can never equal a 3-character bucket id, so *every* stage.add() with a real
-    // bakedMotion source fails this way, for any key — it is not a front-size issue, and no
-    // fixture-level change reaches it. presetForImageId('a') is 'e40c292c', reproduced here as the
-    // exact, deterministic cause of that hash. Flip this assertion to a real draw (drop the
-    // isAborted/instanceof-Error branch below and assert on host.read()) once
-    // packages/motion/src/source.ts honours the override contract.
+    // packages/motion/src/source.ts's fit() now normalises an unrecognised override (anything that
+    // is not one of '2x3' | '1x1' | '3x2') onto the aspect-derived bucket instead of forwarding it
+    // straight into packages/motion/src/buckets.ts's fitSheet(), so presetForImageId('a') ===
+    // 'e40c292c' no longer collides with a literal bucket id and this add() succeeds.
     if (isAborted(sprite)) return expect.fail('add() was unexpectedly ABORTED')
-    expect(sprite instanceof Error).toBe(true)
-    if (!(sprite instanceof Error)) return expect.fail('expected the known bucket-override defect')
-    expect(sprite.message).toContain('unknown bucket "e40c292c"')
+    if (sprite instanceof Error) return expect.fail(sprite.message)
+    const view = host.view()
+    if (view instanceof Error) return expect.fail(view.message)
+    expect(view.show(sprite)).toBeUndefined()
+    const got = host.read()
+    // Something was actually drawn: the sprite's opaque red must have replaced at least some of
+    // the framebuffer's cleared, fully-transparent 0,0,0,0.
+    let sawAlpha = false
+    for (let i = 3; i < got.length; i += 4) {
+      if (got[i] !== 0) {
+        sawAlpha = true
+        break
+      }
+    }
+    expect(sawAlpha).toBe(true)
   })
 
   it('releases its context, so a file of these cannot exhaust the ~16-context cap', async () => {

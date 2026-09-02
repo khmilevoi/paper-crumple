@@ -71,11 +71,28 @@ describe('fit is pure (§5.3, §5.4)', () => {
     expect(fit(400, 600).bucket).toBe('2x3')
   })
 
-  it('is a MotionError for a degenerate rect and for an unknown override', () => {
+  it('is a MotionError for a degenerate rect', () => {
     const s = source()
     expect(MotionError.is(s.fit({ x: 0, y: 0, w: 0, h: 10 }))).toBe(true)
     expect(MotionError.is(s.fit({ x: 0, y: 0, w: 10, h: NaN }))).toBe(true)
-    expect(MotionError.is(s.fit({ x: 0, y: 0, w: 400, h: 600 }, 'nope'))).toBe(true)
+  })
+
+  it('normalises an unrecognised override onto the aspect-derived bucket instead of erroring (core preset.ts §4.1, §5.3): an opaque fold-preset token this slot did not author is not a bucket id', () => {
+    const s = source()
+    // Shaped like presetForImageId('a') === 'e40c292c' — an eight-hex-digit fold-preset token,
+    // never a '2x3' | '1x1' | '3x2' bucket id.
+    const withToken = s.fit({ x: 0, y: 0, w: 400, h: 600 }, 'e40c292c')
+    expect(withToken).not.toBeInstanceOf(Error)
+    expect((withToken as BakedFit).bucket).toBe(
+      (s.fit({ x: 0, y: 0, w: 400, h: 600 }, null) as BakedFit).bucket,
+    )
+    // Also not an error for an arbitrary unrecognised string in general.
+    expect(MotionError.is(s.fit({ x: 0, y: 0, w: 400, h: 600 }, 'nope'))).toBe(false)
+  })
+
+  it('still honours a genuine bucket-id override — the legitimate path is unchanged', () => {
+    expect(fit(400, 600, '1x1').bucket).toBe('1x1')
+    expect(fit(400, 600, '3x2').bucket).toBe('3x2')
   })
 
   it('does not care whether the bucket it picked was supplied — that is load’s error', () => {
