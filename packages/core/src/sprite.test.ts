@@ -232,7 +232,13 @@ describe('addAll, prepare, replace and remove', () => {
     stage.dispose()
   })
 
-  it('replace() warns once when a conditional re-supply came back 200 (amendment 10)', async () => {
+  // replace() warns unconditionally today: buildSprite calls only source.acquire(...)
+  // (never resupply()), and urlSource().acquire issues a plain request with no
+  // conditional headers (source.ts:607-614), so warnReplaced() (stage.ts:1237-1244)
+  // fires at the end of every successful replace() regardless of what came back.
+  // Amendment 10's "conditional re-supply came back 200" framing describes intended
+  // behaviour, not the current wiring.
+  it('replace() warns once, naming the key (amendment 10)', async () => {
     const { stage } = await mounted()
     await stage.add('/a.png', { key: 'k' })
     const warned: Error[] = []
