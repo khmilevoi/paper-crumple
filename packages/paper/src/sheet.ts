@@ -12,7 +12,15 @@
  * a throw, never a silent no-op, never a fake success — so this module type-checks as a complete
  * `SheetRenderer` at every commit in between.
  */
-import { ABORTED, attempt, GlError, isAborted, KnobError, SheetError } from '@paper-crumple/core'
+import {
+  ABORTED,
+  attempt,
+  GlError,
+  isAborted,
+  KnobError,
+  SheetError,
+  SourceExpiredError,
+} from '@paper-crumple/core'
 import type {
   Aborted,
   BuildError,
@@ -29,6 +37,7 @@ import {
   artworkLongSide,
   checkGuardBand,
   createScratchPools,
+  drawTargetFor,
   exactFrontLongSide,
   handleBytes,
   hullCacheKey,
@@ -42,8 +51,8 @@ import { cpuSdfFromAlpha } from './field.js'
 import { growBox, scaleBox, sheetRectFromExtent, signedFieldExtent } from './extent.js'
 import type { AlphaBox } from './mask.js'
 import { createSdfBuilder, sigmaFor } from './gl-sdf.js'
-import type { Field, SdfBuilder } from './gl-sdf.js'
-import { freezeOverscan } from './handle.js'
+import type { Field, LooseField, SdfBuilder } from './gl-sdf.js'
+import { checkReserve, freezeOverscan } from './handle.js'
 import type { PaperSheetHandle } from './handle.js'
 import { hullCache } from './hull-cache.js'
 import type { HullCache, HullCacheKey } from './hull-cache.js'
@@ -185,6 +194,22 @@ interface Mounted {
    *  itself carries a raw `WebGLTexture`, not this package's own `Texture` wrapper, so `dispose`
    *  cannot call `.dispose()` on it without this map. */
   readonly frontTextures: WeakMap<SheetFront, { texture: Texture }>
+  /**
+   * Task 12's own addition: what `build()` last left the shared Pool A field slots holding.
+   * `buildField`/`blurField` write into one shared `sdf.tight` / `sdf.loose` slot apiece (§8.1) —
+   * there is no per-sprite storage for a field — so a later `build()` call can only skip pass A
+   * (the jump flood) when it is asking for exactly what this record already holds: the same
+   * sprite, at the same requested size. `null` until the first `build()` call, and reset to
+   * `null` whenever `ensurePools` disposes and rebuilds the pools this record's `Field`s point
+   * into (a size a later sprite needs that this mount's Pool A was not sized for).
+   */
+  lastFieldBuild: {
+    readonly spriteKey: string
+    readonly size: Size
+    readonly tight: Field
+    readonly looseness: number
+    readonly loose: LooseField
+  } | null
 }
 
 /**
@@ -249,6 +274,11 @@ function ensurePools(
   m.pools = null
   m.sdf = null
   m.poolsSize = null
+  // Whatever `build()` last cached in `lastFieldBuild` points at Targets the disposed `SdfBuilder`
+  // owned (`gl-sdf.ts`'s own `targetsBySlot`); a fresh `SdfBuilder` below re-acquires new ones at
+  // the same pool slots, so the cache would otherwise hand a later `build()` call a `Field` whose
+  // framebuffer no longer exists.
+  m.lastFieldBuild = null
 
   const pools = createScratchPools({ gl: m.ctx, artwork, sdfRes })
   const sdf = createSdfBuilder(m.ctx, pools.poolA)
@@ -504,6 +534,7 @@ export function paperSheet(options?: PaperSheetOptions): PaperSheet {
       tiles: neutral,
       liveFronts: new Set<Texture>(),
       frontTextures: new WeakMap<SheetFront, { texture: Texture }>(),
+      lastFieldBuild: null,
     }
 
     tilesReadyState = makeDeferred<InstanceType<typeof GlError> | true>()
@@ -800,41 +831,237 @@ export function paperSheet(options?: PaperSheetOptions): PaperSheet {
     size: Size,
     knobValues: Readonly<SheetKnobs<Knobs>>,
   ): BuildError | SheetFront {
-    void handle
-    void size
-    void knobValues
+    // Step 1 (spec 5.2): mount() first.
     if (mounted === null) {
       return new SheetError('paperSheet: call mount(ctx) before build() (spec 5.2)')
     }
-    // task 12 (paper-sheet-renderer) replaces this body with the real front build: allocate the
-    // front through `ctx.texture`, wrap it in a `ctx.target`, render, dispose the target, return
-    // the texture (§8.1: no front-assembly FBO, no size-keyed cache).
-    return new SheetError(
-      'paperSheet: build() is not implemented yet — task 12 of paper-sheet-renderer adds it',
-    )
+    const m = mounted
+
+    // Step 2: a released handle is a SheetError, never a throw.
+    if (handle.alive === false) {
+      return new SheetError('paperSheet: build() called on a handle release() already freed')
+    }
+
+    // Step 3 (spec 8.5): "the artwork is no longer in the pool" is read straight off the pool,
+    // never off a flag on the handle — `poolA.artworkKey()` is the only signal the core needs,
+    // and it is what lets a second sprite taking the slot be detected without either handle
+    // knowing about the other. `m.pools`/`m.sdf` being unset at all (no sprite has ever been
+    // sourced into this mount) is the same fact by construction.
+    if (m.pools === null || m.sdf === null) {
+      return new SourceExpiredError(
+        'paperSheet: build() — no artwork has ever been sourced into this mount (spec 8.5); ' +
+          'call source() before build()',
+      )
+    }
+    const pools = m.pools
+    const sdf = m.sdf
+    if (pools.poolA.artworkKey() !== handle.spriteKey) {
+      return new SourceExpiredError(
+        `paperSheet: build() — handle "${handle.spriteKey}"'s artwork is no longer in the pool ` +
+          '(spec 8.5); another sprite has taken the slot, so source() must run again',
+      )
+    }
+
+    // Step 4 (spec 8.6): checkReserve catches a front-class slider dragged past the frozen
+    // margin. `reserve` (this factory's own closure variable, above) is the same
+    // `freezeOverscan(edgeParamsFrom(edgeMode, defaultsFor(edgeMode)), overscanHeadroom)` that
+    // `source()` freezes onto every handle it hands out — deterministic in those three inputs,
+    // none of which vary per sprite or over a sheet's life, so re-reading it here is exactly
+    // "the handle's own frozen reserve" without a field added to the handle for it. `KnobError`
+    // is unreachable here (mount() above already refused whenever `reserve` is one), kept
+    // because §10.8 forbids unwrapping an `Error | T` unchecked even on a branch believed dead.
+    if (KnobError.is(reserve)) {
+      return new SheetError('paperSheet: build() could not derive the frozen overscan reserve', {
+        cause: reserve,
+      })
+    }
+    // checkReserve is a "front-class slider" guard (task 12 brief's own wording): a live
+    // `looseness` drag is field-tier, not front-tier, and is handled entirely by step 5's pass-B
+    // re-run below, never by re-deriving the margin. So every field-tier knob (`looseness`,
+    // `sdfRes`) is pinned back to this factory's default for this check alone — otherwise
+    // dragging `looseness` off its default, which step 5 exists to make cheap, would trip the
+    // very guard `overscanHeadroom` is the documented escape from.
+    const fieldTierKeys = knobDescriptors.filter((d) => d.invalidates === 'field')
+    const defaults = defaultsFor(edgeMode)
+    const marginValues: Record<string, string | number | boolean> = { ...knobValues }
+    for (const d of fieldTierKeys) marginValues[d.key] = defaults[d.key]!
+    const reserveCheck = checkReserve(reserve, edgeParamsFrom(edgeMode, marginValues))
+    if (reserveCheck !== undefined) return reserveCheck
+
+    // Step 5 (spec 6.3, engine.js's own setLooseness): pass A (the tight SDF field) depends only
+    // on the artwork and the handle-frozen geometry, never on any knob — so it is reused whenever
+    // this call is asking for exactly what the last `build()` left the shared Pool A field slots
+    // holding (same sprite, same requested size; `gl-sdf.ts`'s own `buildField`/`blurField` write
+    // into one shared slot apiece, so a different sprite or size having intervened means the slot
+    // no longer holds this sprite's tight field). Pass B (the blur) is re-run alone whenever
+    // `looseness` itself moved — never pass A — which is what makes dragging it cheap.
+    const frontLongSide = Math.max(size.w, size.h)
+    const field = dimsForLongSide(handle.sdfRes, size.w, size.h, 2)
+    const cachedField = m.lastFieldBuild
+    const tightReusable =
+      cachedField !== null &&
+      cachedField.spriteKey === handle.spriteKey &&
+      cachedField.size.w === size.w &&
+      cachedField.size.h === size.h
+
+    const artworkTexture = pools.poolA.holdArtwork(handle.spriteKey, {
+      width: handle.artwork.w,
+      height: handle.artwork.h,
+      format: 'RGBA8UI',
+      filter: 'NEAREST',
+      label: `artwork:${handle.spriteKey}`,
+    })
+    if (GlError.is(artworkTexture)) return artworkTexture
+
+    let tight: Field
+    if (tightReusable) {
+      tight = cachedField.tight
+    } else {
+      const p = handle.overscan
+      const artworkUvScale = 1 + 2 * p
+      const built = sdf.buildField({
+        artwork: artworkTexture,
+        artworkUv: [artworkUvScale, artworkUvScale, -p * artworkUvScale, -p * artworkUvScale],
+        width: field.w,
+        height: field.h,
+        sourceLongSide: frontLongSide,
+      })
+      if (GlError.is(built)) return built
+      tight = built
+    }
+
+    const looseness = numKnob(knobValues, 'looseness', 0)
+    let loose: LooseField
+    if (tightReusable && cachedField.looseness === looseness) {
+      loose = cachedField.loose
+    } else {
+      const blurred = sdf.blurField({
+        field: tight,
+        sigmaPx: sigmaFor(looseness, frontLongSide),
+        frontLongSide,
+      })
+      if (GlError.is(blurred)) return blurred
+      loose = blurred
+    }
+
+    m.lastFieldBuild = {
+      spriteKey: handle.spriteKey,
+      size: { w: size.w, h: size.h },
+      tight,
+      looseness,
+      loose,
+    }
+
+    // Step 6 (spec 6.3): a hull-tier knob (`minDist`, `maxDist`, `angularity`, `seed`) moving off
+    // the value `source()` traced the handle's hull at is `invalidates: 'hull'`, which the core
+    // resolves by calling `source()` again — `build()` never silently retraces, which would hide
+    // a cache miss the invalidation ladder exists to surface. `source()` always traces at
+    // `defaultsFor(edgeMode)` (spec 5.2 passes no per-sprite knobs to it), so that is what "the
+    // ones the handle was built at" means here. Checked after the field rebuild above (never
+    // before it, per the brief's own numbered order), even though the rebuild's own work is
+    // wasted on the error path below — each step catches its own honest precondition, in the
+    // stated sequence, rather than being reordered for a marginal saving on an error path.
+    const hullTierKeys = knobDescriptors.filter((d) => d.invalidates === 'hull')
+    const hullChanged = hullTierKeys.some((d) => knobValues[d.key] !== defaults[d.key])
+    if (hullChanged) {
+      return new SheetError(
+        'paperSheet: build() — a hull-invalidating knob (minDist/maxDist/angularity/seed) moved ' +
+          "off the value source() traced this handle's hull at (spec 6.3); call source() again",
+      )
+    }
+
+    // Step 7 (spec 8.7): RGBA8, no mipmaps, LINEAR, non-premultiplied — allocated through
+    // `ctx.texture`, never a pool: a front is resident and the core's own LRU budgets it, not
+    // this slot (spec 8.1's two pools are scratch, and a front-assembly cache would be a third).
+    const front = m.ctx.texture({
+      width: size.w,
+      height: size.h,
+      format: 'RGBA8',
+      filter: 'LINEAR',
+      label: 'paper.front',
+    })
+    if (GlError.is(front)) return front
+
+    // Step 8 (spec 8.1): there is no front-assembly FBO — render directly into the front's own
+    // texture, the very texture this call returns. The target is disposed at the end of the
+    // call; the texture is not.
+    const target = m.ctx.target(front)
+    if (GlError.is(target)) {
+      front.dispose()
+      return target
+    }
+
+    const artworkRect: Rect = {
+      x: Math.round((size.w - handle.artwork.w) / 2),
+      y: Math.round((size.h - handle.artwork.h) / 2),
+      w: handle.artwork.w,
+      h: handle.artwork.h,
+    }
+
+    const renderFailed = m.renderer.renderFront(m.tiles, {
+      target: drawTargetFor(target),
+      front: size,
+      artworkRect,
+      artwork: artworkTexture,
+      tight,
+      loose,
+      // No hull-polygon field is rasterized inside build() (out of this task's nine steps) — this
+      // reuses the already-landed `uEdgeMode = 2` path (`paper-renderer.gl.test.ts`'s own "Ruling
+      // R28"), the hull's own tight SDF field standing in for a dedicated one.
+      paperField: null,
+      edgeMode,
+      values: knobValues,
+      descriptors: knobDescriptors,
+    })
+    target.dispose()
+    if (renderFailed !== undefined) {
+      front.dispose()
+      return renderFailed
+    }
+
+    // Step 9: `rect` is `handle.frontRect` scaled from the handle's own front size to `size`.
+    // `handle.rect` — the same box in SOURCE pixels — is `handle.frontRect` scaled by
+    // `sourceLongSide / addTimeFrontLongSide` (source()'s own `sourceScale`), so scaling it the
+    // other way, by `frontLongSide / sourceLongSide`, lands in exactly this call's front space
+    // without this module needing to have kept the add-time front size around at all.
+    const sourceLongSide = Math.max(handle.srcW, handle.srcH)
+    const rect = scaleRect(handle.rect, frontLongSide / sourceLongSide)
+
+    const result: SheetFront = {
+      texture: front.handle,
+      width: size.w,
+      height: size.h,
+      rect,
+      bytes: front.bytes,
+    }
+    m.liveFronts.add(front)
+    m.frontTextures.set(result, { texture: front })
+    return result
   }
 
   function releaseFront(front: SheetFront): void {
-    void front
     if (mounted === null) return
-    // §5.2: `releaseFront` exists so the core never calls `deleteTexture` on slot memory. Until
-    // task 12 wires `frontTextures` / `liveFronts` up to a real `build()`, no front this slot
-    // returns is ever real, so there is nothing yet to release — but that is worth saying loudly
-    // rather than passing silently, since a silent no-op here would look identical to "already
-    // freed" to a caller that cannot otherwise tell.
-    console.warn(
-      'paperSheet.releaseFront: not implemented until task 12 of paper-sheet-renderer — no ' +
-        'front from this build of paperSheet() is releasing anything',
-    )
+    // §5.2: `releaseFront` exists so the core never calls `deleteTexture` on slot memory. A
+    // no-op for a front this slot does not know — the core may call it twice (§4.6's teardown
+    // order makes that likely), and a `WeakMap` lookup that already came up empty stays empty.
+    const entry = mounted.frontTextures.get(front)
+    if (entry === undefined) return
+    mounted.frontTextures.delete(front)
+    mounted.liveFronts.delete(entry.texture)
+    entry.texture.dispose()
   }
 
   function release(handle: PaperSheetHandle): void {
-    void handle
     if (mounted === null) return
-    console.warn(
-      'paperSheet.release: not implemented until task 12 of paper-sheet-renderer — no handle ' +
-        'from this build of paperSheet() is releasing anything',
-    )
+    handle.alive = false
+    mounted.cache.invalidate(handle.spriteKey)
+    if (mounted.pools !== null && mounted.pools.poolA.artworkKey() === handle.spriteKey) {
+      // The literal slot name `'artwork'` is `ArtworkPool.holdArtwork`'s own internal convention
+      // — not exported as a constant, but exercised directly by core's own suite
+      // (`gl-pools.test.ts`'s `pools.poolA.release('artwork')`), so it is a stable part of the
+      // contract rather than a private implementation detail this module is reaching past.
+      mounted.pools.poolA.release('artwork')
+    }
   }
 
   function dispose(): void {

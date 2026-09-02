@@ -1,6 +1,11 @@
-import { afterEach, describe, expect, it } from 'vitest'
-import { ABORTED, GlError, SheetError, isAborted } from '@paper-crumple/core'
-import { checkGuardBand, KNOB_REFERENCE_PX, overscanRadius } from '@paper-crumple/core/unstable'
+import { afterEach, describe, expect, it, vi } from 'vitest'
+import { ABORTED, GlError, SheetError, SourceExpiredError, isAborted } from '@paper-crumple/core'
+import {
+  checkGuardBand,
+  frontBytes,
+  KNOB_REFERENCE_PX,
+  overscanRadius,
+} from '@paper-crumple/core/unstable'
 import type { GlContext } from '@paper-crumple/core/unstable'
 import { createGlFixture, type PaperGlFixture } from './testing/gl-fixture.js'
 import { defaultsFor, edgeParamsFrom } from './paper-knobs.js'
@@ -280,6 +285,202 @@ describe('the guard band, relocated onto the hull (spec 8.6, 8.3)', () => {
     const handle = await sheet.source(bitmap, { maxSize: 128, exact: false })
     bitmap.close()
     expect(handle instanceof Error).toBe(false)
+    sheet.dispose()
+  })
+})
+
+/**
+ * A more compactly-inset ellipse than the shared `sprite()` above (semi-axis a quarter of each
+ * dimension, not a third): `torn` mode's own default margin — thickness, tear amplitude, mid
+ * amplitude and the looseness-driven blur sigma all folded into one reference-px radius (spec
+ * 8.6) — needs more silhouette headroom than `hull`'s single `maxDist` term does. `sprite()`'s
+ * own 1/3 ratio is well clear of the guard band for every `hull`-mode test above (spec 8.6's own
+ * "hull ~= 0.09"), but is not for `torn` (~= 0.17-0.21), independent of `maxSize` (the guard
+ * band's own fraction of the front is scale-invariant: both the reference-px margin and the
+ * field resolution scale together). A local, more conservative shape is the fix, not a bigger
+ * `maxSize`.
+ */
+async function compactSprite(w = 64, h = 64): Promise<ImageBitmap> {
+  const data = new Uint8ClampedArray(w * h * 4)
+  for (let y = 0; y < h; y++) {
+    for (let x = 0; x < w; x++) {
+      const inside = ((x - w / 2) / (w / 4)) ** 2 + ((y - h / 2) / (h / 4)) ** 2 <= 1
+      const p = (y * w + x) * 4
+      data[p] = 200
+      data[p + 1] = 120
+      data[p + 2] = 60
+      data[p + 3] = inside ? 255 : 0
+    }
+  }
+  const canvas = new OffscreenCanvas(w, h)
+  canvas.getContext('2d')!.putImageData(new ImageData(data, w, h), 0, 0)
+  return createImageBitmap(canvas, { premultiplyAlpha: 'none', colorSpaceConversion: 'none' })
+}
+
+describe('build() (spec 5.2, 8.1, 8.5, 8.7)', () => {
+  async function mounted() {
+    const ctx = open()
+    const sheet = paperSheet()
+    sheet.mount(ctx)
+    const bitmap = await sprite()
+    const handle = await sheet.source(bitmap, { maxSize: 128, exact: false })
+    bitmap.close()
+    // `expect` first — a failure here aborts the test with a message, rather than a `throw` this
+    // package's own lint rule bans; the `if` right after, repeating the same condition, is what
+    // narrows `handle`'s type for the type checker (a boolean stored in between would not).
+    expect(GlError.is(handle) || SheetError.is(handle) || isAborted(handle)).toBe(false)
+    if (GlError.is(handle) || SheetError.is(handle) || isAborted(handle)) return undefined
+    return { ctx, sheet, handle }
+  }
+
+  it('returns a front whose bytes are its own accounting, not w x h x 4 inferred', async () => {
+    const m = await mounted()
+    expect(m).toBeDefined()
+    if (m === undefined) return
+    const { sheet, handle } = m
+    const size = { w: 128, h: 128 }
+    const front = sheet.build(handle, size, defaultsFor('hull') as never)
+    expect(front instanceof Error, (front as Error).message).toBe(false)
+    if (front instanceof Error) return
+    expect(front.width).toBe(128)
+    expect(front.bytes).toBe(frontBytes(size))
+    expect(front.rect.w).toBeGreaterThan(0)
+    sheet.releaseFront(front)
+    sheet.dispose()
+  })
+
+  it('renders into the texture it returns, with no assembly FBO', async () => {
+    const m = await mounted()
+    expect(m).toBeDefined()
+    if (m === undefined) return
+    const { ctx, sheet, handle } = m
+    const front = sheet.build(handle, { w: 128, h: 128 }, defaultsFor('hull') as never)
+    expect(front instanceof Error, (front as Error).message).toBe(false)
+    if (front instanceof Error) return
+    // The returned texture is drawable: reading it back through a fresh target shows the paper.
+    // `READ_FRAMEBUFFER` is bound explicitly — `DrawScope.bindTarget` only ever binds
+    // `DRAW_FRAMEBUFFER`, so a caller that skipped this would silently read the canvas backbuffer.
+    const probe = ctx.gl.createFramebuffer()
+    const out = new Uint8Array(4)
+    ctx.scope(() => {
+      ctx.gl.bindFramebuffer(ctx.gl.READ_FRAMEBUFFER, probe)
+      ctx.gl.framebufferTexture2D(
+        ctx.gl.READ_FRAMEBUFFER,
+        ctx.gl.COLOR_ATTACHMENT0,
+        ctx.gl.TEXTURE_2D,
+        front.texture,
+        0,
+      )
+      ctx.gl.readPixels(64, 64, 1, 1, ctx.gl.RGBA, ctx.gl.UNSIGNED_BYTE, out)
+      ctx.gl.bindFramebuffer(ctx.gl.READ_FRAMEBUFFER, null)
+    })
+    ctx.gl.deleteFramebuffer(probe)
+    expect(out[3]).toBeGreaterThan(0)
+    sheet.releaseFront(front)
+    sheet.dispose()
+  })
+
+  it('returns SourceExpiredError once another sprite has taken the artwork slot', async () => {
+    const m = await mounted()
+    expect(m).toBeDefined()
+    if (m === undefined) return
+    const { sheet, handle } = m
+    const other = await sprite(40, 40)
+    const second = await sheet.source(other, { maxSize: 128, exact: false })
+    other.close()
+    const bad = GlError.is(second) || SheetError.is(second) || isAborted(second)
+    expect(bad, 'source() must succeed for this fixture').toBe(false)
+    if (bad) return
+    const front = sheet.build(handle, { w: 128, h: 128 }, defaultsFor('hull') as never)
+    expect(SourceExpiredError.is(front)).toBe(true)
+    sheet.dispose()
+  })
+
+  it('names "re-add required" when a knob moves past the frozen reserve (spec 8.6)', async () => {
+    const m = await mounted()
+    expect(m).toBeDefined()
+    if (m === undefined) return
+    const { sheet, handle } = m
+    const past = { ...defaultsFor('hull'), maxDist: 140 }
+    const front = sheet.build(handle, { w: 128, h: 128 }, past as never)
+    expect(SheetError.is(front)).toBe(true)
+    expect((front as Error).message).toContain('re-add required')
+    sheet.dispose()
+  })
+
+  it('is a SheetError, never a throw, to build a released handle', async () => {
+    const m = await mounted()
+    expect(m).toBeDefined()
+    if (m === undefined) return
+    const { sheet, handle } = m
+    sheet.release(handle)
+    const front = sheet.build(handle, { w: 128, h: 128 }, defaultsFor('hull') as never)
+    expect(SheetError.is(front)).toBe(true)
+    sheet.dispose()
+  })
+
+  it('lets releaseFront run twice, because teardown order makes that likely', async () => {
+    const m = await mounted()
+    expect(m).toBeDefined()
+    if (m === undefined) return
+    const { sheet, handle } = m
+    const front = sheet.build(handle, { w: 128, h: 128 }, defaultsFor('hull') as never)
+    expect(front instanceof Error, (front as Error).message).toBe(false)
+    if (front instanceof Error) return
+    sheet.releaseFront(front)
+    expect(() => sheet.releaseFront(front)).not.toThrow()
+    sheet.dispose()
+  })
+
+  // The claim under test is "pass A did not run the second time" — asserting only that the
+  // output changed, or that some field's identity stayed stable, would not prove it: a
+  // regression that rebuilt the whole field (pass A + pass B) would still pass a weaker check.
+  // `gl.drawArrays` is the real observable: `buildField` (pass A) issues `2 * (schedule.length +
+  // 1) + 1` draws (`gl-sdf.ts`'s own `Field.passes`, comfortably into double digits at this
+  // field size), while `blurField` (pass B) issues exactly two (a horizontal half and a vertical
+  // half) and `renderFront` issues exactly one more. So a second `build()` call that reused pass
+  // A must draw at most a handful of times, and one that silently re-ran it cannot.
+  it('re-runs pass B alone when only looseness moved', async () => {
+    const ctx = open()
+    const sheet = paperSheet({ edgeMode: 'torn' })
+    sheet.mount(ctx)
+    const bitmap = await compactSprite()
+    const handle = await sheet.source(bitmap, { maxSize: 128, exact: false })
+    bitmap.close()
+    expect(
+      GlError.is(handle) || SheetError.is(handle) || isAborted(handle),
+      String((handle as Error)?.message),
+    ).toBe(false)
+    if (GlError.is(handle) || SheetError.is(handle) || isAborted(handle)) return
+
+    const drawArrays = vi.spyOn(ctx.gl, 'drawArrays')
+
+    drawArrays.mockClear()
+    const a = sheet.build(handle, { w: 128, h: 128 }, defaultsFor('torn') as never)
+    const firstDraws = drawArrays.mock.calls.length
+
+    drawArrays.mockClear()
+    const b = sheet.build(handle, { w: 128, h: 128 }, {
+      ...defaultsFor('torn'),
+      looseness: 0.9,
+    } as never)
+    const secondDraws = drawArrays.mock.calls.length
+
+    drawArrays.mockRestore()
+
+    expect(a instanceof Error || b instanceof Error).toBe(false)
+    if (a instanceof Error || b instanceof Error) return
+
+    // Pass A ran cold on the first build (its own many-pass JFA schedule, plus pass B's two
+    // draws, plus renderFront's one) — comfortably into double digits.
+    expect(firstDraws).toBeGreaterThan(10)
+    // The second build only moved `looseness`: pass B's two draws plus renderFront's one, and
+    // nothing from pass A — a regression that reran the jump flood would land back near
+    // `firstDraws`, which this bound catches.
+    expect(secondDraws).toBe(3)
+
+    sheet.releaseFront(a)
+    sheet.releaseFront(b)
     sheet.dispose()
   })
 })
