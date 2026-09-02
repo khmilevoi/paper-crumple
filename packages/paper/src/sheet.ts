@@ -297,7 +297,7 @@ function mapRectAffine(
  * inverting the exact `artworkUv` affine map rather than a uniform long-side scale (fix round 1,
  * finding 3). See the call site's own comment for why front-space uv and source-space uv are
  * related by the identical `scale`/`offset` pair `artworkUv` already uses between field space and
- * artwork space: `sourceUv = frontUv*(1+2p) - p*(1+2p)`.
+ * artwork space: `sourceUv = frontUv*(1+2p) - p`.
  */
 function frontRectToSourceRect(
   frontRect: Rect,
@@ -307,15 +307,15 @@ function frontRectToSourceRect(
   p: number,
 ): Rect {
   const scale = 1 + 2 * p
-  return mapRectAffine(frontRect, front, { w: srcW, h: srcH }, scale, -p * scale)
+  return mapRectAffine(frontRect, front, { w: srcW, h: srcH }, scale, -p)
 }
 
 /**
  * The exact inverse of `frontRectToSourceRect`: `rect` (source pixels, fixed at add-time) to a
  * front-pixel rect at `front` — whatever dims THIS `build()` call actually requested, which need
- * not match the front `source()` traced the handle at. Algebra: `sourceUv = frontUv*scale -
- * p*scale` (the forward map) solves to `frontUv = sourceUv/scale + p`, i.e. the same affine form
- * with `scale' = 1/scale`, `offset' = p` — so this is `mapRectAffine` with that pair, not a
+ * not match the front `source()` traced the handle at. Algebra: `sourceUv = frontUv*scale - p`
+ * (the forward map) solves to `frontUv = sourceUv/scale + p/scale`, i.e. the same affine form
+ * with `scale' = 1/scale`, `offset' = p/scale` — so this is `mapRectAffine` with that pair, not a
  * second, independently-written conversion (fix round 2). `p` is `handle.overscan`, frozen at
  * add-time and independent of the size requested here, so the mapping is well-defined for any
  * `size` a caller passes to `build()`.
@@ -333,7 +333,7 @@ function sourceRectToFrontRect(
   p: number,
 ): Rect {
   const scale = 1 + 2 * p
-  return mapRectAffine(sourceRect, { w: srcW, h: srcH }, front, 1 / scale, p)
+  return mapRectAffine(sourceRect, { w: srcW, h: srcH }, front, 1 / scale, p / scale)
 }
 
 /**
@@ -445,11 +445,12 @@ function readBackField(ctx: GlContext, field: Field, texelPx: number): Float32Ar
  * flip rows (fix round 1, finding 1 — see below for why not, with the measurement to back it):**
  *
  * 1. *Margin.* `buildField`'s seed pass (`gl-sdf.ts`'s `SEED_FS`) reads the artwork through
- *    `artworkUv = fieldUv * (1+2p) - p*(1+2p)`, so the artwork occupies a *sub-rectangle* of the
+ *    `artworkUv = fieldUv * (1+2p) - p`, so the artwork occupies a *sub-rectangle* of the
  *    field inset by the overscan margin `p`, not the whole field. `drawImage`'s 5-argument form
  *    reproduces exactly that sub-rectangle: solving `artworkUv(fieldUv) = 0` and `= 1` for
- *    `fieldUv` gives the artwork's own span in field pixels, `[p * dim, p * dim + dim / (1+2p)]` on
- *    each axis — which is exactly `{ dx, dy, dWidth, dHeight }` below. The canvas starts fully
+ *    `fieldUv` gives the artwork's own span in field pixels,
+ *    `[p * dim / (1+2p), (p + 1) * dim / (1+2p)]` on each axis — a rectangle of `dim / (1+2p)`
+ *    centred in the field, which is exactly `{ dx, dy, dWidth, dHeight }` below. The canvas starts fully
  *    transparent, so the untouched margin reads alpha 0 — "outside" — matching the seed pass's own
  *    `inRange` guard, which never samples the artwork there either. The original report's
  *    departure 2 named exactly this gap; this is what closes it.
@@ -490,14 +491,16 @@ function cpuFieldFallback(
     return new GlError('paperSheet: source() CPU-field fallback 2D context unavailable')
   }
 
-  // The same artworkUv scale `buildField`'s seed pass applies (`gl-sdf.ts:80`, "Departure 2" in
-  // that file's own header comment) — the artwork spans `[p, p + 1/scale]` of each axis, not
-  // `[0, 1]`.
+  // The same artworkUv map `buildField`'s seed pass applies (`gl-sdf.ts:80`, "Departure 2" in
+  // that file's own header comment) — the artwork spans `[p/scale, (p+1)/scale]` of each axis, not
+  // `[0, 1]`. `p` is a fraction of the ARTWORK (`p = r / (1000 - 2r)`, `front = artwork * scale`),
+  // so the margin is `p * artwork`, i.e. `p / scale` of the field — dividing by `scale` here is
+  // what keeps the artwork centred and the two margins equal.
   const scale = 1 + 2 * p
   const dWidth = w / scale
   const dHeight = h / scale
-  const dx = p * w
-  const dy = p * h
+  const dx = (p * w) / scale
+  const dy = (p * h) / scale
 
   const drawn = attempt(
     () => c2d.drawImage(bitmap, dx, dy, dWidth, dHeight),
@@ -827,7 +830,7 @@ export function paperSheet(options?: PaperSheetOptions): PaperSheet {
     const artworkUvScale = 1 + 2 * p
     const tight = sdf.buildField({
       artwork: artworkTexture,
-      artworkUv: [artworkUvScale, artworkUvScale, -p * artworkUvScale, -p * artworkUvScale],
+      artworkUv: [artworkUvScale, artworkUvScale, -p, -p],
       width: field.w,
       height: field.h,
       sourceLongSide: frontLongSide,
@@ -956,7 +959,7 @@ export function paperSheet(options?: PaperSheetOptions): PaperSheet {
     // artwork space and source space are related the same way (the resample step maps the FULL
     // source 1:1 onto the FULL artwork — see `srcRect` above — no crop, no offset). So front-uv and
     // source-uv are related by the identical affine map `artworkUv` already uses,
-    // `sourceUv = frontUv * (1+2p) - p*(1+2p)`, applied once here rather than assumed away.
+    // `sourceUv = frontUv * (1+2p) - p`, applied once here rather than assumed away.
     const rect = frontRectToSourceRect(frontRect, front, srcW, srcH, p)
 
     const handle: PaperSheetHandle = {
@@ -1084,7 +1087,7 @@ export function paperSheet(options?: PaperSheetOptions): PaperSheet {
       const artworkUvScale = 1 + 2 * p
       const built = sdf.buildField({
         artwork: artworkTexture,
-        artworkUv: [artworkUvScale, artworkUvScale, -p * artworkUvScale, -p * artworkUvScale],
+        artworkUv: [artworkUvScale, artworkUvScale, -p, -p],
         width: field.w,
         height: field.h,
         sourceLongSide: frontLongSide,

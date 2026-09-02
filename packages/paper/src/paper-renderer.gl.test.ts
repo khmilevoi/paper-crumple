@@ -99,7 +99,7 @@ function scene() {
   const scale = FRONT.w / ARTWORK.w
   const tight = builder.buildField({
     artwork,
-    artworkUv: [scale, scale, -p * scale, -p * scale],
+    artworkUv: [scale, scale, -p, -p],
     width: FIELD,
     height: FIELD,
     sourceLongSide: FRONT.w,

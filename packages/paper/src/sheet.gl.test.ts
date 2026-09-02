@@ -669,9 +669,9 @@ describe("task 12 fix round 2 (build()'s rect conversion)", () => {
     const p = handle.overscan
     expect(p).toBeGreaterThan(0.15) // torn's own headline figure (~0.19-0.22); a real margin to invert
     const scale = 1 + 2 * p
-    // The exact inverse of `frontRectToSourceRect`'s own `sourceUv = frontUv*scale - p*scale`:
-    // `frontUv = sourceUv/scale + p`.
-    const toFront = (uSource: number, frontDim: number) => (uSource / scale + p) * frontDim
+    // The exact inverse of `frontRectToSourceRect`'s own `sourceUv = frontUv*scale - p`:
+    // `frontUv = sourceUv/scale + p/scale`.
+    const toFront = (uSource: number, frontDim: number) => (uSource / scale + p / scale) * frontDim
 
     const expectedX0 = toFront(handle.rect.x / srcW, size.w)
     const expectedY0 = toFront(handle.rect.y / srcH, size.h)
@@ -869,7 +869,7 @@ describe('fix round 1 — the CPU-fallback field (findings 1, 2, 3, 4)', () => {
     const p = handle.overscan
     expect(p).toBeGreaterThan(0.15) // torn's own headline figure (~0.19-0.22); a real margin to invert
     const scale = 1 + 2 * p
-    const toSource = (uFront: number, srcDim: number) => (uFront * scale - p * scale) * srcDim
+    const toSource = (uFront: number, srcDim: number) => (uFront * scale - p) * srcDim
 
     const expectedX0 = toSource(handle.frontRect.x / front.w, srcW)
     const expectedY0 = toSource(handle.frontRect.y / front.h, srcH)
