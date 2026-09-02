@@ -142,6 +142,20 @@ describe('holes and components survive into the built front (§8.2, §11)', () =
     // A is centred in the front (§7.4.3); every probe below is expressed in the fixture's own
     // (unpadded) coordinates, shifted by PAD to land on the actual painted geometry, and offset
     // into front coordinates once, so the numbers stay readable against the file header's diagram.
+    //
+    // ax/ay come out NEGATIVE here, and that is load-bearing — do not "fix" it by shrinking the
+    // build size to match the artwork, or by assuming ax >= 0. Under `exact: true`, source() sets
+    // `aLongSide = sourceLongSide` unconditionally (sheet.ts:767-773) — maxSize is never consulted
+    // for artwork sizing — so on this padded 160x160 fixture `handle.artwork` is 160x160, while the
+    // front built below is only 128x128, i.e. smaller than its own artwork. That gives
+    // `ax = round((128 - 160) / 2) = -16`, and the clip this implies is real: build() places
+    // `artworkRect` with the identical `Math.round((size - artwork) / 2)` formula (sheet.ts:1157-
+    // 1161), so the artwork overflows the front by 16px on every edge inside it. It is harmless
+    // only because the painted content sits at bitmap x/y in [40,120), strictly inside the visible
+    // artwork window (artwork-local [16,144) on each axis) — only transparent margin gets clipped.
+    // And because `at()` below reapplies this same `ax`/`ay` that build() itself used, the negative
+    // offset cancels out of every probe: `at(x, y)` reads front pixel (16 + x, 16 + y), which stays
+    // inside [0,128) for all five probes here.
     const ax = Math.round((front.width - handle.artwork.w) / 2)
     const ay = Math.round((front.height - handle.artwork.h) / 2)
     const at = (x: number, y: number) => readTexel(ctx, front.texture, ax + PAD + x, ay + PAD + y)
