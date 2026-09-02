@@ -93,8 +93,13 @@ export function createPackStore(o: PackStoreOptions): PackStore {
             `'@paper-crumple/motion/packs/${bucket}' and pass it to bakedMotion({ packs }).`,
         )
       }
+      // A function-call boundary, so TypeScript cannot carry a `false` narrowing from one call
+      // to the next across the `await` below — `AbortSignal.aborted` is a mutable property that
+      // can flip while the fetch is in flight, which check point two exists to catch.
+      const aborted = (): boolean => opts?.signal?.aborted === true
+
       // Check point one. Nothing is spent on a caller that has already gone away.
-      if (opts?.signal?.aborted === true) return ABORTED
+      if (aborted()) return ABORTED
 
       const resident = packs.get(bucket)
       const result = resident ?? (await fetchOnce(bucket, module))
@@ -103,7 +108,7 @@ export function createPackStore(o: PackStoreOptions): PackStore {
       // Check point two. The fetch was never cancelled and the pack stays resident — "stop
       // spending, keep what is already paid for" — but this caller takes no reference, because
       // it receives nothing it could later release.
-      if (opts?.signal?.aborted === true) return ABORTED
+      if (aborted()) return ABORTED
 
       // Only take a reference if the pack is actually in the store. If the store was disposed
       // while the fetch was in flight, the pack was not stored, so no reference is needed.

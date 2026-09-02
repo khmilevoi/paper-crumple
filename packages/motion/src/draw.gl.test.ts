@@ -1,8 +1,9 @@
 import { GlError } from '@paper-crumple/core'
-import type { DrawTarget, SheetFront } from '@paper-crumple/core'
+import type { DrawTarget, MotionKnobs, SheetFront } from '@paper-crumple/core'
 import { afterEach, describe, expect, it } from 'vitest'
 
 import { MOTION_KNOBS } from './knobs.js'
+import type { MotionLookKnobs } from './knobs.js'
 import pack2x3 from './packs/2x3.js'
 import { bakedMotion, type BakedClip, type BakedFit } from './source.js'
 import { createGlFixture, type GlFixture } from './testing/gl-fixture.js'
@@ -41,7 +42,7 @@ const KNOBS = {
   ...Object.fromEntries(MOTION_KNOBS.map((k) => [k.key, k.default])),
   paperColor: '#f7f4ed',
   paperBack: '#e8e2d4',
-} as never
+} as unknown as Readonly<MotionKnobs<MotionLookKnobs>>
 
 function target(gl: WebGL2RenderingContext): DrawTarget {
   const box = { x: 0, y: 0, w: gl.drawingBufferWidth, h: gl.drawingBufferHeight }
