@@ -73,6 +73,68 @@ main {
   padding: 0.75rem;
   font-family: var(--mono);
   font-size: 0.85rem;
+  display: flex;
+  flex-direction: column;
+  gap: 0.75rem;
+}
+
+.inspector-section h3,
+.inspector-section h4 {
+  margin: 0 0 0.35rem;
+  font-size: 0.85rem;
+  color: var(--fg);
+}
+
+.inspector-facts,
+.inspector-usage {
+  display: grid;
+  grid-template-columns: max-content 1fr;
+  gap: 0.15rem 0.75rem;
+  margin: 0;
+}
+
+.inspector-facts dt,
+.inspector-usage dt {
+  color: var(--fg-dim);
+}
+
+.inspector-facts dd,
+.inspector-usage dd {
+  margin: 0;
+}
+
+.inspector-warnings,
+.inspector-channel ul {
+  margin: 0;
+  padding-left: 1.1rem;
+  color: var(--fg-dim);
+}
+
+.inspector-events {
+  max-height: 180px;
+  overflow-y: auto;
+  margin: 0;
+  padding: 0.5rem;
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  white-space: pre-wrap;
+  font-size: 0.78rem;
+}
+
+.inspector-note {
+  color: var(--fg-dim);
+  margin: 0 0 0.5rem;
+}
+
+.inspector-channels {
+  display: flex;
+  gap: 1rem;
+}
+
+.inspector-channel {
+  flex: 1;
+  min-width: 0;
 }
 
 #transport {

@@ -7,6 +7,7 @@ import { createPanel } from './panel'
 import type { SetTarget } from './panel'
 import { createConfigPanel } from './config-panel'
 import { createTransport } from './transport'
+import { createInspector } from './inspector'
 
 const line = document.getElementById('version-line')
 const knobCount = document.getElementById('knob-count')
@@ -28,10 +29,7 @@ let currentConfig: DemoConfig = DEFAULT_CONFIG
 
 const sample = SAMPLES.find((s) => s.id === DEFAULT_SAMPLE_ID)
 
-function onError(e: pc.StageEvent<'error'>): void {
-  // Task 7 replaces this with the inspector panel; for now the error surface is the console.
-  console.warn('playground: stage error', e)
-}
+const inspector = createInspector()
 
 /**
  * The one piece of routing this demo has to get right (§6.6): `stage.set` and `sprite.set` take
@@ -49,15 +47,35 @@ function onSet(
   value: string | number | boolean,
   target: SetTarget,
 ): Error | undefined {
-  if (live === null) return new Error('playground: no stage is built yet')
-  const patch = { [key]: value }
-  if (target === 'stage') return live.built.stage.set(patch as never)
-  if (target === 'sprite') {
-    if (live.sprite === null) return new Error('playground: no sprite is mounted yet')
-    return live.sprite.set(patch as never)
+  if (live === null) {
+    const err = new Error('playground: no stage is built yet')
+    inspector.observed('onSet', err)
+    return err
   }
-  if (live.view === null) return new Error('playground: no view is mounted yet')
-  return live.view.set(patch as never)
+  const patch = { [key]: value }
+  if (target === 'stage') {
+    const result = live.built.stage.set(patch as never)
+    if (result instanceof Error) inspector.observed('stage.set', result)
+    return result
+  }
+  if (target === 'sprite') {
+    if (live.sprite === null) {
+      const err = new Error('playground: no sprite is mounted yet')
+      inspector.observed('onSet(sprite)', err)
+      return err
+    }
+    const result = live.sprite.set(patch as never)
+    if (result instanceof Error) inspector.observed('sprite.set', result)
+    return result
+  }
+  if (live.view === null) {
+    const err = new Error('playground: no view is mounted yet')
+    inspector.observed('onSet(view)', err)
+    return err
+  }
+  const result = live.view.set(patch as never)
+  if (result instanceof Error) inspector.observed('view.set', result)
+  return result
 }
 
 /**
@@ -94,6 +112,7 @@ function report(text: string): void {
   if (line) line.textContent = text
   configPanel.setStatus(text)
   transport.setStatus(text)
+  inspector.line(text)
 }
 
 async function rebuild(next: DemoConfig): Promise<void> {
@@ -109,12 +128,15 @@ async function rebuild(next: DemoConfig): Promise<void> {
     return
   }
 
-  const built = await buildStage(next, onError, controller.signal)
+  const built = await buildStage(next, inspector.fromChannel, controller.signal)
   if (built === pc.ABORTED) return
   if (built instanceof Error) {
+    inspector.observed('buildStage', built)
     report(`playground: stage build failed: ${built.message}`)
     return
   }
+
+  inspector.attach(built, next.budgetMb * 1024 * 1024)
 
   // `direct` mode's surface must be sized to its final layout — the hero's rect and all six tile
   // rects — before any view is created: a view's rect is resolved once, at `stage.view()`, and
@@ -128,6 +150,7 @@ async function rebuild(next: DemoConfig): Promise<void> {
     const layout = planDirectLayout(built.stage.surface.width, SAMPLES.length)
     const resized = built.stage.resize(layout.surfaceW, layout.surfaceH)
     if (resized instanceof Error) {
+      inspector.observed('stage.resize', resized)
       built.stage.dispose()
       report(`playground: direct surface layout failed: ${resized.message}`)
       return
@@ -143,6 +166,7 @@ async function rebuild(next: DemoConfig): Promise<void> {
     return
   }
   if (mounted instanceof Error) {
+    inspector.observed('mountHero', mounted)
     built.stage.dispose()
     report(`playground: hero mount failed: ${mounted.message}`)
     return
@@ -155,13 +179,16 @@ async function rebuild(next: DemoConfig): Promise<void> {
     built.stage.dispose()
     return
   }
-  for (const f of grid.failures) console.warn('playground: grid mount failure', f)
+  for (const f of grid.failures) inspector.observed('mountGrid', f)
   gridViews = grid.views
 
   currentConfig = next
   live = { built, view: mounted.view, sprite: mounted.sprite }
   panel.rebuild(built, mounted.view, mounted.sprite)
   transport.bind(built, mounted.view, gridViews)
+  // The hero view now exists on `built.stage.views` — refresh once more so Usage's idealSize /
+  // state / pose describe it rather than the pre-mount snapshot `attach` above took.
+  inspector.refreshUsage()
 
   configPanel.setStatus(
     `rebuilt in ${built.buildMs.toFixed(1)} ms · ${built.stage.warnings.length} warnings · ` +
@@ -184,6 +211,7 @@ async function boot(): Promise<void> {
   // give two `GlError` classes, and `instanceof` then narrows an Error as a success value.
   const dup = pc.assertSingleCore()
   if (dup instanceof Error) {
+    inspector.observed('assertSingleCore', dup)
     if (line) line.textContent = `core duplicated: ${dup.message}`
     return
   }
