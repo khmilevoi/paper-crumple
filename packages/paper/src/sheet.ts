@@ -713,6 +713,16 @@ export function paperSheet(options?: PaperSheetOptions): PaperSheet {
     return undefined
   }
 
+  // A function, not the inlined `o.signal?.aborted === true` it wraps: `aborted` can flip between
+  // any two of `source()`'s three check points (an abort mid-trace is the entire reason there are
+  // three, not one), but TS's CFA does not know that — having seen one `=== true` check rule the
+  // property out, it treats a second textually-identical check on the same reference as
+  // unreachable. A fresh call each time is a fresh expression, so nothing narrows across calls
+  // (same idiom as `core/runner.ts`'s own `signalAborted`).
+  function signalAborted(signal: AbortSignal | undefined): boolean {
+    return signal !== undefined && signal.aborted
+  }
+
   async function source(
     bitmap: ImageBitmap,
     o: SourceOptions,
@@ -723,7 +733,7 @@ export function paperSheet(options?: PaperSheetOptions): PaperSheet {
     const m = mounted
 
     // Abort check point 1 (§10.5): on entry, before any GPU work is spent.
-    if (o.signal?.aborted === true) return ABORTED
+    if (signalAborted(o.signal)) return ABORTED
 
     // §5.2 passes no per-sprite knob values to source(); the hull-trace-relevant work here runs
     // at this factory's default values, exactly as the factory-level `overscan` above does.
@@ -857,7 +867,7 @@ export function paperSheet(options?: PaperSheetOptions): PaperSheet {
     // interruptible step. The `await` is what makes this point (and the third one, below)
     // observable from outside a synchronous call: without it nothing here would ever yield.
     await Promise.resolve()
-    if (o.signal?.aborted === true) return ABORTED
+    if (signalAborted(o.signal)) return ABORTED
 
     // Step 9: the CPU signed field for the hull trace, then buildHull, then the rect, then the
     // guard-band check.
@@ -903,7 +913,7 @@ export function paperSheet(options?: PaperSheetOptions): PaperSheet {
     // unconditionally (cache hit or fresh trace) — a cache hit already "landed" trivially, so
     // there is nothing more to keep either way.
     afterHullForTest?.()
-    if (o.signal?.aborted === true) return ABORTED
+    if (signalAborted(o.signal)) return ABORTED
 
     // The rect (§8.3, no source-sized readback): hull/both take it from the polygon's own
     // extent; torn (and any use-alpha hull) take it from the silhouette's own box, grown by the

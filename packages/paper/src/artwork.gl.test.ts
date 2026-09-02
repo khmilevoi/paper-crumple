@@ -18,8 +18,15 @@ afterEach(() => {
 
 const SRC = { w: 24, h: 16 }
 
-/** A deterministic non-trivial source: a gradient with a hard alpha edge. */
-function sourceBytes(): Uint8ClampedArray {
+/**
+ * A deterministic non-trivial source: a gradient with a hard alpha edge.
+ *
+ * Typed as `Uint8ClampedArray<ArrayBuffer>`, not the bare (TS 5.7+ default) `Uint8ClampedArray`:
+ * `new Uint8ClampedArray(n)` always backs onto a fresh, non-shared `ArrayBuffer`, so this is the
+ * accurate generic parameter, not a widening — `ImageData`'s constructor below requires exactly
+ * this (its `ImageDataArray` excludes `SharedArrayBuffer`-backed views).
+ */
+function sourceBytes(): Uint8ClampedArray<ArrayBuffer> {
   const out = new Uint8ClampedArray(SRC.w * SRC.h * 4)
   for (let y = 0; y < SRC.h; y++) {
     for (let x = 0; x < SRC.w; x++) {

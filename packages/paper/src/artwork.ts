@@ -216,7 +216,11 @@ export function createResampler(ctx: GlContext): Err | Resampler {
     return target
   }
 
-  function resample(o: ResampleOptions): Err | ArtworkSlot {
+  // A `const` arrow, not a hoisted `function` declaration: `byteFetch`/`resampleProgram` are
+  // narrowed to `Program` above by the early-return `GlError.is()` checks, but that narrowing does
+  // not survive into a nested `function` declaration's body (see `gl-sdf.ts`'s `buildField` for
+  // the same fix, with the fuller explanation). A `const` arrow has no such hoisting hazard.
+  const resample = (o: ResampleOptions): Err | ArtworkSlot => {
     const { spriteKey, bitmap, srcRect, artwork, poolA, poolB } = o
     const { gl } = ctx
 

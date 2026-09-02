@@ -1,5 +1,6 @@
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { GlError } from '@paper-crumple/core'
+import type { DrawTarget } from '@paper-crumple/core'
 import { createScratchPools, drawTargetFor, poolABytes } from '@paper-crumple/core/unstable'
 import type { ScratchPools } from '@paper-crumple/core/unstable'
 import { createGlFixture, type PaperGlFixture } from './testing/gl-fixture.js'
@@ -51,12 +52,18 @@ function disc(w: number, h: number, r: number): Uint8Array {
  */
 function readDistance(
   ctx: PaperGlFixture['ctx'],
-  target: { readonly framebuffer: WebGLFramebuffer },
+  target: DrawTarget,
   bits: 'R16F' | 'RGBA8',
   decode: readonly [number, number],
   x: number,
   y: number,
 ): number {
+  // `DrawTarget.framebuffer` is `null` only for the stage's own output (core's own doc comment on
+  // the interface) — every call site below passes `drawTargetFor()` of an offscreen Pool A/B
+  // `Target`, which always wraps a real framebuffer, so `null` here would be a genuine test bug,
+  // not a case this helper is meant to carry silently.
+  expect(target.framebuffer, 'readDistance: target has no framebuffer').not.toBeNull()
+  if (target.framebuffer === null) return NaN
   const px = new Uint8Array(4)
   const fl = new Float32Array(4)
   ctx.scope(() => {

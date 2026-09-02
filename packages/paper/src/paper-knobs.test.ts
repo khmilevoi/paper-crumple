@@ -49,7 +49,13 @@ describe('the descriptor split (spec 6.7)', () => {
   })
 
   it('binds nothing, because grain is ambiguous and not shared (spec 6.2)', () => {
-    const all = [...COMMON_KNOBS, ...HULL_KNOBS, ...TORN_KNOBS, SDF_RES_KNOB]
+    // Widened to `KnobDescriptor[]` explicitly — see the same annotation's comment further below.
+    const all: readonly KnobDescriptor[] = [
+      ...COMMON_KNOBS,
+      ...HULL_KNOBS,
+      ...TORN_KNOBS,
+      SDF_RES_KNOB,
+    ]
     expect(all.filter((k) => k.binds !== undefined)).toEqual([])
   })
 })
@@ -92,7 +98,12 @@ describe('the shipped defaults reproduce DEFAULT_PARAMS', () => {
 
 describe('reference: sprite-px marks every px-valued knob (spec 6.4)', () => {
   it('marks exactly the ten px knobs', () => {
-    const marked = [...COMMON_KNOBS, ...HULL_KNOBS, ...TORN_KNOBS]
+    // Widened to `KnobDescriptor[]` explicitly: the spread's own inferred type is a union of each
+    // individual literal descriptor's exact object type, and not every member of that union
+    // declares `reference` (it is optional only on `KnobBase`'s common supertype), so `.filter`
+    // below cannot access it without this annotation.
+    const all: readonly KnobDescriptor[] = [...COMMON_KNOBS, ...HULL_KNOBS, ...TORN_KNOBS]
+    const marked = all
       .filter((k) => k.kind === 'number' && k.reference === 'sprite-px')
       .map((k) => k.key)
       .sort()

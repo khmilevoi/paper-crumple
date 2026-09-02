@@ -382,7 +382,12 @@ export function createSdfBuilder(ctx: GlContext, pool: ArtworkPool): Err | SdfBu
     return target
   }
 
-  function buildField(o: BuildFieldOptions): Err | Field {
+  // A `const` arrow, not a hoisted `function` declaration: `seed`/`step`/`resolve`/`blur` are
+  // narrowed to `Program` above by the early-return `GlError.is()` checks, but that narrowing does
+  // not survive into a nested `function` declaration's body (TS's CFA treats a hoisted function as
+  // possibly callable before the narrowing ran, so it re-widens captured outer bindings back to
+  // their declared type). A `const` arrow has no such hoisting hazard, so the narrowing holds.
+  const buildField = (o: BuildFieldOptions): Err | Field => {
     const { artwork, artworkUv, width: w, height: h, sourceLongSide, into, slot } = o
 
     if (into !== undefined && (into.width !== w || into.height !== h)) {
@@ -483,7 +488,8 @@ export function createSdfBuilder(ctx: GlContext, pool: ArtworkPool): Err | SdfBu
     }
   }
 
-  function blurField(o: BlurFieldOptions): Err | LooseField {
+  // Same reasoning as `buildField` above: a `const` arrow so the `blur` program's narrowing holds.
+  const blurField = (o: BlurFieldOptions): Err | LooseField => {
     const { field, sigmaPx, frontLongSide } = o
     const size = looseSizeFor({ w: field.width, h: field.height })
     const outDesc = fieldTargetDesc(size.w, size.h)

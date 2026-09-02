@@ -53,7 +53,7 @@
  * core-declared default in `SHARED_KNOBS`.
  */
 import { GlError, SHARED_KNOBS } from '@paper-crumple/core'
-import type { DrawTarget, KnobDescriptor, Rect, Size } from '@paper-crumple/core'
+import type { DrawTarget, KnobDescriptor, Rect, SharedKnob, Size } from '@paper-crumple/core'
 import type { GlContext, Texture } from '@paper-crumple/core/unstable'
 import {
   FULLSCREEN_VS,
@@ -86,7 +86,7 @@ type Err = InstanceType<typeof GlError>
 const SHARED_DEFAULTS = new Map(SHARED_KNOBS.map((d) => [d.key, d.default] as const))
 
 /** `SHARED_KNOBS`' own default, so a hard-coded literal here can never drift from spec 6.2's. */
-function sharedColorDefault(key: string): string {
+function sharedColorDefault(key: SharedKnob): string {
   return SHARED_DEFAULTS.get(key) ?? '#000000'
 }
 
@@ -125,7 +125,11 @@ export function createPaperRenderer(ctx: GlContext): Err | PaperRenderer {
   const folds = new Float32Array(MAX_FOLDS * 3)
   const foldJitter = new Float32Array(MAX_FOLDS)
 
-  function renderFront(tiles: MountedTiles, r: FrontRenderRequest): Err | undefined {
+  // A `const` arrow, not a hoisted `function` declaration: `program` is narrowed to `Program`
+  // above by the early-return `GlError.is()` check, but that narrowing does not survive into a
+  // nested `function` declaration's body (see `gl-sdf.ts`'s `buildField` for the same fix, with
+  // the fuller explanation). A `const` arrow has no such hoisting hazard.
+  const renderFront = (tiles: MountedTiles, r: FrontRenderRequest): Err | undefined => {
     const descByKey = new Map(r.descriptors.map((d) => [d.key, d] as const))
 
     function rawNum(key: string, fallback: number): number {
