@@ -23,6 +23,9 @@
         color: #a00;
         font-weight: bold;
       }
+      canvas {
+        display: none;
+      }
       table {
         border-collapse: collapse;
       }
@@ -56,33 +59,303 @@
           '<p class="refused">Refusing to measure: the page is not cross-origin isolated, so ' +
           'performance.now() is clamped to 100 µs. Serve it with tools/bench-3d/serve.mjs.</p>'
       } else {
+        // Never throws: every failure below is reported into #out instead (no-restricted-syntax
+        // bans ThrowStatement across this repository, and the convention holds here too).
+        runMeasurement(out).catch((error) => {
+          out.textContent = `measurement failed: ${error instanceof Error ? error.message : String(error)}`
+        })
+      }
+
+      /** A 4x4 opaque red front standing in for a built sheet, matching draw.gl.test.ts's fixture. */
+      function makeFront(gl) {
+        const texture = gl.createTexture()
+        const texels = new Uint8Array(4 * 4 * 4)
+        for (let i = 0; i < texels.length; i += 4) texels.set([255, 0, 0, 255], i)
+        gl.bindTexture(gl.TEXTURE_2D, texture)
+        gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, 4, 4, 0, gl.RGBA, gl.UNSIGNED_BYTE, texels)
+        gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR)
+        gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.LINEAR)
+        gl.bindTexture(gl.TEXTURE_2D, null)
+        return { texture, width: 4, height: 4, rect: { x: 0, y: 0, w: 4, h: 4 }, bytes: 64 }
+      }
+
+      /** Least-squares fit of `ms = A + B*pixels` over the size sweep's non-disjoint means. */
+      function linearFit(points) {
+        if (points.length < 2) return { A: undefined, B: undefined }
+        let sumX = 0
+        let sumY = 0
+        let sumXY = 0
+        let sumXX = 0
+        for (const { pixels, ms } of points) {
+          sumX += pixels
+          sumY += ms
+          sumXY += pixels * ms
+          sumXX += pixels * pixels
+        }
+        const denominator = points.length * sumXX - sumX * sumX
+        if (denominator === 0) return { A: undefined, B: undefined }
+        const B = (points.length * sumXY - sumX * sumY) / denominator
+        const A = (sumY - B * sumX) / points.length
+        return { A, B }
+      }
+
+      /** §17.1's three threshold bands, fixed in advance. */
+      function thresholdBand(ms) {
+        if (ms === undefined) return 'n/a — no non-disjoint sample'
+        if (ms <= 0.1) return '<= 0.10 ms — settled, may be marked verified'
+        if (ms <= 0.167) return '0.10-0.167 ms — documented grid size capped, caveat stands'
+        return '> 0.167 ms — reopens instancing'
+      }
+
+      function renderTable(rows, fit, band) {
+        const header =
+          '<tr><th>instrument</th><th>size</th><th>N</th><th>pose</th><th>per-draw clear</th>' +
+          '<th>mean GPU ms</th><th>samples</th><th>discarded</th></tr>'
+        const body = rows
+          .map(
+            (r) =>
+              `<tr><td>${r.instrument}</td><td>${r.size}</td><td>${String(r.n)}</td>` +
+              `<td>${String(r.pose)}</td><td>${String(r.clear)}</td>` +
+              `<td>${r.mean === undefined ? 'n/a' : r.mean.toFixed(4)}</td>` +
+              `<td>${String(r.samples)}</td><td>${String(r.discarded)}</td></tr>`,
+          )
+          .join('')
+        out.innerHTML =
+          `<table>${header}${body}</table>` +
+          `<p>Size-sweep fit: A = ${fit.A === undefined ? 'n/a' : fit.A.toFixed(4)} ms, ` +
+          `B = ${fit.B === undefined ? 'n/a' : fit.B.toExponential(4)} ms/px. ` +
+          `Deciding N=256 batch falls in: ${band}. See docs/level-3-timing.md for the recipe, ` +
+          `the write-up template and the threshold table.</p>`
+      }
+
+      /**
+       * The measurement body (§17.1). This function computes and prints numbers only when a human
+       * opens this page in a cross-origin-isolated browser with a real GPU — nothing here runs as
+       * part of authoring the harness, and no result is recorded anywhere else.
+       */
+      async function runMeasurement(out) {
         const { createGlContext, GL_ATTRIBUTES, createGpuTimer } =
           await import('@paper-crumple/core/unstable')
-        const { bakedMotion } = await import('@paper-crumple/motion')
+        const { bakedMotion, MOTION_KNOBS } = await import('@paper-crumple/motion')
         const pack2x3 = (await import('/packages/motion/dist/packs/2x3.js')).default
         const pack1x1 = (await import('/packages/motion/dist/packs/1x1.js')).default
         const pack3x2 = (await import('/packages/motion/dist/packs/3x2.js')).default
 
-        // Instrument 1 first: reproduce 0.29-0.41 ms serialised at 998x951, or nothing measured
-        // afterwards means anything. Then instrument 2 (N in 1, 8, 32, 100, 256, one query around
-        // the batch, no finish inside), then the empty-query and 1x1-scissored controls, then CPU
-        // submit cost. Sweep 1x1, 96, 192, 384x366, 768, 998x951; fit ms = A + B*pixels; run all
-        // six poses; run the batch both with and without the per-draw clear.
-        //
-        // Discard any sample whose interval was disjoint rather than averaging it in: createGpuTimer
-        // already returns undefined for those, so count them and report the count beside the mean.
-        const runner = await import('./bench.js').catch(() => null)
-        out.textContent =
-          runner === null
-            ? 'Fill in the measurement below, following docs/level-3-timing.md.'
-            : 'ready'
-        globalThis.__benchDeps = {
-          createGlContext,
-          GL_ATTRIBUTES,
-          createGpuTimer,
-          bakedMotion,
-          packs: [pack1x1, pack2x3, pack3x2],
+        // The canvas must hold the largest size in the sweep (998x951); every smaller size below
+        // scissors a `dest` box inside it rather than resizing the canvas mid-run (spec 7.3: a
+        // slot may never resize the canvas from inside a draw).
+        const MAX_W = 998
+        const MAX_H = 951
+        const canvas = document.createElement('canvas')
+        canvas.width = MAX_W
+        canvas.height = MAX_H
+        document.body.append(canvas)
+        // GL_ATTRIBUTES already carries depth: true (spec 7.3); requested explicitly here too so
+        // the intent reads at the call site.
+        const gl = canvas.getContext('webgl2', { ...GL_ATTRIBUTES, depth: true })
+        if (gl === null) {
+          out.textContent = 'No WebGL2 context — check the driver/launch flags (§11).'
+          return
         }
+        const ctx = createGlContext(gl)
+
+        const timer = createGpuTimer(ctx)
+        if (timer === null) {
+          out.textContent =
+            'EXT_disjoint_timer_query_webgl2 is unavailable on this driver; nothing to measure.'
+          return
+        }
+
+        const source = bakedMotion({ packs: [pack1x1, pack2x3, pack3x2] })
+        const mounted = source.mount(ctx)
+        if (mounted instanceof Error) {
+          out.textContent = `mount failed: ${mounted.message}`
+          return
+        }
+
+        const fit = source.fit({ x: 0, y: 0, w: 256, h: 384 })
+        if (fit instanceof Error) {
+          out.textContent = `fit failed: ${fit.message}`
+          return
+        }
+        const clip = await source.load(fit)
+        if (clip instanceof Error) {
+          out.textContent = `load failed: ${clip.message}`
+          return
+        }
+
+        const front = makeFront(gl)
+        const knobs = {
+          ...Object.fromEntries(MOTION_KNOBS.map((k) => [k.key, k.default])),
+          paperColor: '#f7f4ed',
+          paperBack: '#e8e2d4',
+        }
+        const referenceFrame = clip.keyFrames[0]
+        const fullViewport = { x: 0, y: 0, w: MAX_W, h: MAX_H }
+
+        function drawOnce(w, h, frame, withClear) {
+          return ctx.scope((s) => {
+            const target = { framebuffer: null, viewport: fullViewport, dest: { x: 0, y: 0, w, h } }
+            s.bindTarget(target)
+            s.enable('SCISSOR_TEST', true)
+            if (withClear) {
+              gl.clearColor(0, 0, 0, 0)
+              gl.clear(gl.COLOR_BUFFER_BIT | gl.DEPTH_BUFFER_BIT)
+            }
+            return source.draw({ clip, fit, frame, front, out: target, knobs })
+          })
+        }
+
+        // createGpuTimer.poll() cannot distinguish "not ready yet" from "the interval was
+        // disjoint" — both read as undefined (gl-timer.ts). A query that never resolves inside
+        // the budget is therefore counted and reported as discarded exactly like a disjoint one,
+        // rather than averaged in.
+        async function pollUntil(maxFrames = 120) {
+          for (let i = 0; i < maxFrames; i++) {
+            const ms = timer.poll()
+            if (ms !== undefined) return ms
+            await new Promise((resolve) => requestAnimationFrame(resolve))
+          }
+          return undefined
+        }
+
+        // Instrument 2's shape: one query around `count` draws, with no finish() inside.
+        async function timeBatch(count, w, h, frame, withClear) {
+          timer.begin()
+          for (let i = 0; i < count; i++) drawOnce(w, h, frame, withClear)
+          timer.end()
+          return pollUntil()
+        }
+
+        const TRIALS = 8
+        async function sample(run) {
+          let discarded = 0
+          const values = []
+          for (let i = 0; i < TRIALS; i++) {
+            const ms = await run()
+            if (ms === undefined) discarded++
+            else values.push(ms)
+          }
+          const mean =
+            values.length > 0 ? values.reduce((a, b) => a + b, 0) / values.length : undefined
+          return { mean, samples: values.length, discarded }
+        }
+
+        const rows = []
+
+        // Instrument 1: reproduce 0.29-0.41 ms serialised per-draw at 998x951 first. If this does
+        // not land in that band, nothing measured after it means anything.
+        rows.push({
+          instrument: 'Serialised per-draw at 998x951',
+          size: `${MAX_W}x${MAX_H}`,
+          n: 1,
+          pose: referenceFrame,
+          clear: true,
+          ...(await sample(() => timeBatch(1, MAX_W, MAX_H, referenceFrame, true))),
+        })
+
+        // Instrument 2, the deciding measurement: one query around N draws with no finish inside,
+        // for N in 1, 8, 32, 100, 256. A grid does not serialise its draws, so this is the marginal
+        // cost instancing would compete against, not the isolated cost of the first draw.
+        for (const n of [1, 8, 32, 100, 256]) {
+          rows.push({
+            instrument: 'One query around N draws',
+            size: '384x366',
+            n,
+            pose: referenceFrame,
+            clear: false,
+            ...(await sample(() => timeBatch(n, 384, 366, referenceFrame, false))),
+          })
+        }
+
+        // Instrument 3: the empty-query and 1x1-scissored controls, separating query overhead and
+        // the driver's own floor from the work being measured.
+        rows.push({
+          instrument: 'empty query',
+          size: '-',
+          n: 0,
+          pose: '-',
+          clear: false,
+          ...(await sample(async () => {
+            timer.begin()
+            timer.end()
+            return pollUntil()
+          })),
+        })
+        rows.push({
+          instrument: '1x1-scissored',
+          size: '1x1',
+          n: 1,
+          pose: referenceFrame,
+          clear: false,
+          ...(await sample(() => timeBatch(1, 1, 1, referenceFrame, false))),
+        })
+
+        // Instrument 4: CPU submit cost, separately from GPU time — performance.now() is not
+        // clamped here because the page is cross-origin isolated.
+        const cpuTrials = []
+        for (let i = 0; i < TRIALS; i++) {
+          const start = performance.now()
+          drawOnce(384, 366, referenceFrame, false)
+          cpuTrials.push(performance.now() - start)
+        }
+        rows.push({
+          instrument: 'CPU submit cost',
+          size: '384x366',
+          n: 1,
+          pose: referenceFrame,
+          clear: false,
+          mean: cpuTrials.reduce((a, b) => a + b, 0) / cpuTrials.length,
+          samples: cpuTrials.length,
+          discarded: 0,
+        })
+
+        // The size sweep: 1x1, 96 (96x96), 192 (192x192), 384x366, 768 (768x768), 998x951. Fit
+        // ms = A + B*pixels and report both.
+        const sweepSizes = [
+          [1, 1],
+          [96, 96],
+          [192, 192],
+          [384, 366],
+          [768, 768],
+          [MAX_W, MAX_H],
+        ]
+        const sweepPoints = []
+        for (const [w, h] of sweepSizes) {
+          const result = await sample(() => timeBatch(1, w, h, referenceFrame, true))
+          rows.push({
+            instrument: 'size sweep',
+            size: `${w}x${h}`,
+            n: 1,
+            pose: referenceFrame,
+            clear: true,
+            ...result,
+          })
+          if (result.mean !== undefined) sweepPoints.push({ pixels: w * h, ms: result.mean })
+        }
+        const fitted = linearFit(sweepPoints)
+
+        // All six poses, and the batch both with and without the per-draw clear
+        // (`material.js:154-156`).
+        for (const frame of clip.keyFrames) {
+          for (const withClear of [true, false]) {
+            rows.push({
+              instrument: 'pose sweep',
+              size: '384x366',
+              n: 1,
+              pose: frame,
+              clear: withClear,
+              ...(await sample(() => timeBatch(1, 384, 366, frame, withClear))),
+            })
+          }
+        }
+
+        const deciding256 = rows.find(
+          (r) => r.instrument === 'One query around N draws' && r.n === 256,
+        )
+        renderTable(rows, fitted, thresholdBand(deciding256 ? deciding256.mean : undefined))
+
+        ctx.dispose()
       }
     </script>
   </body>
