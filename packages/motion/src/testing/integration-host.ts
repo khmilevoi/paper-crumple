@@ -30,9 +30,7 @@ import type {
   View,
 } from '@paper-crumple/core'
 import type { SheetHandle } from '@paper-crumple/core/unstable'
-import pack1x1 from '../packs/1x1.js'
-import pack2x3 from '../packs/2x3.js'
-import pack3x2 from '../packs/3x2.js'
+import type { PackModule } from '../pack-module.js'
 import { bakedMotion } from '../source.js'
 import { createGlFixture, type GlFixture } from './gl-fixture.js'
 
@@ -146,6 +144,12 @@ export interface IntegrationHost {
 
 export async function createIntegrationHost(o: {
   readonly fronts: readonly HostFront[]
+  /**
+   * The packs `bakedMotion()` plays, supplied by the caller. This fixture cannot import
+   * `../packs/*` itself — those are separately-loaded subpaths (§3.2, §14) that must never
+   * become eagerly reachable, a rule `barrel.test.ts` pins.
+   */
+  readonly packs: readonly PackModule[]
   readonly size?: Size
 }): Promise<IntegrationHost | Error> {
   const size = o.size ?? { w: 128, h: 128 }
@@ -159,7 +163,7 @@ export async function createIntegrationHost(o: {
   }
   const gl = fixture.gl
   const sheet = stubSheet(o.fronts)
-  const motion = bakedMotion({ packs: [pack1x1, pack2x3, pack3x2] })
+  const motion = bakedMotion({ packs: o.packs })
 
   const texture = gl.createTexture()
   const framebuffer = gl.createFramebuffer()

@@ -8,7 +8,12 @@
  */
 import { afterEach, describe, expect, it } from 'vitest'
 import { isAborted } from '@paper-crumple/core'
+import pack1x1 from './packs/1x1.js'
+import pack2x3 from './packs/2x3.js'
+import pack3x2 from './packs/3x2.js'
 import { createIntegrationHost, type HostFront } from './testing/integration-host.js'
+
+const PACKS = [pack1x1, pack2x3, pack3x2]
 
 const live: Array<{ dispose(): void }> = []
 afterEach(() => {
@@ -31,7 +36,7 @@ function solid(key: string, rgb: [number, number, number]): HostFront {
 
 describe('the minimal level-2 host', () => {
   it("is a HostedStage over the test's own context, so no destination canvas is in the case", async () => {
-    const host = await createIntegrationHost({ fronts: [solid('a', [200, 40, 40])] })
+    const host = await createIntegrationHost({ fronts: [solid('a', [200, 40, 40])], packs: PACKS })
     if (host instanceof Error) return expect.fail(host.message)
     live.push(host)
     expect(host.stage.lost).toBe(false)
@@ -46,7 +51,7 @@ describe('the minimal level-2 host', () => {
 
   it('draws a shown sprite into the framebuffer the test owns', async () => {
     const front = solid('a', [200, 40, 40])
-    const host = await createIntegrationHost({ fronts: [front] })
+    const host = await createIntegrationHost({ fronts: [front], packs: PACKS })
     if (host instanceof Error) return expect.fail(host.message)
     live.push(host)
     // Raw bytes, never a PNG (§7.4.1) — an ImageBitmap built straight off the texels via
@@ -86,7 +91,7 @@ describe('the minimal level-2 host', () => {
   })
 
   it('releases its context, so a file of these cannot exhaust the ~16-context cap', async () => {
-    const host = await createIntegrationHost({ fronts: [solid('a', [10, 20, 30])] })
+    const host = await createIntegrationHost({ fronts: [solid('a', [10, 20, 30])], packs: PACKS })
     if (host instanceof Error) return expect.fail(host.message)
     host.dispose()
     expect(host.gl.isContextLost()).toBe(true)
