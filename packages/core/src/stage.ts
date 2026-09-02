@@ -477,6 +477,7 @@ function internals(v: View): ViewInternals {
 function buildStage(p: StageParts): BuiltStage {
   let batching = false
   const views: View[] = []
+  let swapCounter = 0
 
   // §10.6's policy is P9's, applied to `stage.play`'s report: a mid-run draw failure reaches the
   // stage through `RunHost.reportError`, never through the run's settled value (P4 settles a run
@@ -779,6 +780,23 @@ function buildStage(p: StageParts): BuiltStage {
       return run
     }
 
+    /**
+     * amendment 11 — `add` + `crumpleTo(pending)`. **Not `async`, and `start` is emitted
+     * synchronously before it returns**, exactly as `crumpleTo` is: the composition must not be
+     * the place where the iOS-audio guarantee is quietly lost.
+     *
+     * The key is derived from the source so a consumer swapping a URL in does not have to mint
+     * one; a consumer who wants a stable key calls `add()` and `crumpleTo()` themselves.
+     */
+    function swapToMethod(src: SpriteSource, o?: SwapOptions): Run<SwapResult> {
+      if (p.isDisposed() || state === 'disposed') return settledRun(ABORTED)
+      const key = `swap:${presetForImageId(String(src))}:${String(swapCounter++)}`
+      // `add()` is started here and its promise is passed straight through — the loading
+      // indicator form of §4.2, with no second mechanism.
+      const pending = add(src, { key, signal: o?.signal } as never)
+      return view.crumpleTo(pending as never, o)
+    }
+
     function stopMethod(): void {
       if (p.isDisposed() || state === 'disposed') return
       controller?.stop({ owner: 'view' })
@@ -844,7 +862,7 @@ function buildStage(p: StageParts): BuiltStage {
 
       play: playMethod,
       crumpleTo: crumpleToMethod,
-      swapTo: (() => settledRun(undefined)) as never, // Task 15
+      swapTo: swapToMethod,
       stop: stopMethod,
       set: (() => undefined) as never, // Task 16
 
@@ -1186,8 +1204,7 @@ function buildStage(p: StageParts): BuiltStage {
     // disposal** and never the rule that an attached sprite is not freed.
     if (o?.detach === true) {
       for (const v of [...views]) {
-        const view = v as unknown as { spriteKey: string | null; dispose(): void }
-        if (view.spriteKey === key) view.dispose()
+        if (internals(v).spriteKey === key) v.dispose()
       }
     }
     if (record.attachCount > 0) {
@@ -1210,6 +1227,55 @@ function buildStage(p: StageParts): BuiltStage {
     p.lru.remove(key)
     p.rebuildQueue.forget(key)
     return undefined
+  }
+
+  /**
+   * amendment 11 — `add` + `view` + `show('flat')`. It adds no mechanism.
+   *
+   * **`mountAll` was designed and rejected, and the rejection is recorded because it is the
+   * obvious next step.** Its return type cannot be made honest: `Array<View | AddError> |
+   * Aborted` omits the `ViewError` that `mount` can produce, and a whole-batch `Aborted`
+   * (amendment 2) cannot say who owns the sprites and views already built when the signal
+   * fired — either answer contradicts §10.5's "stop spending, keep what is already paid for" or
+   * contradicts "the return value is the complete account". The index-correlated array also
+   * discards the keys, which the consumer immediately rebuilds into a `Map`. A `for` loop over
+   * `mount` is four lines and leaves the abort policy where the caller can see it.
+   */
+  async function mountMethod(
+    item: {
+      key: string
+      src: SpriteSource
+      canvas: HTMLCanvasElement
+      fit?: Fit
+      tag?: string
+      pin?: true
+    },
+    o?: { signal?: AbortSignal },
+  ): Promise<View | AddError | InstanceType<typeof ViewError> | Aborted> {
+    const gone = dead()
+    if (gone !== undefined) return p.policy.returned(new ViewError(gone.message), null)
+    if (o?.signal?.aborted === true) return ABORTED
+
+    const sprite = await add(item.src, {
+      key: item.key,
+      signal: o?.signal,
+      ...(item.pin === true ? { pin: true as const } : {}),
+    } as never)
+    if (isAborted(sprite) || sprite instanceof Error) return sprite
+
+    const created = stage.view({
+      canvas: item.canvas,
+      ...(item.fit === undefined ? {} : { fit: item.fit }),
+      ...(item.tag === undefined ? {} : { tag: item.tag }),
+    })
+    if (created instanceof Error) {
+      // A sprite nobody can reach is not "already paid for": remove it rather than leak a key
+      // the consumer never learned about.
+      remove(item.key)
+      return p.policy.returned(created, null)
+    }
+    created.show(sprite)
+    return created
   }
 
   async function stagePlayMethod(
@@ -1366,8 +1432,7 @@ function buildStage(p: StageParts): BuiltStage {
     },
     play: stagePlayMethod,
     stop: stageStopMethod,
-    // Task 15
-    mount: () => Promise.resolve(new ViewError('not implemented')) as never,
+    mount: mountMethod as never,
     // Task 16
     set: (() => undefined) as never,
 
