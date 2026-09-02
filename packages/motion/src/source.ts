@@ -302,12 +302,32 @@ export function bakedMotion(
         gl.uniform4f(u('uSheetPx'), cxPx, cyPx, halfW, halfH)
         gl.uniform2f(u('uViewPx'), out.viewport.w, out.viewport.h)
         gl.uniform1f(u('uDepthPx'), 4 * halfH)
+        // `uUvRect` is the ONE place the two y conventions in this library meet, so the flip
+        // lives here and nowhere else.
+        //
+        // `paper`'s front is y-DOWN and says so everywhere: `artwork.ts` pins
+        // `UNPACK_FLIP_Y_WEBGL` off ("not inherited from the spike's `true`"), so an artwork
+        // texel row is a source image row; `PAPER_FS` assembles the front straight off
+        // `gl_FragCoord` with no flip; `sheet.ts`'s `cpuFieldFallback` header proves, with a
+        // measurement, that nothing in the field path flips either; and `SheetFront.rect` is
+        // that same y-down row index, because `sourceRectToFrontRect` carries a source-pixel
+        // rect into it unflipped.
+        //
+        // This shader's world is y-UP: `uSheetPx` is documented "target px, y up", `gl_Position`
+        // maps `aPos.y = +1` to the top of the screen, and the baked packs put `aUv.y = 1`
+        // there with it. Feeding a y-down front through a v that rises toward the top of the
+        // screen therefore lands the image's first row at the framebuffer's first row — which a
+        // GL framebuffer shows at the BOTTOM — and every sprite draws upside down.
+        //
+        // So v is inverted: `aUv.y = 1` (screen top) samples the sheet box's top edge in the
+        // front, `aUv.y = 0` its bottom edge. `x` is untouched: neither convention disagrees
+        // about which way x runs.
         gl.uniform4f(
           u('uUvRect'),
           (fcx - fit.sheetW / 2) / front.width,
-          (fcy - fit.sheetH / 2) / front.height,
+          (fcy + fit.sheetH / 2) / front.height,
           fit.sheetW / front.width,
-          fit.sheetH / front.height,
+          -fit.sheetH / front.height,
         )
         // uLight is the manifest's baked vector, which is why lightAngle is not a knob (§6.2, §9.3).
         gl.uniform3f(u('uLight'), pack.light[0], pack.light[1], pack.light[2])

@@ -1,0 +1,23 @@
+{
+  "name": "@paper-crumple/playground",
+  "version": "0.0.0",
+  "private": true,
+  "description": "A local demo: every paper-crumple knob, live, generated from the runtime descriptors.",
+  "type": "module",
+  "scripts": {
+    "dev": "pnpm -w turbo run build --filter=@paper-crumple/core --filter=@paper-crumple/paper --filter=@paper-crumple/motion && vite",
+    "build": "pnpm -w turbo run build --filter=@paper-crumple/core --filter=@paper-crumple/paper --filter=@paper-crumple/motion && vite build",
+    "preview": "vite preview",
+    "typecheck": "tsc -p tsconfig.json"
+  },
+  "dependencies": {
+    "@paper-crumple/core": "workspace:*",
+    "@paper-crumple/motion": "workspace:*",
+    "@paper-crumple/paper": "workspace:*"
+  },
+  "devDependencies": {
+    "@paper-crumple/tsconfig": "workspace:*",
+    "typescript": "catalog:",
+    "vite": "^8.2.2"
+  }
+}
