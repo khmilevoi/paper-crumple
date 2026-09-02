@@ -375,14 +375,16 @@ export function createPanel(
   }
 
   function reset(): void {
+    const pending: Array<{ key: string; error: Error }> = []
     for (const key of Object.keys(values)) {
       const def = defaults[key]
       if (def === undefined) continue
       values[key] = def
       const err = onSet(key, def, target)
-      if (err) showInlineError(key, err)
+      if (err) pending.push({ key, error: err })
     }
     render()
+    for (const { key, error } of pending) showInlineError(key, error)
   }
 
   return {
