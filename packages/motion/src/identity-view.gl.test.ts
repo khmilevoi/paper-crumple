@@ -134,15 +134,32 @@ describe('identityView (§7.4.2) — a smoke test for the sheet shader, not a re
     expect(f.gl.getError()).toBe(f.gl.NO_ERROR)
 
     const got = out.read()
-    const lo = IDENTITY_MARGIN
-    const hi = IDENTITY_MARGIN + IDENTITY_BOX
     const differing: string[] = []
-    for (let y = lo; y < hi; y++) {
-      for (let x = lo; x < hi; x++) {
+    for (let y = 0; y < IDENTITY_FRONT; y++) {
+      for (let x = 0; x < IDENTITY_FRONT; x++) {
         const p = (y * IDENTITY_FRONT + x) * 4
-        for (let c = 0; c < 4; c++) {
-          if (got[p + c] !== view.bytes[p + c]) {
-            differing.push(`(${x},${y}).${'rgba'[c]}: ${got[p + c]} != ${view.bytes[p + c]}`)
+        const inside =
+          x >= IDENTITY_MARGIN &&
+          x < IDENTITY_MARGIN + IDENTITY_BOX &&
+          y >= IDENTITY_MARGIN &&
+          y < IDENTITY_MARGIN + IDENTITY_BOX
+        if (inside) {
+          // Inside the box: the fixture's own texels are the oracle, texel for texel.
+          for (let c = 0; c < 4; c++) {
+            if (got[p + c] !== view.bytes[p + c]) {
+              differing.push(
+                `(${x},${y}).${'rgba'[c]}: ${got[p + c]} != ${view.bytes[p + c]} (inside box)`,
+              )
+            }
+          }
+        } else {
+          // Outside the box: `view.bytes` varies RGB at alpha 0 there (§ identity-view.ts), but pose
+          // 0 discards outside the box, so the framebuffer must still read the cleared 0,0,0,0 — not
+          // the fixture's stored RGB, which the shader was never meant to emit.
+          for (let c = 0; c < 4; c++) {
+            if (got[p + c] !== 0) {
+              differing.push(`(${x},${y}).${'rgba'[c]}: ${got[p + c]} != 0 (outside box)`)
+            }
           }
         }
       }
@@ -151,7 +168,7 @@ describe('identityView (§7.4.2) — a smoke test for the sheet shader, not a re
     expect(differing.length).toBe(0)
   })
 
-  it('leaves the transparent field alone, because the identity path discards below 0.002', () => {
+  it('starts from a target cleared to zero, so a non-zero field after the draw is the shader and not the target', () => {
     const f = open()
     const view = identityView(f.gl)
     live.push(view)
