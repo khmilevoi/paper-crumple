@@ -92,7 +92,11 @@ describe('the synthetic pack generator', () => {
         expect(Math.abs(Math.sqrt(x * x + y * y + z * z) - 1)).toBeLessThan(1e-2)
       }
     }
-  })
+    // Explicit timeout, not a slow assertion: this walks every vertex of every frame with two
+    // `expect` calls each, which is ~1.7s of real work alone but exceeds the 5s default once the
+    // merged tree runs all three packages' suites in parallel. Raised at sync 4, where the unit
+    // project first grew to 125 files; the assertions above are untouched.
+  }, 30_000)
 })
 
 describe('the committed synthetic fixture', () => {
