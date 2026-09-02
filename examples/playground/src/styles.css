@@ -1,16 +1,31 @@
 /*
- * Skeleton styles for the walking skeleton (Task 1). This is deliberately minimal — a
- * three-column layout and a dark, monospace-values look. Task 9 does the real styling pass.
+ * The playground is an instrument panel, not a showcase: dense rows, a monospace column for
+ * every value a control reports, badges legible at a glance, and — above everything else — a
+ * stage column that never loses its space to the controls flanking it. Three columns collapse to
+ * one at 1100px; the stage keeps a real minimum width on both sides of that line.
  */
 
 :root {
   color-scheme: dark;
-  --bg: #111318;
-  --panel-bg: #1a1d24;
-  --border: #2a2e38;
+  --bg: #0d0f13;
+  --panel-bg: #15181f;
+  --panel-bg-raised: #1b1f28;
+  --well-bg: #0a0c10;
+  --border: #262b36;
+  --border-soft: #1d212a;
   --fg: #e6e8ee;
   --fg-dim: #9aa0ac;
+  --fg-faint: #6b7280;
+  --accent: #5fb3ff;
+  --accent-dim: #2c5a7d;
+  --ok: #63c774;
+  --warn: #e0a94a;
+  --bad: #e2685f;
+  --dev: #b98af0;
   --mono: 'SFMono-Regular', Consolas, 'Liberation Mono', Menlo, monospace;
+  --sans: system-ui, -apple-system, 'Segoe UI', sans-serif;
+  --radius: 6px;
+  --radius-sm: 4px;
 }
 
 * {
@@ -21,68 +36,539 @@ body {
   margin: 0;
   background: var(--bg);
   color: var(--fg);
-  font-family: system-ui, sans-serif;
+  font-family: var(--sans);
+  font-size: 14px;
+  line-height: 1.35;
 }
 
+h1,
+h2,
+h3,
+h4 {
+  font-weight: 600;
+}
+
+h2 {
+  margin: 0 0 0.5rem;
+  font-size: 0.78rem;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: var(--fg-dim);
+}
+
+button {
+  font: inherit;
+  color: inherit;
+  background: var(--panel-bg-raised);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  padding: 0.3rem 0.6rem;
+  cursor: pointer;
+}
+
+button:hover {
+  border-color: var(--accent-dim);
+  color: var(--accent);
+}
+
+input,
+select {
+  font: inherit;
+  color: inherit;
+  accent-color: var(--accent);
+}
+
+/* ---------------------------------------------------------------------------------------------
+ * Masthead
+ * ------------------------------------------------------------------------------------------- */
+
 #masthead {
-  padding: 1rem 1.5rem;
+  display: flex;
+  align-items: baseline;
+  gap: 1rem;
+  padding: 0.6rem 1rem;
   border-bottom: 1px solid var(--border);
+  background: var(--panel-bg);
+}
+
+#masthead h1 {
+  margin: 0;
+  font-size: 0.95rem;
 }
 
 #version-line {
   font-family: var(--mono);
+  font-size: 0.78rem;
   color: var(--fg-dim);
-  margin: 0.25rem 0 0;
+  margin: 0;
+  overflow-wrap: anywhere;
 }
+
+/* ---------------------------------------------------------------------------------------------
+ * The three-column layout — collapses to one column under 1100px. The centre column carries a
+ * real min-width above that line so the side columns cannot squeeze the stage before the
+ * breakpoint does its job; below the line the stage is reordered first, since it is the one
+ * thing on the page a reader should never have to scroll past a wall of controls to see.
+ * ------------------------------------------------------------------------------------------- */
 
 main {
   display: grid;
-  grid-template-columns: 240px 1fr 280px;
-  gap: 1rem;
-  padding: 1rem;
+  grid-template-columns: 260px minmax(360px, 1fr) 300px;
+  gap: 0.75rem;
+  padding: 0.75rem;
   align-items: start;
 }
 
+@media (max-width: 1100px) {
+  main {
+    grid-template-columns: 1fr;
+  }
+
+  #stage-column {
+    order: -1;
+  }
+}
+
 #config-column,
-#panel-column {
+#panel-column,
+#stage-column {
   background: var(--panel-bg);
   border: 1px solid var(--border);
-  border-radius: 6px;
-  padding: 0.75rem;
+  border-radius: var(--radius);
+  padding: 0.65rem;
+  min-width: 0;
 }
 
 #stage-column {
-  min-height: 400px;
-  background: var(--panel-bg);
-  border: 1px solid var(--border);
-  border-radius: 6px;
-  padding: 0.75rem;
+  min-height: 420px;
+  display: flex;
+  flex-direction: column;
+  gap: 0.6rem;
 }
 
-#knob-count,
-#panel {
-  font-family: var(--mono);
-  font-size: 0.85rem;
-  color: var(--fg-dim);
-}
-
-#inspector {
-  margin: 0 1rem 1rem;
-  border: 1px solid var(--border);
-  border-radius: 6px;
-  padding: 0.75rem;
-  font-family: var(--mono);
-  font-size: 0.85rem;
+#config-column {
   display: flex;
   flex-direction: column;
   gap: 0.75rem;
+  position: sticky;
+  top: 0.75rem;
+  max-height: calc(100vh - 1.5rem);
+  overflow-y: auto;
+}
+
+#panel-column {
+  position: sticky;
+  top: 0.75rem;
+  max-height: calc(100vh - 1.5rem);
+  overflow-y: auto;
+  display: flex;
+  flex-direction: column;
+  gap: 0.5rem;
+}
+
+@media (max-width: 1100px) {
+  #config-column,
+  #panel-column {
+    position: static;
+    max-height: none;
+  }
+}
+
+/* ---------------------------------------------------------------------------------------------
+ * Shared dense-row primitives — factory options (config-*) and knobs (knob-*) both use a
+ * one-line head, a control body, and a small note underneath. A monospace readout is always
+ * right-aligned in its own column so a reader scanning the panel reads values, not prose.
+ * ------------------------------------------------------------------------------------------- */
+
+#knob-count {
+  font-family: var(--mono);
+  font-size: 0.72rem;
+  color: var(--fg-dim);
+  background: var(--well-bg);
+  border: 1px solid var(--border-soft);
+  border-radius: var(--radius-sm);
+  padding: 0.4rem 0.5rem;
+  line-height: 1.4;
+}
+
+.config-row,
+.knob-row {
+  border-bottom: 1px solid var(--border-soft);
+  padding: 0.4rem 0;
+}
+
+.config-row:last-of-type,
+.knob-row:last-of-type {
+  border-bottom: none;
+}
+
+.config-head,
+.knob-head {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 0.35rem;
+  font-family: var(--mono);
+  font-size: 0.78rem;
+  color: var(--fg);
+}
+
+.knob-label {
+  overflow-wrap: anywhere;
+}
+
+.config-body,
+.knob-body {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  margin-top: 0.3rem;
+}
+
+.knob-body {
+  font-family: var(--mono);
+}
+
+.config-input,
+.knob-input[type='number'] {
+  width: 6rem;
+}
+
+.knob-input[type='range'] {
+  flex: 1;
+  min-width: 0;
+}
+
+.knob-readout {
+  font-family: var(--mono);
+  font-size: 0.76rem;
+  color: var(--accent);
+  min-width: 3.6rem;
+  text-align: right;
+  flex-shrink: 0;
+}
+
+.config-note,
+.inspector-note {
+  margin: 0.3rem 0 0;
+  font-size: 0.74rem;
+  color: var(--fg-faint);
+  line-height: 1.4;
+}
+
+.config-status {
+  font-family: var(--mono);
+  font-size: 0.72rem;
+  color: var(--fg-dim);
+  margin: 0;
+}
+
+.knob-error {
+  margin-top: 0.3rem;
+  padding: 0.3rem 0.45rem;
+  border: 1px solid var(--bad);
+  border-radius: var(--radius-sm);
+  background: rgba(226, 104, 95, 0.12);
+  color: var(--bad);
+  font-family: var(--mono);
+  font-size: 0.74rem;
+}
+
+/* ---------------------------------------------------------------------------------------------
+ * Badges — legible at a glance means a fixed shape and a colour per kind, not per invalidation
+ * level (the demo emits one CSS class for every `invalidates` value; the badge text itself is
+ * `draw` / `front` / `hull` / `field`). The other three kinds — a `sprite-px` reference, `dev`,
+ * and a `no label` gap in the demo's own table — each get their own colour so the three read as
+ * different *kinds* of note, not different severities of the same one.
+ * ------------------------------------------------------------------------------------------- */
+
+.knob-badges {
+  display: inline-flex;
+  gap: 0.3rem;
+  flex-wrap: wrap;
+}
+
+.knob-badge {
+  font-family: var(--mono);
+  font-size: 0.62rem;
+  letter-spacing: 0.03em;
+  text-transform: uppercase;
+  padding: 0.1rem 0.4rem;
+  border-radius: 999px;
+  border: 1px solid transparent;
+  white-space: nowrap;
+}
+
+.knob-badge--level {
+  background: rgba(95, 179, 255, 0.12);
+  border-color: rgba(95, 179, 255, 0.35);
+  color: var(--accent);
+}
+
+.knob-badge--reference {
+  background: rgba(99, 199, 116, 0.12);
+  border-color: rgba(99, 199, 116, 0.35);
+  color: var(--ok);
+  cursor: help;
+}
+
+.knob-badge--warning {
+  background: rgba(224, 169, 74, 0.14);
+  border-color: rgba(224, 169, 74, 0.4);
+  color: var(--warn);
+}
+
+.knob-badge--dev {
+  background: rgba(185, 138, 240, 0.14);
+  border-color: rgba(185, 138, 240, 0.4);
+  color: var(--dev);
+}
+
+/* ---------------------------------------------------------------------------------------------
+ * The knob panel's controls strip and its collapsible groups.
+ * ------------------------------------------------------------------------------------------- */
+
+.knob-controls {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.75rem;
+  padding-bottom: 0.5rem;
+  margin-bottom: 0.4rem;
+  border-bottom: 1px solid var(--border);
+  font-size: 0.78rem;
+}
+
+.knob-target {
+  display: flex;
+  align-items: center;
+  gap: 0.4rem;
+  border: 1px solid var(--border-soft);
+  border-radius: var(--radius-sm);
+  padding: 0.2rem 0.5rem;
+  margin: 0;
+}
+
+.knob-target legend {
+  padding: 0 0.3rem;
+  font-size: 0.68rem;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  color: var(--fg-faint);
+}
+
+.knob-target label {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.2rem;
+  color: var(--fg-dim);
+}
+
+.knob-dev-toggle {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.3rem;
+  color: var(--fg-dim);
+}
+
+#panel details {
+  border: 1px solid var(--border-soft);
+  border-radius: var(--radius-sm);
+  margin-bottom: 0.4rem;
+  background: var(--panel-bg-raised);
+}
+
+#panel summary {
+  cursor: pointer;
+  padding: 0.4rem 0.55rem;
+  font-size: 0.74rem;
+  font-weight: 600;
+  letter-spacing: 0.03em;
+  text-transform: uppercase;
+  color: var(--fg-dim);
+}
+
+#panel summary:hover {
+  color: var(--fg);
+}
+
+#panel details[open] summary {
+  border-bottom: 1px solid var(--border-soft);
+}
+
+#panel details > .knob-row {
+  padding-left: 0.55rem;
+  padding-right: 0.55rem;
+}
+
+/* ---------------------------------------------------------------------------------------------
+ * Share block
+ * ------------------------------------------------------------------------------------------- */
+
+#share {
+  border-top: 1px solid var(--border);
+  padding-top: 0.6rem;
+}
+
+#emitted-code {
+  margin: 0.5rem 0 0;
+  padding: 0.5rem;
+  background: var(--well-bg);
+  border: 1px solid var(--border-soft);
+  border-radius: var(--radius-sm);
+  font-family: var(--mono);
+  font-size: 0.72rem;
+  line-height: 1.4;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  max-height: 220px;
+  overflow-y: auto;
+}
+
+/* ---------------------------------------------------------------------------------------------
+ * Stage — the hero, the transport, and the grid. This block keeps its width at every breakpoint;
+ * only its own contents wrap.
+ * ------------------------------------------------------------------------------------------- */
+
+#hero-slot {
+  display: flex;
+  justify-content: center;
+  align-items: center;
+  min-height: 260px;
+  background: var(--well-bg);
+  border: 1px solid var(--border-soft);
+  border-radius: var(--radius-sm);
+  overflow: hidden;
+}
+
+/* `direct` present hands `#hero-slot` the stage's own surface canvas (unclassed — it is one
+   canvas for the hero rect and the grid rects together, not `.hero-canvas`), so this targets
+   any canvas the slot holds rather than a specific class. */
+#hero-slot canvas {
+  display: block;
+  max-width: 100%;
+  height: auto;
+}
+
+#transport {
+  padding: 0.6rem 0.7rem;
+  border: 1px solid var(--border-soft);
+  border-radius: var(--radius-sm);
+  background: var(--panel-bg-raised);
+  font-family: var(--mono);
+  font-size: 0.78rem;
+}
+
+.transport-summary {
+  margin: 0 0 0.4rem;
+  color: var(--fg);
+}
+
+.transport-status {
+  margin: 0 0 0.5rem;
+  color: var(--fg-dim);
+  min-height: 1em;
+}
+
+.transport-row {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 0.5rem;
+  margin: 0.4rem 0;
+}
+
+.transport-row button {
+  font-size: 0.76rem;
+}
+
+.transport-input[type='range'] {
+  flex: 1;
+  min-width: 8rem;
+}
+
+.transport-readout,
+.transport-cadence {
+  color: var(--fg-dim);
+  font-size: 0.74rem;
+}
+
+.transport-cadence {
+  margin: 0.5rem 0 0;
+  padding-top: 0.4rem;
+  border-top: 1px solid var(--border-soft);
+}
+
+.transport-report {
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  color: var(--fg-dim);
+  font-size: 0.72rem;
+  margin: 0.3rem 0 0;
+}
+
+#grid {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.5rem;
+  padding-top: 0.4rem;
+  border-top: 1px solid var(--border-soft);
+}
+
+.grid-tile {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 0.25rem;
+}
+
+.grid-tile-canvas {
+  width: 88px;
+  height: 88px;
+  background: var(--well-bg);
+  border: 1px solid var(--border-soft);
+  border-radius: var(--radius-sm);
+}
+
+.grid-tile-label {
+  font-family: var(--mono);
+  font-size: 0.66rem;
+  color: var(--fg-faint);
+  max-width: 100px;
+  text-align: center;
+  overflow-wrap: anywhere;
+}
+
+/* ---------------------------------------------------------------------------------------------
+ * Inspector — full width, four sub-panels plus the two error columns side by side.
+ * ------------------------------------------------------------------------------------------- */
+
+#inspector {
+  margin: 0 0.75rem 0.75rem;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: 0.75rem;
+  background: var(--panel-bg);
+  font-family: var(--mono);
+  font-size: 0.78rem;
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(240px, 1fr));
+  gap: 0.75rem;
+  align-items: start;
+}
+
+.inspector-section {
+  min-width: 0;
 }
 
 .inspector-section h3,
 .inspector-section h4 {
-  margin: 0 0 0.35rem;
-  font-size: 0.85rem;
-  color: var(--fg);
+  margin: 0 0 0.4rem;
+  font-size: 0.72rem;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  color: var(--fg-dim);
+  font-weight: 600;
 }
 
 .inspector-facts,
@@ -95,12 +581,15 @@ main {
 
 .inspector-facts dt,
 .inspector-usage dt {
-  color: var(--fg-dim);
+  color: var(--fg-faint);
 }
 
 .inspector-facts dd,
 .inspector-usage dd {
   margin: 0;
+  text-align: right;
+  color: var(--fg);
+  overflow-wrap: anywhere;
 }
 
 .inspector-warnings,
@@ -108,88 +597,52 @@ main {
   margin: 0;
   padding-left: 1.1rem;
   color: var(--fg-dim);
+  font-size: 0.74rem;
+}
+
+.inspector-warnings li,
+.inspector-channel li {
+  margin-bottom: 0.2rem;
+  overflow-wrap: anywhere;
 }
 
 .inspector-events {
-  max-height: 180px;
+  max-height: 220px;
   overflow-y: auto;
   margin: 0;
   padding: 0.5rem;
-  background: var(--bg);
-  border: 1px solid var(--border);
-  border-radius: 4px;
+  background: var(--well-bg);
+  border: 1px solid var(--border-soft);
+  border-radius: var(--radius-sm);
   white-space: pre-wrap;
-  font-size: 0.78rem;
+  overflow-wrap: anywhere;
+  font-size: 0.72rem;
+  color: var(--fg-dim);
 }
 
-.inspector-note {
-  color: var(--fg-dim);
-  margin: 0 0 0.5rem;
+/* The two error channels span the full inspector width and sit side by side within it — the
+   only sub-panel that spans, since a reader comparing observed against orphaned failures needs
+   both columns in the same glance, not stacked across a scroll. */
+.inspector-section:has(.inspector-channels) {
+  grid-column: 1 / -1;
 }
 
 .inspector-channels {
-  display: flex;
+  display: grid;
+  grid-template-columns: 1fr 1fr;
   gap: 1rem;
 }
 
 .inspector-channel {
-  flex: 1;
   min-width: 0;
+  background: var(--well-bg);
+  border: 1px solid var(--border-soft);
+  border-radius: var(--radius-sm);
+  padding: 0.5rem;
 }
 
-#transport {
-  margin: 0.75rem 0;
-  padding: 0.75rem;
-  border: 1px solid var(--border);
-  border-radius: 6px;
-  font-family: var(--mono);
-  font-size: 0.8rem;
-}
-
-.transport-row {
-  display: flex;
-  align-items: center;
-  gap: 0.5rem;
-  margin: 0.4rem 0;
-}
-
-.transport-readout,
-.transport-summary,
-.transport-status,
-.transport-cadence {
-  color: var(--fg-dim);
-}
-
-.transport-report {
-  white-space: pre-wrap;
-  color: var(--fg-dim);
-  margin: 0.25rem 0;
-}
-
-#grid {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 0.5rem;
-}
-
-.grid-tile {
-  display: flex;
-  flex-direction: column;
-  align-items: center;
-  gap: 0.25rem;
-}
-
-.grid-tile-canvas {
-  width: 96px;
-  height: 96px;
-  background: var(--panel-bg);
-  border: 1px solid var(--border);
-}
-
-.grid-tile-label {
-  font-family: var(--mono);
-  font-size: 0.7rem;
-  color: var(--fg-dim);
-  max-width: 110px;
-  text-align: center;
+@media (max-width: 640px) {
+  .inspector-channels {
+    grid-template-columns: 1fr;
+  }
 }

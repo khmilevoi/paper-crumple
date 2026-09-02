@@ -169,8 +169,11 @@ export function createConfigPanel(
     root.append(
       boolRow(
         'tiles',
-        'the four baked tiles, on the @paper-crumple/paper/tiles subpath. Default is null, ' +
-          'because the default edge mode is hull, which needs no tear, no teeth and no fibre',
+        "the four baked tiles, on the @paper-crumple/paper/tiles subpath. This describes paperSheet's " +
+          "own default, not this demo's default (below, tiles starts on): paperSheet defaults to " +
+          'tiles: null because its default edge mode is hull, which needs no tear, no teeth and no ' +
+          'fibre — a hull consumer who never opts into torn would otherwise be charged for an asset ' +
+          'their configuration cannot use',
         current.tiles,
         (v) => apply({ ...current, tiles: v }),
       ),
