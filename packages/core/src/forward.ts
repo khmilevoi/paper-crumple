@@ -1,9 +1,3 @@
-/* eslint-disable @typescript-eslint/no-empty-object-type --
- * Several declarations here have no members yet, on purpose: the plan that owns the type gives
- * it members, and inventing them here would pre-empt that plan's design. An empty interface is
- * the honest declaration of "this name exists and its shape is somebody else's".
- */
-
 /**
  * # Forward declarations
  *
