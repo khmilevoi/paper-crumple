@@ -164,7 +164,7 @@ function pickTexels(bytes: ArrayLike<number>, texels: readonly number[]): number
   return out
 }
 
-describe('the front texture under exact: opaque texels match the source, transparent texels are exactly zero', () => {
+describe("the front's artwork rect through readPixels, partitioned by alpha", () => {
   /**
    * Ruling 1: the oracle is split by the *source's own* alpha, not compared whole against the raw
    * source bytes. At `uEdgeMode == 2` (see the file header) `outColor` is exactly `(0,0,0,0)`
@@ -263,8 +263,14 @@ describe('the front texture under exact: opaque texels match the source, transpa
     const got = readRect(ctx, front.texture, ax, ay, handle.artwork.w, handle.artwork.h)
 
     const { opaque, empty, partial } = partitionByAlpha(reference)
-    // Every texel is one of these three classes; `partial` (measured non-empty for this fixture at
-    // this reduction) is deliberately left unasserted — see the doc comment above.
+    // The three classes are pinned individually, not merely summed: `partitionByAlpha` puts every
+    // texel in exactly one array, so the sum is true by construction and bounds nothing. These are
+    // the measured counts the doc comment above reasons from, so if the reference changed and the
+    // partial-alpha ring grew, the ring the oracle deliberately leaves unasserted would be caught
+    // here rather than silently widening under a comment that had become false.
+    expect(opaque.length).toBe(289)
+    expect(empty.length).toBe(368)
+    expect(partial.length).toBe(72)
     expect(opaque.length + empty.length + partial.length).toBe(handle.artwork.w * handle.artwork.h)
 
     expect(firstDifferencesAt(got, reference, opaque, handle.artwork.w)).toEqual([])

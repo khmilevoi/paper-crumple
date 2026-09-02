@@ -158,11 +158,18 @@ describe('the zero-asset path is the render with the photograph turned off (§14
     if (asSpike instanceof Error) return expect.fail(asSpike.message)
 
     // If this ever reaches 0, the comparison above has become vacuous and the claim §14.1 corrected
-    // could quietly become false again without anything going red.
+    // could quietly become false again without anything going red. Measured on the level-2 lane:
+    // 316 of the 16384 texels of the 128x128 front differ on this arm — recorded here because it
+    // is the margin the `toBeGreaterThan(0)` is standing on, and a drift towards 0 is the failure
+    // this assertion exists to catch.
     expect(differingTexels(zero, asSpike)).toBeGreaterThan(0)
   })
 
   it("records the re-derived constant, so a copy of the spike's value cannot creep back", () => {
+    // Only `NEUTRAL_TILE_BYTE` pins shipped source: it is imported from `paper-tiles.ts`, so a
+    // change there goes red here. `SPIKE_EFFECTIVE_BYTE` is computed locally at the top of this
+    // file, so the two assertions that mention it pin this file's own arithmetic — the spike's
+    // value is not shipped anywhere and there is nothing else to pin it against.
     expect(NEUTRAL_TILE_BYTE).toBe(128)
     expect(SPIKE_EFFECTIVE_BYTE).toBe(64)
     // 128/255 = 0.50196: a residual tilt of 0.00392 against a 0.5 centre, 127x smaller than the

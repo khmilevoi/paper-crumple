@@ -1,5 +1,6 @@
 /**
- * # The three ambient pins and the byte-fetch probe, after a whole pipeline run (§7.4.1, §11)
+ * # The three ambient pins after a whole pipeline run, and the byte-fetch probe at context
+ * creation (§7.4.1, §11)
  *
  * §7.4.1 names three pieces of ambient state that "silently corrupt a byte and must be pinned":
  * `DITHER`, which ES 3.0 enables by default and permits to alter the written value;
@@ -10,10 +11,12 @@
  * them **after a real `source()` and `build()`**, because the risk the pins exist for is a slot
  * that dirties them mid-pipeline, and nothing before this tier could have caught that.
  *
- * `exactByteFetch` is asserted `true` for a different reason: on the level-2 lane's driver it is
- * the normative path, and a driver regression that silently flipped it to the canvas fallback
- * would cost byte-fidelity for every fully transparent texel's colour (§8.5.3) with no test going
- * red. Here it goes red.
+ * `exactByteFetch` is asserted `true` for a different reason, and in its **own** describe below:
+ * on the level-2 lane's driver it is the normative path, and a driver regression that silently
+ * flipped it to the canvas fallback would cost byte-fidelity for every fully transparent texel's
+ * colour (§8.5.3) with no test going red. Here it goes red. It runs no pipeline and must not: the
+ * value is computed once at `createGlContext` and nothing re-probes it, so a pipeline run would
+ * decorate the case without adding anything it could catch.
  */
 import { afterEach, describe, expect, it } from 'vitest'
 import { GlError, SheetError, isAborted } from '@paper-crumple/core'
@@ -89,7 +92,9 @@ describe('the ambient pins survive a whole pipeline run (§7.4.1)', () => {
     sheet.releaseFront(front)
     sheet.dispose()
   })
+})
 
+describe('the byte-fetch probe, as `createGlContext` computed it (§8.5.3)', () => {
   it('reports exactByteFetch true, so a driver regression is a CI failure and not a drift', () => {
     const f = open()
     // The `usampler2D` form stays the normative definition and the fallback, so a `false` here

@@ -30,9 +30,10 @@ describe('the level-3 runbook (§17.1)', () => {
   })
 
   it('names every N of the deciding batch, since a grid does not serialise its draws', () => {
-    for (const n of ['1', '8', '32', '100', '256']) {
-      expect(runbook).toMatch(new RegExp(`\\b${n}\\b`))
-    }
+    // The list itself, verbatim. A per-number word-boundary match would be met by any
+    // standalone digit anywhere in the document — list numbering included — and would
+    // prove nothing.
+    expect(runbook).toContain('1, 8, 32, 100, 256')
     expect(runbook).toContain('no `finish` inside')
   })
 

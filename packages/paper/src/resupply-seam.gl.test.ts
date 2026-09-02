@@ -102,7 +102,7 @@ function recordingSheet(
   return wrapper
 }
 
-describe("a conditional re-supply answered 200 busts the real slot's hull entry", () => {
+describe('replace() re-traces the hull instead of serving the cached polygon (amendment 10; no conditional request is issued today — see test 2)', () => {
   it('re-traces the hull instead of serving the polygon the key was registered with', async () => {
     fixture = createGlFixture(8, 8)
     expect(
@@ -156,8 +156,11 @@ describe("a conditional re-supply answered 200 busts the real slot's hull entry"
     expect(sheet.handles).toHaveLength(2)
     const [a, b] = sheet.handles as [PaperSheetHandle, PaperSheetHandle]
 
-    // The whole point: the second trace is not the cached polygon. `sheet.gl.test.ts` uses the
-    // same identity comparison for the cache-hit case, so this is the negative of that test.
+    // The second trace is not the cached polygon. `sheet.gl.test.ts` uses the same identity
+    // comparison for the cache-hit case, so this is the negative of that test — but on its own it
+    // is true by construction: a fresh `ImageBitmap` always mints a fresh `spriteKey`, so no cache
+    // entry could have been hit whatever `release()` did. The two assertions below it are the
+    // falsifiable ones, and they are where this case earns its keep.
     expect(b.hull).not.toBe(a.hull)
 
     // The entry point itself was reached: `replace()`'s own D3 comment says `release(handle)` is
@@ -206,6 +209,10 @@ describe("a conditional re-supply answered 200 busts the real slot's hull entry"
     const first = await stage.add('/sweater.png', { key: 'sweater' })
     if (first instanceof Error || isAborted(first)) return expect.fail(String(first))
     await stage.replace('sweater', '/sweater.png')
+
+    // Two requests actually went out. Without this the pin below reads `undefined` off a missing
+    // entry and passes for the wrong reason (test 1 carries the same check).
+    expect(seen).toHaveLength(2)
 
     // **This is the gap, pinned.** `stage.replace()` normalises a fresh source and calls
     // `acquire()`, never `resupply()`, so no conditional request is issued and `SourceFreshness`

@@ -98,15 +98,20 @@ describe('identityView (§7.4.2) — a smoke test for the sheet shader, not a re
     expect(fit.sheetH).toBe(IDENTITY_BOX)
   })
 
-  it('has an integer margin and an artwork rect A === (0, 0, w, h)', () => {
+  it('has an integer margin, a 128x128 front and the paper box as front.rect', () => {
     const f = open()
     const view = identityView(f.gl)
     live.push(view)
     expect(Number.isInteger(view.margin)).toBe(true)
     expect(view.margin).toBe(IDENTITY_MARGIN)
-    // A is the whole front: the transparent field is part of the artwork, not a reserved margin.
+    // The whole front is 128x128 and the transparent field is part of the texture, not a hole in
+    // it. `front.rect` is `SheetFront.rect` (`packages/core/src/sheet.ts`): the **paper box**
+    // inside that texture, not the artwork rect, so it is the margin-inset 96x96 box and not
+    // `(0, 0, w, h)`. Asserted with the literals rather than the constants so the fixture cannot
+    // move the box and the assertion with it.
     expect(view.front.width).toBe(IDENTITY_FRONT)
     expect(view.front.height).toBe(IDENTITY_FRONT)
+    expect(view.front.rect).toEqual({ x: 16, y: 16, w: 96, h: 96 })
     expect(view.bytes.length).toBe(IDENTITY_FRONT * IDENTITY_FRONT * 4)
   })
 
