@@ -124,6 +124,20 @@ describe('set() at the three scopes', () => {
   })
 })
 
+describe('prepare() as a rebuild demand (§8.8)', () => {
+  it('rebuilds a resident front that a front-class set() left dirty', async () => {
+    const s = await scene()
+    // A running view marks dirty and does not rebuild eagerly, which is what leaves a resident
+    // front stale for `prepare()` to find.
+    s.view.play('flat', 'ball')
+    s.sprite.set({ sheetEdge: 0.9 } as never)
+    const builds = s.sheet.calls.build.length
+    expect(await s.stage.prepare('k')).not.toBeInstanceOf(Error)
+    expect(s.sheet.calls.build.length).toBeGreaterThan(builds)
+    s.stage.dispose()
+  })
+})
+
 describe('budget and usage', () => {
   it('the accounting closes: bytes is fronts plus handles plus pools', async () => {
     const s = await scene()
@@ -131,7 +145,9 @@ describe('budget and usage', () => {
     expect(u.fronts).toBe(1)
     expect(u.handles).toBe(1)
     expect(u.attached).toBe(1)
-    expect(u.bytes).toBeGreaterThan(0)
+    // `reclaimable + unreclaimable` is the front tier alone, which is what `p.lru.usage()`
+    // counts. §8.8's `bytes` is fronts **plus** handles plus pools, so it is strictly larger.
+    expect(u.bytes).toBeGreaterThan(u.reclaimable + u.unreclaimable)
     s.stage.dispose()
   })
 

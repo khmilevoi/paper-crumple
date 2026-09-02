@@ -45,6 +45,22 @@ function flushMicrotasks(): Promise<void> {
 }
 
 describe('view.play and view.crumpleTo', () => {
+  it('releases the target hold when the swap is stopped before the ball (§4.5)', async () => {
+    const s = await scene()
+    const run = s.view.crumpleTo(s.b)
+    // Well short of the first dwell: the run is live, rising, and nowhere near `adopt`.
+    s.timers.advance(10)
+    s.view.stop()
+    expect(isAborted(await run)).toBe(true)
+    await flushMicrotasks()
+    // `a` is attached to the view and is the MRU, which the LRU never evicts; `b` is the only
+    // candidate, and it is one only if the hold the crumpleTo took has been released.
+    s.stage.budget({ bytes: 1 })
+    expect(s.stage.usage().fronts).toBe(1)
+    expect(s.stage.get('b')?.key).toBe('b')
+    s.stage.dispose()
+  })
+
   it('returns a Run and not a promise, and emits start before it returns', async () => {
     const s = await scene()
     const events: string[] = []

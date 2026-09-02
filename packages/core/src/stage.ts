@@ -745,7 +745,12 @@ function buildStage(p: StageParts): BuiltStage {
       // §10.6's policy is P9's: the runner hands over an error and this decides `observed`, adds
       // `view` and emits it. A returned ABORTED never reaches here — cancellation is not failure.
       reportError: (error) => {
-        const entry = playBroadcasts.get(view)
+        // Only a **stage-owned** run may write into the broadcast's record. A view-owned run
+        // supersedes a live broadcast (`decideCollision('view', 'stage')` is `'supersede'`)
+        // without creating a record of its own, and crediting the superseded broadcast with that
+        // run's error would report the view as `failed` for something another run did, rather
+        // than as `incomplete`. The orphan emission stays unconditional (§10.6).
+        const entry = controller?.owner === 'stage' ? playBroadcasts.get(view) : undefined
         if (entry !== undefined) entry.error = error
         p.policy.orphan(error, view)
       },
@@ -789,7 +794,11 @@ function buildStage(p: StageParts): BuiltStage {
     /** Holds the pending target's front against eviction; returns the release. */
     function holdTarget(target: Sprite | Promise<Sprite | Error | Aborted>): () => void {
       let key: string | null = null
+      let released = false
       const take = (s: Sprite): void => {
+        // A target that settles **after** the release has fired must not take a hold: the
+        // release is the only thing that could ever undo it, and it has already run.
+        if (released) return
         key = s.key
         p.lru.hold(key)
       }
@@ -799,7 +808,10 @@ function buildStage(p: StageParts): BuiltStage {
           if (!(s instanceof Error) && !isAborted(s)) take(s)
         })
       }
+      // Idempotent: it is called from `adopt` and from the run's completion, and the run always
+      // completes.
       return () => {
+        released = true
         if (key !== null) p.lru.releaseHold(key)
         key = null
       }
@@ -869,6 +881,11 @@ function buildStage(p: StageParts): BuiltStage {
           return undefined
         },
       })
+      // `adopt` fires at the ball, and every path that ends the run before it — `view.stop()`, a
+      // superseding run, `view.dispose()` — would otherwise leave the hold above in place
+      // forever, and a held front is unevictable (§4.5). The release is idempotent, so the normal
+      // path (adopt at the ball, then the run settles) still releases exactly once.
+      void run.done.then(held)
       currentRun = run
       return run
     }
@@ -1240,7 +1257,13 @@ function buildStage(p: StageParts): BuiltStage {
         null,
       )
     }
-    if (record.front !== null) return record.sprite
+    // §8.8 demand 4 — `prepare(key)`. A resident front that a front-class `set()` marked dirty
+    // is stale, so returning it early would make `prepare` the one demand that never rebuilds.
+    // The prepared key is the mandatory item; the rest of the queue rides along in the budget.
+    if (record.front !== null) {
+      if (p.rebuildQueue.dirty(key)) p.rebuildQueue.drain({ demand: 'prepare', mandatory: key })
+      return record.sprite
+    }
     const rebuilt = rebuildFront(record)
     if (rebuilt !== undefined) return p.policy.returned(rebuilt, null)
     return record.sprite
@@ -1284,7 +1307,15 @@ function buildStage(p: StageParts): BuiltStage {
     p.o.motion.release(record.clip)
 
     const built = await buildSprite(key, source, { signal: o?.signal, exact: record.exact })
-    if (isAborted(built)) return ABORTED
+    if (isAborted(built)) {
+      // The D3 release above already handed this record's handle and clip back to the slots, so
+      // the record cannot outlive an abort: a later `remove(key)` would release both a second
+      // time, and `prepare(key)` would build a front from a released handle.
+      p.sprites.delete(key)
+      p.lru.remove(key)
+      p.rebuildQueue.forget(key)
+      return ABORTED
+    }
     if (built instanceof Error) {
       p.sprites.delete(key)
       p.lru.remove(key)
@@ -1513,7 +1544,14 @@ function buildStage(p: StageParts): BuiltStage {
       ...p.lru.usage(),
       // §8.8 — handle metadata and the hull cache are unbudgeted and never evicted; the pools are
       // whole-stage and do not scale with sprite count. `bytes` is fronts + handles + pools, and
-      // the accounting closes exactly.
+      // the accounting closes exactly: `p.lru.usage().bytes` is the front tier alone, each
+      // record's `SheetHandle.bytes` is the slot's own declared accounting (§5.2), and the two
+      // scratch pools report their live bytes themselves.
+      bytes:
+        p.lru.usage().bytes +
+        [...p.sprites.values()].reduce((sum, r) => sum + r.handle.bytes, 0) +
+        p.pools.poolA.bytes() +
+        p.pools.poolB.bytes(),
       handles: p.sprites.size,
       attached: [...p.sprites.values()].filter((r) => r.attachCount > 0).length,
     }),

@@ -2,7 +2,7 @@ import { describe, expect, it, vi } from 'vitest'
 import { isAborted } from './abort.js'
 import { GlError, SheetError, ViewError } from './errors.js'
 import { createStage } from './stage.js'
-import { fakeMotion, fakeSheet, stageEnv } from './testing/fake-slots.js'
+import { fakeGlContext, fakeMotion, fakeSheet, stageEnv } from './testing/fake-slots.js'
 
 /** The smallest object `size: 'managed'` and the blit need out of a destination canvas. */
 function destCanvas(css = { width: 150, height: 75 }) {
@@ -193,10 +193,12 @@ describe('stage.view()', () => {
   it('scissors the clear to the view rect and disables STENCIL_TEST for the draw', async () => {
     const sheet = fakeSheet()
     const motion = fakeMotion()
-    const env = stageEnv()
-    const ctx = env.makeContext?.({} as WebGL2RenderingContext)
-    const scissor = vi.spyOn(ctx?.gl as WebGL2RenderingContext, 'scissor')
-    const disable = vi.spyOn(ctx?.gl as WebGL2RenderingContext, 'disable')
+    // The spies must sit on the very context the stage draws into, so this env hands out a
+    // fixed one rather than `stageEnv()`'s fresh-per-stage default.
+    const ctx = fakeGlContext()
+    const env = stageEnv({ makeContext: () => ctx })
+    const scissor = vi.spyOn(ctx.gl, 'scissor')
+    const disable = vi.spyOn(ctx.gl, 'disable')
     const stage = await createStage({ sheet, motion, maxSize: 384, present: 'direct' }, env)
     if (stage instanceof Error || isAborted(stage)) return expect.fail('stage refused')
     const sprite = await stage.add('/a.png', { key: 'k' })

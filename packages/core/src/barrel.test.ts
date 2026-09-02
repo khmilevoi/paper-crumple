@@ -74,8 +74,12 @@ describe('the stage surface P9 owes the root barrel', () => {
     expect(typeof (root as { presetForImageId: unknown }).presetForImageId).toBe('function')
   })
 
-  it('declares View exactly once — a duplicate export is a decomposition violation', () => {
-    const names = Object.keys(root)
-    expect(names.filter((n) => n === 'View')).toHaveLength(0) // type-only, never a runtime name
+  it('keeps View type-only and mints a stage through paperStage alone', () => {
+    // `View` is an interface: a runtime binding under that name would mean it was re-declared as
+    // a value somewhere, which is the decomposition violation this pins.
+    expect(Object.hasOwn(root, 'View')).toBe(false)
+    // `createStage` is `stage.ts`'s internal, env-injecting factory. `paperStage` is the one
+    // public door (§14), and the internal one must never appear beside it.
+    expect(Object.hasOwn(root, 'createStage')).toBe(false)
   })
 })

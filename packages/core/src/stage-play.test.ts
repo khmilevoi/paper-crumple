@@ -205,6 +205,32 @@ describe('stage.play', () => {
     },
   )
 
+  it(
+    'reports a view superseded by a *view-owned* run as incomplete, never crediting the ' +
+      "broadcast with that run's error",
+    async () => {
+      const g = await grid(1)
+      const motion = g.motion as unknown as { draw: (a: unknown) => unknown }
+      let calls = 0
+      const original = motion.draw.bind(motion)
+      motion.draw = (a: unknown) => {
+        calls += 1
+        // Call 1 is the broadcast's own initial draw and must succeed. Call 2 is the view-owned
+        // run's, which supersedes the broadcast and fails: its error belongs to that run and not
+        // to the broadcast, which never reached `to` and is therefore incomplete.
+        return calls > 1 ? new GlError('dropped') : original(a)
+      }
+      const broadcast = g.stage.play('flat', 'ball')
+      g.views[0]?.play('flat', 'ball')
+      g.timers.advance(10_000)
+      const report = await broadcast
+      expect(report.failed).toEqual([])
+      expect(report.started).toHaveLength(1)
+      expect(report.completed).toBe(false)
+      g.stage.dispose()
+    },
+  )
+
   it('a broadcast over zero eligible views is not completed', async () => {
     const timers = createFakeTimers()
     const stage = await createStage(

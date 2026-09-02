@@ -194,6 +194,32 @@ describe('addAll, prepare, replace and remove', () => {
     stage.dispose()
   })
 
+  it('replace() aborted mid-flight leaves no record behind, so remove() cannot double-free', async () => {
+    let release = (): void => {}
+    let gated = false
+    // The gate suspends `source()` only for the replace(); the add() below must not hang on it.
+    const sheet = fakeSheet({
+      gate: () => (gated ? new Promise<void>((r) => (release = r)) : Promise.resolve()),
+    })
+    const { stage, motion } = await mounted({ sheet })
+    await stage.add('/a.png', { key: 'k' })
+    gated = true
+    const controller = new AbortController()
+    const pending = stage.replace('k', '/b.png', { signal: controller.signal })
+    controller.abort()
+    release()
+    expect(isAborted(await pending)).toBe(true)
+    // D3 released the handle and the clip *before* sourcing, so the record cannot survive: it
+    // would hold a handle and a clip the slots already took back.
+    expect(stage.get('k')).toBeUndefined()
+    const releases = sheet.calls.release.length
+    const clips = motion.calls.release.length
+    expect(stage.remove('k')).toBeUndefined()
+    expect(sheet.calls.release).toHaveLength(releases)
+    expect(motion.calls.release).toHaveLength(clips)
+    stage.dispose()
+  })
+
   it('replace() keeps the key, the pin and the attachments', async () => {
     const { stage } = await mounted()
     const first = await stage.add('/a.png', { key: 'k' })

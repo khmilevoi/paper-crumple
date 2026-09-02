@@ -18,9 +18,13 @@ export interface SurfaceHost {
   /** §4.0.2's grading result, which becomes `stage.warnings`. */
   readonly warnings: readonly string[]
   /**
-   * Grow to fit the largest view requested. **Monotonic**: it never shrinks, so the surface is a
-   * high-water mark and a draw never reallocates the backing store of a neighbour. A no-op on a
-   * surface the stage does not own.
+   * Raise the backing store to at least `w x h`. **Monotonic**: it never shrinks, so the surface
+   * is a high-water mark and a draw never reallocates the backing store of a neighbour. A no-op
+   * on a surface the stage does not own.
+   *
+   * **The stage itself never calls it**: it creates its surface at `maxSize x maxSize` up front,
+   * which already fits every view it will grant. This is the entry point for a host driving the
+   * surface itself, and the monotonic guarantee is what makes that safe.
    */
   grow(w: number, h: number): InstanceType<typeof GlError> | undefined
   /**
@@ -69,8 +73,9 @@ function mutable(canvas: Canvas): { width: number; height: number } {
 }
 
 function makeHost(gl: WebGL2RenderingContext, canvas: Canvas, owned: boolean): SurfaceHost | Error {
+  const attrs = attempt(() => gl.getContextAttributes())
   const grade = gradeAttributes(
-    attempt(() => gl.getContextAttributes()) instanceof Error ? null : gl.getContextAttributes(),
+    attrs instanceof Error ? null : attrs,
     // Grading is done once, at mount, for the framebuffer case. A view that later targets the
     // default framebuffer is re-graded by the stage at `view()` time against `presentable`,
     // which is what this call computes.
@@ -118,6 +123,15 @@ function makeHost(gl: WebGL2RenderingContext, canvas: Canvas, owned: boolean): S
       return setSize(nextW, nextH)
     },
     resize(w, h) {
+      // amendment 8 — the stage owns nothing about an injected context, its canvas's size
+      // included. `HostedStage` omits `resize` statically; this is the runtime half of the same
+      // refusal, for a JavaScript consumer or a cast that reaches the method anyway.
+      if (!owned) {
+        return new GlError(
+          'resize() is refused on an injected context: surface.owned is false, so the canvas ' +
+            "is the host application's to size",
+        )
+      }
       if (!positive(w) || !positive(h)) {
         return new GlError(`resize() needs finite positive dimensions, got ${w}x${h}`)
       }
@@ -168,7 +182,7 @@ export function createOwnedSurface(o: {
     )
   }
   const host = makeHost(gl as WebGL2RenderingContext, canvas, true)
-  return host instanceof GlError ? host : host instanceof Error ? new GlError(host.message) : host
+  return GlError.is(host) ? host : host instanceof Error ? new GlError(host.message) : host
 }
 
 /**
@@ -182,5 +196,5 @@ export function hostInjected(
   const canvas = attempt(() => gl.canvas)
   if (canvas instanceof Error) return new GlError('the injected context exposes no canvas')
   const host = makeHost(gl, canvas as Canvas, false)
-  return host instanceof GlError ? host : host instanceof Error ? new GlError(host.message) : host
+  return GlError.is(host) ? host : host instanceof Error ? new GlError(host.message) : host
 }

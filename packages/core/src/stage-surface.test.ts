@@ -99,7 +99,17 @@ describe('the stage-owned surface', () => {
     expect(injectedExt.loseContext).not.toHaveBeenCalled()
   })
 
-  it('an injected surface is not owned, reports the context canvas, and has no resize', () => {
+  it('refuses resize() on an injected surface, the runtime half of amendment 8', () => {
+    const injected = hostInjected(fakeGl({ width: 10, height: 20 }))
+    if (injected instanceof Error) return expect.fail('injection refused')
+    // `HostedStage` omits `resize` statically (`stage.test-d.ts`); a JavaScript consumer or a
+    // cast reaches it anyway, and overwriting a host application's canvas is what §4.0 forbids.
+    expect(injected.resize(4096, 4096)).toBeInstanceOf(GlError)
+    expect(injected.surface.width).toBe(10)
+    expect(injected.surface.height).toBe(20)
+  })
+
+  it('an injected surface is not owned, reports the context canvas, and ignores grow()', () => {
     const injected = hostInjected(fakeGl({ width: 10, height: 20 }))
     if (injected instanceof Error) return expect.fail('injection refused')
     expect(injected.surface.owned).toBe(false)

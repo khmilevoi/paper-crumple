@@ -247,7 +247,6 @@ export function fakeMotion(o: FakeMotionOptions = {}): FakeMotion {
 
 /** A `StageEnv` with no DOM, no GL and a fake clock. Every level-1 stage test uses this. */
 export function stageEnv(over: Partial<StageEnv> = {}): StageEnv {
-  const ctx = fakeGlContext()
   const canvas = (w: number, h: number) =>
     ({
       width: w,
@@ -268,7 +267,10 @@ export function stageEnv(over: Partial<StageEnv> = {}): StageEnv {
     }) as unknown as HTMLCanvasElement
   return {
     surface: { makeOffscreen: canvas, makeElement: canvas },
-    makeContext: () => ctx,
+    // A fresh context per stage. One env handed to two stages would otherwise share `scopes` and
+    // `disposed`, so one stage's `dispose()` would make the other look torn down. A test that
+    // needs to reach the context passes its own `makeContext` override.
+    makeContext: () => fakeGlContext(),
     timers: createFakeTimers(),
     dpr: 2,
     onContextLost: () => () => {},
