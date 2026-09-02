@@ -8,9 +8,12 @@ import type { SetTarget } from './panel'
 import { createConfigPanel } from './config-panel'
 import { createTransport } from './transport'
 import { createInspector } from './inspector'
+import { decodeState, emitCode, encodeState } from './state'
 
 const line = document.getElementById('version-line')
 const knobCount = document.getElementById('knob-count')
+const copyCodeBtn = document.getElementById('copy-code-btn')
+const emittedCodeEl = document.getElementById('emitted-code')
 
 interface Live {
   readonly built: BuiltStage
@@ -42,7 +45,7 @@ const inspector = createInspector()
  * `front`-class (or coarser) knob is deliberately left to fail and shown inline rather than
  * filtered out before it reaches the library.
  */
-function onSet(
+function applyKnob(
   key: string,
   value: string | number | boolean,
   target: SetTarget,
@@ -75,6 +78,27 @@ function onSet(
   }
   const result = live.view.set(patch as never)
   if (result instanceof Error) inspector.observed('view.set', result)
+  return result
+}
+
+/**
+ * Task 8's hook: every knob write (and, below, every landed rebuild) re-serializes the live
+ * config + the panel's current `changed()` diff into `location.hash` via `replaceState` — no new
+ * history entry per drag-frame. This is what "goes into the URL hash" means in practice: nothing
+ * the reader has to opt into, the address bar is always a live share link.
+ */
+function syncHash(): void {
+  const hash = encodeState(currentConfig, panel.changed())
+  history.replaceState(null, '', hash)
+}
+
+function onSet(
+  key: string,
+  value: string | number | boolean,
+  target: SetTarget,
+): Error | undefined {
+  const result = applyKnob(key, value, target)
+  syncHash()
   return result
 }
 
@@ -189,6 +213,7 @@ async function rebuild(next: DemoConfig): Promise<void> {
   // The hero view now exists on `built.stage.views` — refresh once more so Usage's idealSize /
   // state / pose describe it rather than the pre-mount snapshot `attach` above took.
   inspector.refreshUsage()
+  syncHash()
 
   configPanel.setStatus(
     `rebuilt in ${built.buildMs.toFixed(1)} ms · ${built.stage.warnings.length} warnings · ` +
@@ -204,7 +229,25 @@ async function rebuild(next: DemoConfig): Promise<void> {
       `built in ${built.buildMs.toFixed(1)}ms`
 }
 
-const configPanel = createConfigPanel(DEFAULT_CONFIG, (next) => void rebuild(next))
+// The URL hash a reader may have opened this page with, decoded exactly once at load. A
+// malformed fragment is reported through the inspector, never thrown or console-logged — a bad
+// link falls back to `DEFAULT_CONFIG` rather than producing a blank page.
+const initialHashState = decodeState(location.hash)
+if (initialHashState instanceof Error) inspector.observed('decodeState', initialHashState)
+const initialConfig = initialHashState instanceof Error ? DEFAULT_CONFIG : initialHashState.config
+
+const configPanel = createConfigPanel(initialConfig, (next) => void rebuild(next))
+
+if (copyCodeBtn !== null) {
+  copyCodeBtn.addEventListener('click', () => {
+    const code = emitCode(currentConfig, panel.changed())
+    if (emittedCodeEl !== null) emittedCodeEl.textContent = code
+    navigator.clipboard.writeText(code).catch((reason: unknown) => {
+      const err = reason instanceof Error ? reason : new Error(String(reason))
+      inspector.observed('clipboard.writeText', err)
+    })
+  })
+}
 
 async function boot(): Promise<void> {
   // A duplicate core is a startup failure, not a once-per-session console warning: two copies
@@ -216,7 +259,19 @@ async function boot(): Promise<void> {
     return
   }
 
-  await rebuild(DEFAULT_CONFIG)
+  await rebuild(initialConfig)
+
+  // The knobs the fragment named on top of `initialConfig` — reapplied against the now-live
+  // stage the same way a manual edit would be, through `onSet`, so every write still lands on
+  // the inspector's channels and re-syncs the hash. `decodeState`'s own `KnobValues` carries no
+  // per-key write-back target (`panel.changed()` on the writing side does not either), so `stage`
+  // — the panel's own default target — is the one write-back path every knob is guaranteed to
+  // support.
+  if (!(initialHashState instanceof Error)) {
+    // `onSet` already reports a failed write through the inspector's own `stage.set` /
+    // `sprite.set` / `view.set` channel — nothing further to do with its return value here.
+    for (const [key, value] of Object.entries(initialHashState.knobs)) onSet(key, value, 'stage')
+  }
 }
 
 void boot()
