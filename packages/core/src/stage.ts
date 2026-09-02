@@ -1,7 +1,14 @@
 import { ABORTED, isAborted, type Aborted } from './abort.js'
 import { attempt } from './attempt.js'
 import { blitPlan, managedBackingStore } from './blit.js'
-import type { StagePlayReport } from './collisions.js'
+import {
+  planStagePlay,
+  stagePlayReport,
+  type ChainOutcome,
+  type StagePlayCandidate,
+  type StagePlayReport,
+} from './collisions.js'
+import { batchBySortKey } from './draw-batch.js'
 import { resolvePose } from './dwell.js'
 import { createErrorPolicy, type ErrorPolicy } from './error-policy.js'
 import { createEventBus, type EventBus } from './emitter.js'
@@ -25,7 +32,7 @@ import { presetForImageId } from './preset.js'
 import type { PoseRef } from './pose.js'
 import { createRebuildQueue, type RebuildQueue } from './rebuild-queue.js'
 import type { AddError, PlayResult, ReadyError, SwapResult } from './results.js'
-import { createRun, settledRun, type Run } from './run.js'
+import { createRun, settledRun, type Run, type RunOwner } from './run.js'
 import {
   createRunController,
   type CrumpleTarget,
@@ -447,9 +454,39 @@ interface StageParts {
   teardown: Array<() => void>
 }
 
+/** The stage-side face of a view. Never handed to a consumer; `View` is the public one. */
+interface ViewInternals {
+  owner(): RunOwner | null
+  playAs(owner: RunOwner, from: PoseRef, to: PoseRef, o?: PlayOptions): Run<PlayResult>
+  stopAs(owner: RunOwner, all: boolean): void
+  readonly spriteKey: string | null
+}
+
+const INTERNALS = new WeakMap<View, ViewInternals>()
+function internals(v: View): ViewInternals {
+  return (
+    INTERNALS.get(v) ?? {
+      owner: () => null,
+      playAs: () => settledRun(undefined),
+      stopAs: () => {},
+      spriteKey: null,
+    }
+  )
+}
+
 function buildStage(p: StageParts): BuiltStage {
   let batching = false
   const views: View[] = []
+
+  // §10.6's policy is P9's, applied to `stage.play`'s report: a mid-run draw failure reaches the
+  // stage through `RunHost.reportError`, never through the run's settled value (P4 settles a run
+  // to `undefined` on a dropped frame, on purpose — see `runner.test.ts`'s "still settles the run
+  // to undefined" and "§10.6 policy is P9's" cases). `playBroadcastViews` marks which views have a
+  // `stage.play` chain in flight; `playBroadcastErrors` is what `reportError` writes into for one
+  // of them, read back once that view's run settles. This is additional bookkeeping on top of the
+  // existing `p.policy.orphan` emission below — it never changes whether or how an error emits.
+  const playBroadcastViews = new Set<View>()
+  const playBroadcastErrors = new Map<View, Error>()
 
   const dead = (): InstanceType<typeof GlError> | undefined =>
     p.isDisposed() || p.isLost()
@@ -614,7 +651,10 @@ function buildStage(p: StageParts): BuiltStage {
       emit: (event, payload) => bus.emit(event, payload as never),
       // §10.6's policy is P9's: the runner hands over an error and this decides `observed`, adds
       // `view` and emits it. A returned ABORTED never reaches here — cancellation is not failure.
-      reportError: (error) => p.policy.orphan(error, view),
+      reportError: (error) => {
+        if (playBroadcastViews.has(view)) playBroadcastErrors.set(view, error)
+        p.policy.orphan(error, view)
+      },
       render: (next) => {
         pose = next
         return record === null ? undefined : paintOnce(record, next)
@@ -838,6 +878,15 @@ function buildStage(p: StageParts): BuiltStage {
     // lets `view.run` report `null` at exactly the moment §4.5 says the view returns to `idle`.
     bus.on('end', () => {
       currentRun = null
+    })
+
+    INTERNALS.set(view, {
+      owner: () => controller?.owner ?? null,
+      playAs: (owner, from, to, o) => controllerFor().play(from, to, { ...o, owner }),
+      stopAs: (owner, all) => controller?.stop({ owner, all }),
+      get spriteKey() {
+        return record?.key ?? null
+      },
     })
     return view
   }
@@ -1163,6 +1212,75 @@ function buildStage(p: StageParts): BuiltStage {
     return undefined
   }
 
+  async function stagePlayMethod(
+    from: PoseRef,
+    to: PoseRef,
+    o?: StagePlayOptions,
+  ): Promise<StagePlayReport<View>> {
+    // §4.4 — it never returns an Error and never rejects. There is nothing to narrow, so the
+    // error policy is not on this path at all; a per-view failure is a `failed` entry.
+    if (p.isDisposed() || p.isLost()) {
+      return { started: [], skipped: [], failed: [], completed: false }
+    }
+    // Snapshotted **synchronously**, in registration order, so the eligible set is fixed at the
+    // call and the resolution condition is decidable.
+    const candidates: Array<StagePlayCandidate<View>> = views.map((v) => {
+      const inner = internals(v)
+      return {
+        view: v,
+        tag: v.tag,
+        hasSprite: v.sprite !== null,
+        disposed: v.state === 'disposed',
+        liveOwner: inner.owner(),
+      }
+    })
+    const eligibility = planStagePlay(candidates)
+
+    // §7.1 — the stage emits its own `start` synchronously before the first setTimeout, even
+    // when `stagger > 0` delays the individual views'.
+    p.bus.emit('start', {
+      from: 0,
+      to: 0,
+      duration: o?.duration,
+      view: null,
+    } as never)
+
+    const stagger = Math.max(0, o?.stagger ?? 0)
+    const ordered = batchBySortKey(eligibility.start, (c) => {
+      const key = internals(c.view).spriteKey
+      return key === null ? '' : (p.sprites.get(key)?.fit.sortKey ?? '')
+    })
+    const chains = ordered.map(
+      (c, i) =>
+        new Promise<ChainOutcome>((resolve) => {
+          const begin = (): void => {
+            if (o?.signal?.aborted === true) return resolve({ kind: 'cancelled' })
+            playBroadcastViews.add(c.view)
+            playBroadcastErrors.delete(c.view)
+            const run = internals(c.view).playAs('stage', from, to, o)
+            void run.done.then((settled) => {
+              playBroadcastViews.delete(c.view)
+              const reported = playBroadcastErrors.get(c.view)
+              playBroadcastErrors.delete(c.view)
+              if (reported !== undefined) resolve({ kind: 'failed', error: reported })
+              else if (isAborted(settled)) resolve({ kind: 'incomplete' })
+              else if (settled instanceof Error) resolve({ kind: 'failed', error: settled })
+              else resolve({ kind: 'completed' })
+            })
+          }
+          if (i === 0 || stagger === 0) begin()
+          else p.timers.setTimeoutFn(begin, i * stagger)
+        }),
+    )
+    return stagePlayReport(eligibility, await Promise.all(chains))
+  }
+
+  function stageStopMethod(o?: { all?: boolean }): void {
+    // The same scope principle applied to cancellation, so that a broadcast stop cannot
+    // silently kill a user-initiated garment swap.
+    for (const v of views) internals(v).stopAs('stage', o?.all === true)
+  }
+
   const stage = {
     warnings: p.warnings,
     caps: p.ctx.caps,
@@ -1246,10 +1364,8 @@ function buildStage(p: StageParts): BuiltStage {
       views.push(created)
       return created
     },
-    // Task 14
-    play: () =>
-      Promise.resolve({ started: [], skipped: [], failed: [], completed: false }) as never,
-    stop: () => {},
+    play: stagePlayMethod,
+    stop: stageStopMethod,
     // Task 15
     mount: () => Promise.resolve(new ViewError('not implemented')) as never,
     // Task 16
