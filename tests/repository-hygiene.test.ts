@@ -57,16 +57,19 @@ describe('the root manifest', () => {
     expect(scripts['test:gl']).toBe(
       'playwright install --no-shell chromium && vitest run --project gl',
     )
-    // `check` is everything CI runs, level 2 included, and it builds first. Core's exports map
-    // points at ./dist, so NodeNext cannot resolve @paper-crumple/core from a sibling package
-    // until that dist exists (spec 10.4). Core alone is filtered in: it is the only package
-    // imported across a workspace boundary, and paper and motion have no buildable entries
-    // until late in the run.
+    // `check` is everything CI runs, level 2 included, and it builds first. Every published
+    // package's exports map points at ./dist, so NodeNext cannot resolve one from a sibling
+    // package until that dist exists (spec 10.4). All three published packages are filtered in:
+    // core was alone only while paper and motion had no buildable entries, and wave 4 gave them
+    // theirs — paper's src/tiles.ts and motion's src/packs/*.ts. @paper-crumple/tsconfig is
+    // private and builds nothing, so it stays out.
     expect(scripts.check).toBe(
-      'turbo run build --filter=@paper-crumple/core && pnpm lint && pnpm format:check && pnpm typecheck && pnpm test && pnpm test:gl',
+      'turbo run build --filter=@paper-crumple/core --filter=@paper-crumple/paper --filter=@paper-crumple/motion && pnpm lint && pnpm format:check && pnpm typecheck && pnpm test && pnpm test:gl',
     )
-    // The build leads. A lane that typechecks before core's dist exists is the bug this guards.
-    expect(scripts.check.split(' && ')[0]).toBe('turbo run build --filter=@paper-crumple/core')
+    // The build leads. A lane that typechecks before those dists exist is the bug this guards.
+    expect(scripts.check.split(' && ')[0]).toBe(
+      'turbo run build --filter=@paper-crumple/core --filter=@paper-crumple/paper --filter=@paper-crumple/motion',
+    )
   })
 
   it('pins the whole level-2 toolchain exactly, because this tier asserts byte identity', () => {
