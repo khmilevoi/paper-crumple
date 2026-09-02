@@ -1,4 +1,80 @@
-/** §4.2's view. **Task 12 declares its members.** */
+import type { Aborted } from './abort.js'
+import type { SheetError } from './errors.js'
+import type { KnobDescriptor } from './forward.js'
+import type { Size } from './geometry.js'
+import type { EventName, Events } from './events.js'
+import type { KnobSetter, ViewKnobPatch } from './knob-patch.js'
+import type { PoseRef } from './pose.js'
+import type { PlayResult, SwapResult } from './results.js'
+import type { Run } from './run.js'
+import type { PlayOptions } from './runner.js'
+import type { SpriteSource } from './source.js'
+import type { Sprite } from './sprite.js'
+import type { ViewState } from './view-state.js'
+
+type AnySlot = readonly KnobDescriptor[]
+
+/** `view.crumpleTo` and `view.swapTo`'s options (§4.2). */
+export interface SwapOptions extends PlayOptions {
+  /** Named because a `crumpleTo` chained by hand does not reproduce the ball hold (§7.2). */
+  duration?: number
+}
+
+/**
+ * §4.2 — **a place on the screen**: a render target and a destination rect, at most one sprite at
+ * a time, and **the pose**. Owner of draw-class knob overrides. Created and disposed explicitly.
+ *
+ * One sprite may be shown by several views — the same garment as a grid thumbnail and in a detail
+ * panel, sharing one front texture. That is why the pose belongs to the view.
+ */
 export interface View {
+  // --- the accessors the design already assumes (amendment 14) ---
+  /** The **resolved numeric index** — the value §4.5 tells a caller to pass to
+   *  `play(view.pose, 'flat')`. `PoseRef` is an input type only. */
+  readonly pose: number
+  /** §4.5's table, exposed — all seven states, under the table's own names. A three-value summary
+   *  was refused: it would hide whether a parked view waits on a target (`crumpling.ball`) or
+   *  descends on the old sprite after one failed (`crumpling.recover`). */
+  readonly state: ViewState
+  readonly sprite: Sprite | null
+  /** Replaces every hand-rolled `isPlaying` counter, and makes `run.stop()` reachable. */
+  readonly run: Run<PlayResult | SwapResult> | null
+  /** Supplied at `stage.view()`; what makes a `stage.play()` skip entry correlatable without a
+   *  reverse `Map<View, id>`. */
   readonly tag: string | undefined
+  /** What the motion slot asked the front be rendered at (amendment 13). */
+  readonly idealSize: Size
+
+  // --- drawing ---
+  show(sprite: Sprite | null): InstanceType<typeof SheetError> | undefined
+  /** Redraw at the current pose. No run, no events (amendment 15). */
+  refresh(): void
+  /** Draw one pose. No run, no events. The honest escape hatch for scroll-driven or
+   *  devtools-stepped scrubbing, where the scheduler belongs to the consumer. */
+  draw(pose: PoseRef): void
+
+  // --- runs (§4.2, amendment 22) ---
+  play(from: PoseRef, to: PoseRef, o?: PlayOptions): Run<PlayResult>
+  /**
+   * **Not `async`.** It returns a promise-like, but it emits `start` **before** it returns, so
+   * `AudioContext.resume()` can be called from inside the user gesture that triggered it (§7.1).
+   * Refactoring this to `async` silently breaks audio on iOS; `Run` is a non-promise return type
+   * so that edit is a type error at every call site rather than a prose warning.
+   *
+   * A consumer honouring `prefers-reduced-motion` needs no API: `show()` **is** the degraded
+   * swap — instant, pose 0, no run — so the whole accommodation is
+   * `matchMedia('(prefers-reduced-motion: reduce)').matches ? view.show(b) : view.swapTo(src)`.
+   */
+  crumpleTo(target: Sprite | Promise<Sprite | Error | Aborted>, o?: SwapOptions): Run<SwapResult>
+  /** `add` + `crumpleTo(pending)`. Inherits `crumpleTo`'s contract exactly (amendment 11). */
+  swapTo(src: SpriteSource, o?: SwapOptions): Run<SwapResult>
+  /** Freezes at the current pose and **issues no draw** — a cancel path must not render. */
+  stop(): void
+
+  set: KnobSetter<ViewKnobPatch<AnySlot, AnySlot>>
+  on<E extends EventName>(event: E, fn: (e: Events[E]) => void): () => void
+  once<E extends EventName>(event: E, fn: (e: Events[E]) => void): () => void
+  /** Detaches and releases nothing context-wide. A `{ canvas }` view leaves the element's last
+   *  blitted pixels in place; the element itself is the consumer's (§4.6). */
+  dispose(): void
 }

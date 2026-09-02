@@ -1,6 +1,8 @@
 import { ABORTED, isAborted, type Aborted } from './abort.js'
 import { attempt } from './attempt.js'
+import { blitPlan, managedBackingStore } from './blit.js'
 import type { StagePlayReport } from './collisions.js'
+import { resolvePose } from './dwell.js'
 import { createErrorPolicy, type ErrorPolicy } from './error-policy.js'
 import { createEventBus, type EventBus } from './emitter.js'
 import {
@@ -15,13 +17,15 @@ import type { KnobDescriptor } from './forward.js'
 import { createFrontLru, type FrontLru, type FrontLruUsage } from './front-lru.js'
 import { createGlContext, type CoreGlContext } from './gl-context.js'
 import { createScratchPools, type ScratchPools } from './gl-pools.js'
-import type { GlCaps } from './gl.js'
+import type { DrawTarget, GlCaps } from './gl.js'
 import type { EventName, StageEvent } from './events.js'
 import { createKnobRegistry, type KnobRegistry } from './knob-registry.js'
 import type { KnobPatch, KnobSetter } from './knob-patch.js'
 import { presetForImageId } from './preset.js'
 import type { PoseRef } from './pose.js'
+import { createRebuildQueue, type RebuildQueue } from './rebuild-queue.js'
 import type { AddError, ReadyError } from './results.js'
+import { settledRun } from './run.js'
 import type { StagePlayOptions } from './runner.js'
 import { sdfResFor, sizeForDisplay } from './resolution.js'
 import {
@@ -45,8 +49,10 @@ import type {
   HostedTarget,
   StageOptions,
   Surface,
+  ViewTarget,
 } from './stage-types.js'
 import { systemTimers, type Timers } from './stepper.js'
+import { transition, type ViewState } from './view-state.js'
 import type { View } from './view.js'
 
 /**
@@ -231,6 +237,9 @@ function defaultOnContextLost(
 type BuiltStage = StageCommon & {
   readonly surface: Surface
   resize(w: number, h: number): InstanceType<typeof GlError> | undefined
+  /** The union of the three modes' `view()` — `createStage`'s return type is mode-agnostic, and
+   *  the runtime narrows on which member of `ViewTarget` it was actually handed. */
+  view(t: ViewTarget): View | InstanceType<typeof ViewError>
 }
 
 export async function createStage(
@@ -332,6 +341,26 @@ export async function createStage(
     },
   })
 
+  const rebuildQueue = createRebuildQueue({
+    timers,
+    rebuild: (key) => {
+      const record = sprites.get(key)
+      if (record === undefined) return
+      const front = o.sheet.build(
+        record.handle,
+        record.fit.frontSize,
+        registry.projector('sheet')(record.knobs) as never,
+      )
+      if (front instanceof Error) {
+        policy.orphan(front, null)
+        return
+      }
+      if (record.front !== null) o.sheet.releaseFront(record.front)
+      record.front = front
+      lru.insert({ key, bytes: front.bytes, reclaimable: record.source.reclaimable })
+    },
+  })
+
   const warnings: Error[] = host.warnings.map((w) => new GlError(w))
   let lost = false
   let disposed = false
@@ -344,6 +373,7 @@ export async function createStage(
     registry,
     pools,
     lru,
+    rebuildQueue,
     sprites,
     reserved,
     bus,
@@ -394,6 +424,7 @@ interface StageParts {
   registry: KnobRegistry
   pools: ScratchPools
   lru: FrontLru
+  rebuildQueue: RebuildQueue
   sprites: Map<string, SpriteRecord>
   /** Keys whose `add()` is in flight. A live key is refused whether or not it has finished. */
   reserved: Set<string>
@@ -417,6 +448,234 @@ function buildStage(p: StageParts): BuiltStage {
     p.isDisposed() || p.isLost()
       ? new GlError('this stage is disposed or its context was lost; build a new one')
       : undefined
+
+  /** §4.1's "never a silent overwrite" applied to elements. */
+  const claimed = new Set<HTMLCanvasElement>()
+
+  function resolveTarget(t: ViewTarget): DrawTarget | InstanceType<typeof ViewError> {
+    if ('framebuffer' in t) {
+      return { framebuffer: t.framebuffer, viewport: t.viewport, dest: t.rect ?? t.viewport }
+    }
+    if ('rect' in t) {
+      // D2 — the one target check that stays at runtime, because `presentable` is the result of
+      // grading the **granted** attributes (§4.0.2) and is not statically knowable.
+      if (!p.host.surface.presentable) {
+        return new ViewError(
+          'a { rect } view targets the default framebuffer, and this context was not granted the ' +
+            'attributes that permit it (surface.presentable === false). Use a { framebuffer } view.',
+        )
+      }
+      const box = { x: 0, y: 0, w: p.host.surface.width, h: p.host.surface.height }
+      return { framebuffer: null, viewport: box, dest: t.rect }
+    }
+    // A blit view draws at the surface's **origin**, one view at a time, and is copied out.
+    const box = { x: 0, y: 0, w: p.host.surface.width, h: p.host.surface.height }
+    return { framebuffer: null, viewport: box, dest: box }
+  }
+
+  function drawInto(record: SpriteRecord, target: DrawTarget, pose: number): Error | undefined {
+    const front = record.front
+    if (front === null) return new GlError('the front is not resident; prepare() it first')
+    const frame = record.clip.keyFrames[pose] ?? 0
+    return p.ctx.scope((s) => {
+      s.bindTarget(target)
+      const gl = p.ctx.gl
+      // §4.0.2 — an injected context may carry a stencil buffer the stage never asked for.
+      // P6's capture/restore already covers STENCIL_TEST and the stencil mask; disabling it for
+      // the duration of the stage's draws is this plan's.
+      attempt(() => gl.disable(gl.STENCIL_TEST))
+      // §7.3 — never clear the default framebuffer. The replacement is a scissored clear over the
+      // view's **own rect**, fixed for the view's life, so there is no union-of-rectangles problem
+      // and no fringe left by a smaller successor. `clear()` is absent from `DrawScope` entirely,
+      // so a slot cannot clear at all.
+      s.enable('SCISSOR_TEST', true)
+      attempt(() => gl.scissor(target.dest.x, target.dest.y, target.dest.w, target.dest.h))
+      attempt(() => gl.clearColor(0, 0, 0, 0))
+      attempt(() => gl.clear(gl.COLOR_BUFFER_BIT | gl.DEPTH_BUFFER_BIT))
+      s.enable('SCISSOR_TEST', false)
+      const drawn = p.o.motion.draw({
+        clip: record.clip,
+        fit: record.fit,
+        frame,
+        front,
+        out: target,
+        knobs: p.registry.projector('motion')(record.knobs) as never,
+      })
+      return drawn instanceof Error ? drawn : undefined
+    })
+  }
+
+  function blitOut(t: BlitTarget, record: SpriteRecord): Error | undefined {
+    const front = record.front
+    if (front === null) return undefined
+    const dest2d = attempt(() => t.canvas.getContext('2d'))
+    if (dest2d instanceof Error || dest2d === null) {
+      return new ViewError('the destination canvas does not provide a 2D context')
+    }
+    if ((t.size ?? 'managed') === 'managed') {
+      const rect = attempt(() => t.canvas.getBoundingClientRect())
+      if (!(rect instanceof Error)) {
+        const next = managedBackingStore({
+          cssSize: { w: rect.width, h: rect.height },
+          dpr: p.dpr,
+          front: { w: front.width, h: front.height },
+          current: { w: t.canvas.width, h: t.canvas.height },
+        })
+        if (next !== null) {
+          t.canvas.width = next.w
+          t.canvas.height = next.h
+        }
+      }
+    }
+    const plan = blitPlan({
+      surface: { w: p.host.surface.width, h: p.host.surface.height },
+      front: { w: front.width, h: front.height },
+      dest: { w: t.canvas.width, h: t.canvas.height },
+      fit: t.fit ?? 'stretch',
+    })
+    // The clear comes first, and it is a live bug fix: §4.3's scissored clear covers the GL
+    // surface only, so without this a swapTo from a wide sprite to a narrow one leaves the
+    // previous sprite's edges around the new one.
+    for (const bar of plan.clear) {
+      attempt(() => dest2d.clearRect(bar.x, bar.y, bar.w, bar.h))
+    }
+    if (plan.dest.w === 0 || plan.dest.h === 0) return undefined
+    const copied = attempt(() =>
+      dest2d.drawImage(
+        p.host.surface.canvas as CanvasImageSource,
+        plan.src.x,
+        plan.src.y,
+        plan.src.w,
+        plan.src.h,
+        plan.dest.x,
+        plan.dest.y,
+        plan.dest.w,
+        plan.dest.h,
+      ),
+    )
+    return copied instanceof Error ? new GlError('the blit failed', { cause: copied }) : undefined
+  }
+
+  function createViewObject(t: ViewTarget, target: DrawTarget): View {
+    const bus = createEventBus()
+    let state: ViewState = 'idle'
+    let pose = 0
+    let record: SpriteRecord | null = null
+
+    const paint = (next: number): void => {
+      if (record === null) return
+      // §8.8 — until a rebuild lands the view draws the last front it drew successfully, at the
+      // new pose: never a blank frame, never a skipped step.
+      if (record.front === null || p.rebuildQueue.dirty(record.key)) {
+        p.rebuildQueue.drain({ demand: 'show', mandatory: record.key })
+      }
+      pose = next
+      const drawn = drawInto(record, target, next)
+      if (drawn !== undefined) {
+        // No caller on the stack for a step, and `refresh` / `draw` return `void` by design, so
+        // every dropped frame is an orphan (§10.6).
+        p.policy.orphan(drawn, view)
+        return
+      }
+      if ('canvas' in t) {
+        const copied = blitOut(t, record)
+        if (copied !== undefined) p.policy.orphan(copied, view)
+      }
+    }
+
+    const view: View = {
+      get pose() {
+        return pose
+      },
+      get state() {
+        return state
+      },
+      get sprite() {
+        return record?.sprite ?? null
+      },
+      get run() {
+        return null // Task 13
+      },
+      tag: t.tag,
+      get idealSize() {
+        return record?.fit.frontSize ?? { w: 0, h: 0 }
+      },
+
+      show(sprite) {
+        if (p.isDisposed()) return undefined // React runs cleanups child-first (§4.6)
+        const decision = transition(state, 'show')
+        if (!decision.legal) {
+          return decision.refusal === 'SheetError'
+            ? p.policy.returned(
+                new SheetError('this view is disposed; every call is refused'),
+                view,
+              )
+            : undefined
+        }
+        if (record !== null) {
+          record.attachCount -= 1
+          p.lru.detach(record.key)
+        }
+        record = sprite === null ? null : (sprite as unknown as { key: string }, findRecord(sprite))
+        if (record !== null) {
+          record.attachCount += 1
+          p.lru.attach(record.key)
+        }
+        state = 'idle'
+        paint(0)
+        return undefined
+      },
+
+      refresh() {
+        if (p.isDisposed() || !transition(state, 'refresh').legal) return
+        paint(pose)
+      },
+
+      draw(ref) {
+        if (p.isDisposed() || !transition(state, 'draw').legal) return
+        const resolved = resolvePose(ref, record?.clip.keyFrames.length ?? 1)
+        if (resolved instanceof Error) {
+          p.policy.orphan(resolved, view)
+          return
+        }
+        paint(resolved)
+      },
+
+      play: (() => settledRun(undefined)) as never, // Task 13
+      crumpleTo: (() => settledRun(undefined)) as never, // Task 13
+      swapTo: (() => settledRun(undefined)) as never, // Task 15
+      stop: () => {}, // Task 13
+      set: (() => undefined) as never, // Task 16
+
+      on: (event, fn) => bus.on(event, fn as never),
+      once: (event, fn) => bus.once(event, fn as never),
+
+      dispose() {
+        if (state === 'disposed') return
+        state = 'disposed'
+        if (record !== null) {
+          record.attachCount -= 1
+          p.lru.detach(record.key)
+          record = null
+        }
+        if ('canvas' in t) claimed.delete(t.canvas)
+        bus.clear()
+        const at = views.indexOf(view)
+        if (at >= 0) views.splice(at, 1)
+      },
+    }
+
+    // §7.1 — a view's own listeners run first, in registration order; the stage re-emits
+    // synchronously after the last returns, with `view` filled in.
+    bus.on('start', (e) => p.bus.emit('start', { ...e, view }))
+    bus.on('step', (e) => p.bus.emit('step', { ...e, view }))
+    bus.on('end', (e) => p.bus.emit('end', { ...e, view }))
+    return view
+  }
+
+  function findRecord(sprite: Sprite): SpriteRecord | null {
+    return p.sprites.get(sprite.key) ?? null
+  }
 
   async function buildSprite(
     key: string,
@@ -731,6 +990,7 @@ function buildStage(p: StageParts): BuiltStage {
     p.o.motion.release(record.clip)
     p.sprites.delete(key)
     p.lru.remove(key)
+    p.rebuildQueue.forget(key)
     return undefined
   }
 
@@ -784,8 +1044,39 @@ function buildStage(p: StageParts): BuiltStage {
     replace: replace as never,
     prepare: prepare as never,
     remove: remove as never,
-    // Task 12
-    view: () => new ViewError('not implemented') as never,
+    view(t: ViewTarget) {
+      const gone = dead()
+      if (gone !== undefined) return p.policy.returned(new ViewError(gone.message), null)
+      if ('canvas' in t) {
+        if (claimed.has(t.canvas)) {
+          return p.policy.returned(
+            new ViewError(
+              'that element already has a live view. Two views blitting into one canvas is a ' +
+                'flicker with no error attached to it, so the second is refused. Dispose the ' +
+                'first; React runs a cleanup before the second effect, so StrictMode does not ' +
+                'trip this.',
+            ),
+            null,
+          )
+        }
+        const probe = attempt(() => t.canvas.getContext('2d'))
+        if (probe instanceof Error || probe === null) {
+          return p.policy.returned(
+            new ViewError(
+              'that element does not provide a 2D context, which usually means it already ' +
+                'carries a WebGL one. The stage never asks a consumer element for a WebGL context.',
+            ),
+            null,
+          )
+        }
+        claimed.add(t.canvas)
+      }
+      const target = resolveTarget(t)
+      if (target instanceof Error) return p.policy.returned(target, null)
+      const created = createViewObject(t, target)
+      views.push(created)
+      return created
+    },
     // Task 14
     play: () =>
       Promise.resolve({ started: [], skipped: [], failed: [], completed: false }) as never,
