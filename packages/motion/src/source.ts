@@ -18,9 +18,17 @@
  * defaulting to `tiles: null`. The knob, the uniform and the sampler are wired throughout, so
  * supplying a tile later is a value change and not a redesign.
  */
-import { AssetError, GlError } from '@paper-crumple/core'
-import type { Aborted, LoadError, MotionSource, Rect, Size } from '@paper-crumple/core'
-import { uploadBytes } from '@paper-crumple/core/unstable'
+import { AssetError, GlError, KNOB_REFERENCE_PX } from '@paper-crumple/core'
+import type {
+  Aborted,
+  DrawArgs,
+  DrawResult,
+  LoadError,
+  MotionSource,
+  Rect,
+  Size,
+} from '@paper-crumple/core'
+import { hexToRgb, uploadBytes } from '@paper-crumple/core/unstable'
 import type {
   GlContext,
   MotionClip,
@@ -30,13 +38,15 @@ import type {
 } from '@paper-crumple/core/unstable'
 
 import { fitSheet } from './buckets.js'
-import { MOTION_KNOBS } from './knobs.js'
+import { FIBRE_TILE_PX, MOTION_KNOBS } from './knobs.js'
 import type { MotionLookKnobs } from './knobs.js'
+import { createSheetMesh } from './mesh.js'
 import type { SheetMesh } from './mesh.js'
+import type { Pack } from './pack.js'
 import type { PackModule } from './pack-module.js'
 import { createPackStore } from './pack-store.js'
 import type { PackStore } from './pack-store.js'
-import { SHEET_FS, SHEET_VS } from './shaders.js'
+import { DEBUG_VIEWS, SHEET_FS, SHEET_VS } from './shaders.js'
 
 /** Alpha 0.5 is "no grain": `grainK = 1 + (0.5 - 0.5) * uGrain` is exactly 1 (`material.js:120`). */
 const NEUTRAL_FIBRE = new Uint8Array([128, 128, 255, 128])
@@ -93,6 +103,26 @@ export function bakedMotion(
     meshes.delete(bucket)
     clips.delete(bucket)
   })
+
+  /**
+   * The bucket's twelve VAOs, built on first use. `load()` cannot build them: §5.3 types it
+   * `Promise<LoadError | Aborted | C>` and `LoadError` carries no `GlError`, so a failed build
+   * would have to be reported as a `PackError`, which is a lie about the taxonomy. One build per
+   * bucket, never per pose — §8.4's twelve preconfigured VAOs are unchanged; only *when* they are
+   * built moves.
+   */
+  function meshFor(m: Mounted, bucket: string): InstanceType<typeof GlError> | SheetMesh {
+    const existing = meshes.get(bucket)
+    if (existing) return existing
+    const pack = store.get(bucket)
+    if (!pack) {
+      return new GlError(`bakedMotion: bucket '${bucket}' is not loaded; call load(fit) first`)
+    }
+    const mesh = createSheetMesh(m.ctx.gl, pack)
+    if (mesh instanceof Error) return mesh
+    meshes.set(bucket, mesh)
+    return mesh
+  }
 
   return {
     knobs: MOTION_KNOBS,
@@ -171,8 +201,124 @@ export function bakedMotion(
       return clip
     },
 
-    draw() {
-      return new GlError('bakedMotion: draw is not implemented yet')
+    draw(
+      a: DrawArgs<BakedFit, BakedClip, MotionLookKnobs>,
+    ): InstanceType<typeof GlError> | DrawResult {
+      if (disposed) return new GlError('bakedMotion: drawn after dispose')
+      const m = mounted
+      if (!m) return new GlError('bakedMotion: drawn before mount')
+
+      const { clip, fit, frame, front, out, knobs } = a
+      const pack: Pack | undefined = store.get(clip.bucket)
+      if (!pack) {
+        return new GlError(
+          `bakedMotion: bucket '${clip.bucket}' is not loaded; call load(fit) first`,
+        )
+      }
+      if (!Number.isInteger(frame) || frame < 0 || frame >= pack.frameCount) {
+        return new GlError(
+          `bakedMotion: stored frame ${frame} out of 0..${pack.frameCount - 1} for bucket '${clip.bucket}'`,
+        )
+      }
+      if (front.width <= 0 || front.height <= 0) {
+        return new GlError(`bakedMotion: front is ${front.width}x${front.height}`)
+      }
+
+      const mesh = meshFor(m, clip.bucket)
+      if (mesh instanceof Error) return mesh
+
+      // Both narrowed before use: `hexToRgb` reports a malformed knob as a `KnobError`, which has
+      // no legal slot in `GlError | DrawResult` (§5.3). The knob registry validates `paperColor`
+      // and `paperBack` with `isHex` at `set()` time (§6.1), so this branch is unreachable through
+      // the stage; it is defence for a hand-built `DrawArgs`.
+      const front3 = hexToRgb(knobs.paperColor)
+      if (front3 instanceof Error) {
+        return new GlError(`bakedMotion: paperColor ${knobs.paperColor} is not a hex colour`, {
+          cause: front3,
+        })
+      }
+      const back3 = hexToRgb(knobs.paperBack)
+      if (back3 instanceof Error) {
+        return new GlError(`bakedMotion: paperBack ${knobs.paperBack} is not a hex colour`, {
+          cause: back3,
+        })
+      }
+
+      const stored = pack.frames[frame]!
+      const { gl } = m.ctx
+      const u = (name: string): WebGLUniformLocation | null => m.program.uniformLocation(name)
+
+      // The front texture maps onto the view's box with ONE uniform scale, so the sheet keeps its
+      // aspect whatever box the view gives it.
+      const k = Math.min(out.dest.w / front.width, out.dest.h / front.height)
+      const halfW = (fit.sheetW / 2) * k
+      const halfH = (fit.sheetH / 2) * k
+      // dest and viewport are GL coordinates — origin bottom-left, y up — because bindTarget feeds
+      // viewport to gl.viewport() and dest to gl.scissor(). gl_Position is relative to the
+      // viewport, so the centre is offset by the viewport's origin.
+      const cxPx = out.dest.x - out.viewport.x + out.dest.w / 2
+      const cyPx = out.dest.y - out.viewport.y + out.dest.h / 2
+      // The sheet's box inside the front texture, centred on the paper's box.
+      const fcx = front.rect.x + front.rect.w / 2
+      const fcy = front.rect.y + front.rect.h / 2
+
+      const result = m.ctx.scope((s): InstanceType<typeof GlError> | DrawResult => {
+        s.bindTarget(out)
+        // No clear, ever: §7.3 forbids clearing the default framebuffer and the view has already
+        // performed a scissored clear over its own rect. DrawScope has no clear() at all.
+        s.enable('DEPTH_TEST', true)
+        s.enable('BLEND', false)
+        s.enable('CULL_FACE', false)
+        gl.depthFunc(gl.LEQUAL)
+        gl.depthMask(true)
+        gl.useProgram(m.program.handle)
+
+        // Unit 1 first, unit 0 last, so the active unit is 0 when the scope restores: §5.1 puts
+        // back the active unit's bindings only, and unit 1's binding leaks by design.
+        gl.activeTexture(gl.TEXTURE1)
+        gl.bindTexture(gl.TEXTURE_2D, m.fibre.handle)
+        gl.uniform1i(u('uFibre'), 1)
+        gl.activeTexture(gl.TEXTURE0)
+        gl.bindTexture(gl.TEXTURE_2D, front.texture)
+        gl.uniform1i(u('uFront'), 0)
+
+        gl.uniform4f(u('uSheetPx'), cxPx, cyPx, halfW, halfH)
+        gl.uniform2f(u('uViewPx'), out.viewport.w, out.viewport.h)
+        gl.uniform1f(u('uDepthPx'), 4 * halfH)
+        gl.uniform4f(
+          u('uUvRect'),
+          (fcx - fit.sheetW / 2) / front.width,
+          (fcy - fit.sheetH / 2) / front.height,
+          fit.sheetW / front.width,
+          fit.sheetH / front.height,
+        )
+        // uLight is the manifest's baked vector, which is why lightAngle is not a knob (§6.2, §9.3).
+        gl.uniform3f(u('uLight'), pack.light[0], pack.light[1], pack.light[2])
+        gl.uniform1f(u('uAlphaFloor'), stored.alphaFloor)
+        // Pose 0 is the untouched sprite: shade forced to exactly 1 (§7.4.2).
+        gl.uniform1i(u('uIdentity'), stored.index === 0 ? 1 : 0)
+
+        gl.uniform3f(u('uPaperColor'), front3[0], front3[1], front3[2])
+        gl.uniform3f(u('uPaperBack'), back3[0], back3[1], back3[2])
+        gl.uniform1f(u('uAmbient'), knobs.ambient)
+        gl.uniform1f(u('uAoStrength'), knobs.aoStrength)
+        gl.uniform1f(u('uAoGamma'), knobs.aoGamma)
+        gl.uniform1f(u('uBackShade'), knobs.backShade)
+        gl.uniform1f(u('uGrain'), knobs.grain)
+        // Quoted against a 1000 px-tall sprite, like every px figure in the registry (§6.4).
+        gl.uniform1f(
+          u('uFibreScale'),
+          fit.sheetW / (FIBRE_TILE_PX * (front.height / KNOB_REFERENCE_PX)),
+        )
+        const debug = DEBUG_VIEWS.indexOf(knobs.debug)
+        gl.uniform1i(u('uDebug'), debug < 0 ? 0 : debug)
+
+        const drawn = mesh.draw(frame)
+        if (drawn instanceof Error) return drawn
+        return { sortKey: fit.sortKey, frame }
+      })
+
+      return result
     },
 
     release(clip) {
