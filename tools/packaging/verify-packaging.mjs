@@ -37,11 +37,16 @@ function packAll() {
   }
 
   for (const spec of PACKAGES) {
-    const result = run(
-      'pnpm',
-      ['pack', '--pack-destination', OUT],
-      join(ROOT, 'packages', spec.dir),
-    )
+    /** @type {ReturnType<typeof run> | undefined} */
+    let result
+    try {
+      result = run('pnpm', ['pack', '--pack-destination', OUT], join(ROOT, 'packages', spec.dir))
+    } catch (error) {
+      failures.push(
+        `${spec.name}: pnpm pack --pack-destination ${OUT} threw: ${error instanceof Error ? error.message : String(error)}`,
+      )
+      continue
+    }
     if (result.status !== 0) {
       failures.push(`pnpm pack failed for ${spec.name}:\n${result.stderr ?? ''}`)
     }
@@ -62,7 +67,10 @@ function tarballFor(spec) {
     )
     const flat = `${spec.name.replace('@', '').replace('/', '-')}-${manifest.version}.tgz`
     return readdirSync(OUT).includes(flat) ? join(OUT, flat) : undefined
-  } catch {
+  } catch (error) {
+    failures.push(
+      `${spec.name}: could not locate its tarball: ${error instanceof Error ? error.message : String(error)}`,
+    )
     return undefined
   }
 }
@@ -72,7 +80,10 @@ function sourceTiles() {
   try {
     const dir = join(ROOT, 'packages', 'paper', 'src', 'tiles')
     return new Map(readdirSync(dir).map((name) => [name, readFileSync(join(dir, name))]))
-  } catch {
+  } catch (error) {
+    failures.push(
+      `could not read packages/paper/src/tiles: ${error instanceof Error ? error.message : String(error)}`,
+    )
     return new Map()
   }
 }
@@ -150,12 +161,21 @@ function main() {
       ['publint', [tarball]],
       ['attw', [tarball, '--profile', 'esm-only']],
     ]) {
-      const result = spawnSync('pnpm', ['exec', tool, ...args], {
-        cwd: ROOT,
-        shell: true,
-        encoding: 'utf8',
-        stdio: 'inherit',
-      })
+      /** @type {ReturnType<typeof spawnSync> | undefined} */
+      let result
+      try {
+        result = spawnSync('pnpm', ['exec', tool, ...args], {
+          cwd: ROOT,
+          shell: true,
+          encoding: 'utf8',
+          stdio: 'inherit',
+        })
+      } catch (error) {
+        failures.push(
+          `${spec.name}: pnpm exec ${tool} ${args.join(' ')} threw: ${error instanceof Error ? error.message : String(error)}`,
+        )
+        continue
+      }
       if (result.status !== 0) failures.push(`${spec.name}: ${tool} exited ${result.status}`)
     }
   }

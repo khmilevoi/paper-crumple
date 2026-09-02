@@ -107,6 +107,19 @@ describe('checkPackedManifest', () => {
 
     expect(checkPackedManifest(core, coreManifest)).toEqual([])
   })
+
+  it('fails core peer-depending on itself', () => {
+    const coreManifest = {
+      ...base,
+      name: '@paper-crumple/core',
+      peerDependencies: { typescript: '>=5.0', '@paper-crumple/core': '^0.0.0' },
+      exports: { '.': {}, './unstable': {} },
+    }
+
+    expect(checkPackedManifest(core, coreManifest)).toEqual([
+      '@paper-crumple/core: must not peer-depend on itself',
+    ])
+  })
 })
 
 describe('checkPackUrls', () => {
