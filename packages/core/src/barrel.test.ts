@@ -63,3 +63,19 @@ describe('the /unstable subpath', () => {
     expect(e).toBeInstanceOf(Error)
   })
 })
+
+describe('the stage surface P9 owes the root barrel', () => {
+  it('exports paperStage as a runtime value', () => {
+    expect(Object.hasOwn(root, 'paperStage')).toBe(true)
+    expect(typeof (root as { paperStage: unknown }).paperStage).toBe('function')
+  })
+
+  it('exports presetForImageId, because the key selects the fold preset', () => {
+    expect(typeof (root as { presetForImageId: unknown }).presetForImageId).toBe('function')
+  })
+
+  it('declares View exactly once — a duplicate export is a decomposition violation', () => {
+    const names = Object.keys(root)
+    expect(names.filter((n) => n === 'View')).toHaveLength(0) // type-only, never a runtime name
+  })
+})

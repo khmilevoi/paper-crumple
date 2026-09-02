@@ -125,3 +125,10 @@ export type { DisplaySizeRequest } from './resolution.js'
 // to the package: P9 imports them from './source.js' by relative path, exactly as it imports the
 // front LRU, because `add`'s public shape is P9's to design.
 export type { BitmapSupplier, PinFor, PinnedSource, SpriteSource } from './source.js'
+
+// --- P9: the stage, the sprites and the views (§4, §7.3, §8.4, §8.8, §10.6) ---
+export { paperStage } from './stage.js'
+export type { AddOptions, BlitStage, DirectStage, Fit, HostedStage, StageCommon } from './stage.js'
+export type { Sprite } from './sprite.js'
+export type { SwapOptions } from './view.js'
+export { presetForImageId } from './preset.js'

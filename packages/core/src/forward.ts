@@ -37,7 +37,7 @@ export type { Program, Target, Texture, TextureDesc } from './gl-resources.js'
  * Until P9 fills it, `View` is structurally satisfied by any object. That is a two-wave cost and
  * it is the cheaper one: the alternative is P2 guessing at §4.2's surface.
  */
-export interface View {}
+export type { View } from './view.js'
 
 /**
  * What `MotionSource.draw` reports back. §5.3 names the type and never gives its members.
