@@ -1516,7 +1516,7 @@ function buildStage(p: StageParts): BuiltStage {
     get surface() {
       return p.host.surface
     },
-    ...(p.host.surface.owned ? { resize: (w: number, h: number) => p.host.resize(w, h) } : {}),
+    resize: (w: number, h: number) => p.host.resize(w, h),
     on: <E extends EventName>(event: E, fn: (e: StageEvent<E>) => void) => p.bus.on(event, fn),
     once: <E extends EventName>(event: E, fn: (e: StageEvent<E>) => void) => p.bus.once(event, fn),
 
