@@ -2,7 +2,7 @@ import * as pc from '@paper-crumple/core'
 import type { BuiltStage, DemoConfig } from './config'
 import { DEFAULT_SAMPLE_ID, SAMPLES } from './samples'
 import { DEFAULT_CONFIG, buildStage } from './config'
-import { mountGrid, mountHero } from './scene'
+import { mountGrid, mountHero, planDirectLayout } from './scene'
 import { createPanel } from './panel'
 import type { SetTarget } from './panel'
 import { createConfigPanel } from './config-panel'
@@ -116,7 +116,27 @@ async function rebuild(next: DemoConfig): Promise<void> {
     return
   }
 
-  const mounted = await mountHero(built, sample, controller.signal)
+  // `direct` mode's surface must be sized to its final layout — the hero's rect and all six tile
+  // rects — before any view is created: a view's rect is resolved once, at `stage.view()`, and
+  // never recomputed, so resizing after the hero exists would leave its rect stale while the
+  // surface (and, under a bottom-left-origin WebGL buffer, where that rect actually paints) moves
+  // out from under it. `resize()` may shrink as well as grow — unlike the monotonic `grow()` — but
+  // that is harmless here: this stage is fresh and nothing has been drawn against it yet.
+  let heroRect: pc.Rect | undefined
+  let tileRects: readonly pc.Rect[] | undefined
+  if (built.present === 'direct') {
+    const layout = planDirectLayout(built.stage.surface.width, SAMPLES.length)
+    const resized = built.stage.resize(layout.surfaceW, layout.surfaceH)
+    if (resized instanceof Error) {
+      built.stage.dispose()
+      report(`playground: direct surface layout failed: ${resized.message}`)
+      return
+    }
+    heroRect = layout.heroRect
+    tileRects = layout.tileRects
+  }
+
+  const mounted = await mountHero(built, sample, controller.signal, heroRect)
   if (mounted === pc.ABORTED) {
     // The build itself landed but never went live — nothing else will ever dispose it.
     built.stage.dispose()
@@ -128,7 +148,7 @@ async function rebuild(next: DemoConfig): Promise<void> {
     return
   }
 
-  const grid = await mountGrid(built, SAMPLES, controller.signal)
+  const grid = await mountGrid(built, SAMPLES, controller.signal, tileRects)
   if (grid === pc.ABORTED) {
     // Same reasoning as the hero above: this build never went live, so nothing else will
     // dispose it.

@@ -31,23 +31,66 @@ export function heroCanvas(built: BuiltStage): HTMLCanvasElement | Error {
   return canvas
 }
 
+/**
+ * `direct` mode's whole geometry, computed once and handed to both `mountHero` and `mountGrid`:
+ * the hero occupies a `width × width` square at the surface's origin, and the grid's tiles fill a
+ * strip below it. One function is the single source of truth for both sets of rects and for the
+ * surface size they are fixed against.
+ *
+ * This must run, and the surface must be sized from its result, **before any view exists**. A
+ * view's rect is resolved once, at `stage.view()`, and never recomputed — growing the surface
+ * afterward does not move or rescale that view's rect, but a WebGL buffer's origin is bottom-left,
+ * so the already-placed content visibly relocates within the taller canvas anyway. Sizing up front
+ * is what avoids that: nothing has been drawn against the surface yet, so there is nothing to
+ * disturb.
+ */
+export interface DirectLayout {
+  readonly surfaceW: number
+  readonly surfaceH: number
+  readonly heroRect: pc.Rect
+  readonly tileRects: readonly pc.Rect[]
+}
+
+export function planDirectLayout(width: number, tileCount: number): DirectLayout {
+  const w = Math.max(1, Math.floor(width))
+  const heroRect: pc.Rect = { x: 0, y: 0, w, h: w }
+
+  const rows = Math.max(1, Math.ceil(tileCount / GRID_COLS))
+  const tileW = Math.max(1, Math.floor(w / GRID_COLS))
+  const tileH = Math.max(1, Math.floor(w / 2))
+  const tileRects: pc.Rect[] = []
+  for (let i = 0; i < tileCount; i += 1) {
+    const col = i % GRID_COLS
+    const row = Math.floor(i / GRID_COLS)
+    tileRects.push({ x: col * tileW, y: w + row * tileH, w: tileW, h: tileH })
+  }
+
+  return { surfaceW: w, surfaceH: w + tileH * rows, heroRect, tileRects }
+}
+
 export async function mountHero(
   built: BuiltStage,
   sample: Sample,
   signal: AbortSignal,
+  directRect?: pc.Rect,
 ): Promise<{ view: pc.View; sprite: pc.Sprite } | Error | pc.Aborted> {
   const canvas = heroCanvas(built)
   if (canvas instanceof Error) return canvas
 
   if (built.present === 'direct') {
+    if (directRect === undefined) {
+      return new Error(
+        'playground: mountHero needs a rect in direct mode — call planDirectLayout() and size ' +
+          'the surface before mounting anything',
+      )
+    }
     // One surface, one rect. `add` then `view` then `show` — which is what `mount` composes,
     // spelled out because `mount` takes a canvas and a direct view takes a rect. `tag` lives on
     // the view target, not on `add`'s options — `AddOptions` has no `tag` field.
     const sprite = await built.stage.add(sample.url, { key: sample.id })
     if (sprite === pc.ABORTED) return pc.ABORTED
     if (sprite instanceof Error) return sprite
-    const rect = { x: 0, y: 0, w: built.stage.surface.width, h: built.stage.surface.height }
-    const view = built.stage.view({ rect, tag: sample.id })
+    const view = built.stage.view({ rect: directRect, tag: sample.id })
     if (view instanceof Error) return view
     const shown = view.show(sprite)
     if (shown instanceof Error) return shown
@@ -93,6 +136,7 @@ export async function mountGrid(
   built: BuiltStage,
   samples: readonly Sample[],
   signal: AbortSignal,
+  directTileRects?: readonly pc.Rect[],
 ): Promise<{ views: Map<string, pc.View>; failures: Error[] } | pc.Aborted> {
   if (signal.aborted) return pc.ABORTED
 
@@ -106,26 +150,23 @@ export async function mountGrid(
   slot.replaceChildren()
 
   if (built.present === 'direct') {
-    // One surface, six more rects of it — laid out below the hero's own rect rather than over
-    // it. `resize` never shrinks the surface (docs/USAGE.md §5), so the hero's already-fixed
-    // rect stays valid after the surface grows to make room for the grid.
-    const surface = built.stage.surface
-    const originalW = surface.width
-    const originalH = surface.height
-    const rows = Math.ceil(samples.length / GRID_COLS)
-    const tileW = Math.max(1, Math.floor(originalW / GRID_COLS))
-    const tileH = Math.max(1, Math.floor(originalH / 2))
-    const resized = built.stage.resize(originalW, originalH + tileH * rows)
-    if (resized instanceof Error) {
-      failures.push(resized)
+    if (directTileRects === undefined) {
+      failures.push(
+        new Error(
+          'playground: mountGrid needs directTileRects in direct mode — call planDirectLayout() ' +
+            'and size the surface before mounting anything',
+        ),
+      )
       return { views, failures }
     }
 
     for (let i = 0; i < samples.length; i += 1) {
       const sample = samples[i]
-      const col = i % GRID_COLS
-      const row = Math.floor(i / GRID_COLS)
-      const rect = { x: col * tileW, y: originalH + row * tileH, w: tileW, h: tileH }
+      const rect = directTileRects[i]
+      if (rect === undefined) {
+        failures.push(new Error(`playground: no rect planned for sample "${sample.id}"`))
+        continue
+      }
 
       const existing = built.stage.get(sample.id)
       let sprite = existing
