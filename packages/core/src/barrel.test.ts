@@ -63,3 +63,23 @@ describe('the /unstable subpath', () => {
     expect(e).toBeInstanceOf(Error)
   })
 })
+
+describe('the stage surface P9 owes the root barrel', () => {
+  it('exports paperStage as a runtime value', () => {
+    expect(Object.hasOwn(root, 'paperStage')).toBe(true)
+    expect(typeof (root as { paperStage: unknown }).paperStage).toBe('function')
+  })
+
+  it('exports presetForImageId, because the key selects the fold preset', () => {
+    expect(typeof (root as { presetForImageId: unknown }).presetForImageId).toBe('function')
+  })
+
+  it('keeps View type-only and mints a stage through paperStage alone', () => {
+    // `View` is an interface: a runtime binding under that name would mean it was re-declared as
+    // a value somewhere, which is the decomposition violation this pins.
+    expect(Object.hasOwn(root, 'View')).toBe(false)
+    // `createStage` is `stage.ts`'s internal, env-injecting factory. `paperStage` is the one
+    // public door (§14), and the internal one must never appear beside it.
+    expect(Object.hasOwn(root, 'createStage')).toBe(false)
+  })
+})

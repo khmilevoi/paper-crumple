@@ -114,3 +114,8 @@ export type {
 // above; a slot that runs it gets the reference's output and a slot that edits it breaks a
 // cross-language contract.
 export { EXACT_BYTE_FETCH_FS, FULLSCREEN_VS, RESAMPLE_FS, RESAMPLE_UNIFORMS } from './gl-shaders.js'
+
+// --- P9: what a slot author needs from the stage side (§4.0.2, §8.4) ---
+export { gradeAttributes } from './surface-grade.js'
+export type { AttributeGrade } from './surface-grade.js'
+export { batchBySortKey } from './draw-batch.js'
