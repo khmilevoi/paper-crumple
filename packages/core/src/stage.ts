@@ -26,12 +26,20 @@ import { createGlContext, type CoreGlContext } from './gl-context.js'
 import { createScratchPools, type ScratchPools } from './gl-pools.js'
 import type { DrawTarget, GlCaps } from './gl.js'
 import type { EventName, StageEvent } from './events.js'
-import { createKnobRegistry, type KnobRegistry } from './knob-registry.js'
+import { atOrAbove, INVALIDATION_ORDER, SPRITE_SCOPE, VIEW_SCOPE } from './invalidation.js'
+import {
+  createKnobRegistry,
+  resolveKnobValues,
+  type KnobPrimitive,
+  type KnobRegistry,
+  type KnobValues,
+} from './knob-registry.js'
 import type { KnobPatch, KnobSetter } from './knob-patch.js'
+import type { Invalidates } from './knobs.js'
 import { presetForImageId } from './preset.js'
 import type { PoseRef } from './pose.js'
 import { createRebuildQueue, type RebuildQueue } from './rebuild-queue.js'
-import type { AddError, PlayResult, ReadyError, SwapResult } from './results.js'
+import type { AddError, PlayResult, ReadyError, SetResult, SwapResult } from './results.js'
 import { createRun, settledRun, type Run, type RunOwner } from './run.js'
 import {
   createRunController,
@@ -490,6 +498,80 @@ function buildStage(p: StageParts): BuiltStage {
    * another's tracking. */
   const playBroadcasts = new Map<View, { error?: Error }>()
 
+  // §6.2's ground truth: every value under its namespaced path. `stage.set` writes this layer,
+  // which sits between the registry's defaults and every sprite's own layer (§6.6, §6.8).
+  const stageLayer: Record<string, KnobPrimitive> = {}
+
+  function applyPatch(
+    patch: Readonly<Record<string, unknown>>,
+    scope: readonly Invalidates[],
+    layer: Record<string, KnobPrimitive>,
+  ): SetResult {
+    const normalised = p.registry.normalise(patch, scope)
+    if (normalised instanceof Error) return p.policy.returned(normalised, null) as SetResult
+    Object.assign(layer, normalised)
+    return undefined
+  }
+
+  /** core defaults -> slot defaults -> stage -> sprite -> view (§6.6). */
+  function knobsFor(record: SpriteRecord | null, viewLayer: KnobValues): KnobValues {
+    return resolveKnobValues([p.registry.defaults(), stageLayer, record?.knobs ?? {}, viewLayer])
+  }
+
+  function delta(before: KnobValues, after: KnobValues): KnobValues {
+    const out: Record<string, KnobPrimitive> = {}
+    for (const [path, value] of Object.entries(after)) {
+      if (before[path] !== value) out[path] = value
+    }
+    return out
+  }
+
+  function invalidateSprite(record: SpriteRecord, changed: KnobValues): void {
+    const level = p.registry.invalidationOf(changed)
+    if (level === undefined) return
+    if (!atOrAbove(level, 'front')) {
+      // Draw class is sprite-scoped too: every view showing this sprite repaints.
+      for (const v of views) if (internals(v).spriteKey === record.key) v.refresh()
+      return
+    }
+    // §8.8 demand 3 — a front-class set() on a sprite with attachCount > 0. On a running view it
+    // marks dirty and the rebuild lands at the top of the next step, at most one dwell later; on
+    // an idle view the rebuild and a redraw happen synchronously inside set().
+    p.rebuildQueue.mark(record.key)
+    const running = views.some(
+      (v) => internals(v).spriteKey === record.key && v.state !== 'idle' && v.state !== 'disposed',
+    )
+    if (running) return
+    p.rebuildQueue.drain({ demand: 'front-set', mandatory: record.key })
+    for (const v of views) if (internals(v).spriteKey === record.key) v.refresh()
+  }
+
+  function invalidate(changed: KnobValues): void {
+    for (const record of p.sprites.values()) invalidateSprite(record, changed)
+  }
+
+  // §8.8 — the byte budget, tracked separately from `p.lru`'s internal one so the warning below
+  // can compare against it without the LRU exposing its private `budget` number.
+  let budgetedBytes = p.o.budget ?? Number.POSITIVE_INFINITY
+  let unreclaimableWarned = false
+
+  function checkUnreclaimable(): void {
+    if (unreclaimableWarned) return
+    const u = p.lru.usage()
+    if (u.unreclaimable <= budgetedBytes) return
+    unreclaimableWarned = true
+    const count = [...p.sprites.values()].filter((r) => !r.source.reclaimable).length
+    // The budget bounds the reclaimable set; it cannot bound a set the application has forbidden
+    // the library to free, and saying so is more honest than silently overshooting.
+    p.warnings.push(
+      new AssetError(
+        `unreclaimable front bytes (${String(u.unreclaimable)}) exceed the byte budget ` +
+          `(${String(budgetedBytes)}): ${String(count)} sprite(s) were added with no source a ` +
+          're-supplier could be derived from, so the LRU may not evict them',
+      ),
+    )
+  }
+
   const dead = (): InstanceType<typeof GlError> | undefined =>
     p.isDisposed() || p.isLost()
       ? new GlError('this stage is disposed or its context was lost; build a new one')
@@ -519,7 +601,12 @@ function buildStage(p: StageParts): BuiltStage {
     return { framebuffer: null, viewport: box, dest: box }
   }
 
-  function drawInto(record: SpriteRecord, target: DrawTarget, pose: number): Error | undefined {
+  function drawInto(
+    record: SpriteRecord,
+    target: DrawTarget,
+    pose: number,
+    viewLayer: KnobValues,
+  ): Error | undefined {
     const front = record.front
     if (front === null) return new GlError('the front is not resident; prepare() it first')
     const frame = record.clip.keyFrames[pose] ?? 0
@@ -545,7 +632,9 @@ function buildStage(p: StageParts): BuiltStage {
         frame,
         front,
         out: target,
-        knobs: p.registry.projector('motion')(record.knobs) as never,
+        // §6.6's resolution order, applied at draw time: core defaults -> slot defaults -> stage
+        // -> sprite -> view, the view winning at draw class.
+        knobs: p.registry.projector('motion')(knobsFor(record, viewLayer)) as never,
       })
       return drawn instanceof Error ? drawn : undefined
     })
@@ -607,6 +696,8 @@ function buildStage(p: StageParts): BuiltStage {
     let state: ViewState = 'idle'
     let pose = 0
     let record: SpriteRecord | null = null
+    /** §6.6 — the view's own draw-class layer. Written by `view.set` alone. */
+    let viewLayer: KnobValues = {}
 
     const paint = (next: number): void => {
       if (record === null) return
@@ -616,7 +707,7 @@ function buildStage(p: StageParts): BuiltStage {
         p.rebuildQueue.drain({ demand: 'show', mandatory: record.key })
       }
       pose = next
-      const drawn = drawInto(record, target, next)
+      const drawn = drawInto(record, target, next, viewLayer)
       if (drawn !== undefined) {
         // No caller on the stack for a step, and `refresh` / `draw` return `void` by design, so
         // every dropped frame is an orphan (§10.6).
@@ -637,7 +728,7 @@ function buildStage(p: StageParts): BuiltStage {
       if (r.front === null || p.rebuildQueue.dirty(r.key)) {
         p.rebuildQueue.drain({ demand: 'step', mandatory: r.key })
       }
-      const drawn = drawInto(r, target, next)
+      const drawn = drawInto(r, target, next, viewLayer)
       if (drawn !== undefined) return drawn
       return 'canvas' in t ? blitOut(t, r) : undefined
     }
@@ -866,7 +957,15 @@ function buildStage(p: StageParts): BuiltStage {
       crumpleTo: crumpleToMethod,
       swapTo: swapToMethod,
       stop: stopMethod,
-      set: (() => undefined) as never, // Task 16
+      set: ((patch: Readonly<Record<string, unknown>>) => {
+        const layer: Record<string, KnobPrimitive> = { ...viewLayer }
+        const failed = applyPatch(patch, VIEW_SCOPE, layer)
+        if (failed !== undefined) return failed
+        viewLayer = layer
+        // Draw class: no rebuild, one redraw at the current pose.
+        if (state === 'idle') view.refresh()
+        return undefined
+      }) as never,
 
       on: (event, fn) => bus.on(event, fn as never),
       once: (event, fn) => bus.once(event, fn as never),
@@ -983,7 +1082,17 @@ function buildStage(p: StageParts): BuiltStage {
       get attachCount() {
         return box.record?.attachCount ?? 0
       },
-      set: (() => undefined) as never, // Task 16
+      set: ((patch: Readonly<Record<string, unknown>>) => {
+        const current = box.record
+        if (current === undefined) return undefined
+        const before = { ...current.knobs }
+        const layer: Record<string, KnobPrimitive> = { ...current.knobs }
+        const failed = applyPatch(patch, SPRITE_SCOPE, layer)
+        if (failed !== undefined) return failed
+        current.knobs = layer
+        invalidateSprite(current, delta(before, layer))
+        return undefined
+      }) as never,
     }
     const record: SpriteRecord = {
       key,
@@ -1391,9 +1500,23 @@ function buildStage(p: StageParts): BuiltStage {
     },
 
     budget: (o: { bytes?: number; artworkSlots?: number }) => {
-      if (o.bytes !== undefined) p.lru.setBudget(o.bytes)
+      if (o.bytes !== undefined) {
+        budgetedBytes = o.bytes
+        p.lru.setBudget(o.bytes)
+        checkUnreclaimable()
+      }
+      // `artworkSlots` tunes Pool A's slot count (§8.5), but `ArtworkPool` (P6, on the trunk)
+      // exposes no setter for it — inventing one here would be an edit to a neighbour's module.
+      // Accepted and currently a no-op.
     },
-    usage: () => ({ ...p.lru.usage(), handles: 0, attached: 0 }), // Task 16 fills handles/attached
+    usage: () => ({
+      ...p.lru.usage(),
+      // §8.8 — handle metadata and the hull cache are unbudgeted and never evicted; the pools are
+      // whole-stage and do not scale with sprite count. `bytes` is fronts + handles + pools, and
+      // the accounting closes exactly.
+      handles: p.sprites.size,
+      attached: [...p.sprites.values()].filter((r) => r.attachCount > 0).length,
+    }),
     pin: (key: string) => {
       const record = p.sprites.get(key)
       if (record === undefined) return
@@ -1449,8 +1572,13 @@ function buildStage(p: StageParts): BuiltStage {
     play: stagePlayMethod,
     stop: stageStopMethod,
     mount: mountMethod as never,
-    // Task 16
-    set: (() => undefined) as never,
+    set: ((patch: Readonly<Record<string, unknown>>) => {
+      const before = { ...stageLayer }
+      const failed = applyPatch(patch, INVALIDATION_ORDER, stageLayer)
+      if (failed !== undefined) return failed
+      invalidate(delta(before, stageLayer))
+      return undefined
+    }) as never,
 
     dispose() {
       if (p.isDisposed()) return
