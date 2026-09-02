@@ -164,7 +164,7 @@ function pickTexels(bytes: ArrayLike<number>, texels: readonly number[]): number
   return out
 }
 
-describe('the front texture under exact: the artwork rect is the source, byte for byte', () => {
+describe('the front texture under exact: opaque texels match the source, transparent texels are exactly zero', () => {
   /**
    * Ruling 1: the oracle is split by the *source's own* alpha, not compared whole against the raw
    * source bytes. At `uEdgeMode == 2` (see the file header) `outColor` is exactly `(0,0,0,0)`
