@@ -12,11 +12,12 @@
  * a throw, never a silent no-op, never a fake success — so this module type-checks as a complete
  * `SheetRenderer` at every commit in between.
  */
-import { GlError, isAborted, KnobError, SheetError } from '@paper-crumple/core'
+import { ABORTED, attempt, GlError, isAborted, KnobError, SheetError } from '@paper-crumple/core'
 import type {
   Aborted,
   BuildError,
   Knobs,
+  Rect,
   SheetFront,
   SheetKnobs,
   SheetRenderer,
@@ -24,21 +25,41 @@ import type {
   SourceError,
   SourceOptions,
 } from '@paper-crumple/core'
-import type { GlContext, ScratchPools, Texture } from '@paper-crumple/core/unstable'
+import {
+  artworkLongSide,
+  checkGuardBand,
+  createScratchPools,
+  exactFrontLongSide,
+  handleBytes,
+  hullCacheKey,
+  KNOB_REFERENCE_PX,
+  overscanRadius,
+} from '@paper-crumple/core/unstable'
+import type { GlContext, HandleFacts, ScratchPools, Texture } from '@paper-crumple/core/unstable'
 import { createResampler } from './artwork.js'
 import type { Resampler } from './artwork.js'
-import type { SdfBuilder } from './gl-sdf.js'
+import { cpuSdfFromAlpha } from './field.js'
+import { growBox, scaleBox, sheetRectFromExtent, signedFieldExtent } from './extent.js'
+import type { AlphaBox } from './mask.js'
+import { createSdfBuilder, sigmaFor } from './gl-sdf.js'
+import type { Field, SdfBuilder } from './gl-sdf.js'
 import { freezeOverscan } from './handle.js'
 import type { PaperSheetHandle } from './handle.js'
 import { hullCache } from './hull-cache.js'
-import type { HullCache } from './hull-cache.js'
-import { defaultsFor, descriptorsFor, edgeParamsFrom } from './paper-knobs.js'
+import type { HullCache, HullCacheKey } from './hull-cache.js'
+import { DISTANCE_WAVELENGTH_PX, buildHull, toleranceFor } from './hull.js'
+import { hullBuffers, hullExtent } from './hull-shape.js'
+import type { HullShape } from './hull-shape.js'
+import { defaultsFor, descriptorsFor, edgeParamsFrom, resolveSdfRes } from './paper-knobs.js'
 import type { PaperEdgeMode } from './paper-knobs.js'
 import { createPaperRenderer } from './paper-renderer.js'
 import type { PaperRenderer } from './paper-renderer.js'
 import { loadTileBitmaps, mountNeutralTiles, TILE_NAMES, uploadTiles } from './paper-tiles.js'
 import type { MountedTiles } from './paper-tiles.js'
 import type { PaperTileSet } from './tile-set.js'
+
+/** Working px between the hull repair pass's samples along every polygon segment (`engine.js:9`). */
+const HULL_SAMPLE_PX = 4
 
 /**
  * Factory options for `paperSheet()` (spec 6.5, 14).
@@ -97,6 +118,26 @@ export interface PaperSheet extends SheetRenderer<Knobs, PaperSheetHandle> {
    * "the photograph turned off") — but it is a *different* render than one that ran after.
    */
   readonly tilesReady: Promise<InstanceType<typeof GlError> | true>
+
+  /**
+   * `invalidateHull(spriteKey)` — P8's `HullCache.invalidate`, exposed for the `replace()` path
+   * P9 calls down when a conditional re-supply comes back `200` (§18 amendment 10). Returns how
+   * many cached variants were dropped.
+   *
+   * `spriteKey` is this slot's own `paper:<n>` surrogate (`PaperSheetHandle.spriteKey`), which the
+   * stage's own key is not — §5.2 passes no key down to `source()`. A caller that cannot name the
+   * surrogate passes `'*'`, which clears every sprite's cache entirely rather than none of them.
+   */
+  invalidateHull(spriteKey: string): number
+
+  /**
+   * **Test-only**, and never assigned by production code. The level-2 suite installs this to
+   * drive `source()`'s third abort check point (§10.5) deterministically: `source()` calls it
+   * synchronously right after a freshly traced hull lands in the cache and before the abort check
+   * that follows, which is the one moment no signal-timing trick from outside `source()` can
+   * reliably hit. A name no consumer could mistake for API.
+   */
+  __afterHullForTest?: () => void
 }
 
 /** A `resolve`-only deferred: `.promise` is handed out immediately, `.resolve` settles it once. */
@@ -130,6 +171,9 @@ interface Mounted {
   readonly ctx: GlContext
   pools: ScratchPools | null
   sdf: SdfBuilder | null
+  /** What `pools`/`sdf` were last built for — `null` exactly when they are. `ensurePools` (below)
+   *  compares against this to decide reuse vs. a dispose-and-rebuild (task 11's own addition). */
+  poolsSize: { artwork: Size; sdfRes: number } | null
   readonly resampler: Resampler
   readonly renderer: PaperRenderer
   readonly cache: HullCache
@@ -141,6 +185,205 @@ interface Mounted {
    *  itself carries a raw `WebGLTexture`, not this package's own `Texture` wrapper, so `dispose`
    *  cannot call `.dispose()` on it without this map. */
   readonly frontTextures: WeakMap<SheetFront, { texture: Texture }>
+}
+
+/**
+ * §7.4.3's own rule, reused for `A`, for the front and for the field: the long axis takes
+ * `longSide` exactly, the short axis keeps the SOURCE's aspect ratio (step 3 of the brief's
+ * ten-step pipeline, applied wherever a size is derived from a long-side figure).
+ */
+function dimsForLongSide(longSide: number, srcW: number, srcH: number, floor = 1): Size {
+  const long = Math.max(srcW, srcH)
+  const short = Math.min(srcW, srcH)
+  const shortSide = Math.max(floor, Math.round((longSide * short) / long))
+  return srcW >= srcH ? { w: longSide, h: shortSide } : { w: shortSide, h: longSide }
+}
+
+/**
+ * A numeric knob value, or `fallback` when the key is absent from `values` — which happens for
+ * real here: `values` is always `defaultsFor(edgeMode)` (§5.2 passes no per-sprite knob values to
+ * `source()`), and a `torn`-only or `hull`-only descriptor is simply not in the other mode's set
+ * (`edgeParamsFrom`'s own `num` helper makes the same allowance).
+ */
+function numKnob(values: Knobs, key: string, fallback: number): number {
+  const v = values[key]
+  return typeof v === 'number' && Number.isFinite(v) ? v : fallback
+}
+
+/** A plain per-axis `Rect` scale — no box-margin logic, unlike `sheetRectFromExtent`. */
+function scaleRect(r: Rect, scale: number): Rect {
+  return {
+    x: Math.round(r.x * scale),
+    y: Math.round(r.y * scale),
+    w: Math.max(1, Math.round(r.w * scale)),
+    h: Math.max(1, Math.round(r.h * scale)),
+  }
+}
+
+/**
+ * Take, or (dispose-and-)rebuild, this mount's Pool A/B pair and its `SdfBuilder` at `{ artwork,
+ * sdfRes }`. §8.1's Pool A budget is fixed at creation from exactly these two figures, so a later
+ * sprite that needs a bigger artwork or a different `sdfRes` cannot simply `acquire` into the old
+ * pools — the fixed budget would refuse it. The doc comment on `Mounted` above states the rule;
+ * this is what enforces it.
+ */
+function ensurePools(
+  m: Mounted,
+  artwork: Size,
+  sdfRes: number,
+): InstanceType<typeof GlError> | { readonly pools: ScratchPools; readonly sdf: SdfBuilder } {
+  const current = m.poolsSize
+  if (
+    m.pools !== null &&
+    m.sdf !== null &&
+    current !== null &&
+    current.artwork.w === artwork.w &&
+    current.artwork.h === artwork.h &&
+    current.sdfRes === sdfRes
+  ) {
+    return { pools: m.pools, sdf: m.sdf }
+  }
+
+  m.sdf?.dispose()
+  m.pools?.dispose()
+  m.pools = null
+  m.sdf = null
+  m.poolsSize = null
+
+  const pools = createScratchPools({ gl: m.ctx, artwork, sdfRes })
+  const sdf = createSdfBuilder(m.ctx, pools.poolA)
+  if (GlError.is(sdf)) {
+    pools.dispose()
+    return sdf
+  }
+
+  m.pools = pools
+  m.sdf = sdf
+  m.poolsSize = { artwork, sdfRes }
+  return { pools, sdf }
+}
+
+/**
+ * Ports `engine.js:#readBackField` whole (task 11 brief): reads pass A's own output back to the
+ * CPU, in field TEXELS — a field-sized `readPixels`, 147 456 B at `sdfRes` 192, which §8.1 budgets
+ * explicitly. Float targets read as RED/FLOAT when the driver reports that as its implementation
+ * format ("a quarter of the transfer and what ANGLE reports for an R16F target"), RGBA/FLOAT
+ * otherwise; the RGBA8 fallback decodes through the byte contract. `null` on any failure — errors
+ * are swallowed on purpose, because the caller has a CPU transform (§8.2.1).
+ *
+ * `READ_FRAMEBUFFER` is bound explicitly: `DrawScope.bindTarget` only ever binds
+ * `DRAW_FRAMEBUFFER`, so a caller that skipped this would silently read the canvas backbuffer.
+ */
+function readBackField(ctx: GlContext, field: Field, texelPx: number): Float32Array | null {
+  const { gl } = ctx
+  const w = field.width
+  const h = field.height
+  const decode = field.decode
+  return ctx.scope((): Float32Array | null => {
+    gl.bindFramebuffer(gl.READ_FRAMEBUFFER, field.target.framebuffer)
+    // Stale-error drain, verbatim from engine.js: a prior call's error must not be misread as
+    // this readback's own failure.
+    while (gl.getError() !== gl.NO_ERROR) {
+      // drain
+    }
+    let out: Float32Array | null = null
+    if (ctx.caps.floatRT) {
+      const single =
+        gl.getParameter(gl.IMPLEMENTATION_COLOR_READ_FORMAT) === gl.RED &&
+        gl.getParameter(gl.IMPLEMENTATION_COLOR_READ_TYPE) === gl.FLOAT
+      const channels = single ? 1 : 4
+      const buf = new Float32Array(w * h * channels)
+      gl.readPixels(0, 0, w, h, single ? gl.RED : gl.RGBA, gl.FLOAT, buf)
+      if (gl.getError() === gl.NO_ERROR) {
+        out = new Float32Array(w * h)
+        for (let i = 0, p = 0; i < out.length; i++, p += channels) {
+          out[i] = (buf[p] * decode[0] + decode[1]) / texelPx
+        }
+      }
+    } else {
+      const buf = new Uint8Array(w * h * 4)
+      gl.readPixels(0, 0, w, h, gl.RGBA, gl.UNSIGNED_BYTE, buf)
+      if (gl.getError() === gl.NO_ERROR) {
+        out = new Float32Array(w * h)
+        for (let i = 0, p = 0; i < out.length; i++, p += 4) {
+          out[i] = ((buf[p] / 255) * decode[0] + decode[1]) / texelPx
+        }
+      }
+    }
+    return out
+  })
+}
+
+/**
+ * P8's `cpuSdfFromAlpha` over the sprite's own alpha, scaled directly to the field's resolution —
+ * the degraded branch (~120 ms at 512, §8.2.1) this port falls to when `readBackField` refuses.
+ * Both DOM boundaries (`OffscreenCanvas` construction, `getImageData`) are wrapped in `attempt`
+ * (§10.8): a closed or detached bitmap must resolve to a `GlError`, never throw.
+ */
+function cpuFieldFallback(
+  bitmap: ImageBitmap,
+  w: number,
+  h: number,
+): InstanceType<typeof GlError> | Float32Array {
+  const canvas = attempt(
+    () => new OffscreenCanvas(w, h),
+    (cause) =>
+      new GlError('paperSheet: source() CPU-field fallback OffscreenCanvas construction failed', {
+        cause,
+      }),
+  )
+  if (GlError.is(canvas)) return canvas
+
+  const c2d = canvas.getContext('2d')
+  if (c2d === null) {
+    return new GlError('paperSheet: source() CPU-field fallback 2D context unavailable')
+  }
+
+  const drawn = attempt(
+    () => c2d.drawImage(bitmap, 0, 0, w, h),
+    (cause) => new GlError('paperSheet: source() CPU-field fallback drawImage failed', { cause }),
+  )
+  if (GlError.is(drawn)) return drawn
+
+  const imageData = attempt(
+    () => c2d.getImageData(0, 0, w, h),
+    (cause) =>
+      new GlError('paperSheet: source() CPU-field fallback getImageData failed', { cause }),
+  )
+  if (GlError.is(imageData)) return imageData
+
+  const alpha = new Float32Array(w * h)
+  const data = imageData.data
+  for (let i = 0, p = 3; i < alpha.length; i++, p += 4) alpha[i] = data[p] / 255
+  return cpuSdfFromAlpha(alpha, w, h)
+}
+
+/**
+ * True when `field` came off `readBackField` — GPU-native, y-up like every GPU texture; false
+ * when it came off `cpuFieldFallback` — canvas-native, y-down like the canvas it was read off.
+ * Carried per the brief's own warning ("the subtle bug the spike documents"): whichever later
+ * stage rasterizes this sprite's hull mask onto the GPU (`engine.js`'s own
+ * `pixelStorei(UNPACK_FLIP_Y_WEBGL, !cpuSdfYUp)`) needs it to flip correctly. `source()` itself
+ * only traces the polygon and never rasterizes it, so nothing inside this call consumes it — it
+ * is not persisted onto `PaperSheetHandle` (frozen by task 8) and is a documented, deliberate
+ * departure from an otherwise-whole port; see the task report.
+ */
+interface CpuField {
+  readonly field: Float32Array
+  readonly yUp: boolean
+}
+
+function acquireCpuField(
+  ctx: GlContext,
+  tight: Field,
+  texelPx: number,
+  bitmap: ImageBitmap,
+): InstanceType<typeof GlError> | CpuField {
+  const readBack = readBackField(ctx, tight, texelPx)
+  if (readBack !== null) return { field: readBack, yUp: true }
+  const fallback = cpuFieldFallback(bitmap, tight.width, tight.height)
+  if (GlError.is(fallback)) return fallback
+  return { field: fallback, yUp: false }
 }
 
 export function paperSheet(options?: PaperSheetOptions): PaperSheet {
@@ -162,6 +405,46 @@ export function paperSheet(options?: PaperSheetOptions): PaperSheet {
   // Before the first `mount()` there is nothing to report yet, so this deferred is never
   // resolved — a pending promise nobody is required to await, which is not a floating rejection.
   let tilesReadyState = makeDeferred<InstanceType<typeof GlError> | true>()
+
+  // §5.2's `SourceOptions` carries no key. `paper:<n>` is minted once per BITMAP IDENTITY — a
+  // slot-local surrogate for the stage's own key, which §5.2 does not pass down — so the same
+  // bitmap re-`source()`d hits the same artwork slot and the same hull-cache entry, and a
+  // `replace()` with fresh bytes (a fresh `ImageBitmap`) gets a fresh key for free.
+  //
+  // `srcW`/`srcH` are captured alongside the key, on first use, and reused rather than re-read
+  // from `bitmap.width`/`.height` on every call: an `ImageBitmap`'s own dimensions cannot change
+  // across its life, but they DO read as `0x0` once `.close()`'d, and §8.5.4 explicitly allows
+  // `stage.add(b, { key }); b.close()` — the bitmap is not guaranteed to still be open on a later
+  // `source()` for the very same key. `lastArtwork` records what `A` the artwork slot was last
+  // written at, so a repeat call whose artwork slot is still resident (untouched by another
+  // sprite in between) and whose desired `A` has not changed can skip the resample outright
+  // rather than needing to touch the bitmap at all — sound because a spriteKey is minted per
+  // bitmap OBJECT IDENTITY, so "the same key" already means "the same, unchanged bytes".
+  interface SpriteInfo {
+    readonly key: string
+    readonly srcW: number
+    readonly srcH: number
+    lastArtwork: Size | null
+  }
+  const spriteInfos = new WeakMap<ImageBitmap, SpriteInfo>()
+  let nextSpriteKeyId = 1
+  function spriteInfoFor(bitmap: ImageBitmap): SpriteInfo {
+    const existing = spriteInfos.get(bitmap)
+    if (existing !== undefined) return existing
+    const info: SpriteInfo = {
+      key: `paper:${nextSpriteKeyId}`,
+      srcW: bitmap.width,
+      srcH: bitmap.height,
+      lastArtwork: null,
+    }
+    nextSpriteKeyId += 1
+    spriteInfos.set(bitmap, info)
+    return info
+  }
+
+  // See `PaperSheet.__afterHullForTest`'s own doc comment: test-only, never set by production
+  // code.
+  let afterHullForTest: (() => void) | undefined
 
   function mount(ctx: GlContext): InstanceType<typeof GlError> | undefined {
     if (mounted !== null) {
@@ -188,6 +471,7 @@ export function paperSheet(options?: PaperSheetOptions): PaperSheet {
       ctx,
       pools: null,
       sdf: null,
+      poolsSize: null,
       resampler,
       renderer,
       cache: hullCache(),
@@ -250,16 +534,239 @@ export function paperSheet(options?: PaperSheetOptions): PaperSheet {
     bitmap: ImageBitmap,
     o: SourceOptions,
   ): Promise<SourceError | Aborted | PaperSheetHandle> {
-    void bitmap
-    void o
     if (mounted === null) {
       return new SheetError('paperSheet: call mount(ctx) before source() (spec 5.2)')
     }
-    // task 11 (paper-sheet-renderer) replaces this body with the hull trace, the resample and
-    // the field build. Until then this is an honest failure, not a fake success.
-    return new SheetError(
-      'paperSheet: source() is not implemented yet — task 11 of paper-sheet-renderer adds it',
-    )
+    const m = mounted
+
+    // Abort check point 1 (§10.5): on entry, before any GPU work is spent.
+    if (o.signal?.aborted === true) return ABORTED
+
+    // §5.2 passes no per-sprite knob values to source(); the hull-trace-relevant work here runs
+    // at this factory's default values, exactly as the factory-level `overscan` above does.
+    const values = defaultsFor(edgeMode)
+    const edgeParams = edgeParamsFrom(edgeMode, values)
+
+    // Step 1: handle-level overscan.
+    const sourceReserve = freezeOverscan(edgeParams, overscanHeadroom)
+    if (KnobError.is(sourceReserve)) {
+      // `KnobError` is not a member of `SourceError` (only `SheetError | GlError` are, per
+      // amendment 1's `results.ts`), so it is wrapped rather than returned "as is" at the type
+      // level; the cause is preserved. Unreachable for any of the three edge modes at their own
+      // defaults (`paperSheet()`'s own `overscan` computation above notes the same thing), kept
+      // because §10.8 forbids unwrapping an `Error | T` unchecked even when a branch is believed
+      // dead.
+      return new SheetError('paperSheet: source() could not derive overscan', {
+        cause: sourceReserve,
+      })
+    }
+    const p = sourceReserve.overscan
+
+    const info = spriteInfoFor(bitmap)
+    const spriteKey = info.key
+
+    // Steps 2-3: frontLongSide, A_long, and A itself (source aspect kept).
+    const srcW = info.srcW
+    const srcH = info.srcH
+    const sourceLongSide = Math.max(srcW, srcH)
+    const frontLongSide = o.exact ? exactFrontLongSide(sourceLongSide, p) : o.maxSize
+    const aLongSide = o.exact ? sourceLongSide : artworkLongSide(o.maxSize, p)
+    const artwork = dimsForLongSide(aLongSide, srcW, srcH)
+
+    // Step 4: sdfRes, off the front's long side (§7.4.3).
+    const sdfRes = resolveSdfRes(numKnob(values, 'sdfRes', 0), frontLongSide)
+
+    // The front's own size (never materialised as a texture here — task 12's `build()` does
+    // that) and the field's size, both keeping the source aspect at their own long side.
+    const front = dimsForLongSide(frontLongSide, srcW, srcH)
+    const field = dimsForLongSide(sdfRes, front.w, front.h, 2)
+
+    // Step 5: pools, sized at { artwork, sdfRes } — created lazily here, reused across sprites,
+    // re-created (with disposal) when a later sprite needs a bigger Pool A.
+    const ensured = ensurePools(m, artwork, sdfRes)
+    if (GlError.is(ensured)) return ensured
+    const { pools, sdf } = ensured
+
+    // Step 6: resample into the Pool A artwork slot — unless it is already sitting there. A
+    // spriteKey is minted per BITMAP OBJECT IDENTITY (above), so "the artwork slot already holds
+    // this exact key, at this exact size" means the bytes cannot have changed; skipping the
+    // resample then is not a stale-cache risk, and it is what lets a `source()` for a sprite
+    // whose hull is already cached succeed even when the caller has since closed the bitmap
+    // (§8.5.4's own "stage.add(b, { key }); b.close()" — the last read of the bitmap already
+    // happened, on the call that populated the slot).
+    const alreadyResident =
+      pools.poolA.artworkKey() === spriteKey &&
+      info.lastArtwork !== null &&
+      info.lastArtwork.w === artwork.w &&
+      info.lastArtwork.h === artwork.h
+    let artworkTexture: Texture
+    if (alreadyResident) {
+      const held = pools.poolA.holdArtwork(spriteKey, {
+        width: artwork.w,
+        height: artwork.h,
+        format: 'RGBA8UI',
+        filter: 'NEAREST',
+        label: `artwork:${spriteKey}`,
+      })
+      if (GlError.is(held)) return held
+      artworkTexture = held
+    } else {
+      const resampled = m.resampler.resample({
+        spriteKey,
+        bitmap,
+        srcRect: { x: 0, y: 0, w: srcW, h: srcH },
+        artwork,
+        poolA: pools.poolA,
+        poolB: pools.poolB,
+      })
+      if (GlError.is(resampled)) return resampled
+      artworkTexture = resampled.texture
+      info.lastArtwork = artwork
+    }
+
+    // Step 7: buildField — the margin applied as a uv offset, at no cost (§8.5).
+    const artworkUvScale = 1 + 2 * p
+    const tight = sdf.buildField({
+      artwork: artworkTexture,
+      artworkUv: [artworkUvScale, artworkUvScale, -p * artworkUvScale, -p * artworkUvScale],
+      width: field.w,
+      height: field.h,
+      sourceLongSide: frontLongSide,
+    })
+    if (GlError.is(tight)) return tight
+
+    // Step 8: blurField — sigma off `looseness`, which a `hull`-only sheet does not even declare
+    // as a knob (`numKnob` falls back to 0, the field's own no-blur floor). Not otherwise
+    // consumed here: `build()` (task 12) re-derives it against the sprite's real knob values.
+    const looseness = numKnob(values, 'looseness', 0)
+    const blurred = sdf.blurField({
+      field: tight,
+      sigmaPx: sigmaFor(looseness, frontLongSide),
+      frontLongSide,
+    })
+    if (GlError.is(blurred)) return blurred
+
+    // Abort check point 2 (§10.5): after the resample and the two field passes, before the CPU
+    // hull trace — the boundary between work already paid for and the one genuinely
+    // interruptible step. The `await` is what makes this point (and the third one, below)
+    // observable from outside a synchronous call: without it nothing here would ever yield.
+    await Promise.resolve()
+    if (o.signal?.aborted === true) return ABORTED
+
+    // Step 9: the CPU signed field for the hull trace, then buildHull, then the rect, then the
+    // guard-band check.
+    const texel = front.w / field.w
+    const pxScale = front.h / KNOB_REFERENCE_PX
+    const k = pxScale / texel
+
+    const knobKey = hullCacheKey(knobDescriptors, values)
+    const cacheKey: HullCacheKey = { spriteKey, sdfRes, knobKey }
+
+    let hull: HullShape | undefined = m.cache.get(cacheKey)
+    if (hull === undefined) {
+      const cpu = acquireCpuField(m.ctx, tight, texel, bitmap)
+      if (GlError.is(cpu)) return cpu
+
+      // `torn` mode declares no hull-only descriptors at all — `values.minDist`/`maxDist` are
+      // simply absent — so it always passes 0/0, which is what makes `buildHull` return
+      // `HULL_USE_ALPHA` (the brief's own instruction).
+      const minDist = edgeMode === 'torn' ? 0 : numKnob(values, 'minDist', 0)
+      const maxDist = edgeMode === 'torn' ? 0 : numKnob(values, 'maxDist', 0)
+      const angularity = numKnob(values, 'angularity', 0)
+      const seed = numKnob(values, 'seed', 0)
+
+      const built = buildHull({
+        field: cpu.field,
+        width: field.w,
+        height: field.h,
+        minDist: minDist * k,
+        maxDist: maxDist * k,
+        angularity,
+        seed,
+        tolerance: toleranceFor(angularity) * k,
+        wavelength: DISTANCE_WAVELENGTH_PX * k,
+        sampleStep: HULL_SAMPLE_PX / texel,
+      })
+      hull = built.hull
+      // "The freshly traced hull is written into the cache before the sentinel is returned" —
+      // §10.5's own wording for check point 3, below: a hull that already landed is kept.
+      m.cache.set(cacheKey, hull)
+    }
+
+    // Abort check point 3 (§10.5's own named point): after the hull trace returns. Fires
+    // unconditionally (cache hit or fresh trace) — a cache hit already "landed" trivially, so
+    // there is nothing more to keep either way.
+    afterHullForTest?.()
+    if (o.signal?.aborted === true) return ABORTED
+
+    // The rect (§8.3, no source-sized readback): hull/both take it from the polygon's own
+    // extent; torn (and any use-alpha hull) take it from the silhouette's own box, grown by the
+    // overscan radius.
+    let box: AlphaBox | undefined =
+      hull.kind === 'use-alpha' ? undefined : hullExtent(hull, field.w, field.h)
+    if (box === undefined) {
+      // Only reachable for `torn` (always `use-alpha`) or a degenerate empty trace. The CPU field
+      // is not retained past the cache-hit branch above, so a use-alpha rect always re-acquires
+      // it — cheap relative to the trace it replaces, and never on the hot (cached-hull) path for
+      // hull/both.
+      const cpu = acquireCpuField(m.ctx, tight, texel, bitmap)
+      if (GlError.is(cpu)) return cpu
+      const raw = signedFieldExtent(cpu.field, field.w, field.h)
+      if (raw === undefined) {
+        return new SheetError('paperSheet: source() found an empty silhouette')
+      }
+      // `overscanRadius` is reference px (like `minDist`/`maxDist`); `k` is the same
+      // reference-px-to-field-texel conversion the hull trace uses above.
+      box = growBox(raw, overscanRadius(edgeParams) * k, field.w, field.h)
+    }
+
+    const frontBox = scaleBox(box, texel)
+    const frontRect = sheetRectFromExtent(frontBox, front.w, front.h)
+
+    // Step 50 (guard band, §8.6): before allocating anything the caller will not receive.
+    const guardBand = checkGuardBand({ frontSize: front, hullExtent: frontRect })
+    if (guardBand !== undefined) return guardBand
+
+    const sourceScale = sourceLongSide / frontLongSide
+    const rect = scaleRect(frontRect, sourceScale)
+
+    const facts: HandleFacts = {
+      rect,
+      overscan: p,
+      sdfRes,
+      srcW,
+      srcH,
+      aspect: srcW / srcH,
+      exact: o.exact,
+      hull: hullBuffers(hull),
+    }
+
+    return {
+      spriteKey,
+      rect,
+      frontRect,
+      artwork,
+      overscan: p,
+      sdfRes,
+      srcW,
+      srcH,
+      aspect: srcW / srcH,
+      exact: o.exact,
+      edgeMode,
+      hull,
+      alive: true,
+      bytes: handleBytes(facts),
+    }
+  }
+
+  function invalidateHull(spriteKey: string): number {
+    if (mounted === null) return 0
+    if (spriteKey === '*') {
+      const total = mounted.cache.size
+      mounted.cache.clear()
+      return total
+    }
+    return mounted.cache.invalidate(spriteKey)
   }
 
   function build(
@@ -331,5 +838,12 @@ export function paperSheet(options?: PaperSheetOptions): PaperSheet {
     releaseFront,
     release,
     dispose,
+    invalidateHull,
+    get __afterHullForTest() {
+      return afterHullForTest
+    },
+    set __afterHullForTest(fn) {
+      afterHullForTest = fn
+    },
   }
 }
