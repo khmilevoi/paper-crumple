@@ -9,7 +9,12 @@ const BROADCAST_STAGGER_MS = 40
 const BROKEN_KEY = 'broken'
 
 export interface TransportHandle {
-  bind(built: BuiltStage, hero: pc.View, gridViews: ReadonlyMap<string, pc.View>): void
+  /**
+   * `hero` is nullable because a stage whose hero failed to mount still goes live (see
+   * `main.ts`'s `rebuild`): the transport re-points at it and disables itself rather than
+   * disappearing, so a reader can still see which stage is bound.
+   */
+  bind(built: BuiltStage, hero: pc.View | null, gridViews: ReadonlyMap<string, pc.View>): void
   setStatus(text: string): void
 }
 
@@ -253,7 +258,7 @@ export function createTransport(report: (line: string) => void): TransportHandle
 
   function bind(
     nextBuilt: BuiltStage,
-    nextHero: pc.View,
+    nextHero: pc.View | null,
     nextGridViews: ReadonlyMap<string, pc.View>,
   ): void {
     for (const off of unsubscribers) off()
@@ -266,18 +271,24 @@ export function createTransport(report: (line: string) => void): TransportHandle
     built = nextBuilt
     hero = nextHero
     gridViews = nextGridViews
-    currentSampleId = hero.sprite?.key ?? null
+    currentSampleId = hero?.sprite?.key ?? null
 
-    unsubscribers.push(hero.on('start', refreshPoseReadout))
-    unsubscribers.push(hero.on('step', refreshPoseReadout))
-    unsubscribers.push(hero.on('end', refreshPoseReadout))
-
-    poseInput.value = String(hero.pose)
+    // No hero view means nothing to subscribe to and no pose to read back. Every control below
+    // already guards `hero === null` on its own handler, so the transport renders in full and
+    // simply does nothing when clicked — the same shape the panel takes in that state.
+    if (hero !== null) {
+      unsubscribers.push(hero.on('start', refreshPoseReadout))
+      unsubscribers.push(hero.on('step', refreshPoseReadout))
+      unsubscribers.push(hero.on('end', refreshPoseReadout))
+      poseInput.value = String(hero.pose)
+    }
     refreshPoseReadout()
     refreshReduceIndicator()
     populateSwapSelect()
     broadcastReportEl.textContent = ''
-    summaryLine.textContent = `hero + ${String(gridViews.size)} grid tiles bound (${built.present} present)`
+    summaryLine.textContent =
+      `${hero === null ? 'no hero view (mount failed)' : 'hero'} + ` +
+      `${String(gridViews.size)} grid tiles bound (${built.present} present)`
   }
 
   function setStatus(text: string): void {

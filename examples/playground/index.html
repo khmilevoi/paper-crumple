@@ -4,6 +4,15 @@
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <title>paper-crumple playground</title>
+    <!--
+      Inline, so the only network request this page ever makes for chrome is none at all: without
+      it every load logged a 404 for /favicon.ico, which was the single console entry the demo
+      produced and made "the console is clean" impossible to state as a check.
+    -->
+    <link
+      rel="icon"
+      href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'%3E%3Cpath fill='%23ece7dc' d='M2.5 1h8L14 4.5V15h-11.5z'/%3E%3Cpath fill='%23b3aa98' d='M10.5 1L14 4.5h-3.5z'/%3E%3Cpath fill='none' stroke='%23847c6c' stroke-width='.8' d='M4 6l3 2.5-2.5 2.5 4.5-1.5 2 3'/%3E%3C/svg%3E"
+    />
     <link rel="stylesheet" href="/src/styles.css" />
   </head>
   <body>

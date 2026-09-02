@@ -206,11 +206,18 @@ async function rebuild(next: DemoConfig): Promise<void> {
     built.stage.dispose()
     return
   }
+  // A hero that refuses to mount is reported and then *kept*, not disposed. The knob descriptors
+  // live on the two slots (`built.sheet.knobs` / `built.motion.knobs`) and exist the moment the
+  // stage is built — no sprite is involved — so the generated panel, which is the whole point of
+  // this demo, must still render. `Live.view` / `Live.sprite` are already nullable for exactly
+  // this case and `applyKnob` above turns a `view`- or `sprite`-targeted write against a null one
+  // into an inline Error on the row rather than a crash. Returning here instead left the page
+  // with a "Knobs" heading and nothing under it, which is what made a mount failure impossible to
+  // explore from the page it happened on.
+  const hero = mounted instanceof Error ? null : mounted
   if (mounted instanceof Error) {
     inspector.observed('mountHero', mounted)
-    built.stage.dispose()
     report(`playground: hero mount failed: ${mounted.message}`)
-    return
   }
 
   const grid = await mountGrid(built, SAMPLES, controller.signal, tileRects)
@@ -224,22 +231,25 @@ async function rebuild(next: DemoConfig): Promise<void> {
   gridViews = grid.views
 
   currentConfig = next
-  live = { built, view: mounted.view, sprite: mounted.sprite }
-  panel.rebuild(built, mounted.view, mounted.sprite)
-  transport.bind(built, mounted.view, gridViews)
+  live = { built, view: hero?.view ?? null, sprite: hero?.sprite ?? null }
+  panel.rebuild(built, live.view, live.sprite)
+  transport.bind(built, live.view, gridViews)
   // The hero view now exists on `built.stage.views` — refresh once more so Usage's idealSize /
   // state / pose describe it rather than the pre-mount snapshot `attach` above took.
   inspector.refreshUsage()
   syncHash()
 
   configPanel.setStatus(
-    `rebuilt in ${built.buildMs.toFixed(1)} ms · ${built.stage.warnings.length} warnings · ` +
+    (hero === null ? 'stage rebuilt, hero NOT mounted (see the masthead and EVENTS) · ' : '') +
+      `rebuilt in ${built.buildMs.toFixed(1)} ms · ${built.stage.warnings.length} warnings · ` +
       `sheet.overscan ${built.sheet.overscan.toFixed(3)} (the factory baseline, computed once ` +
       `from this factory's default knob values before any sprite exists — a mounted sprite's own ` +
       `frozen reserve is a different number the moment an edge knob moves)`,
   )
 
-  if (line)
+  // Only on a mounted hero: otherwise this would overwrite the `report()` above and the masthead
+  // would claim a clean build for a page showing no sprite.
+  if (line && hero !== null)
     line.textContent =
       `core ${pc.VERSION} · ${SAMPLES.length} samples · ${pc.DWELL_MS.length} dwells · ` +
       `${built.stage.warnings.length} warnings · maxTextureSize ${built.stage.caps.maxTextureSize} · ` +
@@ -282,6 +292,34 @@ if (copyCodeBtn !== null) {
     })
   })
 }
+
+/**
+ * A share link pasted into an already-open tab changes only the fragment, and a fragment-only
+ * navigation never reloads the document — so `decodeState` above, which runs exactly once at
+ * module evaluation, would never see it and the page would silently keep the configuration it
+ * booted with. That, and not a decode or a render fault, is why a restored configuration appeared
+ * not to reach the controls: on a genuine reload it always did.
+ *
+ * `syncHash` writes with `history.replaceState`, which by spec does **not** fire `hashchange`, so
+ * this listener only ever observes a fragment a reader (or a link) put there and cannot loop
+ * against the demo's own writes.
+ */
+window.addEventListener('hashchange', () => {
+  const next = decodeState(location.hash)
+  if (next instanceof Error) {
+    inspector.observed('decodeState', next)
+    return
+  }
+  // Re-pasting the address bar unchanged should not cost a stage rebuild. Comparing the encoded
+  // forms reuses `encodeState` rather than adding a second, separate notion of "same config".
+  if (encodeState(next.config, next.knobs) === encodeState(currentConfig, panel.changed())) return
+  // Same order as `boot()` below, and for the same reason: seeding before the rebuild leaves
+  // `panel.rebuild`'s own preserved-value carry-over as the single path that writes a restored
+  // knob to the live stage, including the skip for keys the new slot set no longer declares.
+  panel.seed(next.knobs)
+  configPanel.set(next.config)
+  void rebuild(next.config)
+})
 
 async function boot(): Promise<void> {
   // A duplicate core is a startup failure, not a once-per-session console warning: two copies
