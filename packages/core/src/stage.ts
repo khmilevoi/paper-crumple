@@ -315,7 +315,7 @@ export async function createStage(
   if (registry instanceof Error) {
     unwind()
     return policy.returned(
-      registry instanceof KnobError ? registry : new KnobError(registry.message),
+      KnobError.is(registry) ? registry : new KnobError(registry.message),
       null,
     )
   }
@@ -777,7 +777,7 @@ function buildStage(p: StageParts): BuiltStage {
           record.attachCount -= 1
           p.lru.detach(record.key)
         }
-        record = sprite === null ? null : (sprite as unknown as { key: string }, findRecord(sprite))
+        record = sprite === null ? null : findRecord(sprite)
         if (record !== null) {
           record.attachCount += 1
           p.lru.attach(record.key)
