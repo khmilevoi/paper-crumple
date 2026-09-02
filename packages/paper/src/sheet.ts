@@ -670,6 +670,14 @@ export function paperSheet(options?: PaperSheetOptions): PaperSheet {
       return undefined
     }
 
+    // Captured now, not read as `tilesReadyState` inside the callback below: `mount()` replaces
+    // `tilesReadyState` with a fresh deferred on every call (just above), so a stale `.then` from
+    // an earlier `mount()` reading the mutable outer binding at callback time — rather than the
+    // deferred that was current when *this* fetch started — would settle a *later* mount's
+    // promise. A `mount → dispose → mount` sequence is exactly that: the first mount's fetch can
+    // still be in flight when the second one starts.
+    const deferred = tilesReadyState
+
     // Fire-and-forget with a value, never a floating rejection (spec 5.2's own wording).
     // `loadTileBitmaps` never rejects; the `try`/`catch` below is the belt for anything inside
     // this callback that could throw regardless (a closed-bitmap `.close()`, in principle),
@@ -677,36 +685,34 @@ export function paperSheet(options?: PaperSheetOptions): PaperSheet {
     loadTileBitmaps(tileSet).then((result) => {
       try {
         if (GlError.is(result)) {
-          tilesReadyState.resolve(result)
+          deferred.resolve(result)
           return
         }
         if (isAborted(result)) {
           // No `signal` is ever passed to this internal call, so this is unreachable in
           // practice; handled because `loadTileBitmaps`'s own return type allows it.
-          tilesReadyState.resolve(new GlError('paperSheet: unexpected tile-load abort'))
+          deferred.resolve(new GlError('paperSheet: unexpected tile-load abort'))
           return
         }
         if (mounted === null) {
           // `dispose()` ran while the fetch was in flight. Nothing left to swap the tiles into;
           // close what was decoded so the bitmaps do not leak.
           for (const name of TILE_NAMES) result[name].close()
-          tilesReadyState.resolve(new GlError('paperSheet: tiles landed after dispose()'))
+          deferred.resolve(new GlError('paperSheet: tiles landed after dispose()'))
           return
         }
         const uploaded = uploadTiles(mounted.ctx, result)
         for (const name of TILE_NAMES) result[name].close()
         if (GlError.is(uploaded)) {
-          tilesReadyState.resolve(uploaded)
+          deferred.resolve(uploaded)
           return
         }
         const previous = mounted.tiles
         mounted.tiles = uploaded
         previous.dispose()
-        tilesReadyState.resolve(true)
+        deferred.resolve(true)
       } catch (cause) {
-        tilesReadyState.resolve(
-          new GlError('paperSheet: tile mount failed unexpectedly', { cause }),
-        )
+        deferred.resolve(new GlError('paperSheet: tile mount failed unexpectedly', { cause }))
       }
     })
 
@@ -1214,8 +1220,13 @@ export function paperSheet(options?: PaperSheetOptions): PaperSheet {
   }
 
   function release(handle: PaperSheetHandle): void {
-    if (mounted === null) return
+    // Set before the `mounted === null` early return, not after: a `release()` that arrives
+    // after `dispose()` has nothing left to invalidate or release back to the pool, but the
+    // handle itself is still genuinely no longer alive, and this flag is the only thing a caller
+    // can check for that. Inert today — `build()` refuses on `mounted === null` first — but the
+    // flag should tell the truth regardless of what currently reads it.
     handle.alive = false
+    if (mounted === null) return
     mounted.cache.invalidate(handle.spriteKey)
     if (mounted.pools !== null && mounted.pools.poolA.artworkKey() === handle.spriteKey) {
       // The literal slot name `'artwork'` is `ArtworkPool.holdArtwork`'s own internal convention

@@ -375,7 +375,13 @@ export function createSdfBuilder(ctx: GlContext, pool: ArtworkPool): Err | SdfBu
     ) {
       return cached
     }
-    if (cached !== undefined) cached.dispose()
+    if (cached !== undefined) {
+      cached.dispose()
+      // `artwork.ts`'s `acquireArtworkTarget` has the same cache and clears its slot before the
+      // call below that can fail — do the same here, so a `ctx.target()` failure never leaves a
+      // just-disposed Target reachable through `targetsBySlot` for the next `acquireTarget` call.
+      targetsBySlot.delete(slot)
+    }
     const target = ctx.target(texture)
     if (GlError.is(target)) return target
     targetsBySlot.set(slot, target)

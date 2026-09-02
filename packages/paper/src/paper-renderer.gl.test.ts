@@ -6,19 +6,25 @@ import { createGlFixture, type PaperGlFixture } from './testing/gl-fixture.js'
 import { createSdfBuilder, SDF_POOL_SLOTS, sigmaFor } from './gl-sdf.js'
 import { createPaperRenderer } from './paper-renderer.js'
 import { mountNeutralTiles } from './paper-tiles.js'
-import { defaultsFor, descriptorsFor } from './paper-knobs.js'
+import { defaultsFor, descriptorsFor, type PaperEdgeMode } from './paper-knobs.js'
 
 type Err = InstanceType<typeof GlError>
 
-let fixture: PaperGlFixture | null = null
-let pools: ScratchPools | null = null
+// Arrays, not a single mutable slot: `scene()` runs once per `renderInto()` call, and the one
+// test below (`'produces a different silhouette in torn mode than in hull mode'`) calls
+// `renderInto()` twice. A single `let fixture` / `let pools` reassigned by the second call would
+// orphan the first call's whole WebGL2 context and `ScratchPools` — `afterEach` would then only
+// ever dispose the last one, not every one the test opened. §4.0 caps live WebGL2 contexts at
+// roughly sixteen and Vitest opens one page per file, so an orphaned context here is not idle
+// bookkeeping — six contexts deep already, it is most of the budget.
+const fixtures: PaperGlFixture[] = []
+const poolsList: ScratchPools[] = []
 
 afterEach(() => {
-  pools?.dispose()
-  pools = null
-  // §4.0 caps live WebGL2 contexts at roughly sixteen and Vitest opens one page per file.
-  fixture?.dispose()
-  fixture = null
+  for (const p of poolsList) p.dispose()
+  poolsList.length = 0
+  for (const f of fixtures) f.dispose()
+  fixtures.length = 0
 })
 
 const FRONT = { w: 96, h: 96 }
@@ -58,10 +64,12 @@ function opaqueMask(w: number, h: number): Uint8Array {
 // asserts it away with the landed idiom (`expect(GlError.is(x)).toBe(false)` then
 // `if (GlError.is(x)) return`) before touching the value.
 function scene() {
-  fixture = createGlFixture(8, 8)
+  const fixture = createGlFixture(8, 8)
   expect(fixture.gl, 'no WebGL2 context — check the SwiftShader launch flags (§11)').not.toBeNull()
+  fixtures.push(fixture)
   const ctx = fixture.ctx
-  pools = createScratchPools({ gl: ctx, artwork: ARTWORK, sdfRes: FIELD })
+  const pools = createScratchPools({ gl: ctx, artwork: ARTWORK, sdfRes: FIELD })
+  poolsList.push(pools)
   const artwork = pools.poolA.holdArtwork('k', {
     width: ARTWORK.w,
     height: ARTWORK.h,
@@ -157,10 +165,10 @@ function scene() {
  * `withPaperField`: pass the real synthetic `paperField` (drives `uEdgeMode = 1`, the actual hull
  * path) or `null` (drives `uEdgeMode = 2`, "the sheet IS the artwork alpha" — ruling R28).
  */
-function renderInto(mode: 'hull' | 'torn', withPaperField: boolean) {
+function renderInto(mode: PaperEdgeMode, withPaperField: boolean) {
   const built = scene()
   if (GlError.is(built)) return built
-  const { ctx, artwork, tight, loose, tiles, paperMask, paperField } = built
+  const { ctx, artwork, tight, loose, tiles, builder, paperMask, paperField } = built
   const front = ctx.texture({
     width: FRONT.w,
     height: FRONT.h,
@@ -207,6 +215,9 @@ function renderInto(mode: 'hull' | 'torn', withPaperField: boolean) {
       renderer.dispose()
       tiles.dispose()
       paperMask.dispose()
+      // `scene()`'s `builder` was never disposed here before, leaking its four programs and
+      // cached framebuffers per test.
+      builder.dispose()
     },
   }
 }
@@ -266,5 +277,55 @@ describe('the front build (edge.js:86)', () => {
       .reduce((a, b) => a + b, 0)
     torn.cleanup()
     expect(alphaHull).not.toBe(alphaTorn)
+  })
+
+  // `edge.js:100-116`'s third mode, and the one public factory option with zero runtime coverage
+  // before this: `renderFront`'s `'both'` branch binds `uSdfTight` *and* `uSdfLoose` to the hull's
+  // own field (never `r.tight` / `r.loose`) and forces `uLoosePush = 0`. This is the first test
+  // that actually mounts, sources or builds a front in `'both'` mode rather than only counting its
+  // descriptors (`paper-knobs.test.ts`).
+  //
+  // `withPaperField: false` throughout, deliberately — not this suite's synthetic all-opaque
+  // `paperField` (built for the `'hull'` margin test above, ruling R28). That field's only real
+  // contour sits in the last ~2% of the texture, where `paperField()`'s own border guard
+  // (`smoothstep(0.482, 0.5, ...) * 1e4`) already forces the field to a huge negative number
+  // regardless of edge mode — so a `'both'` vs `'hull'` comparison built on it came back
+  // byte-for-byte identical, telling this test nothing. `paperField: null` instead falls back to
+  // `r.tight` (`hullField = r.paperField ?? r.tight`, this module's header comment) — the real
+  // square artwork's own field, with its actual contour tens of pixels inside the canvas, which is
+  // where the torn maths this finding is about have room to run.
+  it("renders 'both' — the hull silhouette, decorated by the torn shader path (edge.js:100-116)", () => {
+    const both = expectOk(renderInto('both', false))
+    // It renders at all: the centre still carries the artwork, composited and opaque.
+    expect(both.at(48, 48)[0]).toBeGreaterThan(200)
+    expect(both.at(48, 48)[3]).toBe(255)
+    const alphaBoth = Array.from(both.out)
+      .filter((_, i) => i % 4 === 3)
+      .reduce((a, b) => a + b, 0)
+    both.cleanup()
+
+    // Its silhouette differs from plain `'hull'` on the same fallback field — `'both'` forces
+    // `uEdgeMode = 0` (the torn/fibre/deckle path over `scrapBase`), `'hull'` without a real
+    // `paperField` is `uEdgeMode = 2` (`paper.js:117`'s direct artwork-alpha path, ruling R28) —
+    // different maths over the same inputs.
+    const hull = expectOk(renderInto('hull', false))
+    const alphaHull = Array.from(hull.out)
+      .filter((_, i) => i % 4 === 3)
+      .reduce((a, b) => a + b, 0)
+    hull.cleanup()
+    expect(alphaBoth).not.toBe(alphaHull)
+
+    // The binding this finding is specifically about — `uSdfLoose` pointed at the *tight* field
+    // and `uLoosePush` forced to `0` — only matters where `uEdgeMode == 0` (`scrapBase`'s
+    // `max(tight, loose + uLoosePush)`), so the sharper comparison is against plain `'torn'`,
+    // which takes the same `uEdgeMode == 0` path but with the real `uSdfLoose` / `uLoosePush`
+    // binding: exactly the materially different render `renderFront`'s `'both'` branch never had
+    // a test for before this one.
+    const torn = expectOk(renderInto('torn', false))
+    const alphaTorn = Array.from(torn.out)
+      .filter((_, i) => i % 4 === 3)
+      .reduce((a, b) => a + b, 0)
+    torn.cleanup()
+    expect(alphaBoth).not.toBe(alphaTorn)
   })
 })

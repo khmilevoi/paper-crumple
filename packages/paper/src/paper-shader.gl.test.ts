@@ -65,6 +65,9 @@ describe('PAPER_FS', () => {
     expect(PAPER_FS).toContain('uShadowBlur')
   })
 
+  // The title's "1977-line" names the spike's own line count, not this file's — 1988 lines ship
+  // here (1977 spike lines + 11 accounted-for), and `.superpowers/sdd/2026-08-26-p10-paper-sheet-
+  // renderer/handcheck-1-shader.md` records the exact line-by-line audit behind that difference.
   it('is the whole 1977-line shader, not an excerpt', () => {
     expect(PAPER_FS.split('\n').length).toBeGreaterThan(1900)
   })

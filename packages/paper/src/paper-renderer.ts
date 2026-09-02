@@ -158,10 +158,15 @@ export function createPaperRenderer(ctx: GlContext): Err | PaperRenderer {
     }
 
     // `paper.js:2157-2163` and `edge.js`'s third mode (see this module's header comment).
-    const hullMode = r.edgeMode !== 'torn'
-    const hullField: Field = r.paperField ?? r.tight
+    // `edge.js:116` rewrites `renderParams.edgeMode` to `'torn'` for `'both'` before calling
+    // `engine.render`, so `hullMode` inside that call is `false` for `'both'` too — a single
+    // `effectiveEdgeMode` reproduces that rewrite instead of computing `hullMode` twice with two
+    // different answers for the same request.
     const both = r.edgeMode === 'both'
-    const uEdgeModeValue = both ? 0 : hullMode ? (r.paperField === null ? 2 : 1) : 0
+    const effectiveEdgeMode = both ? 'torn' : r.edgeMode
+    const hullMode = effectiveEdgeMode !== 'torn'
+    const hullField: Field = r.paperField ?? r.tight
+    const uEdgeModeValue = hullMode ? (r.paperField === null ? 2 : 1) : 0
     const tightField: Field = both ? hullField : r.tight
     const looseTexture = both ? hullField.target.texture : r.loose.target.texture
     const looseDecode = both ? hullField.decode : r.loose.decode

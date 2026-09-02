@@ -238,6 +238,13 @@ export function createResampler(ctx: GlContext): Err | Resampler {
       : uploadViaCanvas(ctx, srcRect, bitmap, dedicated)
     if (uploadFail !== undefined) {
       dedicated.dispose()
+      // Bounded, not unbounded (Pool B is single-slot and the next `acquire`/`dispose` would
+      // reclaim it regardless): `uploadViaByteFetch` may have already taken Pool B's one slot
+      // before failing, and only the happy path below released it — release it here too, on
+      // every error return, so a failed upload does not pin the slot until the next call.
+      // `releaseIdle` is a no-op when this key never held the slot (`gl-pools.ts`), so calling it
+      // unconditionally is safe even for the `uploadViaCanvas` branch, which never touches Pool B.
+      poolB.releaseIdle(spriteKey)
       return uploadFail
     }
 
