@@ -49,6 +49,29 @@ async function sourceBitmap(): Promise<ImageBitmap> {
   })
 }
 
+/**
+ * `uploadViaCanvas` (the §8.5.3 fallback) round-trips the bitmap through an `OffscreenCanvas` 2D
+ * context (`drawImage` + `getImageData`), which — independent of driver, a property of the 2D
+ * canvas's internally premultiplied storage — deterministically zeroes RGB wherever alpha is 0:
+ * premultiplying by alpha 0 collapses every channel to 0, and un-premultiplying 0/0 back out
+ * yields 0, not the original value. This is why `uploadViaByteFetch` is the normative path and
+ * `uploadViaCanvas` exists only for a driver whose float conversion drifts (§8.5.3) — it was never
+ * meant to promise byte-fidelity for a fully transparent texel's colour, only for its alpha and
+ * for every opaque-enough texel's colour. Golden-adjusted for exactly that, and nothing else: full
+ * buffer, byte-exact, no tolerance, except this one deterministic, driver-independent zeroing.
+ */
+function zeroRgbUnderZeroAlpha(bytes: Uint8Array | Uint8ClampedArray): number[] {
+  const out = Array.from(bytes)
+  for (let p = 0; p < out.length; p += 4) {
+    if (out[p + 3] === 0) {
+      out[p] = 0
+      out[p + 1] = 0
+      out[p + 2] = 0
+    }
+  }
+  return out
+}
+
 function open(artwork: { w: number; h: number }) {
   fixture = createGlFixture(8, 8)
   expect(fixture.gl, 'no WebGL2 context — check the SwiftShader launch flags (§11)').not.toBeNull()
@@ -155,6 +178,46 @@ describe('the artwork slot', () => {
     )
     r.dispose()
   })
+
+  it(
+    "matches P5's identityResample byte for byte through the canvas fallback " +
+      '(§8.5.3, ctx.exactByteFetch=false)',
+    async () => {
+      const artwork = { w: 9, h: 6 }
+      const { ctx, pools: p } = open(artwork)
+      // `createGlContext` returns a plain object (`gl-context.ts`'s `CoreGlContext` return
+      // literal), so a shallow override forces `uploadViaCanvas` without touching production
+      // code or `ctx.exactByteFetch`'s single probe site. Every method this clone carries closes
+      // over the same underlying `gl` as `ctx`, so behaviour is identical except for the one
+      // overridden field.
+      const fallbackCtx = { ...ctx, exactByteFetch: false }
+      const r = createResampler(fallbackCtx)
+      expect(GlError.is(r)).toBe(false)
+      if (GlError.is(r)) return
+      const slot = r.resample({
+        spriteKey: 'k',
+        bitmap: await sourceBitmap(),
+        srcRect: { x: 0, y: 0, w: SRC.w, h: SRC.h },
+        artwork,
+        poolA: p.poolA,
+        poolB: p.poolB,
+      })
+      expect(GlError.is(slot)).toBe(false)
+      if (GlError.is(slot)) return
+      const reference = identityResample(
+        { data: sourceBytes(), width: SRC.w, height: SRC.h },
+        { x: 0, y: 0, w: SRC.w, h: SRC.h },
+        artwork.w,
+        artwork.h,
+      )
+      expect(reference instanceof Error).toBe(false)
+      if (reference instanceof Error) return
+      expect(Array.from(readArtwork(ctx, slot.texture, artwork.w, artwork.h))).toEqual(
+        zeroRgbUnderZeroAlpha(reference),
+      )
+      r.dispose()
+    },
+  )
 })
 
 describe('the ambient state a byte depends on (spec 7.4.1)', () => {
