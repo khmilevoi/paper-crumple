@@ -56,11 +56,12 @@ describe('checkEntries', () => {
 describe('checkPackedManifest', () => {
   const base = {
     name: '@paper-crumple/paper',
+    version: '1.0.0',
     files: ['dist'],
     engines: { node: '>=22' },
     homepage: 'https://github.com/paper-crumple/paper-crumple/tree/main/packages/core#readme',
     dependencies: {},
-    peerDependencies: { typescript: '>=5.0', '@paper-crumple/core': '^0.0.0' },
+    peerDependencies: { typescript: '>=5.0', '@paper-crumple/core': '^1.0.0' },
     exports: { '.': {}, './tiles': {} },
   }
 
@@ -71,11 +72,43 @@ describe('checkPackedManifest', () => {
   it('fails a tilde peer on core (amendment 24)', () => {
     const tilde = {
       ...base,
-      peerDependencies: { ...base.peerDependencies, '@paper-crumple/core': '~0.0.0' },
+      peerDependencies: { ...base.peerDependencies, '@paper-crumple/core': '~1.0.0' },
     }
 
     expect(checkPackedManifest(paper, tilde)).toEqual([
-      '@paper-crumple/paper: peerDependencies["@paper-crumple/core"] is "~0.0.0"; spec 14 amendment 24 requires a caret, because minors are additive',
+      '@paper-crumple/paper: peerDependencies["@paper-crumple/core"] is "~1.0.0"; expected ^1.x, a caret on the major this tarball ships — spec 14 amendment 24 requires a caret, because minors are additive',
+    ])
+  })
+
+  it('fails a caret on a major the family does not ship, which a plain caret check let through', () => {
+    const zero = {
+      ...base,
+      peerDependencies: { ...base.peerDependencies, '@paper-crumple/core': '^0.1.0' },
+    }
+
+    expect(checkPackedManifest(paper, zero)).toEqual([
+      '@paper-crumple/paper: peerDependencies["@paper-crumple/core"] is "^0.1.0"; expected ^1.x, a caret on the major this tarball ships — spec 14 amendment 24 requires a caret, because minors are additive',
+    ])
+  })
+
+  it('holds the peer to the packed version, so a 0.x family cannot claim ^1.x', () => {
+    const zeroFamily = {
+      ...base,
+      version: '0.1.0',
+      peerDependencies: { ...base.peerDependencies, '@paper-crumple/core': '^1.0.0' },
+    }
+
+    expect(checkPackedManifest(paper, zeroFamily)).toEqual([
+      '@paper-crumple/paper: peerDependencies["@paper-crumple/core"] is "^1.0.0"; expected ^0.x, a caret on the major this tarball ships — spec 14 amendment 24 requires a caret, because minors are additive',
+    ])
+  })
+
+  it('fails a packed manifest with no version to hold the peer against', () => {
+    const unversioned: Record<string, unknown> = { ...base }
+    delete unversioned.version
+
+    expect(checkPackedManifest(paper, unversioned)).toEqual([
+      '@paper-crumple/paper: version is undefined; expected a semver version',
     ])
   })
 
@@ -112,7 +145,7 @@ describe('checkPackedManifest', () => {
     const coreManifest = {
       ...base,
       name: '@paper-crumple/core',
-      peerDependencies: { typescript: '>=5.0', '@paper-crumple/core': '^0.0.0' },
+      peerDependencies: { typescript: '>=5.0', '@paper-crumple/core': '^1.0.0' },
       exports: { '.': {}, './unstable': {} },
     }
 

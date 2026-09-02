@@ -97,6 +97,20 @@ export function checkEntries(spec, names) {
 }
 
 /**
+ * The major of a plain `x.y.z`, or `undefined` if it is not one. Deliberately not a semver parser:
+ * every version and range this gate sees is written by changesets or by pnpm's `workspace:^`
+ * expansion, and both emit exactly `x.y.z`.
+ *
+ * @param {unknown} version
+ * @returns {number | undefined}
+ */
+function majorOf(version) {
+  if (typeof version !== 'string') return undefined
+  const match = /^(\d+)\.\d+\.\d+$/.exec(version)
+  return match === null ? undefined : Number(match[1])
+}
+
+/**
  * The published metadata, read out of the packed tarball rather than the source tree — which is
  * the only place `workspace:^` has already become the range a consumer will actually resolve.
  *
@@ -143,11 +157,23 @@ export function checkPackedManifest(spec, manifest) {
     if (corePeer !== undefined) failures.push(`${spec.name}: must not peer-depend on itself`)
   } else if (corePeer === undefined) {
     failures.push(`${spec.name}: no peerDependencies["@paper-crumple/core"] (spec 10.4)`)
-  } else if (!corePeer.startsWith('^')) {
-    failures.push(
-      `${spec.name}: peerDependencies["@paper-crumple/core"] is ${JSON.stringify(corePeer)}; ` +
-        'spec 14 amendment 24 requires a caret, because minors are additive',
-    )
+  } else {
+    // `fixed` keeps all three on one version, so the major this tarball ships *is* core's major.
+    // A caret is not enough on its own: `^0.1.0` is a caret that pins the minor, and a caret on
+    // some other major would let a consumer resolve a core the family never released together.
+    const shipped = majorOf(/** @type {string} */ (manifest.version))
+    const peerMajor = corePeer.startsWith('^') ? majorOf(corePeer.slice(1)) : undefined
+    if (shipped === undefined) {
+      failures.push(
+        `${spec.name}: version is ${JSON.stringify(manifest.version)}; expected a semver version`,
+      )
+    } else if (peerMajor !== shipped) {
+      failures.push(
+        `${spec.name}: peerDependencies["@paper-crumple/core"] is ${JSON.stringify(corePeer)}; ` +
+          `expected ^${shipped}.x, a caret on the major this tarball ships — ` +
+          'spec 14 amendment 24 requires a caret, because minors are additive',
+      )
+    }
   }
 
   return failures

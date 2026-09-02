@@ -1,7 +1,7 @@
 ---
-'@paper-crumple/core': minor
-'@paper-crumple/paper': minor
-'@paper-crumple/motion': minor
+'@paper-crumple/core': major
+'@paper-crumple/paper': major
+'@paper-crumple/motion': major
 ---
 
 Packaging gates, and the documentation that makes three scoped packages findable as one family.

@@ -1,4 +1,4 @@
-import { readFileSync } from 'node:fs'
+import { readFileSync, readdirSync } from 'node:fs'
 import { describe, expect, it } from 'vitest'
 
 const root = new URL('../', import.meta.url)
@@ -36,6 +36,48 @@ const SUBPATHS: Record<string, string[]> = {
 const PUBLISHED = ['core', 'paper', 'motion'] as const
 const manifests = new Map<string, Manifest>(
   PUBLISHED.map((dir) => [dir, readJson<Manifest>(`packages/${dir}/package.json`)]),
+)
+
+type Bump = 'patch' | 'minor' | 'major'
+const RANK: Record<Bump, number> = { patch: 0, minor: 1, major: 2 }
+
+/**
+ * Every bump the pending changesets declare for a published package. Changesets writes one
+ * `'name': bump` line per package in the frontmatter, and nothing else lives up there.
+ */
+const pendingBumps = (): Bump[] => {
+  const dir = new URL('.changeset/', root)
+  const names = new Set(PUBLISHED.map((d) => `@paper-crumple/${d}`))
+
+  return readdirSync(dir)
+    .filter((file) => file.endsWith('.md') && file !== 'README.md')
+    .flatMap((file) => {
+      const frontmatter = /^---\r?\n([\s\S]*?)\r?\n---/.exec(
+        readFileSync(new URL(file, dir), 'utf8'),
+      )
+      if (frontmatter === null) return []
+      return [...frontmatter[1]!.matchAll(/^'(\S+)':\s*(patch|minor|major)\s*$/gm)]
+        .filter(([, name]) => names.has(name!))
+        .map(([, , bump]) => bump as Bump)
+    })
+}
+
+/**
+ * `incrementVersion` in changesets 7 is a plain `semverInc(old, type)` — there is no special 0.x
+ * handling, which is exactly why a `minor` bump here would have shipped 0.1.0 rather than 1.0.0.
+ */
+const applyBump = (version: string, bump: Bump): string => {
+  const [major = 0, minor = 0, patch = 0] = version.split('.').map(Number)
+  if (bump === 'major') return `${major + 1}.0.0`
+  if (bump === 'minor') return `${major}.${minor + 1}.0`
+  return `${major}.${minor}.${patch + 1}`
+}
+
+/** `fixed` in .changeset/config.json puts all three on the highest bump any of them declares. */
+const bumps = pendingBumps()
+const familyBump = bumps.reduce<Bump>(
+  (highest, bump) => (RANK[bump] > RANK[highest] ? bump : highest),
+  'patch',
 )
 
 describe.each(PUBLISHED)('@paper-crumple/%s', (dir) => {
@@ -87,6 +129,7 @@ describe.each(PUBLISHED)('@paper-crumple/%s', (dir) => {
 
   it('starts at 0.0.0 so the one release changeset lands the family on 1.0.0', () => {
     expect(manifest.version).toBe('0.0.0')
+    expect(applyBump(manifest.version!, familyBump)).toBe('1.0.0')
   })
 
   it('points at the one shared docs URL', () => {
@@ -95,6 +138,16 @@ describe.each(PUBLISHED)('@paper-crumple/%s', (dir) => {
 
   it('promises no module-level side effects', () => {
     expect(manifest.sideEffects).toBe(false)
+  })
+})
+
+describe('the pending changesets', () => {
+  it('exist at all, so the release is not versioning an empty queue', () => {
+    expect(bumps.length).toBeGreaterThan(0)
+  })
+
+  it('declare a major, because a minor on 0.0.0 would ship the family as 0.1.0', () => {
+    expect(familyBump).toBe('major')
   })
 })
 
