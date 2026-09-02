@@ -1,4 +1,5 @@
-import { readFileSync } from 'node:fs'
+import { readFileSync, readdirSync } from 'node:fs'
+import { fileURLToPath } from 'node:url'
 import { describe, expect, it } from 'vitest'
 
 import * as motion from './index.js'
@@ -47,9 +48,36 @@ describe('the @paper-crumple/motion barrel', () => {
     for (const key of Object.keys(source)) {
       expect(key).not.toMatch(/^pack(2x3|1x1|3x2)$/)
     }
-    // The three modules are reachable only through their own subpaths.
-    const barrel = readFileSync(new URL('./index.ts', import.meta.url), 'utf8')
-    expect(barrel).not.toContain('./packs/')
+  })
+
+  it('imports ./packs from nowhere but src/packs itself (§3.2, §14)', () => {
+    const srcDir = fileURLToPath(new URL('.', import.meta.url))
+    const isTestFile = (name: string): boolean =>
+      name.endsWith('.test.ts') || name.endsWith('.gl.test.ts') || name.endsWith('.test-d.ts')
+
+    const sourceFiles = readdirSync(srcDir, { recursive: true })
+      .map((entry) => String(entry).replaceAll('\\', '/'))
+      .filter((entry) => entry.endsWith('.ts'))
+      .filter(
+        (entry) =>
+          !entry.split('/').some((segment) => segment === 'testing' || segment === 'packs'),
+      )
+      .filter((entry) => !isTestFile(entry.split('/').at(-1) ?? entry))
+
+    expect(sourceFiles.length).toBeGreaterThan(0)
+
+    const srcDirUrl = new URL('.', import.meta.url)
+    for (const relativePath of sourceFiles) {
+      const contents = readFileSync(new URL(relativePath, srcDirUrl), 'utf8')
+      expect(contents, `${relativePath} must not import from ./packs/`).not.toMatch(
+        /from\s+['"]\.\/packs\//,
+      )
+    }
+  })
+
+  it('exports no test-only helper', () => {
+    expect(Object.keys(motion)).not.toContain('readTinyBin')
+    expect(Object.keys(motion)).not.toContain('readTinyManifest')
   })
 
   it('exports no test-only harness', () => {

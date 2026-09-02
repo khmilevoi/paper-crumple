@@ -7,7 +7,7 @@
  *
  * This subpath is the **format tooling** (spec 3.2): the CRMP v1 parser, the two codecs, the
  * offset arithmetic and the bucket fit — kilobytes, and everything an author of a custom bake
- * needs. The built-in packs are megabytes and live one per pack module subpath, so
+ * needs. The built-in packs are megabytes and live one per `./packs/<bucket>` subpath, so
  * importing this entry never drags someone else's assets into a bundle.
  *
  * The convention (spec 10): functions return `Error | T`, callers narrow with `instanceof Error`
