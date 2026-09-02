@@ -482,12 +482,13 @@ function buildStage(p: StageParts): BuiltStage {
   // §10.6's policy is P9's, applied to `stage.play`'s report: a mid-run draw failure reaches the
   // stage through `RunHost.reportError`, never through the run's settled value (P4 settles a run
   // to `undefined` on a dropped frame, on purpose — see `runner.test.ts`'s "still settles the run
-  // to undefined" and "§10.6 policy is P9's" cases). `playBroadcastViews` marks which views have a
-  // `stage.play` chain in flight; `playBroadcastErrors` is what `reportError` writes into for one
-  // of them, read back once that view's run settles. This is additional bookkeeping on top of the
+  // to undefined" and "§10.6 policy is P9's" cases). This is additional bookkeeping on top of the
   // existing `p.policy.orphan` emission below — it never changes whether or how an error emits.
-  const playBroadcastViews = new Set<View>()
-  const playBroadcastErrors = new Map<View, Error>()
+  /** One entry per view with a `stage.play` chain in flight. The record's identity is the
+   * broadcast's token: a superseding broadcast replaces the entry, and the superseded chain's
+   * cleanup deletes only if the entry is still its own, so one broadcast can never tear down
+   * another's tracking. */
+  const playBroadcasts = new Map<View, { error?: Error }>()
 
   const dead = (): InstanceType<typeof GlError> | undefined =>
     p.isDisposed() || p.isLost()
@@ -653,7 +654,8 @@ function buildStage(p: StageParts): BuiltStage {
       // §10.6's policy is P9's: the runner hands over an error and this decides `observed`, adds
       // `view` and emits it. A returned ABORTED never reaches here — cancellation is not failure.
       reportError: (error) => {
-        if (playBroadcastViews.has(view)) playBroadcastErrors.set(view, error)
+        const entry = playBroadcasts.get(view)
+        if (entry !== undefined) entry.error = error
         p.policy.orphan(error, view)
       },
       render: (next) => {
@@ -1316,29 +1318,43 @@ function buildStage(p: StageParts): BuiltStage {
       const key = internals(c.view).spriteKey
       return key === null ? '' : (p.sprites.get(key)?.fit.sortKey ?? '')
     })
+    // `ordered` exists to order the *starts* (draw batching); `stagePlayReport` indexes its
+    // outcomes against `eligibility.start`'s registration order, so each chain remembers its own
+    // index into `eligibility.start` and the outcomes are written back to that index rather than
+    // to its position in `ordered`.
+    const startIndex = new Map(eligibility.start.map((c, i) => [c.view, i]))
     const chains = ordered.map(
       (c, i) =>
-        new Promise<ChainOutcome>((resolve) => {
+        new Promise<{ index: number; outcome: ChainOutcome }>((resolve) => {
+          const index = startIndex.get(c.view) ?? i
           const begin = (): void => {
-            if (o?.signal?.aborted === true) return resolve({ kind: 'cancelled' })
-            playBroadcastViews.add(c.view)
-            playBroadcastErrors.delete(c.view)
+            if (o?.signal?.aborted === true) {
+              return resolve({ index, outcome: { kind: 'cancelled' } })
+            }
+            const mine: { error?: Error } = {}
+            playBroadcasts.set(c.view, mine)
             const run = internals(c.view).playAs('stage', from, to, o)
             void run.done.then((settled) => {
-              playBroadcastViews.delete(c.view)
-              const reported = playBroadcastErrors.get(c.view)
-              playBroadcastErrors.delete(c.view)
-              if (reported !== undefined) resolve({ kind: 'failed', error: reported })
-              else if (isAborted(settled)) resolve({ kind: 'incomplete' })
-              else if (settled instanceof Error) resolve({ kind: 'failed', error: settled })
-              else resolve({ kind: 'completed' })
+              if (playBroadcasts.get(c.view) === mine) playBroadcasts.delete(c.view)
+              if (mine.error !== undefined) {
+                resolve({ index, outcome: { kind: 'failed', error: mine.error } })
+              } else if (isAborted(settled)) {
+                resolve({ index, outcome: { kind: 'incomplete' } })
+              } else if (settled instanceof Error) {
+                resolve({ index, outcome: { kind: 'failed', error: settled } })
+              } else {
+                resolve({ index, outcome: { kind: 'completed' } })
+              }
             })
           }
           if (i === 0 || stagger === 0) begin()
           else p.timers.setTimeoutFn(begin, i * stagger)
         }),
     )
-    return stagePlayReport(eligibility, await Promise.all(chains))
+    const settledChains = await Promise.all(chains)
+    const outcomes: ChainOutcome[] = new Array(eligibility.start.length)
+    for (const { index, outcome } of settledChains) outcomes[index] = outcome
+    return stagePlayReport(eligibility, outcomes)
   }
 
   function stageStopMethod(o?: { all?: boolean }): void {

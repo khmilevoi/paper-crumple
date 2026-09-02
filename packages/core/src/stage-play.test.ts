@@ -130,6 +130,81 @@ describe('stage.play', () => {
     g.stage.dispose()
   })
 
+  it(
+    "scopes failure tracking per broadcast: a superseding broadcast's own failure is not lost " +
+      "to the superseded one's cleanup",
+    async () => {
+      const g = await grid(1)
+      const motion = g.motion as unknown as { draw: (a: unknown) => unknown }
+      let calls = 0
+      const original = motion.draw.bind(motion)
+      motion.draw = (a: unknown) => {
+        calls += 1
+        // The first call is the first broadcast's initial draw, which must succeed so that
+        // broadcast is only superseded, never itself a failure. The second call is the second
+        // broadcast's initial draw on the same view, which fails.
+        return calls > 1 ? new GlError('dropped') : original(a)
+      }
+      const first = g.stage.play('flat', 'ball')
+      const second = g.stage.play('flat', 'ball')
+      g.timers.advance(10_000)
+      const firstReport = await first
+      const secondReport = await second
+      expect(firstReport.failed).toEqual([])
+      expect(secondReport.failed).toHaveLength(1)
+      expect(secondReport.failed[0]?.tag).toBe('tile-0')
+      g.stage.dispose()
+    },
+  )
+
+  it(
+    'attributes an outcome to the view sortKey-batching moved it to, not to whichever view ' +
+      'now sits at that report index',
+    async () => {
+      const timers = createFakeTimers()
+      const sheet = fakeSheet()
+      const motion = fakeMotion()
+      const stage = await createStage(
+        { sheet, motion, maxSize: 384, present: 'blit' },
+        stageEnv({ timers }),
+      )
+      if (stage instanceof Error || isAborted(stage)) return expect.fail('stage refused')
+      const a = await stage.add('/a.png', { key: 'a' })
+      const b = await stage.add('/b.png', { key: 'b' })
+      if (a instanceof Error || isAborted(a) || b instanceof Error || isAborted(b)) {
+        return expect.fail('add refused')
+      }
+      const view0 = stage.view({ canvas: destCanvas(), tag: 'view-0' })
+      const view1 = stage.view({ canvas: destCanvas(), tag: 'view-1' })
+      const view2 = stage.view({ canvas: destCanvas(), tag: 'view-2' })
+      if (view0 instanceof Error || view1 instanceof Error || view2 instanceof Error) {
+        return expect.fail('view refused')
+      }
+      // Registration order is [view0, view1, view2]. view0 and view2 show the same sprite `a` and
+      // therefore share its `sortKey`; view1 shows `b`, a different sortKey. `batchBySortKey`
+      // groups by sortKey, so the batch it actually draws in is [view0, view2, view1] — genuinely
+      // reordered relative to registration order.
+      view0.show(a)
+      view1.show(b)
+      view2.show(a)
+      const motionMock = motion as unknown as { draw: (arg: unknown) => unknown }
+      let calls = 0
+      const original = motionMock.draw.bind(motionMock)
+      motionMock.draw = (arg: unknown) => {
+        calls += 1
+        // Draws happen synchronously, in batch order: view0, then view2, then view1. The third
+        // call is view1's, so only view1 fails.
+        return calls === 3 ? new GlError('dropped') : original(arg)
+      }
+      const done = stage.play('flat', 'ball')
+      timers.advance(10_000)
+      const report = await done
+      expect(report.failed).toHaveLength(1)
+      expect(report.failed[0]?.tag).toBe('view-1')
+      stage.dispose()
+    },
+  )
+
   it('a broadcast over zero eligible views is not completed', async () => {
     const timers = createFakeTimers()
     const stage = await createStage(
