@@ -8,10 +8,11 @@ import pack2x3 from './packs/2x3.js'
 import pack3x2 from './packs/3x2.js'
 import { bakedMotion, type BakedClip, type BakedFit } from './source.js'
 
-function bytesFetch(): typeof globalThis.fetch {
+function bytesFetch(delayMs = 0): typeof globalThis.fetch {
   return (async (input: RequestInfo | URL): Promise<Response> => {
     const url = String(input)
     const bucket = url.slice(url.lastIndexOf('/') + 1).replace('.bin', '')
+    if (delayMs > 0) await new Promise((r) => setTimeout(r, delayMs))
     return new Response(readPackBin(bucket), { status: 200 })
   }) as typeof globalThis.fetch
 }
@@ -171,5 +172,14 @@ describe('release and dispose', () => {
     await s.load(f)
     s.dispose()
     expect(await s.load(f)).toBeInstanceOf(Error)
+  })
+
+  it('is an AssetError, not a resurrected clip, when dispose races an in-flight load', async () => {
+    const s = bakedMotion({ packs: [pack2x3, pack1x1, pack3x2], fetch: bytesFetch(20) })
+    const f = s.fit({ x: 0, y: 0, w: 256, h: 384 }) as BakedFit
+    const inFlight = s.load(f)
+    s.dispose()
+    const r = await inFlight
+    expect(AssetError.is(r)).toBe(true)
   })
 })

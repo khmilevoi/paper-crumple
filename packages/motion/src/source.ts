@@ -152,6 +152,11 @@ export function bakedMotion(
       // this source can no longer reach is exactly what `AssetError` says.
       if (disposed) return new AssetError('bakedMotion: loaded after dispose')
       const pack = await store.acquire(fit.bucket, opts)
+      // Re-checked: `dispose()` may have run while `acquire` was in flight. The store's own
+      // guard (pack-store.ts) means `acquire` can still resolve to a valid, non-`Error`,
+      // non-`ABORTED` `Pack` with no ref taken — falling through would resurrect an entry in
+      // the `clips` map `dispose()` just cleared.
+      if (disposed) return new AssetError('bakedMotion: loaded after dispose')
       if (pack instanceof Error) return pack
       if (typeof pack === 'symbol') return pack
 
