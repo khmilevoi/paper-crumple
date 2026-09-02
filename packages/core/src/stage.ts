@@ -1,9 +1,16 @@
-import { ABORTED, type Aborted } from './abort.js'
+import { ABORTED, isAborted, type Aborted } from './abort.js'
 import { attempt } from './attempt.js'
 import type { StagePlayReport } from './collisions.js'
 import { createErrorPolicy, type ErrorPolicy } from './error-policy.js'
 import { createEventBus, type EventBus } from './emitter.js'
-import { GlError, KnobError, SheetError, ViewError } from './errors.js'
+import {
+  AssetError,
+  GlError,
+  KnobError,
+  SheetError,
+  SourceExpiredError,
+  ViewError,
+} from './errors.js'
 import type { KnobDescriptor } from './forward.js'
 import { createFrontLru, type FrontLru, type FrontLruUsage } from './front-lru.js'
 import { createGlContext, type CoreGlContext } from './gl-context.js'
@@ -12,12 +19,20 @@ import type { GlCaps } from './gl.js'
 import type { EventName, StageEvent } from './events.js'
 import { createKnobRegistry, type KnobRegistry } from './knob-registry.js'
 import type { KnobPatch, KnobSetter } from './knob-patch.js'
+import { presetForImageId } from './preset.js'
 import type { PoseRef } from './pose.js'
 import type { AddError, ReadyError } from './results.js'
 import type { StagePlayOptions } from './runner.js'
 import { sdfResFor, sizeForDisplay } from './resolution.js'
-import type { PinFor, SourceEnv, SpriteSource } from './source.js'
-import type { Sprite } from './sprite.js'
+import {
+  normalizeSource,
+  type NormalizedSource,
+  type PinFor,
+  type SourceEnv,
+  type SpriteSource,
+} from './source.js'
+import type { SheetFront } from './sheet.js'
+import type { Sprite, SpriteRecord } from './sprite.js'
 import {
   createOwnedSurface,
   hostInjected,
@@ -299,9 +314,23 @@ export async function createStage(
   })
   teardown.push(() => pools.dispose())
 
-  // Task 10 replaces this release with the sheet-slot front release; the LRU is created here
-  // because §8.8 makes it the stage's, and because `budget` must be right before the first add().
-  const lru = createFrontLru({ bytes: o.budget ?? Number.POSITIVE_INFINITY, release: () => {} })
+  // Created before the LRU so `release` below can read it: §8.8 makes the LRU the stage's, and
+  // `budget` must be right before the first add().
+  const sprites = new Map<string, SpriteRecord>()
+  /** Keys whose `add()` is in flight. A live key is refused whether or not it has finished. */
+  const reserved = new Set<string>()
+
+  const lru = createFrontLru({
+    bytes: o.budget ?? Number.POSITIVE_INFINITY,
+    release: (key) => {
+      const record = sprites.get(key)
+      if (record?.front == null) return
+      // Eviction drops a **front** and leaves the sprite rebuildable (§4.3). `remove()` is what
+      // destroys the sprite, its hull entry and its key.
+      o.sheet.releaseFront(record.front)
+      record.front = null
+    },
+  })
 
   const warnings: Error[] = host.warnings.map((w) => new GlError(w))
   let lost = false
@@ -315,6 +344,8 @@ export async function createStage(
     registry,
     pools,
     lru,
+    sprites,
+    reserved,
     bus,
     policy,
     timers,
@@ -363,6 +394,9 @@ interface StageParts {
   registry: KnobRegistry
   pools: ScratchPools
   lru: FrontLru
+  sprites: Map<string, SpriteRecord>
+  /** Keys whose `add()` is in flight. A live key is refused whether or not it has finished. */
+  reserved: Set<string>
   bus: EventBus<StageEventPayloads>
   policy: ErrorPolicy
   timers: Timers
@@ -378,6 +412,158 @@ interface StageParts {
 function buildStage(p: StageParts): BuiltStage {
   let batching = false
   const views: View[] = []
+
+  const dead = (): InstanceType<typeof GlError> | undefined =>
+    p.isDisposed() || p.isLost()
+      ? new GlError('this stage is disposed or its context was lost; build a new one')
+      : undefined
+
+  async function buildSprite(
+    key: string,
+    source: NormalizedSource,
+    opts: { signal?: AbortSignal; exact?: boolean },
+  ): Promise<SpriteRecord | AddError | Aborted> {
+    const acquired = await source.acquire({ signal: opts.signal })
+    if (isAborted(acquired)) return ABORTED
+    if (acquired instanceof Error) return acquired
+
+    const handle = await p.o.sheet.source(acquired.bitmap, {
+      maxSize: p.host.surface.width,
+      exact: opts.exact === true,
+      signal: opts.signal,
+    })
+    // §8.5.4 — the stage closes every bitmap it obtained and never closes one it was given.
+    if (acquired.owned) attempt(() => acquired.bitmap.close())
+    if (isAborted(handle)) return ABORTED
+    if (handle instanceof Error) return handle
+
+    // D5 — the key selects the fold preset, and "a grid must not fold in unison" depends on it.
+    const fit = p.o.motion.fit(handle.rect, presetForImageId(key))
+    if (fit instanceof Error) {
+      p.o.sheet.release(handle)
+      return fit
+    }
+
+    const clip = await p.o.motion.load(fit, { signal: opts.signal })
+    if (isAborted(clip) || clip instanceof Error) {
+      p.o.sheet.release(handle)
+      return isAborted(clip) ? ABORTED : clip
+    }
+
+    const knobs = p.registry.defaults()
+    const front = p.o.sheet.build(
+      handle,
+      fit.frontSize,
+      p.registry.projector('sheet')(knobs) as never,
+    )
+    if (front instanceof Error) {
+      p.o.motion.release(clip)
+      p.o.sheet.release(handle)
+      // `BuildError` carries `SourceExpiredError`, which `AddError` (P2's, closed here) does not:
+      // `build()`'s scratch-pool expiry has no `add()`-facing equivalent, so it is folded into a
+      // `SheetError` rather than widening `AddError` itself.
+      return SourceExpiredError.is(front) ? new SheetError(front.message, { cause: front }) : front
+    }
+
+    // Boxed rather than a bare `let`: `sprite`'s getters must close over `record`, which does not
+    // exist until after `sprite` is built. `record` itself is assigned exactly once, so it stays
+    // `const` and only the box's property is written.
+    const box: { record?: SpriteRecord } = {}
+    const sprite: Sprite = {
+      key,
+      get frontSize() {
+        return {
+          w: box.record?.front?.width ?? fit.frontSize.w,
+          h: box.record?.front?.height ?? fit.frontSize.h,
+        }
+      },
+      get rect() {
+        return box.record?.handle.rect ?? handle.rect
+      },
+      get pinned() {
+        return box.record?.pinned ?? false
+      },
+      get attachCount() {
+        return box.record?.attachCount ?? 0
+      },
+      set: (() => undefined) as never, // Task 16
+    }
+    const record: SpriteRecord = {
+      key,
+      sprite,
+      source,
+      handle,
+      fit,
+      clip,
+      front,
+      exact: opts.exact === true,
+      pinned: false,
+      attachCount: 0,
+      knobs,
+    }
+    box.record = record
+    return record
+  }
+
+  async function add(
+    src: SpriteSource,
+    opts: { key: string; signal?: AbortSignal; exact?: boolean; pin?: true },
+  ): Promise<Sprite | AddError | Aborted> {
+    const gone = dead()
+    if (gone !== undefined) return p.policy.returned(gone, null)
+    if (opts.signal?.aborted === true) return ABORTED
+    if (p.sprites.has(opts.key) || p.reserved.has(opts.key)) {
+      return p.policy.returned(
+        new SheetError(
+          `add() was called with the live key '${opts.key}'. Re-pointing a key is refused rather ` +
+            'than silently rebuilt: the hull cache is keyed on (sprite key, sdfRes, hull knobs) ' +
+            'and the bitmap is not in that key, so the new sprite would inherit the old hull. ' +
+            'Use replace() to re-point a key, or remove() first.',
+        ),
+        null,
+      )
+    }
+
+    const source = normalizeSource(src, p.env.sourceEnv)
+    if (source instanceof Error) return p.policy.returned(source, null)
+    // `PinFor` closes the type-level hole for a source written at the call site; a source widened
+    // to the whole union — read out of a data model — reaches this runtime check instead.
+    if (!source.reclaimable && opts.pin !== true) {
+      return p.policy.returned(
+        new AssetError(
+          `add('${opts.key}') was given a source no re-supplier can be derived from, so its front ` +
+            'can never be evicted and the byte budget cannot bound it. Pass pin: true to sign for ' +
+            'that, or pass a URL, a Blob or a supplier function instead.',
+        ),
+        null,
+      )
+    }
+
+    p.reserved.add(opts.key)
+    const built = await buildSprite(opts.key, source, opts)
+    p.reserved.delete(opts.key)
+    // An aborted add() frees its key; a failed one frees it too.
+    if (isAborted(built)) return ABORTED
+    if (built instanceof Error) return p.policy.returned(built, null)
+    if (p.isDisposed()) {
+      p.o.sheet.releaseFront(built.front as SheetFront)
+      p.o.sheet.release(built.handle)
+      p.o.motion.release(built.clip)
+      return ABORTED
+    }
+
+    p.sprites.set(opts.key, built)
+    p.lru.insert({
+      key: opts.key,
+      bytes: built.front?.bytes ?? 0,
+      reclaimable: source.reclaimable,
+    })
+    if (opts.pin === true) {
+      built.pinned = true
+      p.lru.pin(opts.key)
+    }
+    return built.sprite
+  }
 
   const stage = {
     warnings: p.warnings,
@@ -413,10 +599,9 @@ function buildStage(p: StageParts): BuiltStage {
     pin: (key: string) => p.lru.pin(key), // Task 10 guards it
     unpin: (key: string) => p.lru.unpin(key),
 
-    // Task 10
-    add: () => Promise.resolve(new SheetError('not implemented')) as never,
+    add: add as never,
     addAll: () => Promise.resolve([]) as never,
-    get: () => undefined,
+    get: (key: string) => p.sprites.get(key)?.sprite,
     // Task 11
     replace: () => Promise.resolve(new SheetError('not implemented')) as never,
     prepare: () => Promise.resolve(new SheetError('not implemented')) as never,

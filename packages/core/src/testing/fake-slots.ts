@@ -7,6 +7,9 @@ import { knobs } from '../knobs.js'
 import type { DrawArgs, MotionClip, MotionFit, MotionSource } from '../motion.js'
 import type { BuildError, LoadError, SourceError } from '../results.js'
 import type { SheetFront, SheetHandle, SheetRenderer, SourceOptions } from '../sheet.js'
+import type { StageEnv } from '../stage.js'
+import { asBitmap, fakeBitmap } from './fake-source.js'
+import { createFakeTimers } from './fake-timers.js'
 
 /**
  * # The fakes P9 drives (§4, "against fake slots")
@@ -239,5 +242,45 @@ export function fakeMotion(o: FakeMotionOptions = {}): FakeMotion {
     get disposed() {
       return disposed
     },
+  }
+}
+
+/** A `StageEnv` with no DOM, no GL and a fake clock. Every level-1 stage test uses this. */
+export function stageEnv(over: Partial<StageEnv> = {}): StageEnv {
+  const ctx = fakeGlContext()
+  const canvas = (w: number, h: number) =>
+    ({
+      width: w,
+      height: h,
+      getContext: () => ({
+        canvas: { width: w, height: h },
+        getContextAttributes: () => ({
+          alpha: true,
+          antialias: false,
+          depth: true,
+          premultipliedAlpha: false,
+          preserveDrawingBuffer: true,
+          stencil: false,
+          powerPreference: 'high-performance',
+        }),
+        getExtension: () => ({ loseContext: () => {} }),
+      }),
+    }) as unknown as HTMLCanvasElement
+  return {
+    surface: { makeOffscreen: canvas, makeElement: canvas },
+    makeContext: () => ctx,
+    timers: createFakeTimers(),
+    dpr: 2,
+    onContextLost: () => () => {},
+    sourceEnv: {
+      fetch: async () => ({
+        ok: true,
+        status: 200,
+        headers: { get: () => null },
+        blob: async () => new Blob(['png'], { type: 'image/png' }),
+      }),
+      createImageBitmap: async () => asBitmap(fakeBitmap({ width: 40, height: 30 })),
+    },
+    ...over,
   }
 }
