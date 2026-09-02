@@ -24,9 +24,16 @@ import type { KnobPatch, KnobSetter } from './knob-patch.js'
 import { presetForImageId } from './preset.js'
 import type { PoseRef } from './pose.js'
 import { createRebuildQueue, type RebuildQueue } from './rebuild-queue.js'
-import type { AddError, ReadyError } from './results.js'
-import { settledRun } from './run.js'
-import type { StagePlayOptions } from './runner.js'
+import type { AddError, PlayResult, ReadyError, SwapResult } from './results.js'
+import { createRun, settledRun, type Run } from './run.js'
+import {
+  createRunController,
+  type CrumpleTarget,
+  type PlayOptions,
+  type RunController,
+  type RunHost,
+  type StagePlayOptions,
+} from './runner.js'
 import { sdfResFor, sizeForDisplay } from './resolution.js'
 import {
   normalizeSource,
@@ -53,7 +60,7 @@ import type {
 } from './stage-types.js'
 import { systemTimers, type Timers } from './stepper.js'
 import { transition, type ViewState } from './view-state.js'
-import type { View } from './view.js'
+import type { SwapOptions, View } from './view.js'
 
 /**
  * D4 — the widest slot type. `KnobPatch`, `ViewKnobPatch` and `SpriteKnobPatch` are parameterised
@@ -583,6 +590,160 @@ function buildStage(p: StageParts): BuiltStage {
       }
     }
 
+    /** The `RunHost.render` path: draws one pose and returns the failure instead of orphaning it,
+     *  so the controller can report it through `reportError` at the right moment (§7.1). */
+    function paintOnce(r: SpriteRecord, next: number): Error | undefined {
+      // §8.8 demand 2 — the top of a step callback whose next render needs a dirty or
+      // non-resident front. One mandatory item, whatever it costs, plus whatever fits in 4 ms.
+      if (r.front === null || p.rebuildQueue.dirty(r.key)) {
+        p.rebuildQueue.drain({ demand: 'step', mandatory: r.key })
+      }
+      const drawn = drawInto(r, target, next)
+      if (drawn !== undefined) return drawn
+      return 'canvas' in t ? blitOut(t, r) : undefined
+    }
+
+    // The controller is re-created whenever the pack behind the view changes, because
+    // `RunControllerConfig.poseCount` must equal the schedule's length or 'ball' and the swap's
+    // ball index name different poses. `MotionClip.keyFrames.length` is where that number lives.
+    let controller: RunController<SpriteRecord> | null = null
+    let poseCount = 1
+    let currentRun: Run<PlayResult | SwapResult> | null = null
+
+    const host: RunHost = {
+      emit: (event, payload) => bus.emit(event, payload as never),
+      // §10.6's policy is P9's: the runner hands over an error and this decides `observed`, adds
+      // `view` and emits it. A returned ABORTED never reaches here — cancellation is not failure.
+      reportError: (error) => p.policy.orphan(error, view),
+      render: (next) => {
+        pose = next
+        return record === null ? undefined : paintOnce(record, next)
+      },
+      frameFor: (next) => record?.clip.keyFrames[next] ?? 0,
+      setState: (next) => {
+        state = next
+      },
+      timers: p.timers,
+    }
+
+    function controllerFor(): RunController<SpriteRecord> {
+      const count = record?.clip.keyFrames.length ?? 1
+      if (controller === null || count !== poseCount) {
+        controller?.dispose()
+        poseCount = count
+        controller = createRunController<SpriteRecord>(host, { poseCount: count })
+      }
+      return controller
+    }
+
+    /** Turn a `Sprite | Promise<…>` into the runner's `CrumpleTarget<SpriteRecord>`. */
+    function toCrumpleTarget(
+      target: Sprite | Promise<Sprite | Error | Aborted>,
+    ): CrumpleTarget<SpriteRecord> {
+      if (!(target instanceof Promise)) {
+        return (findRecord(target) ??
+          new SheetError('that sprite is not registered on this stage')) as never
+      }
+      return target.then((settled) =>
+        settled instanceof Error || isAborted(settled)
+          ? (settled as never)
+          : ((findRecord(settled) ??
+              new SheetError('that sprite is not registered on this stage')) as never),
+      )
+    }
+
+    /** Holds the pending target's front against eviction; returns the release. */
+    function holdTarget(target: Sprite | Promise<Sprite | Error | Aborted>): () => void {
+      let key: string | null = null
+      const take = (s: Sprite): void => {
+        key = s.key
+        p.lru.hold(key)
+      }
+      if (!(target instanceof Promise)) take(target)
+      else {
+        void target.then((s) => {
+          if (!(s instanceof Error) && !isAborted(s)) take(s)
+        })
+      }
+      return () => {
+        if (key !== null) p.lru.releaseHold(key)
+        key = null
+      }
+    }
+
+    /** `crumpleTo` on an empty view: there is nothing to crumple, so it is a `show()`. */
+    function adoptImmediately(target: Sprite | Promise<Sprite | Error | Aborted>): Run<SwapResult> {
+      if (!(target instanceof Promise)) {
+        view.show(target)
+        return settledRun(undefined)
+      }
+      const handle = createRun<SwapResult>(() => {})
+      void target.then((settled) => {
+        if (settled instanceof Error || isAborted(settled)) handle.settle(settled as never)
+        else {
+          view.show(settled)
+          handle.settle(undefined)
+        }
+      })
+      return handle.run
+    }
+
+    function playMethod(from: PoseRef, to: PoseRef, o?: PlayOptions): Run<PlayResult> {
+      if (p.isDisposed() || state === 'disposed') return settledRun(ABORTED)
+      const run = controllerFor().play(from, to, { ...o, owner: 'view' })
+      currentRun = run
+      return run
+    }
+
+    function crumpleToMethod(
+      target: Sprite | Promise<Sprite | Error | Aborted>,
+      o?: SwapOptions,
+    ): Run<SwapResult> {
+      if (p.isDisposed() || state === 'disposed') return settledRun(ABORTED)
+      // `crumpleTo()` on an empty view degenerates to `show()`: there is no previous content to
+      // crumple.
+      if (record === null) {
+        const run = adoptImmediately(target)
+        currentRun = run
+        return run
+      }
+      // §4.5 — a sprite is attached if it is shown by a non-disposed view **or** is the pending
+      // target of a live crumpleTo. Without the second half, a view parked at the ball for two
+      // seconds could have its incoming sprite evicted before the swap. `hold` is the LRU's name
+      // for exactly that.
+      const held = holdTarget(target)
+      const run = controllerFor().crumple(pose, toCrumpleTarget(target), {
+        ...o,
+        owner: 'view',
+        // Called once, at the ball, **between the pose-5 render and the pose-4 render** — which
+        // is where the sprite, fit and bucket are exchanged, and what makes a bucket change
+        // across a swap invisible rather than merely well hidden.
+        adopt: (next) => {
+          if (record !== null) {
+            record.attachCount -= 1
+            p.lru.detach(record.key)
+          }
+          record = next
+          record.attachCount += 1
+          p.lru.attach(record.key)
+          held()
+          if (record.front === null) {
+            // §8.8 demand 5 — settlement while the view is rising or parked. The park is free
+            // time and the ideal moment to build the incoming front.
+            p.rebuildQueue.drain({ demand: 'target-settled', mandatory: record.key })
+          }
+          return undefined
+        },
+      })
+      currentRun = run
+      return run
+    }
+
+    function stopMethod(): void {
+      if (p.isDisposed() || state === 'disposed') return
+      controller?.stop({ owner: 'view' })
+    }
+
     const view: View = {
       get pose() {
         return pose
@@ -594,7 +755,7 @@ function buildStage(p: StageParts): BuiltStage {
         return record?.sprite ?? null
       },
       get run() {
-        return null // Task 13
+        return controller?.live === true ? currentRun : null
       },
       tag: t.tag,
       get idealSize() {
@@ -641,10 +802,10 @@ function buildStage(p: StageParts): BuiltStage {
         paint(resolved)
       },
 
-      play: (() => settledRun(undefined)) as never, // Task 13
-      crumpleTo: (() => settledRun(undefined)) as never, // Task 13
+      play: playMethod,
+      crumpleTo: crumpleToMethod,
       swapTo: (() => settledRun(undefined)) as never, // Task 15
-      stop: () => {}, // Task 13
+      stop: stopMethod,
       set: (() => undefined) as never, // Task 16
 
       on: (event, fn) => bus.on(event, fn as never),
@@ -652,6 +813,9 @@ function buildStage(p: StageParts): BuiltStage {
 
       dispose() {
         if (state === 'disposed') return
+        // §4.6: ends a live run with `completed: false` before the sprite is detached and the
+        // bus is cleared — or the `end` `dispose()` owes it would never reach a listener.
+        controller?.dispose()
         state = 'disposed'
         if (record !== null) {
           record.attachCount -= 1
@@ -670,6 +834,11 @@ function buildStage(p: StageParts): BuiltStage {
     bus.on('start', (e) => p.bus.emit('start', { ...e, view }))
     bus.on('step', (e) => p.bus.emit('step', { ...e, view }))
     bus.on('end', (e) => p.bus.emit('end', { ...e, view }))
+    // `currentRun` is cleared once the run that produced it has actually ended, which is what
+    // lets `view.run` report `null` at exactly the moment §4.5 says the view returns to `idle`.
+    bus.on('end', () => {
+      currentRun = null
+    })
     return view
   }
 
