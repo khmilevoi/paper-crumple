@@ -565,6 +565,175 @@ function buildStage(p: StageParts): BuiltStage {
     return built.sprite
   }
 
+  async function addAll(
+    entries: ReadonlyArray<{
+      src: SpriteSource
+      key: string
+      signal?: AbortSignal
+      exact?: boolean
+      pin?: true
+    }>,
+    o?: { signal?: AbortSignal },
+  ): Promise<Array<Sprite | AddError> | Aborted> {
+    // amendment 2 — abort is **all-or-nothing at the call level**; no element union carries it.
+    // Checked once, up front, and once more after the loop: a partially-built batch cannot say
+    // who owns what, and this is the shape §10.5's "the return value is the complete account"
+    // allows.
+    if (o?.signal?.aborted === true) return ABORTED
+    const out: Array<Sprite | AddError> = []
+    for (const e of entries) {
+      const one = await add(e.src, { ...e, signal: o?.signal ?? e.signal })
+      if (isAborted(one)) return ABORTED
+      out.push(one)
+    }
+    return out
+  }
+
+  /** Rebuild one front from a resident handle. The LRU dropped the front, not the sprite. */
+  function rebuildFront(record: SpriteRecord): AddError | undefined {
+    const front = p.o.sheet.build(
+      record.handle,
+      record.fit.frontSize,
+      p.registry.projector('sheet')(record.knobs) as never,
+    )
+    if (front instanceof Error) {
+      // `BuildError` carries `SourceExpiredError`, which `AddError` does not — folded into a
+      // `SheetError` exactly as `buildSprite` does above.
+      return SourceExpiredError.is(front) ? new SheetError(front.message, { cause: front }) : front
+    }
+    record.front = front
+    p.lru.insert({ key: record.key, bytes: front.bytes, reclaimable: record.source.reclaimable })
+    return undefined
+  }
+
+  /**
+   * amendment 10 — P15's staleness check reports a `200` on a conditional re-supply, which means
+   * the bytes moved under a key §8.5.1 promised would not move. `replace()` is what that turns
+   * into, and the warning is what says so out loud.
+   */
+  function warnReplaced(key: string): void {
+    p.warnings.push(
+      new AssetError(
+        `the source behind '${key}' changed under a key that promised it would not; the sprite ` +
+          'was rebuilt and its hull entry invalidated',
+      ),
+    )
+  }
+
+  async function prepare(
+    key: string,
+    o?: { signal?: AbortSignal },
+  ): Promise<Sprite | AddError | Aborted> {
+    const gone = dead()
+    if (gone !== undefined) return p.policy.returned(gone, null)
+    if (o?.signal?.aborted === true) return ABORTED
+    const record = p.sprites.get(key)
+    if (record === undefined) {
+      return p.policy.returned(
+        new SheetError(`prepare('${key}') has no sprite under that key; add() it first`),
+        null,
+      )
+    }
+    if (record.front !== null) return record.sprite
+    const rebuilt = rebuildFront(record)
+    if (rebuilt !== undefined) return p.policy.returned(rebuilt, null)
+    return record.sprite
+  }
+
+  async function replace(
+    key: string,
+    src: SpriteSource,
+    o?: { signal?: AbortSignal; exact?: boolean },
+  ): Promise<Sprite | AddError | Aborted> {
+    const gone = dead()
+    if (gone !== undefined) return p.policy.returned(gone, null)
+    if (o?.signal?.aborted === true) return ABORTED
+    const record = p.sprites.get(key)
+    if (record === undefined) {
+      return p.policy.returned(
+        new SheetError(`replace('${key}') has no sprite under that key; add() it instead`),
+        null,
+      )
+    }
+
+    const source = normalizeSource(src, p.env.sourceEnv)
+    if (source instanceof Error) return p.policy.returned(source, null)
+    if (!source.reclaimable && !record.pinned) {
+      return p.policy.returned(
+        new AssetError(
+          `replace('${key}') was given a source no re-supplier can be derived from; pin the ` +
+            'sprite first or pass a URL, a Blob or a supplier function',
+        ),
+        null,
+      )
+    }
+
+    // D3 — the order is the contract. `release(handle)` is where the sheet slot busts the hull
+    // entry through the entry point P8 exposes; a re-supplied key whose bytes changed must
+    // rebuild the hull rather than serve the cached polygon, which is the whole reason §4.1
+    // refuses add() on a live key.
+    if (record.front !== null) p.o.sheet.releaseFront(record.front)
+    record.front = null
+    p.o.sheet.release(record.handle)
+    p.o.motion.release(record.clip)
+
+    const built = await buildSprite(key, source, { signal: o?.signal, exact: record.exact })
+    if (isAborted(built)) return ABORTED
+    if (built instanceof Error) {
+      p.sprites.delete(key)
+      p.lru.remove(key)
+      return p.policy.returned(built, null)
+    }
+
+    // The key, the pins and the attachments survive, so a reference the application holds does
+    // too. Only the source-derived halves are replaced.
+    record.source = built.source
+    record.handle = built.handle
+    record.fit = built.fit
+    record.clip = built.clip
+    record.front = built.front
+    p.lru.insert({ key, bytes: record.front?.bytes ?? 0, reclaimable: source.reclaimable })
+    if (record.pinned) p.lru.pin(key)
+    for (let i = 0; i < record.attachCount; i += 1) p.lru.attach(key)
+    warnReplaced(key)
+    return record.sprite
+  }
+
+  function remove(key: string, o?: { detach?: true }): InstanceType<typeof SheetError> | undefined {
+    if (p.isDisposed()) return undefined // React runs cleanups child-first (§4.6)
+    const record = p.sprites.get(key)
+    if (record === undefined) return undefined
+
+    // amendment 17 — `detach: true` disposes the views the stage now knows about through
+    // `mount`, so the caller no longer has to find them. It changes **who performs the
+    // disposal** and never the rule that an attached sprite is not freed.
+    if (o?.detach === true) {
+      for (const v of [...views]) {
+        const view = v as unknown as { spriteKey: string | null; dispose(): void }
+        if (view.spriteKey === key) view.dispose()
+      }
+    }
+    if (record.attachCount > 0) {
+      return p.policy.returned(
+        new SheetError(
+          `remove('${key}') was called while the sprite is attached to ` +
+            `${String(record.attachCount)} view(s). Dispose them first, or pass { detach: true } ` +
+            'and the stage will.',
+        ),
+        null,
+      )
+    }
+
+    // Eviction drops a front and leaves the sprite rebuildable; `remove()` destroys the sprite,
+    // its hull entry and its key (§4.3).
+    if (record.front !== null) p.o.sheet.releaseFront(record.front)
+    p.o.sheet.release(record.handle)
+    p.o.motion.release(record.clip)
+    p.sprites.delete(key)
+    p.lru.remove(key)
+    return undefined
+  }
+
   const stage = {
     warnings: p.warnings,
     caps: p.ctx.caps,
@@ -596,16 +765,25 @@ function buildStage(p: StageParts): BuiltStage {
       if (o.bytes !== undefined) p.lru.setBudget(o.bytes)
     },
     usage: () => ({ ...p.lru.usage(), handles: 0, attached: 0 }), // Task 16 fills handles/attached
-    pin: (key: string) => p.lru.pin(key), // Task 10 guards it
-    unpin: (key: string) => p.lru.unpin(key),
+    pin: (key: string) => {
+      const record = p.sprites.get(key)
+      if (record === undefined) return
+      record.pinned = true
+      p.lru.pin(key)
+    },
+    unpin: (key: string) => {
+      const record = p.sprites.get(key)
+      if (record === undefined) return
+      record.pinned = false
+      p.lru.unpin(key)
+    },
 
     add: add as never,
-    addAll: () => Promise.resolve([]) as never,
+    addAll: addAll as never,
     get: (key: string) => p.sprites.get(key)?.sprite,
-    // Task 11
-    replace: () => Promise.resolve(new SheetError('not implemented')) as never,
-    prepare: () => Promise.resolve(new SheetError('not implemented')) as never,
-    remove: () => undefined,
+    replace: replace as never,
+    prepare: prepare as never,
+    remove: remove as never,
     // Task 12
     view: () => new ViewError('not implemented') as never,
     // Task 14

@@ -135,3 +135,112 @@ describe('stage.add()', () => {
     expect(stage.get('k')).toBeUndefined()
   })
 })
+
+describe('addAll, prepare, replace and remove', () => {
+  it('addAll returns one entry per input, in order, and never an element-level Aborted', async () => {
+    const { stage } = await mounted()
+    const out = await stage.addAll([
+      { src: '/a.png', key: 'a' },
+      { src: '/b.png', key: 'b' },
+      { src: '/c.png', key: 'a' }, // duplicate key: an element-level AddError
+    ])
+    if (isAborted(out)) return expect.fail('the batch was not cancelled')
+    expect(out).toHaveLength(3)
+    expect(out[2]).toBeInstanceOf(SheetError)
+    expect(out.some(isAborted)).toBe(false)
+    stage.dispose()
+  })
+
+  it('addAll answers a whole-batch ABORTED when the signal fires', async () => {
+    const { stage } = await mounted()
+    const controller = new AbortController()
+    controller.abort()
+    const out = await stage.addAll([{ src: '/a.png', key: 'a' }], { signal: controller.signal })
+    expect(isAborted(out)).toBe(true)
+    stage.dispose()
+  })
+
+  it('prepare() builds a front the LRU had evicted, and is a no-op when resident', async () => {
+    const { stage, sheet } = await mounted()
+    await stage.add('/a.png', { key: 'k' })
+    // front-lru.ts never evicts the most-recently-used front, however small the budget (its own
+    // test: "never evicts the most recently used front, however small the budget"); a second,
+    // later-touched sprite is what makes 'k' evictable at all.
+    await stage.add('/b.png', { key: 'other' })
+    const buildsBefore = sheet.calls.build.length
+    expect(await stage.prepare('k')).not.toBeInstanceOf(Error)
+    expect(sheet.calls.build).toHaveLength(buildsBefore)
+    stage.budget({ bytes: 1 }) // force the LRU to drop the front
+    expect(await stage.prepare('k')).not.toBeInstanceOf(Error)
+    expect(sheet.calls.build.length).toBeGreaterThan(buildsBefore)
+    stage.dispose()
+  })
+
+  it('prepare() on an unknown key is an AddError, not a silent add', async () => {
+    const { stage } = await mounted()
+    expect(await stage.prepare('nope')).toBeInstanceOf(SheetError)
+    stage.dispose()
+  })
+
+  it('replace() releases the old front and the old handle before sourcing the new one (D3)', async () => {
+    const { stage, sheet } = await mounted()
+    await stage.add('/a.png', { key: 'k' })
+    // `FakeSheet.order` is `readonly string[]`; the cast is the only way to clear it between the
+    // add() above and the replace() this test asserts the ordering of.
+    ;(sheet.order as string[]).length = 0
+    const out = await stage.replace('k', '/b.png')
+    expect(out).not.toBeInstanceOf(Error)
+    expect(sheet.order).toEqual(['releaseFront', 'release', 'source', 'build'])
+    stage.dispose()
+  })
+
+  it('replace() keeps the key, the pin and the attachments', async () => {
+    const { stage } = await mounted()
+    const first = await stage.add('/a.png', { key: 'k' })
+    if (first instanceof Error || isAborted(first)) return expect.fail('add refused')
+    stage.pin('k')
+    await stage.replace('k', '/b.png')
+    const after = stage.get('k')
+    expect(after?.key).toBe('k')
+    expect(after?.pinned).toBe(true)
+    stage.dispose()
+  })
+
+  it('replace() warns once when a conditional re-supply came back 200 (amendment 10)', async () => {
+    const { stage } = await mounted()
+    await stage.add('/a.png', { key: 'k' })
+    const warned: Error[] = []
+    stage.on('error', (e) => warned.push(e.error))
+    await stage.replace('k', '/a.png')
+    expect(stage.warnings.map((w) => w.message).join(' ')).toContain('k')
+    stage.dispose()
+  })
+
+  it('remove() destroys the sprite, its front and its key', async () => {
+    const { stage, sheet } = await mounted()
+    await stage.add('/a.png', { key: 'k' })
+    expect(stage.remove('k')).toBeUndefined()
+    expect(stage.get('k')).toBeUndefined()
+    expect(sheet.calls.release).toHaveLength(1)
+    expect(await stage.add('/a.png', { key: 'k' })).not.toBeInstanceOf(Error)
+    stage.dispose()
+  })
+
+  it('remove() on an unknown key is undefined, and on a disposed stage a no-op', async () => {
+    const { stage } = await mounted()
+    expect(stage.remove('nope')).toBeUndefined()
+    stage.dispose()
+    expect(stage.remove('nope')).toBeUndefined()
+  })
+
+  it('pin()/unpin() move a front between the reclaimable and unreclaimable halves', async () => {
+    const { stage } = await mounted()
+    await stage.add('/a.png', { key: 'k' })
+    stage.pin('k')
+    expect(stage.get('k')?.pinned).toBe(true)
+    expect(stage.usage().pinned).toBe(1)
+    stage.unpin('k')
+    expect(stage.usage().pinned).toBe(0)
+    stage.dispose()
+  })
+})
