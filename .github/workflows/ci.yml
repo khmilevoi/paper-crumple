@@ -57,3 +57,22 @@ jobs:
       - run: pnpm exec turbo run build --filter=@paper-crumple/core
       - run: pnpm exec playwright install --with-deps chromium
       - run: pnpm test:gl
+
+  packaging:
+    name: packaging · tarballs, publint and attw
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: pnpm/action-setup@v6
+      - uses: actions/setup-node@v7
+        with:
+          node-version: '24'
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
+      # publint, attw and the entry-list check all read `dist/`, so all three packages build here
+      # and not just core: this lane packs what a consumer would install.
+      - run: pnpm exec turbo run build --filter=@paper-crumple/core --filter=@paper-crumple/paper --filter=@paper-crumple/motion
+      - run: pnpm verify:deps
+      # Prints each tarball's entry list into the log — spec 14's "review the pack output" — and
+      # then asserts it, so the review is binding rather than advisory.
+      - run: pnpm verify:packaging

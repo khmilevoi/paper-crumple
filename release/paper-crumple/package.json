@@ -1,0 +1,23 @@
+{
+  "name": "paper-crumple",
+  "version": "1.0.0",
+  "description": "Deprecated placeholder. The library ships as @paper-crumple/core, @paper-crumple/paper and @paper-crumple/motion.",
+  "keywords": [
+    "deprecated",
+    "paper-crumple"
+  ],
+  "license": "MIT",
+  "homepage": "https://github.com/paper-crumple/paper-crumple/tree/main/packages/core#readme",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/paper-crumple/paper-crumple.git",
+    "directory": "release/paper-crumple"
+  },
+  "files": [
+    "README.md"
+  ],
+  "publishConfig": {
+    "access": "public"
+  },
+  "dependencies": {}
+}
