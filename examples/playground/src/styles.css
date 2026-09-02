@@ -1,0 +1,76 @@
+/*
+ * Skeleton styles for the walking skeleton (Task 1). This is deliberately minimal — a
+ * three-column layout and a dark, monospace-values look. Task 9 does the real styling pass.
+ */
+
+:root {
+  color-scheme: dark;
+  --bg: #111318;
+  --panel-bg: #1a1d24;
+  --border: #2a2e38;
+  --fg: #e6e8ee;
+  --fg-dim: #9aa0ac;
+  --mono: 'SFMono-Regular', Consolas, 'Liberation Mono', Menlo, monospace;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+body {
+  margin: 0;
+  background: var(--bg);
+  color: var(--fg);
+  font-family: system-ui, sans-serif;
+}
+
+#masthead {
+  padding: 1rem 1.5rem;
+  border-bottom: 1px solid var(--border);
+}
+
+#version-line {
+  font-family: var(--mono);
+  color: var(--fg-dim);
+  margin: 0.25rem 0 0;
+}
+
+main {
+  display: grid;
+  grid-template-columns: 240px 1fr 280px;
+  gap: 1rem;
+  padding: 1rem;
+  align-items: start;
+}
+
+#config-column,
+#panel-column {
+  background: var(--panel-bg);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  padding: 0.75rem;
+}
+
+#stage-column {
+  min-height: 400px;
+  background: var(--panel-bg);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  padding: 0.75rem;
+}
+
+#knob-count,
+#panel {
+  font-family: var(--mono);
+  font-size: 0.85rem;
+  color: var(--fg-dim);
+}
+
+#inspector {
+  margin: 0 1rem 1rem;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  padding: 0.75rem;
+  font-family: var(--mono);
+  font-size: 0.85rem;
+}
