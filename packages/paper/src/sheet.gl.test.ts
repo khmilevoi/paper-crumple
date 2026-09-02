@@ -1,7 +1,9 @@
 import { afterEach, describe, expect, it } from 'vitest'
 import { ABORTED, GlError, SheetError, isAborted } from '@paper-crumple/core'
-import { checkGuardBand } from '@paper-crumple/core/unstable'
+import { checkGuardBand, KNOB_REFERENCE_PX, overscanRadius } from '@paper-crumple/core/unstable'
+import type { GlContext } from '@paper-crumple/core/unstable'
 import { createGlFixture, type PaperGlFixture } from './testing/gl-fixture.js'
+import { defaultsFor, edgeParamsFrom } from './paper-knobs.js'
 import { paperSheet } from './sheet.js'
 
 // The `source`/`build` suites are added by tasks 11 and 12; this file stays additive across all
@@ -50,6 +52,28 @@ describe('paperSheet as a factory (spec 6.5, 14)', () => {
 
   it('reserves more when overscanHeadroom is given', () => {
     expect(paperSheet({ overscanHeadroom: 0.5 }).overscan).toBeGreaterThan(paperSheet().overscan)
+  })
+
+  // Fix round 1: an `overscanHeadroom` past the reference plane must not silently read as
+  // `overscan: 0` (a plausible-looking "no margin needed"), and `mount()` — the earliest call
+  // with an error channel — must refuse rather than mount with an unusable reserve. The threshold
+  // is computed from the same `overscanRadius`/`freezeOverscan` arithmetic the factory itself
+  // uses (`radius * (1 + headroom) >= KNOB_REFERENCE_PX / 2`), not guessed, so this test tracks
+  // `hull`'s own defaults if they ever change. No `GlContext` is needed: `mount()`'s guard runs
+  // before it ever touches `ctx` — the factory is synchronous and creates no GL objects — so this
+  // whole test needs no live WebGL2 context (and does not count against the ~sixteen-context cap
+  // `createGlFixture`'s `dispose()` otherwise manages here).
+  it('overscan reads Infinity, and mount() returns a GlError, when overscanHeadroom pushes the reserve past the reference plane (spec 8.6)', () => {
+    const radius = overscanRadius(edgeParamsFrom('hull', defaultsFor('hull')))
+    const headroom = KNOB_REFERENCE_PX / (2 * radius) - 1 + 1e-6
+    const sheet = paperSheet({ overscanHeadroom: headroom })
+    expect(sheet.overscan).toBe(Number.POSITIVE_INFINITY)
+
+    const noContext = {} as unknown as GlContext
+    const mounted = sheet.mount(noContext)
+    expect(GlError.is(mounted), 'mount() must return a GlError, not mount silently').toBe(true)
+    if (!GlError.is(mounted)) return
+    expect(mounted.message).toContain('overscanHeadroom')
   })
 
   it('defaults tiles to null, because hull needs no fibre at all (spec 14)', async () => {

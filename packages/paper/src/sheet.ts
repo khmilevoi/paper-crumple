@@ -395,11 +395,26 @@ export function paperSheet(options?: PaperSheetOptions): PaperSheet {
   // §6.5/§8.6: the factory-level baseline. See `PaperSheet.overscan`'s doc comment for why this
   // is not the same number `add()` later freezes onto a sprite's own handle.
   const reserve = freezeOverscan(edgeParamsFrom(edgeMode, defaultsFor(edgeMode)), overscanHeadroom)
-  // Every mode's own *default* knob values reserve well under the 500 reference-px ceiling
-  // `overscanFromRadius` guards, so this branch is unreachable for any of the three edge modes —
-  // kept because `freezeOverscan`'s return type still carries it, and §10.8 forbids unwrapping an
-  // `Error | T` unchecked even when a branch is believed dead.
-  const overscan = KnobError.is(reserve) ? 0 : reserve.overscan
+  // Every mode's own *default* knob values alone reserve well under the 500 reference-px ceiling
+  // `overscanFromRadius` guards — but `overscanHeadroom` is a user-supplied factory option with no
+  // upper bound (`freezeOverscan` scales the radius by `1 + headroom`), so this branch genuinely IS
+  // reachable: past a headroom of roughly 4.95 for `hull`'s own defaults (roughly 2.34 for
+  // `torn`'s), the scaled radius leaves no artwork inside the reference frame. `overscan` is never
+  // actually read in that case — `mount()` below is the earliest call with an error channel
+  // (`PaperSheet.overscan` itself has none, spec 5.2: a plain `readonly number`) and refuses to
+  // mount, returning the wrapped `KnobError` first. The field still needs *a* value for the narrow
+  // window between construction and a first `mount()` call, so it is `Infinity` rather than a
+  // plausible-looking `0` — a `0` here would silently claim "no margin needed," which is exactly
+  // the one reading this failed derivation can never honestly produce.
+  let overscan: number
+  let overscanError: InstanceType<typeof KnobError> | null
+  if (KnobError.is(reserve)) {
+    overscanError = reserve
+    overscan = Number.POSITIVE_INFINITY
+  } else {
+    overscanError = null
+    overscan = reserve.overscan
+  }
 
   let mounted: Mounted | null = null
   // Before the first `mount()` there is nothing to report yet, so this deferred is never
@@ -447,6 +462,17 @@ export function paperSheet(options?: PaperSheetOptions): PaperSheet {
   let afterHullForTest: (() => void) | undefined
 
   function mount(ctx: GlContext): InstanceType<typeof GlError> | undefined {
+    // The earliest honest surface for a factory-level `overscanHeadroom` that could not be
+    // frozen into a reserve (see the `overscanError` derivation above) — `paperSheet()` itself
+    // returns synchronously with no error channel, and `source()` requires a successful `mount()`
+    // first regardless, so nothing downstream can be reached without passing through here.
+    if (overscanError !== null) {
+      return new GlError(
+        'paperSheet: cannot mount — overscanHeadroom pushes the factory-level reserve past the ' +
+          `${KNOB_REFERENCE_PX} px reference plane (spec 8.6); pass a smaller overscanHeadroom`,
+        { cause: overscanError },
+      )
+    }
     if (mounted !== null) {
       return new GlError('paperSheet: mount() called while already mounted — call dispose() first')
     }
