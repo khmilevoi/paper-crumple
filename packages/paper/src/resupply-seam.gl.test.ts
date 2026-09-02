@@ -46,7 +46,7 @@ function stubMotion(): MotionSource {
   return {
     knobs: [] as readonly KnobDescriptor[],
     mount: () => undefined,
-    fit: (rect) => fit(rect),
+    fit: (rect: Rect) => fit(rect),
     load: async () => ({ sortKey: 'stub' }) as unknown as MotionClip,
     draw: () => ({ sortKey: 'stub', frame: 0 }) as DrawResult,
     release: () => {},
@@ -123,7 +123,9 @@ describe("a conditional re-supply answered 200 busts the real slot's hull entry"
     vi.stubGlobal('fetch', async (_input: unknown, init?: { headers?: Record<string, string> }) => {
       seen.push({ headers: init?.headers })
       const body = bodies[Math.min(seen.length - 1, bodies.length - 1)]!
-      return new Response(body, {
+      // `body` came straight from `blob.arrayBuffer()`, so `body.buffer` is exactly those bytes,
+      // never a `SharedArrayBuffer`; the cast only narrows the type `Response` wants.
+      return new Response(body.buffer as ArrayBuffer, {
         status: 200,
         headers: {
           ETag: `"v${seen.length}"`,
@@ -186,7 +188,8 @@ describe("a conditional re-supply answered 200 busts the real slot's hull entry"
     vi.stubGlobal('fetch', async (_input: unknown, init?: { headers?: Record<string, string> }) => {
       seen.push({ headers: init?.headers })
       const body = bodies[Math.min(seen.length - 1, bodies.length - 1)]!
-      return new Response(body, {
+      // Same narrowing cast as above: bytes are unchanged, only the type widens back to `ArrayBuffer`.
+      return new Response(body.buffer as ArrayBuffer, {
         status: 200,
         headers: { ETag: `"v${seen.length}"`, 'Content-Type': 'image/png' },
       })
