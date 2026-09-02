@@ -229,7 +229,7 @@ describe('the seed pass applies the overscan margin as a uv offset (spec 8.5)', 
     const scale = 1 + 2 * p
     const field = builder.buildField({
       artwork,
-      artworkUv: [scale, scale, -p * scale, -p * scale],
+      artworkUv: [scale, scale, -p, -p],
       width: FIELD,
       height: FIELD,
       sourceLongSide: ARTWORK.w * scale,
@@ -246,6 +246,81 @@ describe('the seed pass applies the overscan margin as a uv offset (spec 8.5)', 
       0,
     )
     expect(d).toBeLessThan(0)
+    builder.dispose()
+  })
+
+  it('centres that sub-rectangle — equal margins on both sides', () => {
+    const { ctx } = open()
+    const builder = createSdfBuilder(ctx, pools!.poolA)
+    expect(GlError.is(builder)).toBe(false)
+    if (GlError.is(builder)) return
+    const artwork = pools!.poolA.holdArtwork('sprite', {
+      width: ARTWORK.w,
+      height: ARTWORK.h,
+      format: 'RGBA8UI',
+      filter: 'NEAREST',
+      label: 'a',
+    })
+    expect(GlError.is(artwork)).toBe(false)
+    if (GlError.is(artwork)) return
+    // Full-bleed and fully opaque, so the silhouette's own edges ARE the artwork's edges: the run
+    // of inside texels measured below is exactly the sub-rectangle the seed pass placed, with no
+    // shape of its own in between to confuse the two.
+    ctx.scope(() => {
+      const { gl } = ctx
+      gl.bindTexture(gl.TEXTURE_2D, artwork.handle)
+      gl.texSubImage2D(
+        gl.TEXTURE_2D,
+        0,
+        0,
+        0,
+        ARTWORK.w,
+        ARTWORK.h,
+        gl.RGBA_INTEGER,
+        gl.UNSIGNED_BYTE,
+        new Uint8Array(ARTWORK.w * ARTWORK.h * 4).fill(255),
+      )
+    })
+    const p = 0.25
+    const scale = 1 + 2 * p
+    const field = builder.buildField({
+      artwork,
+      artworkUv: [scale, scale, -p, -p],
+      width: FIELD,
+      height: FIELD,
+      sourceLongSide: ARTWORK.w * scale,
+    })
+    expect(GlError.is(field)).toBe(false)
+    if (GlError.is(field)) return
+
+    const inside: number[] = []
+    for (let x = 0; x < FIELD; x++) {
+      const d = readDistance(
+        ctx,
+        drawTargetFor(field.target),
+        builder.contract.bits,
+        field.decode,
+        x,
+        FIELD / 2,
+      )
+      if (d >= 0) inside.push(x)
+    }
+    const first = inside.at(0)
+    const last = inside.at(-1)
+    expect(first).toBeDefined()
+    expect(last).toBeDefined()
+    if (first === undefined || last === undefined) return
+
+    // `p` is a fraction of the ARTWORK (`p = r / (1000 - 2r)`, `front = artwork * (1+2p)`), so the
+    // margin is `p * artwork` — `p/(1+2p)` of the field, 10.67 texels here — on BOTH sides. An
+    // offset of `-p * scale` rather than `-p` leaves 16 texels on the left and 5 on the right:
+    // the total margin is still right, its distribution is not, and the starved side is what put
+    // the grown sheet rect on the front's edge and made `checkGuardBand` unpassable for any
+    // tightly-cropped source at any knob value.
+    const leftMargin = first
+    const rightMargin = FIELD - 1 - last
+    expect(Math.abs(leftMargin - rightMargin)).toBeLessThanOrEqual(1)
+    expect(Math.abs(leftMargin - (p / scale) * FIELD)).toBeLessThanOrEqual(1)
     builder.dispose()
   })
 })
