@@ -45,8 +45,14 @@ export function createSheetMesh(
     for (const buffer of buffers) gl.deleteBuffer(buffer)
     gl.bindVertexArray(null)
     gl.bindBuffer(gl.ARRAY_BUFFER, null)
+    gl.bindBuffer(gl.ELEMENT_ARRAY_BUFFER, null)
     return new GlError(`sheetMesh(${pack.bucket}): ${message}`)
   }
+
+  // Element-array binding is VAO state (§3.1), and unlike ARRAY_BUFFER it is never restored by
+  // any scope §5.1 saves. Unbind the caller's VAO first so the index buffer below binds against
+  // the default VAO, not whatever VAO the caller had current.
+  gl.bindVertexArray(null)
 
   function buffer(target: number, data: ArrayBufferView): WebGLBuffer | null {
     const b = gl.createBuffer()
@@ -94,6 +100,7 @@ export function createSheetMesh(
 
   gl.bindVertexArray(null)
   gl.bindBuffer(gl.ARRAY_BUFFER, null)
+  gl.bindBuffer(gl.ELEMENT_ARRAY_BUFFER, null)
 
   const err = gl.getError()
   if (err !== gl.NO_ERROR) return fail(`GL error 0x${err.toString(16)} while building the VAOs`)

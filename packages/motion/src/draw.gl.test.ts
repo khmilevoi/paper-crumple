@@ -4,6 +4,7 @@ import { afterEach, describe, expect, it } from 'vitest'
 
 import { MOTION_KNOBS } from './knobs.js'
 import type { MotionLookKnobs } from './knobs.js'
+import pack1x1 from './packs/1x1.js'
 import pack2x3 from './packs/2x3.js'
 import { bakedMotion, type BakedClip, type BakedFit } from './source.js'
 import { createGlFixture, type GlFixture } from './testing/gl-fixture.js'
@@ -228,6 +229,43 @@ describe('draw (§5.3, §7.3, §8.4)', () => {
     })
     expect(created).toBe(12)
     gl.createVertexArray = original
+    source.dispose()
+  })
+
+  it('is a GlError when clip.bucket and fit.bucket disagree, even when both buckets are loaded', async () => {
+    const f = open()
+    const source = bakedMotion({ packs: [pack2x3, pack1x1] })
+    expect(source.mount(f.ctx)).toBeUndefined()
+    const fit2x3 = source.fit({ x: 0, y: 0, w: 256, h: 384 }) as BakedFit
+    const fit1x1 = source.fit({ x: 0, y: 0, w: 256, h: 256 }) as BakedFit
+    const clip2x3 = (await source.load(fit2x3)) as BakedClip
+    const clip1x1 = (await source.load(fit1x1)) as BakedClip
+    expect(clip2x3).not.toBeInstanceOf(Error)
+    expect(clip1x1).not.toBeInstanceOf(Error)
+    const front = makeFront(f.gl)
+    const r = f.ctx.scope(() =>
+      // Both buckets are loaded, so neither the "not loaded" nor the "frame out of range" guard
+      // fires — without the clip/fit bucket-mismatch guard this would draw silently, with the
+      // VAO from clip2x3.bucket but the sortKey from fit1x1.sortKey (Fix round item 7).
+      source.draw({ clip: clip2x3, fit: fit1x1, frame: 0, front, out: target(f.gl), knobs: KNOBS }),
+    )
+    expect(GlError.is(r)).toBe(true)
+    source.dispose()
+  })
+
+  it('builds the mesh inside its own scope: a bucket drawn for the first time with no outer ctx.scope() leaves the caller VAO untouched', async () => {
+    const f = open()
+    const { gl } = f
+    const { source, fit, clip, front } = await ready(f)
+    const callerVao = gl.createVertexArray()
+    gl.bindVertexArray(callerVao)
+    // No outer f.ctx.scope() here: this is the bucket's first draw, so meshFor() must build the
+    // twelve VAOs. If that build runs outside draw()'s own scope it leaves VERTEX_ARRAY_BINDING
+    // reset to null with nothing left to restore it (Fix round: BLOCKING 1).
+    const r = source.draw({ clip, fit, frame: 0, front, out: target(gl), knobs: KNOBS })
+    expect(r).not.toBeInstanceOf(Error)
+    expect(gl.getParameter(gl.VERTEX_ARRAY_BINDING)).toBe(callerVao)
+    gl.deleteVertexArray(callerVao)
     source.dispose()
   })
 

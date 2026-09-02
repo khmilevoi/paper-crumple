@@ -223,9 +223,11 @@ export function bakedMotion(
       if (front.width <= 0 || front.height <= 0) {
         return new GlError(`bakedMotion: front is ${front.width}x${front.height}`)
       }
-
-      const mesh = meshFor(m, clip.bucket)
-      if (mesh instanceof Error) return mesh
+      if (clip.bucket !== fit.bucket) {
+        return new GlError(
+          `bakedMotion: clip bucket '${clip.bucket}' does not match fit bucket '${fit.bucket}'`,
+        )
+      }
 
       // Both narrowed before use: `hexToRgb` reports a malformed knob as a `KnobError`, which has
       // no legal slot in `GlError | DrawResult` (§5.3). The knob registry validates `paperColor`
@@ -263,9 +265,16 @@ export function bakedMotion(
       const fcy = front.rect.y + front.rect.h / 2
 
       const result = m.ctx.scope((s): InstanceType<typeof GlError> | DrawResult => {
+        // Built inside the scope, because it churns the VAO binding (mesh.ts's own header) and
+        // §5.1 only saves and restores VERTEX_ARRAY_BINDING for the window this scope opens.
+        const mesh = meshFor(m, clip.bucket)
+        if (mesh instanceof Error) return mesh
+
         s.bindTarget(out)
         // No clear, ever: §7.3 forbids clearing the default framebuffer and the view has already
         // performed a scissored clear over its own rect. DrawScope has no clear() at all.
+        // draw() relies on the scissor test remaining enabled by the view, because it never
+        // enables SCISSOR_TEST itself.
         s.enable('DEPTH_TEST', true)
         s.enable('BLEND', false)
         s.enable('CULL_FACE', false)

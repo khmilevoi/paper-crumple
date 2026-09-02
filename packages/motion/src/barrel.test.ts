@@ -58,10 +58,7 @@ describe('the @paper-crumple/motion barrel', () => {
     const sourceFiles = readdirSync(srcDir, { recursive: true })
       .map((entry) => String(entry).replaceAll('\\', '/'))
       .filter((entry) => entry.endsWith('.ts'))
-      .filter(
-        (entry) =>
-          !entry.split('/').some((segment) => segment === 'testing' || segment === 'packs'),
-      )
+      .filter((entry) => !entry.split('/').some((segment) => segment === 'packs'))
       .filter((entry) => !isTestFile(entry.split('/').at(-1) ?? entry))
 
     expect(sourceFiles.length).toBeGreaterThan(0)
@@ -69,8 +66,10 @@ describe('the @paper-crumple/motion barrel', () => {
     const srcDirUrl = new URL('.', import.meta.url)
     for (const relativePath of sourceFiles) {
       const contents = readFileSync(new URL(relativePath, srcDirUrl), 'utf8')
-      expect(contents, `${relativePath} must not import from ./packs/`).not.toMatch(
-        /from\s+['"]\.\/packs\//,
+      // Catches a `from` import, a side-effect import, a dynamic `import()` and a `require`, in
+      // single or double quotes, however the path to `./packs/` is spelled.
+      expect(contents, `${relativePath} must not reference ./packs/`).not.toMatch(
+        /['"]\.{1,2}\/packs\//,
       )
     }
   })

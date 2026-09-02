@@ -107,6 +107,12 @@ describe('the shipped binaries', () => {
 
   it('carries one unit light vector, the same in all three (§6.2, §9.3)', () => {
     for (const [m] of MODULES) {
+      // The manifest field itself is copied verbatim into every generated pack module
+      // (packs/*.ts) with no transform, so exact equality here is achievable and catches a
+      // 5th-decimal manifest drift a `toBeCloseTo(..., 4)` tolerance would hide.
+      expect(m.manifest.light).toEqual([-0.39993, 0.5499, 0.73325])
+      // `parsePack` then normalizes this vector (`pack.ts`: `light: [lx / ll, ly / ll, lz /
+      // ll]`), so the *parsed* light is legitimately approximate and checked separately.
       const light = parse(m).light
       expect(light[0]).toBeCloseTo(-0.39993, 4)
       expect(light[1]).toBeCloseTo(0.5499, 4)

@@ -86,6 +86,7 @@ export function createPackStore(o: PackStoreOptions): PackStore {
     has: (bucket) => modules.has(bucket),
 
     async acquire(bucket, opts) {
+      if (disposed) return new AssetError('bakedMotion: acquired after dispose')
       const module = modules.get(bucket)
       if (!module) {
         return new AssetError(
@@ -141,6 +142,7 @@ export function createPackStore(o: PackStoreOptions): PackStore {
       packs.clear()
       pending.clear()
       refs.clear()
+      evictors.length = 0
     },
   }
 }

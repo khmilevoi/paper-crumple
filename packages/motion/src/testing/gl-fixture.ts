@@ -36,13 +36,16 @@ export function createGlFixture(width = 64, height = 64): GlFixture {
   canvas.height = height
   document.body.append(canvas)
   const gl = canvas.getContext('webgl2', GL_ATTRIBUTES) as WebGL2RenderingContext | null
-  const ctx = createGlContext(gl as WebGL2RenderingContext)
+  // `createGlContext` reads GL state up front and throws on a `null` context; building it only
+  // when `gl` is non-null lets the caller's own `expect(fixture.gl).not.toBeNull()` name the
+  // missing-SwiftShader-flags failure, rather than a `TypeError` reading as a library bug.
+  const ctx = gl ? createGlContext(gl) : (null as never)
   return {
     canvas,
     gl: gl as WebGL2RenderingContext,
     ctx,
     dispose() {
-      ctx.dispose()
+      ctx?.dispose()
       gl?.getExtension('WEBGL_lose_context')?.loseContext()
       canvas.remove()
     },

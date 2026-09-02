@@ -135,6 +135,22 @@ describe('the sheet mesh (§8.4)', () => {
     const { gl } = f
     const mesh = build(f)
     expect(gl.getParameter(gl.ARRAY_BUFFER_BINDING)).toBeNull()
+    expect(gl.getParameter(gl.ELEMENT_ARRAY_BUFFER_BINDING)).toBeNull()
+    mesh.dispose()
+  })
+
+  it('never overwrites the caller VAO with its own index buffer (Fix round: BLOCKING 2)', () => {
+    const f = open()
+    const { gl } = f
+    // Element-array binding is VAO state and §5.1 never saves ELEMENT_ARRAY_BUFFER, so a mesh
+    // build must not leave its index buffer bound on whatever VAO the caller had current.
+    const callerVao = gl.createVertexArray()
+    gl.bindVertexArray(callerVao)
+    const mesh = build(f)
+    gl.bindVertexArray(callerVao)
+    expect(gl.getParameter(gl.ELEMENT_ARRAY_BUFFER_BINDING)).toBeNull()
+    gl.bindVertexArray(null)
+    gl.deleteVertexArray(callerVao)
     mesh.dispose()
   })
 

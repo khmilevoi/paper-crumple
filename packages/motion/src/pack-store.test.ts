@@ -176,6 +176,16 @@ describe('the refcount', () => {
     expect(s.refs('1x1')).toBe(0)
   })
 
+  it('is an AssetError, and never a network fetch, for an acquire after dispose', async () => {
+    const f = bytesFetch()
+    const s = store([pack2x3], f.fetch)
+    s.dispose()
+    const r = await s.acquire('2x3')
+    expect(AssetError.is(r)).toBe(true)
+    expect(f.calls()).toBe(0)
+    expect(s.refs('2x3')).toBe(0)
+  })
+
   it('does not resurrect a pack if in-flight fetch completes after dispose', async () => {
     const f = bytesFetch(20)
     const s = store([pack2x3], f.fetch)
