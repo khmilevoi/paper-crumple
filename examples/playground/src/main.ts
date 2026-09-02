@@ -1,10 +1,11 @@
 import * as pc from '@paper-crumple/core'
-import type { BuiltStage } from './config'
+import type { BuiltStage, DemoConfig } from './config'
 import { DEFAULT_SAMPLE_ID, SAMPLES } from './samples'
 import { DEFAULT_CONFIG, buildStage } from './config'
 import { mountHero } from './scene'
 import { createPanel } from './panel'
 import type { SetTarget } from './panel'
+import { createConfigPanel } from './config-panel'
 
 const line = document.getElementById('version-line')
 const knobCount = document.getElementById('knob-count')
@@ -18,6 +19,18 @@ interface Live {
 // Mutable so `onSet` below always writes against whatever is currently mounted, without the
 // panel having to know about stage rebuilds or sample swaps.
 let live: Live | null = null
+
+// The demo's own factory-option state — updated only once a rebuild actually lands (never
+// optimistically from the config panel's in-progress edit), so `onCount` below always describes
+// the stage that is actually live rather than the one a reader is still dragging a slider toward.
+let currentConfig: DemoConfig = DEFAULT_CONFIG
+
+const sample = SAMPLES.find((s) => s.id === DEFAULT_SAMPLE_ID)
+
+function onError(e: pc.StageEvent<'error'>): void {
+  // Task 7 replaces this with the inspector panel; for now the error surface is the console.
+  console.warn('playground: stage error', e)
+}
 
 /**
  * The one piece of routing this demo has to get right (§6.6): `stage.set` and `sprite.set` take
@@ -56,12 +69,77 @@ function onCount(sheet: number, motion: number): void {
   if (knobCount === null) return
   knobCount.textContent =
     `${String(sheet)} sheet + ${String(motion)} motion = ${String(sheet + motion)} knobs measured ` +
-    `(edgeMode: ${DEFAULT_CONFIG.edgeMode}). docs/USAGE.md §7 quotes 31 for hull and 46 for torn; ` +
+    `(edgeMode: ${currentConfig.edgeMode}). docs/USAGE.md §7 quotes 31 for hull and 46 for torn; ` +
     `paper-knobs.ts's own header notes this does not reconcile with its derived composition — the ` +
     `count above is measured at runtime, not quoted.`
 }
 
 const panel = createPanel(onSet, onCount)
+
+// One `AbortController` per build, owned here (task 5 brief's rebuild sequence). A config change
+// aborts whatever build is in flight, disposes the currently-live stage — idempotent, and after
+// it every method returns a `GlError` — builds the next one, re-mounts the hero, and re-applies
+// the panel's retained knob values by way of `panel.rebuild`, which already skips every key the
+// new slot set no longer declares (its own loop only ever walks the *new* stage's descriptors, so
+// a key `torn` had and `hull` doesn't simply never comes up). A rebuild is not a reset.
+let buildController: AbortController | null = null
+
+function report(text: string): void {
+  if (line) line.textContent = text
+  configPanel.setStatus(text)
+}
+
+async function rebuild(next: DemoConfig): Promise<void> {
+  buildController?.abort()
+  const controller = new AbortController()
+  buildController = controller
+
+  live?.built.stage.dispose()
+  live = null
+
+  if (sample === undefined) {
+    report(`playground: unknown default sample "${DEFAULT_SAMPLE_ID}"`)
+    return
+  }
+
+  const built = await buildStage(next, onError, controller.signal)
+  if (built === pc.ABORTED) return
+  if (built instanceof Error) {
+    report(`playground: stage build failed: ${built.message}`)
+    return
+  }
+
+  const mounted = await mountHero(built, sample, controller.signal)
+  if (mounted === pc.ABORTED) {
+    // The build itself landed but never went live — nothing else will ever dispose it.
+    built.stage.dispose()
+    return
+  }
+  if (mounted instanceof Error) {
+    built.stage.dispose()
+    report(`playground: hero mount failed: ${mounted.message}`)
+    return
+  }
+
+  currentConfig = next
+  live = { built, view: mounted.view, sprite: mounted.sprite }
+  panel.rebuild(built, mounted.view, mounted.sprite)
+
+  configPanel.setStatus(
+    `rebuilt in ${built.buildMs.toFixed(1)} ms · ${built.stage.warnings.length} warnings · ` +
+      `sheet.overscan ${built.sheet.overscan.toFixed(3)} (the factory baseline, computed once ` +
+      `from this factory's default knob values before any sprite exists — a mounted sprite's own ` +
+      `frozen reserve is a different number the moment an edge knob moves)`,
+  )
+
+  if (line)
+    line.textContent =
+      `core ${pc.VERSION} · ${SAMPLES.length} samples · ${pc.DWELL_MS.length} dwells · ` +
+      `${built.stage.warnings.length} warnings · maxTextureSize ${built.stage.caps.maxTextureSize} · ` +
+      `built in ${built.buildMs.toFixed(1)}ms`
+}
+
+const configPanel = createConfigPanel(DEFAULT_CONFIG, (next) => void rebuild(next))
 
 async function boot(): Promise<void> {
   // A duplicate core is a startup failure, not a once-per-session console warning: two copies
@@ -72,46 +150,7 @@ async function boot(): Promise<void> {
     return
   }
 
-  const sample = SAMPLES.find((s) => s.id === DEFAULT_SAMPLE_ID)
-  if (sample === undefined) {
-    if (line) line.textContent = `playground: unknown default sample "${DEFAULT_SAMPLE_ID}"`
-    return
-  }
-
-  const controller = new AbortController()
-  const onError = (e: pc.StageEvent<'error'>): void => {
-    // Task 7 replaces this with the inspector panel; for now the error surface is the console.
-    console.warn('playground: stage error', e)
-  }
-
-  const built = await buildStage(DEFAULT_CONFIG, onError, controller.signal)
-  if (built === pc.ABORTED) {
-    if (line) line.textContent = 'playground: stage build aborted'
-    return
-  }
-  if (built instanceof Error) {
-    if (line) line.textContent = `playground: stage build failed: ${built.message}`
-    return
-  }
-
-  const mounted = await mountHero(built, sample, controller.signal)
-  if (mounted === pc.ABORTED) {
-    if (line) line.textContent = 'playground: hero mount aborted'
-    return
-  }
-  if (mounted instanceof Error) {
-    if (line) line.textContent = `playground: hero mount failed: ${mounted.message}`
-    return
-  }
-
-  live = { built, view: mounted.view, sprite: mounted.sprite }
-  panel.rebuild(built, mounted.view, mounted.sprite)
-
-  if (line)
-    line.textContent =
-      `core ${pc.VERSION} · ${SAMPLES.length} samples · ${pc.DWELL_MS.length} dwells · ` +
-      `${built.stage.warnings.length} warnings · maxTextureSize ${built.stage.caps.maxTextureSize} · ` +
-      `built in ${built.buildMs.toFixed(1)}ms`
+  await rebuild(DEFAULT_CONFIG)
 }
 
 void boot()
