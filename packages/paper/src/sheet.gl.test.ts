@@ -630,6 +630,73 @@ describe('task 12 fix round 1 (findings 1, 2, 3)', () => {
   })
 })
 
+describe("task 12 fix round 2 (build()'s rect conversion)", () => {
+  // The finding: build()'s step 9 used to scale `handle.rect` (source pixels) UNIFORMLY by
+  // `frontLongSide / sourceLongSide` into this call's own front space — correct only at `p = 0`,
+  // because a uniform scale carries no offset term and so drops the margin fraction `p` encodes
+  // the moment this build's requested `size` differs from the add-time front. `torn` mode's own
+  // ~0.19-0.22 overscan (task 10's own report) is margin enough to make the two formulas diverge
+  // by tens of px once `size` (200x200) differs from the add-time front (128x128) — not a
+  // rounding wobble.
+  it("build()'s rect inverts the artworkUv margin mapping at THIS build's size, not a uniform handle.rect scale", async () => {
+    const ctx = open()
+    const sheet = paperSheet({ edgeMode: 'torn' })
+    sheet.mount(ctx)
+    const bitmap = await compactSprite(64, 64)
+    const handle = await sheet.source(bitmap, { maxSize: 128, exact: false })
+    bitmap.close()
+    expect(
+      GlError.is(handle) || SheetError.is(handle) || isAborted(handle),
+      String((handle as Error)?.message),
+    ).toBe(false)
+    if (GlError.is(handle) || SheetError.is(handle) || isAborted(handle)) {
+      sheet.dispose()
+      return
+    }
+
+    // Deliberately NOT the add-time front (128x128, `maxSize` above): a size mismatch is exactly
+    // what makes the uniform-scale formula and the exact affine inverse disagree.
+    const size = { w: 200, h: 200 }
+    const front = sheet.build(handle, size, defaultsFor('torn') as never)
+    expect(front instanceof Error, String((front as Error)?.message)).toBe(false)
+    if (front instanceof Error) {
+      sheet.dispose()
+      return
+    }
+
+    const srcW = handle.srcW
+    const srcH = handle.srcH
+    const p = handle.overscan
+    expect(p).toBeGreaterThan(0.15) // torn's own headline figure (~0.19-0.22); a real margin to invert
+    const scale = 1 + 2 * p
+    // The exact inverse of `frontRectToSourceRect`'s own `sourceUv = frontUv*scale - p*scale`:
+    // `frontUv = sourceUv/scale + p`.
+    const toFront = (uSource: number, frontDim: number) => (uSource / scale + p) * frontDim
+
+    const expectedX0 = toFront(handle.rect.x / srcW, size.w)
+    const expectedY0 = toFront(handle.rect.y / srcH, size.h)
+    const expectedX1 = toFront((handle.rect.x + handle.rect.w) / srcW, size.w)
+    const expectedY1 = toFront((handle.rect.y + handle.rect.h) / srcH, size.h)
+
+    expect(front.rect.x).toBeCloseTo(expectedX0, 0)
+    expect(front.rect.y).toBeCloseTo(expectedY0, 0)
+    expect(front.rect.w).toBeCloseTo(expectedX1 - expectedX0, 0)
+    expect(front.rect.h).toBeCloseTo(expectedY1 - expectedY0, 0)
+
+    // Explicitly not what the old uniform-scale formula
+    // (`scaleRect(handle.rect, frontLongSide / sourceLongSide)`) would have produced, so a
+    // regression back to it is caught even if rounding happened to make the two close for this
+    // particular fixture.
+    const frontLongSide = Math.max(size.w, size.h)
+    const sourceLongSide = Math.max(srcW, srcH)
+    const uniformX0 = Math.round(handle.rect.x * (frontLongSide / sourceLongSide))
+    expect(Math.abs(front.rect.x - uniformX0)).toBeGreaterThan(1)
+
+    sheet.releaseFront(front)
+    sheet.dispose()
+  })
+})
+
 /**
  * An ellipse biased toward the top third of its own bitmap — asymmetric on the y axis on purpose:
  * a vertical mirror of a centred shape (like `sprite()`'s own) would be indistinguishable from the

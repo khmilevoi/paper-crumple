@@ -263,21 +263,41 @@ function numKnob(values: Knobs, key: string, fallback: number): number {
   return typeof v === 'number' && Number.isFinite(v) ? v : fallback
 }
 
-/** A plain per-axis `Rect` scale — no box-margin logic, unlike `sheetRectFromExtent`. */
-function scaleRect(r: Rect, scale: number): Rect {
+/**
+ * Maps `rect`, read as a fraction of `fromDims`, through the affine map `u -> u*scale + offset`,
+ * then back into pixels of `toDims`. The one primitive both rect conversions between front space
+ * and source space share, so the two directions (source() -> `handle.rect`, and build()'s own
+ * step 9, below) can never independently drift from one another — a `scale`/`offset` pair derived
+ * once from `p` is the only thing that differs between them (fix round 2, "build()'s rect
+ * conversion contradicts source()'s").
+ */
+function mapRectAffine(
+  rect: Rect,
+  fromDims: Size,
+  toDims: Size,
+  scale: number,
+  offset: number,
+): Rect {
+  const mapX = (u: number) => (u * scale + offset) * toDims.w
+  const mapY = (u: number) => (u * scale + offset) * toDims.h
+  const x0 = mapX(rect.x / fromDims.w)
+  const y0 = mapY(rect.y / fromDims.h)
+  const x1 = mapX((rect.x + rect.w) / fromDims.w)
+  const y1 = mapY((rect.y + rect.h) / fromDims.h)
   return {
-    x: Math.round(r.x * scale),
-    y: Math.round(r.y * scale),
-    w: Math.max(1, Math.round(r.w * scale)),
-    h: Math.max(1, Math.round(r.h * scale)),
+    x: Math.round(x0),
+    y: Math.round(y0),
+    w: Math.max(1, Math.round(x1 - x0)),
+    h: Math.max(1, Math.round(y1 - y0)),
   }
 }
 
 /**
- * `frontRect` (front pixels) to `rect` (source pixels), inverting the exact `artworkUv` affine map
- * rather than a uniform long-side scale (fix round 1, finding 3). See the call site's own comment
- * for why front-space uv and source-space uv are related by the identical `scale`/`offset` pair
- * `artworkUv` already uses between field space and artwork space.
+ * `frontRect` (front pixels, at THIS front's own `front` dims) to `rect` (source pixels),
+ * inverting the exact `artworkUv` affine map rather than a uniform long-side scale (fix round 1,
+ * finding 3). See the call site's own comment for why front-space uv and source-space uv are
+ * related by the identical `scale`/`offset` pair `artworkUv` already uses between field space and
+ * artwork space: `sourceUv = frontUv*(1+2p) - p*(1+2p)`.
  */
 function frontRectToSourceRect(
   frontRect: Rect,
@@ -287,18 +307,33 @@ function frontRectToSourceRect(
   p: number,
 ): Rect {
   const scale = 1 + 2 * p
-  const toSourceX = (uFront: number) => (uFront * scale - p * scale) * srcW
-  const toSourceY = (uFront: number) => (uFront * scale - p * scale) * srcH
-  const x0 = toSourceX(frontRect.x / front.w)
-  const y0 = toSourceY(frontRect.y / front.h)
-  const x1 = toSourceX((frontRect.x + frontRect.w) / front.w)
-  const y1 = toSourceY((frontRect.y + frontRect.h) / front.h)
-  return {
-    x: Math.round(x0),
-    y: Math.round(y0),
-    w: Math.max(1, Math.round(x1 - x0)),
-    h: Math.max(1, Math.round(y1 - y0)),
-  }
+  return mapRectAffine(frontRect, front, { w: srcW, h: srcH }, scale, -p * scale)
+}
+
+/**
+ * The exact inverse of `frontRectToSourceRect`: `rect` (source pixels, fixed at add-time) to a
+ * front-pixel rect at `front` — whatever dims THIS `build()` call actually requested, which need
+ * not match the front `source()` traced the handle at. Algebra: `sourceUv = frontUv*scale -
+ * p*scale` (the forward map) solves to `frontUv = sourceUv/scale + p`, i.e. the same affine form
+ * with `scale' = 1/scale`, `offset' = p` — so this is `mapRectAffine` with that pair, not a
+ * second, independently-written conversion (fix round 2). `p` is `handle.overscan`, frozen at
+ * add-time and independent of the size requested here, so the mapping is well-defined for any
+ * `size` a caller passes to `build()`.
+ *
+ * Before this fix, build()'s step 9 instead scaled `handle.rect` uniformly by
+ * `frontLongSide / sourceLongSide` — correct only at `p = 0`, because a uniform scale carries no
+ * offset term and so silently drops the margin fraction `p` encodes whenever this build's
+ * requested size differs from the add-time front size.
+ */
+function sourceRectToFrontRect(
+  sourceRect: Rect,
+  srcW: number,
+  srcH: number,
+  front: Size,
+  p: number,
+): Rect {
+  const scale = 1 + 2 * p
+  return mapRectAffine(sourceRect, { w: srcW, h: srcH }, front, 1 / scale, p)
 }
 
 /**
@@ -1131,13 +1166,18 @@ export function paperSheet(options?: PaperSheetOptions): PaperSheet {
       return renderFailed
     }
 
-    // Step 9: `rect` is `handle.frontRect` scaled from the handle's own front size to `size`.
-    // `handle.rect` — the same box in SOURCE pixels — is `handle.frontRect` scaled by
-    // `sourceLongSide / addTimeFrontLongSide` (source()'s own `sourceScale`), so scaling it the
-    // other way, by `frontLongSide / sourceLongSide`, lands in exactly this call's front space
-    // without this module needing to have kept the add-time front size around at all.
-    const sourceLongSide = Math.max(handle.srcW, handle.srcH)
-    const rect = scaleRect(handle.rect, frontLongSide / sourceLongSide)
+    // Step 9 (fix round 2): `rect` is `handle.rect` (SOURCE pixels, frozen at add-time) mapped
+    // into THIS call's own front space, at `size` — the exact inverse of the affine map
+    // `frontRectToSourceRect` used to derive `handle.rect` in the first place, never a uniform
+    // `frontLongSide / sourceLongSide` scale. A uniform scale is only correct at `p = 0`: it
+    // carries no offset term, so whenever this build's requested `size` differs from the add-time
+    // front size AND `p > 0`, it silently drops the margin fraction the affine map encodes,
+    // producing a rect that disagrees with `source()`'s own (the finding this round fixes —
+    // `SheetFront.rect` is what public callers place artwork with, so the disagreement is a
+    // visible mis-placement, not an internal inconsistency). `handle.overscan` is frozen at
+    // add-time and independent of `size`, so `sourceRectToFrontRect` is well-defined here
+    // regardless of how this call's requested `size` relates to the add-time front.
+    const rect = sourceRectToFrontRect(handle.rect, handle.srcW, handle.srcH, size, handle.overscan)
 
     const result: SheetFront = {
       texture: front.handle,
