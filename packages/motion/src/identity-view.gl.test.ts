@@ -143,6 +143,13 @@ describe('identityView (§7.4.2) — a smoke test for the sheet shader, not a re
     for (let y = 0; y < IDENTITY_FRONT; y++) {
       for (let x = 0; x < IDENTITY_FRONT; x++) {
         const p = (y * IDENTITY_FRONT + x) * 4
+        // `got` is `readPixels`, so its row 0 is the framebuffer's row 0 — which GL shows at the
+        // BOTTOM. `view.bytes` is the front texture, whose row 0 is the image's TOP row
+        // (`artwork.ts` pins `UNPACK_FLIP_Y_WEBGL` off, and nothing in `paper` flips after it).
+        // `draw()`'s `uUvRect` inverts v exactly so those two meet the right way up, so the
+        // oracle for framebuffer row `y` is front row `IDENTITY_FRONT - 1 - y`. Reading
+        // `view.bytes` at `p` instead is what an upside-down sprite looks like from in here.
+        const q = ((IDENTITY_FRONT - 1 - y) * IDENTITY_FRONT + x) * 4
         const inside =
           x >= IDENTITY_MARGIN &&
           x < IDENTITY_MARGIN + IDENTITY_BOX &&
@@ -151,9 +158,9 @@ describe('identityView (§7.4.2) — a smoke test for the sheet shader, not a re
         if (inside) {
           // Inside the box: the fixture's own texels are the oracle, texel for texel.
           for (let c = 0; c < 4; c++) {
-            if (got[p + c] !== view.bytes[p + c]) {
+            if (got[p + c] !== view.bytes[q + c]) {
               differing.push(
-                `(${x},${y}).${'rgba'[c]}: ${got[p + c]} != ${view.bytes[p + c]} (inside box)`,
+                `(${x},${y}).${'rgba'[c]}: ${got[p + c]} != ${view.bytes[q + c]} (inside box)`,
               )
             }
           }
