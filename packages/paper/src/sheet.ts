@@ -39,12 +39,11 @@ import {
   createScratchPools,
   drawTargetFor,
   exactFrontLongSide,
-  handleBytes,
   hullCacheKey,
   KNOB_REFERENCE_PX,
   overscanRadius,
 } from '@paper-crumple/core/unstable'
-import type { GlContext, HandleFacts, ScratchPools, Texture } from '@paper-crumple/core/unstable'
+import type { GlContext, ScratchPools, Texture } from '@paper-crumple/core/unstable'
 import { createResampler } from './artwork.js'
 import type { Resampler } from './artwork.js'
 import { cpuSdfFromAlpha } from './field.js'
@@ -52,12 +51,12 @@ import { growBox, scaleBox, sheetRectFromExtent, signedFieldExtent } from './ext
 import type { AlphaBox } from './mask.js'
 import { createSdfBuilder, sigmaFor } from './gl-sdf.js'
 import type { Field, LooseField, SdfBuilder } from './gl-sdf.js'
-import { checkReserve, freezeOverscan } from './handle.js'
+import { checkReserve, freezeOverscan, handleBytesFor } from './handle.js'
 import type { PaperSheetHandle } from './handle.js'
 import { hullCache } from './hull-cache.js'
 import type { HullCache, HullCacheKey } from './hull-cache.js'
 import { DISTANCE_WAVELENGTH_PX, buildHull, toleranceFor } from './hull.js'
-import { hullBuffers, hullExtent } from './hull-shape.js'
+import { hullExtent } from './hull-shape.js'
 import type { HullShape } from './hull-shape.js'
 import { defaultsFor, descriptorsFor, edgeParamsFrom, resolveSdfRes } from './paper-knobs.js'
 import type { PaperEdgeMode } from './paper-knobs.js'
@@ -147,6 +146,18 @@ export interface PaperSheet extends SheetRenderer<Knobs, PaperSheetHandle> {
    * reliably hit. A name no consumer could mistake for API.
    */
   __afterHullForTest?: () => void
+
+  /**
+   * **Test-only**, and never assigned by production code. The level-2 suite installs this to
+   * drive `source()`'s SECOND abort check point (§10.5) deterministically: `source()` calls it
+   * synchronously right after the two field passes (`buildField`/`blurField`) succeed and BEFORE
+   * the `await` that check point 2 sits behind — the only way to make an abort land inside that
+   * window without a race, since nothing else in this call ever yields before it (fix round 1,
+   * finding 2: the level-2 suite had no way to reach this check point at all before this hook
+   * existed). A name no consumer could mistake for API, by the same convention as
+   * `__afterHullForTest`.
+   */
+  __afterFieldForTest?: () => void
 }
 
 /** A `resolve`-only deferred: `.promise` is handed out immediately, `.resolve` settles it once. */
@@ -242,6 +253,34 @@ function scaleRect(r: Rect, scale: number): Rect {
     y: Math.round(r.y * scale),
     w: Math.max(1, Math.round(r.w * scale)),
     h: Math.max(1, Math.round(r.h * scale)),
+  }
+}
+
+/**
+ * `frontRect` (front pixels) to `rect` (source pixels), inverting the exact `artworkUv` affine map
+ * rather than a uniform long-side scale (fix round 1, finding 3). See the call site's own comment
+ * for why front-space uv and source-space uv are related by the identical `scale`/`offset` pair
+ * `artworkUv` already uses between field space and artwork space.
+ */
+function frontRectToSourceRect(
+  frontRect: Rect,
+  front: Size,
+  srcW: number,
+  srcH: number,
+  p: number,
+): Rect {
+  const scale = 1 + 2 * p
+  const toSourceX = (uFront: number) => (uFront * scale - p * scale) * srcW
+  const toSourceY = (uFront: number) => (uFront * scale - p * scale) * srcH
+  const x0 = toSourceX(frontRect.x / front.w)
+  const y0 = toSourceY(frontRect.y / front.h)
+  const x1 = toSourceX((frontRect.x + frontRect.w) / front.w)
+  const y1 = toSourceY((frontRect.y + frontRect.h) / front.h)
+  return {
+    x: Math.round(x0),
+    y: Math.round(y0),
+    w: Math.max(1, Math.round(x1 - x0)),
+    h: Math.max(1, Math.round(y1 - y0)),
   }
 }
 
@@ -345,15 +384,45 @@ function readBackField(ctx: GlContext, field: Field, texelPx: number): Float32Ar
 }
 
 /**
- * P8's `cpuSdfFromAlpha` over the sprite's own alpha, scaled directly to the field's resolution —
- * the degraded branch (~120 ms at 512, §8.2.1) this port falls to when `readBackField` refuses.
- * Both DOM boundaries (`OffscreenCanvas` construction, `getImageData`) are wrapped in `attempt`
- * (§10.8): a closed or detached bitmap must resolve to a `GlError`, never throw.
+ * P8's `cpuSdfFromAlpha` over the sprite's own alpha — the degraded branch (~120 ms at 512,
+ * §8.2.1) this port falls to when `readBackField` refuses. Both DOM boundaries (`OffscreenCanvas`
+ * construction, `getImageData`) are wrapped in `attempt` (§10.8): a closed or detached bitmap must
+ * resolve to a `GlError`, never throw.
+ *
+ * **Reproduces `readBackField`'s own artwork placement (fix round 1, finding 4), and does NOT
+ * flip rows (fix round 1, finding 1 — see below for why not, with the measurement to back it):**
+ *
+ * 1. *Margin.* `buildField`'s seed pass (`gl-sdf.ts`'s `SEED_FS`) reads the artwork through
+ *    `artworkUv = fieldUv * (1+2p) - p*(1+2p)`, so the artwork occupies a *sub-rectangle* of the
+ *    field inset by the overscan margin `p`, not the whole field. `drawImage`'s 5-argument form
+ *    reproduces exactly that sub-rectangle: solving `artworkUv(fieldUv) = 0` and `= 1` for
+ *    `fieldUv` gives the artwork's own span in field pixels, `[p * dim, p * dim + dim / (1+2p)]` on
+ *    each axis — which is exactly `{ dx, dy, dWidth, dHeight }` below. The canvas starts fully
+ *    transparent, so the untouched margin reads alpha 0 — "outside" — matching the seed pass's own
+ *    `inRange` guard, which never samples the artwork there either. The original report's
+ *    departure 2 named exactly this gap; this is what closes it.
+ * 2. *Orientation — NOT a mismatch here, checked rather than assumed.* The original report's
+ *    departure asserted "GPU-native y-up… canvas-native y-down…", by analogy with `engine.js`'s
+ *    own `cpuSdfYUp`. That analogy does not hold for THIS package's actual upload path:
+ *    `artwork.ts`'s own resample fallback draws the bitmap onto a canvas and `texSubImage2D`s the
+ *    resulting bytes straight into the artwork texture with `UNPACK_FLIP_Y_WEBGL` pinned `false`
+ *    (`artwork.ts`'s own header comment) — canvas row 0 lands in texture row 0 unflipped. The seed
+ *    pass then samples that texture with `texelFetch`, which addresses stored texel rows directly
+ *    (row 0 = texture row 0 = canvas row 0), and `readBackField`'s `readPixels` reads the resulting
+ *    FBO row-major from the row GL calls row 0 — the SAME row a `texelFetch` row-0 lookup would
+ *    have sampled. So `readBackField`'s row 0 and THIS function's own canvas-native row 0 already
+ *    name the same row; a `flipFieldRows` here would introduce a mismatch that does not otherwise
+ *    exist, not fix one. Measured directly (an asymmetric fixture, both branches, `frontRect.y`
+ *    compared): un-flipped, the two branches land within 0 px of each other; artificially flipped
+ *    to test the claim, they land 32 px apart on a 128 px front — see
+ *    `sheet.gl.test.ts`'s "findings 1, 4" test, and this round's report for the exact numbers and
+ *    how they were produced.
  */
 function cpuFieldFallback(
   bitmap: ImageBitmap,
   w: number,
   h: number,
+  p: number,
 ): InstanceType<typeof GlError> | Float32Array {
   const canvas = attempt(
     () => new OffscreenCanvas(w, h),
@@ -369,8 +438,17 @@ function cpuFieldFallback(
     return new GlError('paperSheet: source() CPU-field fallback 2D context unavailable')
   }
 
+  // The same artworkUv scale `buildField`'s seed pass applies (`gl-sdf.ts:80`, "Departure 2" in
+  // that file's own header comment) — the artwork spans `[p, p + 1/scale]` of each axis, not
+  // `[0, 1]`.
+  const scale = 1 + 2 * p
+  const dWidth = w / scale
+  const dHeight = h / scale
+  const dx = p * w
+  const dy = p * h
+
   const drawn = attempt(
-    () => c2d.drawImage(bitmap, 0, 0, w, h),
+    () => c2d.drawImage(bitmap, dx, dy, dWidth, dHeight),
     (cause) => new GlError('paperSheet: source() CPU-field fallback drawImage failed', { cause }),
   )
   if (GlError.is(drawn)) return drawn
@@ -384,36 +462,29 @@ function cpuFieldFallback(
 
   const alpha = new Float32Array(w * h)
   const data = imageData.data
-  for (let i = 0, p = 3; i < alpha.length; i++, p += 4) alpha[i] = data[p] / 255
+  for (let i = 0, k = 3; i < alpha.length; i++, k += 4) alpha[i] = data[k] / 255
   return cpuSdfFromAlpha(alpha, w, h)
 }
 
 /**
- * True when `field` came off `readBackField` — GPU-native, y-up like every GPU texture; false
- * when it came off `cpuFieldFallback` — canvas-native, y-down like the canvas it was read off.
- * Carried per the brief's own warning ("the subtle bug the spike documents"): whichever later
- * stage rasterizes this sprite's hull mask onto the GPU (`engine.js`'s own
- * `pixelStorei(UNPACK_FLIP_Y_WEBGL, !cpuSdfYUp)`) needs it to flip correctly. `source()` itself
- * only traces the polygon and never rasterizes it, so nothing inside this call consumes it — it
- * is not persisted onto `PaperSheetHandle` (frozen by task 8) and is a documented, deliberate
- * departure from an otherwise-whole port; see the task report.
+ * The CPU signed field for the hull trace, from whichever branch succeeds — `readBackField` when
+ * the driver allows it, `cpuFieldFallback` otherwise. Both share the same row order (checked, not
+ * assumed — see `cpuFieldFallback`'s own doc comment) and now the same artwork placement, so a
+ * hull traced off either branch for the same sprite is equivalent rather than mirrored or
+ * margin-shifted; neither branch needs to be told which the caller is (fix round 1, findings 1 and
+ * 4 — departures the original report named and this round resolves by normalising at the source
+ * rather than by carrying a flag downstream).
  */
-interface CpuField {
-  readonly field: Float32Array
-  readonly yUp: boolean
-}
-
 function acquireCpuField(
   ctx: GlContext,
   tight: Field,
   texelPx: number,
   bitmap: ImageBitmap,
-): InstanceType<typeof GlError> | CpuField {
+  p: number,
+): InstanceType<typeof GlError> | Float32Array {
   const readBack = readBackField(ctx, tight, texelPx)
-  if (readBack !== null) return { field: readBack, yUp: true }
-  const fallback = cpuFieldFallback(bitmap, tight.width, tight.height)
-  if (GlError.is(fallback)) return fallback
-  return { field: fallback, yUp: false }
+  if (readBack !== null) return readBack
+  return cpuFieldFallback(bitmap, tight.width, tight.height, p)
 }
 
 export function paperSheet(options?: PaperSheetOptions): PaperSheet {
@@ -490,6 +561,9 @@ export function paperSheet(options?: PaperSheetOptions): PaperSheet {
   // See `PaperSheet.__afterHullForTest`'s own doc comment: test-only, never set by production
   // code.
   let afterHullForTest: (() => void) | undefined
+  // See `PaperSheet.__afterFieldForTest`'s own doc comment: test-only, never set by production
+  // code (fix round 1, finding 2).
+  let afterFieldForTest: (() => void) | undefined
 
   function mount(ctx: GlContext): InstanceType<typeof GlError> | undefined {
     // The earliest honest surface for a factory-level `overscanHeadroom` that could not be
@@ -703,6 +777,13 @@ export function paperSheet(options?: PaperSheetOptions): PaperSheet {
     })
     if (GlError.is(blurred)) return blurred
 
+    // Test-only hook (fix round 1, finding 2 — see `__afterFieldForTest`'s own doc comment on
+    // `PaperSheet`): fires synchronously, before the `await` below ever yields, so a test-driven
+    // `controller.abort()` here is guaranteed to have landed by the time check point 2's own read
+    // of `o.signal.aborted` runs — no race, unlike a signal fired from outside this call's own
+    // stack frame.
+    afterFieldForTest?.()
+
     // Abort check point 2 (§10.5): after the resample and the two field passes, before the CPU
     // hull trace — the boundary between work already paid for and the one genuinely
     // interruptible step. The `await` is what makes this point (and the third one, below)
@@ -721,7 +802,7 @@ export function paperSheet(options?: PaperSheetOptions): PaperSheet {
 
     let hull: HullShape | undefined = m.cache.get(cacheKey)
     if (hull === undefined) {
-      const cpu = acquireCpuField(m.ctx, tight, texel, bitmap)
+      const cpu = acquireCpuField(m.ctx, tight, texel, bitmap, p)
       if (GlError.is(cpu)) return cpu
 
       // `torn` mode declares no hull-only descriptors at all — `values.minDist`/`maxDist` are
@@ -733,7 +814,7 @@ export function paperSheet(options?: PaperSheetOptions): PaperSheet {
       const seed = numKnob(values, 'seed', 0)
 
       const built = buildHull({
-        field: cpu.field,
+        field: cpu,
         width: field.w,
         height: field.h,
         minDist: minDist * k,
@@ -766,9 +847,9 @@ export function paperSheet(options?: PaperSheetOptions): PaperSheet {
       // is not retained past the cache-hit branch above, so a use-alpha rect always re-acquires
       // it — cheap relative to the trace it replaces, and never on the hot (cached-hull) path for
       // hull/both.
-      const cpu = acquireCpuField(m.ctx, tight, texel, bitmap)
+      const cpu = acquireCpuField(m.ctx, tight, texel, bitmap, p)
       if (GlError.is(cpu)) return cpu
-      const raw = signedFieldExtent(cpu.field, field.w, field.h)
+      const raw = signedFieldExtent(cpu, field.w, field.h)
       if (raw === undefined) {
         return new SheetError('paperSheet: source() found an empty silhouette')
       }
@@ -780,25 +861,21 @@ export function paperSheet(options?: PaperSheetOptions): PaperSheet {
     const frontBox = scaleBox(box, texel)
     const frontRect = sheetRectFromExtent(frontBox, front.w, front.h)
 
-    // Step 50 (guard band, §8.6): before allocating anything the caller will not receive.
+    // Step 9 (guard band, §8.6): before allocating anything the caller will not receive.
     const guardBand = checkGuardBand({ frontSize: front, hullExtent: frontRect })
     if (guardBand !== undefined) return guardBand
 
-    const sourceScale = sourceLongSide / frontLongSide
-    const rect = scaleRect(frontRect, sourceScale)
+    // `rect` (source pixels) inverts the SAME uv remap `artworkUv` applies between field space and
+    // artwork space (§8.5), not a uniform `sourceLongSide / frontLongSide` scale (fix round 1,
+    // finding 3): front space and field space are both plain resamples of the one padded
+    // rectangle (`dimsForLongSide` at different long-side figures, no offset between them), and
+    // artwork space and source space are related the same way (the resample step maps the FULL
+    // source 1:1 onto the FULL artwork — see `srcRect` above — no crop, no offset). So front-uv and
+    // source-uv are related by the identical affine map `artworkUv` already uses,
+    // `sourceUv = frontUv * (1+2p) - p*(1+2p)`, applied once here rather than assumed away.
+    const rect = frontRectToSourceRect(frontRect, front, srcW, srcH, p)
 
-    const facts: HandleFacts = {
-      rect,
-      overscan: p,
-      sdfRes,
-      srcW,
-      srcH,
-      aspect: srcW / srcH,
-      exact: o.exact,
-      hull: hullBuffers(hull),
-    }
-
-    return {
+    const handle: PaperSheetHandle = {
       spriteKey,
       rect,
       frontRect,
@@ -812,8 +889,9 @@ export function paperSheet(options?: PaperSheetOptions): PaperSheet {
       edgeMode,
       hull,
       alive: true,
-      bytes: handleBytes(facts),
+      bytes: 0,
     }
+    return { ...handle, bytes: handleBytesFor(handle) }
   }
 
   function invalidateHull(spriteKey: string): number {
@@ -1097,6 +1175,12 @@ export function paperSheet(options?: PaperSheetOptions): PaperSheet {
     },
     set __afterHullForTest(fn) {
       afterHullForTest = fn
+    },
+    get __afterFieldForTest() {
+      return afterFieldForTest
+    },
+    set __afterFieldForTest(fn) {
+      afterFieldForTest = fn
     },
   }
 }

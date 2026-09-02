@@ -484,3 +484,197 @@ describe('build() (spec 5.2, 8.1, 8.5, 8.7)', () => {
     sheet.dispose()
   })
 })
+
+/**
+ * An ellipse biased toward the top third of its own bitmap — asymmetric on the y axis on purpose:
+ * a vertical mirror of a centred shape (like `sprite()`'s own) would be indistinguishable from the
+ * un-mirrored original, which would make a mirroring bug invisible to a test built on it.
+ */
+async function topSprite(w = 64, h = 64): Promise<ImageBitmap> {
+  const data = new Uint8ClampedArray(w * h * 4)
+  const cy = h * 0.32
+  for (let y = 0; y < h; y++) {
+    for (let x = 0; x < w; x++) {
+      const inside = ((x - w / 2) / (w / 3.2)) ** 2 + ((y - cy) / (h / 4.2)) ** 2 <= 1
+      const p = (y * w + x) * 4
+      data[p] = 200
+      data[p + 1] = 120
+      data[p + 2] = 60
+      data[p + 3] = inside ? 255 : 0
+    }
+  }
+  const canvas = new OffscreenCanvas(w, h)
+  canvas.getContext('2d')!.putImageData(new ImageData(data, w, h), 0, 0)
+  return createImageBitmap(canvas, { premultiplyAlpha: 'none', colorSpaceConversion: 'none' })
+}
+
+/**
+ * Forces `source()`'s CPU-fallback branch, once, without corrupting any other GL state: the real
+ * `readPixels` call still runs (so the driver's own buffer contents stay whatever they really are)
+ * — only the very next `getError()` call after it is intercepted and forced non-zero, which is
+ * exactly what `readBackField`'s own post-`readPixels` success check reads as a refusal. Restores
+ * both spies; call the returned function once the forced `source()` call has settled.
+ */
+function forceCpuFallbackOnce(ctx: GlContext): () => void {
+  let forceError = false
+  const gl = ctx.gl
+  const originalGetError = gl.getError.bind(gl)
+  const getErrorSpy = vi.spyOn(gl, 'getError').mockImplementation(() => {
+    if (forceError) {
+      forceError = false
+      return gl.INVALID_OPERATION
+    }
+    return originalGetError()
+  })
+  const originalReadPixels = gl.readPixels.bind(gl)
+  const readPixelsSpy = vi.spyOn(gl, 'readPixels').mockImplementation(((...args: unknown[]) => {
+    ;(originalReadPixels as (...a: unknown[]) => void)(...args)
+    forceError = true
+  }) as typeof gl.readPixels)
+  return () => {
+    getErrorSpy.mockRestore()
+    readPixelsSpy.mockRestore()
+  }
+}
+
+describe('fix round 1 — the CPU-fallback field (findings 1, 2, 3, 4)', () => {
+  // Finding 2: check point 2 sat behind an `await` no given test could reach deterministically
+  // (the only hook fired inside check point 3's own window). `__afterFieldForTest` fires
+  // synchronously, from inside `source()`'s own call, before the resample/field-build work ever
+  // yields — so it must be installed BEFORE `source()` is called (unlike `__afterHullForTest`
+  // above, whose own window opens only after check point 2's `await` has already returned control
+  // to the caller). Installed after, it would fire on a `source()` call that has not read it yet.
+  // The claim under test is "check point 2 itself stopped the work", not merely "the call ended
+  // up ABORTED somehow" — checkpoint 3 reads the SAME signal a few lines later and would also
+  // return ABORTED even if checkpoint 2 were deleted outright, so `isAborted(r)` alone cannot
+  // distinguish the two. `readPixels` only ever runs inside `readBackField`, reachable only from
+  // the CPU hull trace AFTER check point 2 — asserting it was never called is what actually pins
+  // the abort to check point 2's own window, not check point 3's.
+  it('aborts at check point 2, after the field passes and before the CPU hull trace (finding 2)', async () => {
+    const ctx = open()
+    const sheet = paperSheet()
+    sheet.mount(ctx)
+    const bitmap = await sprite()
+    const controller = new AbortController()
+    sheet.__afterFieldForTest = () => controller.abort()
+    const readPixels = vi.spyOn(ctx.gl, 'readPixels')
+    const r = await sheet.source(bitmap, {
+      maxSize: 128,
+      exact: false,
+      signal: controller.signal,
+    })
+    bitmap.close()
+    expect(isAborted(r), 'check point 2 must be reachable, not merely present in the code').toBe(
+      true,
+    )
+    expect(
+      readPixels,
+      'the CPU hull trace must never start once check point 2 has aborted',
+    ).not.toHaveBeenCalled()
+    readPixels.mockRestore()
+    sheet.dispose()
+  })
+
+  // Findings 1 and 4, proved together against the SAME sprite and the SAME forced fallback call,
+  // to keep this file's own live-context count down (§4.0's ~sixteen-context cap).
+  //
+  // Finding 1's own premise ("GPU-native y-up vs canvas-native y-down, needs a flip") does NOT
+  // hold for this package's actual (unflipped) upload path — see `cpuFieldFallback`'s own doc
+  // comment in `sheet.ts` for the algebra. This test is the empirical check that backs that
+  // conclusion: it was run three ways while fixing this round (see the report) — with neither fix,
+  // with the margin fix alone, and with the margin fix plus an (incorrect) row flip — and only the
+  // margin-fix-alone version, which is what ships, passes both assertions below.
+  it("normalises the CPU-fallback field to the readback branch's own margin, and shares its row order without needing a flip (findings 1, 4)", async () => {
+    const ctx = open()
+    const sheet = paperSheet()
+    sheet.mount(ctx)
+    const bitmap = await topSprite()
+
+    const viaReadback = await sheet.source(bitmap, { maxSize: 128, exact: false })
+    expect(
+      GlError.is(viaReadback) || SheetError.is(viaReadback) || isAborted(viaReadback),
+      'the readback branch itself must succeed for this fixture, or the comparison below proves nothing',
+    ).toBe(false)
+    if (GlError.is(viaReadback) || SheetError.is(viaReadback) || isAborted(viaReadback)) {
+      bitmap.close()
+      sheet.dispose()
+      return
+    }
+
+    expect(sheet.invalidateHull('*')).toBeGreaterThan(0)
+    const restore = forceCpuFallbackOnce(ctx)
+    const viaFallback = await sheet.source(bitmap, { maxSize: 128, exact: false })
+    restore()
+    bitmap.close()
+
+    // Finding 4: a fallback that skipped the artworkUv margin remap fills the WHOLE field with the
+    // artwork, so its traced hull extends past the reserved overscan band and trips the guard-band
+    // check — which the readback branch, right above, never does for this same sprite.
+    expect(
+      GlError.is(viaFallback) || SheetError.is(viaFallback) || isAborted(viaFallback),
+      String((viaFallback as Error)?.message),
+    ).toBe(false)
+    if (GlError.is(viaFallback) || SheetError.is(viaFallback) || isAborted(viaFallback)) {
+      sheet.dispose()
+      return
+    }
+
+    // Finding 1: the fallback's frontRect sits close to the readback's own, not mirrored
+    // top-to-bottom — `topSprite()`'s own off-centre bias means a real mirror moves this by tens
+    // of px (measured at 32 px on a 128 px front while checking this, with a row flip artificially
+    // reinstated), comfortably outside the tolerance below; the residual gap here is
+    // JFA-vs-exact-EDT noise between the two algorithms, not orientation.
+    expect(Math.abs(viaFallback.frontRect.y - viaReadback.frontRect.y)).toBeLessThan(10)
+
+    sheet.dispose()
+  })
+
+  // Finding 3: `handle.rect` must invert the exact `artworkUv` affine map, not a uniform
+  // `sourceLongSide / frontLongSide` scale — the two agree only at `p = 0`. `torn` mode's own
+  // ~0.19-0.22 overscan (task 10's own report) makes the two formulas' predictions diverge by
+  // tens of px, so a regression back to the uniform scale is caught, not just a rounding wobble.
+  it('handle.rect inverts the artworkUv margin mapping, not a uniform frontRect scale (finding 3)', async () => {
+    const ctx = open()
+    const sheet = paperSheet({ edgeMode: 'torn' })
+    sheet.mount(ctx)
+    const bitmap = await compactSprite(64, 64)
+    const handle = await sheet.source(bitmap, { maxSize: 128, exact: false })
+    bitmap.close()
+    expect(
+      GlError.is(handle) || SheetError.is(handle) || isAborted(handle),
+      String((handle as Error)?.message),
+    ).toBe(false)
+    if (GlError.is(handle) || SheetError.is(handle) || isAborted(handle)) {
+      sheet.dispose()
+      return
+    }
+
+    // `exact: false` makes `frontLongSide === maxSize` exactly (no `dimsForLongSide` rounding),
+    // and a square 64x64 source keeps both axes at that same figure.
+    const front = { w: 128, h: 128 }
+    const srcW = 64
+    const srcH = 64
+    const p = handle.overscan
+    expect(p).toBeGreaterThan(0.15) // torn's own headline figure (~0.19-0.22); a real margin to invert
+    const scale = 1 + 2 * p
+    const toSource = (uFront: number, srcDim: number) => (uFront * scale - p * scale) * srcDim
+
+    const expectedX0 = toSource(handle.frontRect.x / front.w, srcW)
+    const expectedY0 = toSource(handle.frontRect.y / front.h, srcH)
+    const expectedX1 = toSource((handle.frontRect.x + handle.frontRect.w) / front.w, srcW)
+    const expectedY1 = toSource((handle.frontRect.y + handle.frontRect.h) / front.h, srcH)
+
+    expect(handle.rect.x).toBeCloseTo(expectedX0, 0)
+    expect(handle.rect.y).toBeCloseTo(expectedY0, 0)
+    expect(handle.rect.w).toBeCloseTo(expectedX1 - expectedX0, 0)
+    expect(handle.rect.h).toBeCloseTo(expectedY1 - expectedY0, 0)
+
+    // Explicitly not what the old uniform-scale formula (`sourceLongSide / frontLongSide`) would
+    // have produced, so a regression back to it is caught even if rounding happened to make the
+    // two close for this particular fixture.
+    const uniformX0 = Math.round(handle.frontRect.x * (srcW / front.w))
+    expect(Math.abs(handle.rect.x - uniformX0)).toBeGreaterThan(1)
+
+    sheet.dispose()
+  })
+})
