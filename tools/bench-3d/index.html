@@ -1,0 +1,89 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <title>paper-crumple — level 3, the 3D draw cost at 384 px</title>
+    <script type="importmap">
+      {
+        "imports": {
+          "@paper-crumple/core": "/packages/core/dist/index.js",
+          "@paper-crumple/core/unstable": "/packages/core/dist/unstable.js",
+          "@paper-crumple/motion": "/packages/motion/dist/index.js"
+        }
+      }
+    </script>
+    <style>
+      body {
+        font:
+          13px/1.5 ui-monospace,
+          monospace;
+        margin: 2rem;
+      }
+      .refused {
+        color: #a00;
+        font-weight: bold;
+      }
+      table {
+        border-collapse: collapse;
+      }
+      td,
+      th {
+        border: 1px solid #ccc;
+        padding: 0.2rem 0.6rem;
+        text-align: right;
+      }
+      th:first-child,
+      td:first-child {
+        text-align: left;
+      }
+    </style>
+  </head>
+  <body>
+    <h1>level 3 — the 3D draw cost at 384 px</h1>
+    <p>
+      Not in CI, and not a guarantee. Run this on real hardware, never on SwiftShader: the disputed
+      term is the size-invariant setup cost, which a software rasteriser does not have in the same
+      proportion. Report against the thresholds in <code>docs/level-3-timing.md</code>.
+    </p>
+    <div id="out">measuring…</div>
+    <script type="module">
+      const out = document.getElementById('out')
+
+      // Without cross-origin isolation `performance.now()` is clamped to 100 microseconds and
+      // every CPU figure below is quantisation noise (spec 17.1). Refuse rather than report it.
+      if (!crossOriginIsolated) {
+        out.innerHTML =
+          '<p class="refused">Refusing to measure: the page is not cross-origin isolated, so ' +
+          'performance.now() is clamped to 100 µs. Serve it with tools/bench-3d/serve.mjs.</p>'
+      } else {
+        const { createGlContext, GL_ATTRIBUTES, createGpuTimer } =
+          await import('@paper-crumple/core/unstable')
+        const { bakedMotion } = await import('@paper-crumple/motion')
+        const pack2x3 = (await import('/packages/motion/dist/packs/2x3.js')).default
+        const pack1x1 = (await import('/packages/motion/dist/packs/1x1.js')).default
+        const pack3x2 = (await import('/packages/motion/dist/packs/3x2.js')).default
+
+        // Instrument 1 first: reproduce 0.29-0.41 ms serialised at 998x951, or nothing measured
+        // afterwards means anything. Then instrument 2 (N in 1, 8, 32, 100, 256, one query around
+        // the batch, no finish inside), then the empty-query and 1x1-scissored controls, then CPU
+        // submit cost. Sweep 1x1, 96, 192, 384x366, 768, 998x951; fit ms = A + B*pixels; run all
+        // six poses; run the batch both with and without the per-draw clear.
+        //
+        // Discard any sample whose interval was disjoint rather than averaging it in: createGpuTimer
+        // already returns undefined for those, so count them and report the count beside the mean.
+        const runner = await import('./bench.js').catch(() => null)
+        out.textContent =
+          runner === null
+            ? 'Fill in the measurement below, following docs/level-3-timing.md.'
+            : 'ready'
+        globalThis.__benchDeps = {
+          createGlContext,
+          GL_ATTRIBUTES,
+          createGpuTimer,
+          bakedMotion,
+          packs: [pack1x1, pack2x3, pack3x2],
+        }
+      }
+    </script>
+  </body>
+</html>
