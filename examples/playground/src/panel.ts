@@ -13,6 +13,14 @@ export interface PanelHandle {
   /** Values that differ from their descriptor default — what "copy as code" emits. */
   changed(): KnobValues
   reset(): void
+  /**
+   * Merge `values` into the internal map without writing anywhere — no `onSet`, no render. For
+   * seeding a restored-from-URL configuration before the first `rebuild()`: `rebuild()` is what
+   * actually applies a preserved value to the live stage (and is what already skips a key the new
+   * slot set doesn't declare), so seeding ahead of it reuses that path instead of adding a second
+   * one beside it.
+   */
+  seed(values: KnobValues): void
 }
 
 /**
@@ -387,6 +395,10 @@ export function createPanel(
     for (const { key, error } of pending) showInlineError(key, error)
   }
 
+  function seed(next: KnobValues): void {
+    Object.assign(values, next)
+  }
+
   return {
     get values(): KnobValues {
       return { ...values }
@@ -394,5 +406,6 @@ export function createPanel(
     rebuild,
     changed,
     reset,
+    seed,
   }
 }

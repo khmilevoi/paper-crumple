@@ -92,13 +92,30 @@ function syncHash(): void {
   history.replaceState(null, '', hash)
 }
 
+// A dragged `range` input's native `input` event fires dozens of times per gesture (`panel.ts`
+// binds `onSet` straight to it), and browsers rate-limit `history.replaceState` — Safari starts
+// throwing past roughly a hundred calls in thirty seconds. The stage write below stays on every
+// `input` event, because the live render dragging a slider produces is the whole point of the
+// demo and must not get laggier; the hash write is throttled to at most once per animation frame,
+// since nothing reads `location.hash` between frames anyway.
+let hashSyncScheduled = false
+
+function scheduleHashSync(): void {
+  if (hashSyncScheduled) return
+  hashSyncScheduled = true
+  requestAnimationFrame(() => {
+    hashSyncScheduled = false
+    syncHash()
+  })
+}
+
 function onSet(
   key: string,
   value: string | number | boolean,
   target: SetTarget,
 ): Error | undefined {
   const result = applyKnob(key, value, target)
-  syncHash()
+  scheduleHashSync()
   return result
 }
 
@@ -241,7 +258,24 @@ const configPanel = createConfigPanel(initialConfig, (next) => void rebuild(next
 if (copyCodeBtn !== null) {
   copyCodeBtn.addEventListener('click', () => {
     const code = emitCode(currentConfig, panel.changed())
+    // Render into the `<pre>` first, unconditionally — the visible fallback must work even when
+    // the Clipboard API path below never runs.
     if (emittedCodeEl !== null) emittedCodeEl.textContent = code
+
+    // `navigator.clipboard` is `undefined` outside a secure context (or in an older browser) —
+    // exactly the case the `<pre>` fallback above exists for. Calling `.writeText` on `undefined`
+    // throws *synchronously*, before any promise exists, so a `.catch()` chained onto the call
+    // would never attach. Guard the property first and report its absence through the inspector
+    // instead.
+    if (navigator.clipboard === undefined) {
+      inspector.observed(
+        'clipboard.writeText',
+        new Error(
+          'playground: Clipboard API unavailable (needs a secure context) — use the pre above',
+        ),
+      )
+      return
+    }
     navigator.clipboard.writeText(code).catch((reason: unknown) => {
       const err = reason instanceof Error ? reason : new Error(String(reason))
       inspector.observed('clipboard.writeText', err)
@@ -259,19 +293,14 @@ async function boot(): Promise<void> {
     return
   }
 
-  await rebuild(initialConfig)
+  // Seed the panel's retained `values` before the first `rebuild()`, not after: `rebuild()`'s own
+  // preserved-value carry-over (`panel.rebuild`'s `preserved !== k.default` branch) is what
+  // actually writes a seeded value to the live stage via `onSet`, and it already skips any key
+  // the new slot's descriptors don't declare — a decoded knob `edgeMode` doesn't support this way
+  // is silently dropped by that existing skip rather than reaching a second, separate apply path.
+  if (!(initialHashState instanceof Error)) panel.seed(initialHashState.knobs)
 
-  // The knobs the fragment named on top of `initialConfig` — reapplied against the now-live
-  // stage the same way a manual edit would be, through `onSet`, so every write still lands on
-  // the inspector's channels and re-syncs the hash. `decodeState`'s own `KnobValues` carries no
-  // per-key write-back target (`panel.changed()` on the writing side does not either), so `stage`
-  // — the panel's own default target — is the one write-back path every knob is guaranteed to
-  // support.
-  if (!(initialHashState instanceof Error)) {
-    // `onSet` already reports a failed write through the inspector's own `stage.set` /
-    // `sprite.set` / `view.set` channel — nothing further to do with its return value here.
-    for (const [key, value] of Object.entries(initialHashState.knobs)) onSet(key, value, 'stage')
-  }
+  await rebuild(initialConfig)
 }
 
 void boot()
