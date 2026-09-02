@@ -508,6 +508,39 @@ main {
   border-top: 1px solid var(--border-soft);
 }
 
+/* Sound. Separated by a rule from the run controls above it, because it is the one block on the
+   page that does nothing until it is opted into. */
+.transport-audio {
+  margin-top: 0.5rem;
+  padding-top: 0.4rem;
+  border-top: 1px solid var(--border-soft);
+}
+
+.transport-audio-enable {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.3rem;
+  color: var(--fg);
+  cursor: pointer;
+}
+
+.transport-audio-volume {
+  max-width: 7rem;
+}
+
+.transport-audio-readout {
+  margin: 0.3rem 0 0;
+  overflow-wrap: anywhere;
+}
+
+.transport-audio-note {
+  margin: 0.25rem 0 0;
+  font-size: 0.72rem;
+  color: var(--fg-faint);
+  line-height: 1.4;
+  overflow-wrap: anywhere;
+}
+
 .transport-report {
   white-space: pre-wrap;
   overflow-wrap: anywhere;

@@ -8,6 +8,7 @@ import type { SetTarget } from './panel'
 import { createConfigPanel } from './config-panel'
 import { createTransport } from './transport'
 import { createInspector } from './inspector'
+import { createAudio } from './audio'
 import { decodeState, emitCode, encodeState } from './state'
 
 const line = document.getElementById('version-line')
@@ -135,7 +136,23 @@ function onCount(sheet: number, motion: number): void {
 }
 
 const panel = createPanel(onSet, onCount)
-const transport = createTransport(report)
+
+// Sound. It reports every load failure through the same `observed` channel every other narrowed
+// Error in this demo goes through — a clean clone has no `public/audio/` at all (it is
+// gitignored), and that has to read as a listed, explained absence rather than as a broken page.
+// Its numbers land in the inspector's Audio section, because a sound is invisible in a
+// screenshot and the schedule figures are the only objective evidence the sync is right.
+const audio = createAudio(
+  (where, error) => {
+    inspector.observed(where, error)
+  },
+  () => {
+    inspector.refreshAudio()
+  },
+)
+inspector.setAudioSource(audio.rows)
+
+const transport = createTransport(report, audio)
 
 // The grid's mounted views, kept so a rebuild's `transport.bind` always describes the stage that
 // is actually live — mirroring `live` above for the same reason.

@@ -18,6 +18,14 @@ export interface Inspector {
   fromChannel(e: pc.StageEvent<'error'>): void
   attach(built: BuiltStage, budgetBytes?: number): void
   refreshUsage(): void
+  /**
+   * The Audio section's rows. A sound cannot be seen in a screenshot, so the numbers that prove
+   * it — clip length, the rescale factor, the schedule a fold will actually run, and the measured
+   * length of the last one — are printed here instead of inferred. `src/audio.ts` supplies them
+   * and calls `refreshAudio()` whenever any of them moves.
+   */
+  setAudioSource(rows: () => ReadonlyArray<readonly [string, string]>): void
+  refreshAudio(): void
   line(text: string): void
 }
 
@@ -51,6 +59,7 @@ export function createInspector(): Inspector {
   // Orphans only ever hold `observed: false` payloads (§10.6) — `fromChannel` filters before
   // this array ever sees an entry, so nothing here needs a second `observed` flag.
   const orphanMessages: string[] = []
+  let audioRows: (() => ReadonlyArray<readonly [string, string]>) | null = null
 
   const root = document.getElementById(INSPECTOR_ROOT_ID)
 
@@ -88,6 +97,22 @@ export function createInspector(): Inspector {
   const usageList = document.createElement('dl')
   usageList.className = 'inspector-usage'
   usageSection.append(usageHeading, usageList)
+
+  // --- Audio ----------------------------------------------------------------------------------
+  const audioSection = document.createElement('section')
+  audioSection.className = 'inspector-section'
+  const audioHeading = document.createElement('h3')
+  audioHeading.textContent = 'Audio'
+  const audioNote = document.createElement('p')
+  audioNote.className = 'inspector-note'
+  audioNote.textContent =
+    'Sound is off until you tick it in the transport, and the clips are fetched only then — a ' +
+    'clean clone has no public/audio/ (it is gitignored) and must stay silent, not broken. These ' +
+    'rows are the objective surface: a screenshot cannot show a sound, so the schedule the next ' +
+    'run will be given, and the measured length of the last one, are printed instead.'
+  const audioList = document.createElement('dl')
+  audioList.className = 'inspector-usage'
+  audioSection.append(audioHeading, audioNote, audioList)
 
   // --- The two error channels, side by side ---------------------------------------------------
   const channelsSection = document.createElement('section')
@@ -127,6 +152,7 @@ export function createInspector(): Inspector {
       warningsSection,
       eventsSection,
       usageSection,
+      audioSection,
       channelsSection,
     )
   }
@@ -205,6 +231,10 @@ export function createInspector(): Inspector {
       }
     }
     setRows(usageList, rows)
+  }
+
+  function renderAudio(): void {
+    setRows(audioList, audioRows === null ? [['audio', 'not wired']] : audioRows())
   }
 
   function renderChannels(): void {
@@ -298,6 +328,15 @@ export function createInspector(): Inspector {
     renderChannels()
   }
 
+  function setAudioSource(rows: () => ReadonlyArray<readonly [string, string]>): void {
+    audioRows = rows
+    renderAudio()
+  }
+
+  function refreshAudio(): void {
+    renderAudio()
+  }
+
   function line(text: string): void {
     pushEventLine(`status ${text}`)
   }
@@ -305,8 +344,9 @@ export function createInspector(): Inspector {
   renderFacts()
   renderWarnings()
   renderUsage()
+  renderAudio()
   renderChannels()
   renderEvents()
 
-  return { observed, fromChannel, attach, refreshUsage, line }
+  return { observed, fromChannel, attach, refreshUsage, setAudioSource, refreshAudio, line }
 }
