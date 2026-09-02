@@ -27,6 +27,22 @@ export function heroCanvas(built: BuiltStage): HTMLCanvasElement | Error {
 
   const canvas = document.createElement('canvas')
   canvas.className = 'hero-canvas'
+  // The display size is set HERE, and deliberately not left to follow the backing store.
+  //
+  // `blitOut`'s default `size: 'managed'` re-reads `getBoundingClientRect()` on *every draw* and
+  // writes `canvas.width`/`height` from it (`core`'s managed branch, `blit.ts`'s
+  // `managedBackingStore`: `min(round(cssDim * dpr), frontDim)`). A canvas with no CSS size takes
+  // its layout size from those same attributes, so the two feed each other and every draw
+  // multiplies the element by `devicePixelRatio`: measured at dpr 1.5, +1.28 % per blit, climbing
+  // until it hit `front.h` — roughly eight folds. That is the canvas "growing and shifting" while
+  // a run plays, and because it is per *draw* rather than per run, even the draw-only pose slider
+  // did it. The grid tiles never drifted, because `.grid-tile-canvas` fixes their size in CSS.
+  //
+  // `cssPx` is already this demo's display-size knob, so it is the honest source for the box, and
+  // `mountHero` below passes `fit: 'contain'` — the front is letterboxed into whatever box it is
+  // given, so a square one crops and stretches nothing.
+  canvas.style.width = `${String(built.cssPx)}px`
+  canvas.style.height = `${String(built.cssPx)}px`
   slot.append(canvas)
   return canvas
 }

@@ -59,6 +59,12 @@ export type BuiltStage =
       readonly sheet: PaperSheet
       readonly motion: ReturnType<typeof bakedMotion>
       readonly buildMs: number
+      /**
+       * Carried through so `scene.ts` can give the `blit` hero canvas a display size that does
+       * NOT follow its own backing store — see `heroCanvas`. It is the same number that fed
+       * `sizeForDisplay` above, so the two cannot drift apart.
+       */
+      readonly cssPx: number
     }
   | {
       readonly present: 'direct'
@@ -66,6 +72,12 @@ export type BuiltStage =
       readonly sheet: PaperSheet
       readonly motion: ReturnType<typeof bakedMotion>
       readonly buildMs: number
+      /**
+       * Carried through so `scene.ts` can give the `blit` hero canvas a display size that does
+       * NOT follow its own backing store — see `heroCanvas`. It is the same number that fed
+       * `sizeForDisplay` above, so the two cannot drift apart.
+       */
+      readonly cssPx: number
     }
 
 /**
@@ -104,11 +116,25 @@ export async function buildStage(
     const stage = await pc.paperStage({ ...base, present: 'direct' })
     if (stage === pc.ABORTED) return pc.ABORTED
     if (stage instanceof Error) return stage
-    return { stage, sheet, motion, present: 'direct', buildMs: performance.now() - started }
+    return {
+      stage,
+      sheet,
+      motion,
+      present: 'direct',
+      buildMs: performance.now() - started,
+      cssPx: config.cssPx,
+    }
   }
 
   const stage = await pc.paperStage({ ...base, present: 'blit' })
   if (stage === pc.ABORTED) return pc.ABORTED
   if (stage instanceof Error) return stage
-  return { stage, sheet, motion, present: 'blit', buildMs: performance.now() - started }
+  return {
+    stage,
+    sheet,
+    motion,
+    present: 'blit',
+    buildMs: performance.now() - started,
+    cssPx: config.cssPx,
+  }
 }

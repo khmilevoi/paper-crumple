@@ -443,11 +443,20 @@ main {
 
 /* `direct` present hands `#hero-slot` the stage's own surface canvas (unclassed — it is one
    canvas for the hero rect and the grid rects together, not `.hero-canvas`), so this targets
-   any canvas the slot holds rather than a specific class. */
-#hero-slot canvas {
+   that one specifically. `height: auto` is safe here and ONLY here: a direct surface is sized
+   once by `stage.resize()` and `blitOut` never touches it. */
+#hero-slot canvas:not(.hero-canvas) {
   display: block;
   max-width: 100%;
   height: auto;
+}
+
+/* The `blit` hero. Its `width`/`height` are set inline from `cssPx` (`scene.ts`'s `heroCanvas`,
+   which carries the reasoning); what matters here is that neither is `auto` and nothing else
+   derives its layout size from its backing store, or `blitOut`'s managed sizing feeds back into
+   itself once per draw. */
+.hero-canvas {
+  display: block;
 }
 
 #transport {
