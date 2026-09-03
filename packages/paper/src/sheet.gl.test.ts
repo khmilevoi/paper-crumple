@@ -1079,4 +1079,72 @@ describe('the hull polygon as a real paper field (design 2026-09-02, §2-§3)', 
     sheet.releaseFront(front)
     sheet.dispose()
   })
+
+  it('reuses the hull field on a second build at the same sprite and size (design §4)', async () => {
+    const ctx = open()
+    const sheet = paperSheet()
+    sheet.mount(ctx)
+    const bitmap = await compactSprite()
+    const handle = await sheet.source(bitmap, { maxSize: 128, exact: false })
+    bitmap.close()
+    expect(GlError.is(handle) || SheetError.is(handle) || isAborted(handle)).toBe(false)
+    if (GlError.is(handle) || SheetError.is(handle) || isAborted(handle)) return
+
+    const first = sheet.build(handle, { w: 128, h: 128 }, defaultsFor('hull') as never)
+    expect(first instanceof Error, String((first as Error)?.message)).toBe(false)
+    if (first instanceof Error) return
+
+    const drawArrays = vi.spyOn(ctx.gl, 'drawArrays')
+    drawArrays.mockClear()
+    const second = sheet.build(handle, { w: 128, h: 128 }, defaultsFor('hull') as never)
+    const draws = drawArrays.mock.calls.length
+    drawArrays.mockRestore()
+    expect(second instanceof Error).toBe(false)
+    if (second instanceof Error) return
+
+    // renderFront's own single draw, and nothing else: pass A, pass B and the hull field are all
+    // served from `lastFieldBuild`. A regression that rebuilt the mask every frame would put the
+    // jump flood's whole schedule back in here, which is what this bound catches.
+    expect(draws).toBe(1)
+
+    sheet.releaseFront(first)
+    sheet.releaseFront(second)
+    sheet.dispose()
+  })
+
+  /**
+   * Acceptance criterion 3, at the only scope the public API can reach it. `source()` passes no
+   * per-sprite knob values (`sheet.ts`'s own §5.2 note), so a `hull` handle is always traced at
+   * `minDist: 22` / `maxDist: 72` and there is no route to a `use-alpha` hull in `hull` mode.
+   * `torn` forces both distances to 0 (`sheet.ts`'s "torn mode declares no hull-only descriptors
+   * at all"), so `buildHull` returns `HULL_USE_ALPHA` and this is the degenerate case in the
+   * flesh: no mask is filled, no field is built, and the render is the one that shipped. The
+   * mode-2 render itself is covered where it is driven directly, in `paper-renderer.gl.test.ts`,
+   * which this change does not touch.
+   */
+  it('builds no hull mask for a use-alpha hull, and renders as it did before', async () => {
+    const ctx = open()
+    const sheet = paperSheet({ edgeMode: 'torn' })
+    sheet.mount(ctx)
+    const bitmap = await compactSprite()
+    const handle = await sheet.source(bitmap, { maxSize: 128, exact: false })
+    bitmap.close()
+    expect(GlError.is(handle) || SheetError.is(handle) || isAborted(handle)).toBe(false)
+    if (GlError.is(handle) || SheetError.is(handle) || isAborted(handle)) return
+    expect(handle.hull.kind).toBe('use-alpha')
+
+    // The first build at source()'s own size consumes source()'s field work outright, so a mask
+    // build would be the only thing left to count.
+    const drawArrays = vi.spyOn(ctx.gl, 'drawArrays')
+    drawArrays.mockClear()
+    const front = sheet.build(handle, { w: 128, h: 128 }, defaultsFor('torn') as never)
+    const draws = drawArrays.mock.calls.length
+    drawArrays.mockRestore()
+    expect(front instanceof Error, String((front as Error)?.message)).toBe(false)
+    if (front instanceof Error) return
+    expect(draws).toBe(1)
+
+    sheet.releaseFront(front)
+    sheet.dispose()
+  })
 })

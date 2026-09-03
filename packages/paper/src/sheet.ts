@@ -238,6 +238,13 @@ interface Mounted {
     readonly tight: Field
     readonly looseness: number
     readonly loose: LooseField
+    /**
+     * The hull polygon's own field (design §4), cached under the same `spriteKey` + requested
+     * `size` key as `tight`, and sound under it for the same reason: a hull-tier knob cannot move
+     * without a fresh `source()`, because `build()`'s step 6 refuses rather than retracing.
+     * `null` for a `use-alpha` or all-dropped hull, and after `source()`, which builds no mask.
+     */
+    readonly paperField: Field | null
   } | null
 }
 
@@ -863,6 +870,7 @@ export function paperSheet(options?: PaperSheetOptions): PaperSheet {
       tight,
       looseness,
       loose: blurred,
+      paperField: null,
     }
 
     // Test-only hook (fix round 1, finding 2 — see `__afterFieldForTest`'s own doc comment on
@@ -1111,13 +1119,15 @@ export function paperSheet(options?: PaperSheetOptions): PaperSheet {
       loose = blurred
     }
 
-    m.lastFieldBuild = {
+    const fieldRecord = {
       spriteKey: handle.spriteKey,
       size: { w: size.w, h: size.h },
       tight,
       looseness,
       loose,
+      paperField: tightReusable ? cachedField.paperField : null,
     }
+    m.lastFieldBuild = fieldRecord
 
     // Step 6 (spec 6.3): a hull-tier knob (`minDist`, `maxDist`, `angularity`, `seed`) moving off
     // the value `source()` traced the handle's hull at is `invalidates: 'hull'`, which the core
@@ -1152,8 +1162,8 @@ export function paperSheet(options?: PaperSheetOptions): PaperSheet {
     // field's row order, exactly as the artwork does (§6; the p10 plan's `yUp` flag is superseded,
     // see this file's own row-order note at lines 457-472).
     const srcField = dimsForLongSide(handle.sdfRes, handle.srcW, handle.srcH, 2)
-    let paperField: Field | null = null
-    if (handle.hull.kind === 'polygons' && hullComponentCount(handle.hull) > 0) {
+    let paperField: Field | null = fieldRecord.paperField
+    if (paperField === null && handle.hull.kind === 'polygons' && hullComponentCount(handle.hull) > 0) {
       const bytes = fillHullMask(
         handle.hull,
         field.w,
@@ -1203,6 +1213,10 @@ export function paperSheet(options?: PaperSheetOptions): PaperSheet {
         }
         paperField = builtField
       }
+      // Success path only, once `paperField` has been assigned (or deliberately left `null` for
+      // "no drawable component"): an error path above returns before reaching here, and a record
+      // that claimed a field it did not build would be worse than no cache at all.
+      m.lastFieldBuild = { ...fieldRecord, paperField }
     }
 
     // Step 7 (spec 8.7): RGBA8, no mipmaps, LINEAR, non-premultiplied — allocated through
