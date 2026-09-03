@@ -5,53 +5,84 @@
  * appearance". P8's level-1 tests of `extractContours` and the mask utilities are a different
  * thing and are not replaced by this file.
  *
- * The property under test is §8.2's: only OUTER loops are kept, but **every one of them**, so a
- * source with two disjoint components gets two pieces of paper — and a hole inside a component
- * stays a hole rather than being filled by the paper that surrounds it.
+ * The property under test is §8.2's: **only OUTER loops are kept, but every one of them.** Both
+ * halves of that sentence get a probe here, and they pull in opposite directions:
  *
- * ## Probe coordinates — corrected against the fixture's own geometry
+ * - *every one of them* — a source with two disjoint components gets two pieces of paper, and the
+ *   gap between them stays empty. Pinned twice below: once structurally, on the traced hull's own
+ *   component count, and once on the pixel in the middle of the gap.
+ * - *only OUTER* — a hole inside a component is **filled** by the paper that surrounds it. This is
+ *   deliberate, and `hull.ts`'s own module header says so in as many words: a magazine cutout has
+ *   no holes. The artwork still has its hole (its alpha is 0 there); what the probe reads is the
+ *   paper behind it.
  *
- * Expressed relative to the *unpadded* geometry (before `PAD` below is added), the fixture places
- * the left component at `x in [8,40)`, `y in [24,72)`, its hole at `x in [18,30)`, `y in [40,56)`,
- * and the right component at `x in [56,88)`, `y in [24,72)`. `(24, 48)` and `(24, 47)` both fall
- * *inside* the hole (18 <= 24 < 30 and 40 <= 48 < 56, and y = 47 is still within [40,56)) — they
- * are not on the left component's own paper at all. So:
+ * That second bullet is the opposite of what this file asserted before the hull field was wired
+ * into `build()`. It used to read LOW alpha there, and passed, because every `build()` in `hull`
+ * mode went through `uEdgeMode == 2`, which ignores the traced polygon entirely and derives its
+ * coverage from the artwork's own alpha — so the probe was reading the artwork's hole rather than
+ * the sheet, and never tested §8.2's rule at all. With a real `paperField` the sheet follows the
+ * polygon, the polygon has no inner loop, and the hole reads paper.
  *
- * - The "left component carries paper" probe is at `(12, 48)`: inside the left component's rect
- *   and strictly left of the hole's `x >= 18`, so it reads the component and nothing else.
- * - The hole probes keep their original coordinates (they are correctly inside the hole) but their
- *   matcher is inverted to `toBeLessThan(64)` — the same "this is not paper" bound the gap probe
- *   already uses. A hole that is filled by the surrounding paper reads high alpha there; a hole
- *   that survives reads low alpha. The step this file follows says a closed hole is fixed by
- *   widening the fixture, never by loosening the assertion — which only makes sense if "the hole
- *   survives" is read off a low-alpha probe, not a high one.
+ * The hole probe therefore does double duty, and is the reason it is worth keeping rather than
+ * deleting: it is also this file's **positive control**. Because it sits deep inside the left
+ * component, it can only read paper if the hull mask was filled, scaled and placed correctly. A
+ * gap probe that reads "not paper" proves nothing on its own — a mask that failed to render at
+ * all would satisfy it too. The two probes only pass together if the sheet is really there and
+ * really has two pieces.
  *
- * ## Canvas padding — required by the guard-band check, not by the hole
+ * ## Geometry — and why the gap is 32px wide, not 16px
  *
- * The unpadded geometry above sits in a 96x96 canvas (`S = 96`, `PAD = 0`) and, measured directly,
- * that size fails before the hole assertions are ever reached: `source()` itself returns a
- * `SheetError` from the shipped guard-band check (§8.6, `packages/core/src/overscan.ts`'s
- * `checkGuardBand`) — "the hull reaches 0.4828 of the front on axis x, inside the shader's guard
- * band at 0.482". At the shipped hull defaults (`maxDist: 72` reference px, `slop: 12`) the reserve
- * radius is `r = 72 + 12 = 84`, giving `overscan p = r / (1000 - 2r) = 84 / 832 ≈ 0.10096`. Under
- * `exact: true`, `frontLongSide = ceil(sourceLongSide * (1 + 2p))`; at `sourceLongSide = 96` that is
+ * Two 32x48 opaque squares, `GAP` apart, centred in an `S x S` canvas, the left one carrying a
+ * 12x16 hole. Every coordinate below is derived from those constants rather than written out, so
+ * the diagram cannot drift from the bytes.
+ *
+ * `GAP` is load-bearing and must not be shrunk. `buildHull` traces its contour at
+ * `iso = -(minDist + maxDist) * 0.5` (`hull.ts:146`) — the *middle* of the band, which at the
+ * shipped hull defaults (`minDist: 22`, `maxDist: 72` reference px) is 47 reference px outside the
+ * silhouette on every side. Two offset curves whose offset exceeds half their separation merge
+ * into a single contour; that is ordinary Minkowski-offset behaviour, not a tracer defect, and it
+ * is the same reason a sheet of paper wrapped around two nearby garment pieces reads as one sheet.
+ * At `S = 160` that offset is `47 * 160 / 1000 ~= 7.5` source px per side, so the two components
+ * fuse at any gap much under 15px.
+ *
+ * Measured directly against this fixture, sweeping `GAP` at `S = 160` and reading the component
+ * count off `handle.hull` plus the alpha at the gap's midpoint:
+ *
+ * | `GAP` | hull components | alpha at the gap's midpoint |
+ * | ----- | --------------- | --------------------------- |
+ * | 16    | **1**           | **255** (one merged sheet)   |
+ * | 24    | 2               | 0                            |
+ * | 32    | 2               | 0                            |
+ * | 40    | 2               | 0                            |
+ *
+ * 16px — this fixture's original gap — is inside the merge radius, so the two squares traced as a
+ * single loop spanning both. `GAP = 32` is chosen over the 24 that first works, to sit at roughly
+ * twice the merge threshold rather than just past it: a fixture one pixel from fusing would fail
+ * for a rounding change rather than for a regression.
+ *
+ * ## Canvas size — required by the guard-band check, not by the hole
+ *
+ * `S = 160` is not free either. Measured directly, `S = 96` fails before any assertion is reached:
+ * `source()` itself returns a `SheetError` from the shipped guard-band check (§8.6,
+ * `packages/core/src/overscan.ts`'s `checkGuardBand`) — "the hull reaches 0.4828 of the front on
+ * axis x, inside the shader's guard band at 0.482". At the shipped hull defaults (`maxDist: 72`
+ * reference px, `slop: 12`) the reserve radius is `r = 72 + 12 = 84`, giving overscan
+ * `p = r / (1000 - 2r) = 84 / 832 ~= 0.10096`. Under `exact: true`,
+ * `frontLongSide = ceil(sourceLongSide * (1 + 2p))`; at `sourceLongSide = 96` that is
  * `ceil(96 * 1.20192) = 116` — too little margin around a composite silhouette that already spans
- * `x in [8,88)` (80 of the 96 source pixels) once the hull's own dilation is added on top.
+ * most of the canvas once the hull's own offset is added on top. At `S = 160` that becomes
+ * `ceil(160 * 1.20192) = 193`, which clears it: measured, `source()` succeeds here and the
+ * guard-band `SheetError` does not reappear, at the widened `GAP` as well as the original one.
  *
- * This is a property of the *overall composite bounding box* (both components plus the gap between
- * them), not of the 12x16 hole: padding the canvas out to `S = 160` (`PAD = 32` on every side, the
- * same absolute component geometry just recentred in a larger source image) grows `frontLongSide`
- * to `ceil(160 * 1.20192) = 193`, which clears the guard band — measured directly against this
- * fixture, the guard-band `SheetError` above disappears at `S = 160` and does not reappear.
- *
- * Once `source()` succeeds, the hole itself needs no widening at all: measured directly, both hole
- * probes below read alpha exactly `0` (fully transparent), comfortably under the `64` bound — the
- * 12x16 hole survives the shipped hull dilation cleanly. The smallest hole that survives is
- * therefore still the brief's original 12x16; what needed changing was the fixture's padding, not
- * its hole size.
+ * Note this is a property of the *overall composite bounding box* — both components plus the gap —
+ * so widening `GAP` spends canvas margin: the composite grows from 80px to 96px of the 160, and
+ * the margin around it falls from 40px to 32px per side. Measured, that still clears the guard
+ * band. Growing `S` instead would not have helped, because the hull's offset is quoted in
+ * reference px and therefore scales *with* `S`, while the gap would not.
  */
 import { afterEach, describe, expect, it } from 'vitest'
 import { GlError, SheetError, isAborted } from '@paper-crumple/core'
+import { hullComponentCount } from './hull-shape.js'
 import { defaultsFor } from './paper-knobs.js'
 import { paperSheet } from './sheet.js'
 import { createGlFixture, type PaperGlFixture } from './testing/gl-fixture.js'
@@ -68,27 +99,41 @@ function open() {
   return fixture.ctx
 }
 
-/** Canvas padding around the composite silhouette — see the file header's guard-band note. */
-const PAD = 32
-const S = 96 + 2 * PAD
+/** The canvas the composite is centred in — see the file header's guard-band note. */
+const S = 160
+/** One component's box. */
+const COMP_W = 32
+const COMP_H = 48
+/** The space between them — see the file header. Do not shrink this below ~24. */
+const GAP = 32
+/** The composite's own origin, centred in the canvas. */
+const CX = Math.round((S - (2 * COMP_W + GAP)) / 2)
+const CY = Math.round((S - COMP_H) / 2)
+/** The hole, inside the left component. */
+const HOLE_X = CX + 10
+const HOLE_Y = CY + 16
+const HOLE_W = 12
+const HOLE_H = 16
 
 /**
  * Two disjoint opaque squares — the "pair of sneakers" — the left one carrying a square hole.
- * Raw bytes, never a PNG (§7.4.1). Coordinates below are the unpadded geometry (see file header)
- * shifted by `PAD` on both axes so the whole composite sits centred in the `S x S` canvas.
+ * Raw bytes, never a PNG (§7.4.1). With the constants above this paints, in canvas coordinates:
  *
- *   x in [8+PAD, 40+PAD)  y in [24+PAD, 72+PAD)   left component, opaque
- *   x in [18+PAD, 30+PAD) y in [40+PAD, 56+PAD)   the hole inside it, alpha 0
- *   x in [56+PAD, 88+PAD) y in [24+PAD, 72+PAD)   right component, opaque
+ *   x in [32, 64)    y in [56, 104)   left component, opaque
+ *   x in [42, 54)    y in [72, 88)    the hole inside it, alpha 0
+ *   x in [96, 128)   y in [56, 104)   right component, opaque
+ *
+ * leaving x in [64, 96) as the gap and a 32px margin on either side of the composite.
  */
 function twoComponentsWithAHole(): Uint8ClampedArray<ArrayBuffer> {
   const out = new Uint8ClampedArray(S * S * 4)
   for (let y = 0; y < S; y++) {
     for (let x = 0; x < S; x++) {
       const p = (y * S + x) * 4
-      const left = x >= 8 + PAD && x < 40 + PAD && y >= 24 + PAD && y < 72 + PAD
-      const hole = x >= 18 + PAD && x < 30 + PAD && y >= 40 + PAD && y < 56 + PAD
-      const right = x >= 56 + PAD && x < 88 + PAD && y >= 24 + PAD && y < 72 + PAD
+      const inY = y >= CY && y < CY + COMP_H
+      const left = x >= CX && x < CX + COMP_W && inY
+      const hole = x >= HOLE_X && x < HOLE_X + HOLE_W && y >= HOLE_Y && y < HOLE_Y + HOLE_H
+      const right = x >= CX + COMP_W + GAP && x < CX + 2 * COMP_W + GAP && inY
       out[p] = 30
       out[p + 1] = 160
       out[p + 2] = 90
@@ -123,7 +168,7 @@ function readTexel(
 }
 
 describe('holes and components survive into the built front (§8.2, §11)', () => {
-  it('gives both components paper, and leaves the hole a hole', async () => {
+  it('gives both components paper, fills the hole, and leaves the gap empty', async () => {
     const ctx = open()
     const sheet = paperSheet()
     expect(sheet.mount(ctx)).toBeUndefined()
@@ -136,45 +181,59 @@ describe('holes and components survive into the built front (§8.2, §11)', () =
     if (GlError.is(handle) || SheetError.is(handle) || isAborted(handle)) {
       return expect.fail(`source() refused: ${String(handle)}`)
     }
+
+    // §8.2's "every one of them", pinned structurally rather than inferred from a pixel. This is
+    // the assertion that actually fails when the two components fuse: at the original 16px gap the
+    // tracer returned ONE loop spanning both squares (see the file header's sweep), and every
+    // pixel probe below still has to be read through that fact to be interpreted correctly.
+    expect(hullComponentCount(handle.hull)).toBe(2)
+
     const front = sheet.build(handle, { w: 128, h: 128 }, defaultsFor('hull') as never)
     if (front instanceof Error) return expect.fail(front.message)
 
-    // A is centred in the front (§7.4.3); every probe below is expressed in the fixture's own
-    // (unpadded) coordinates, shifted by PAD to land on the actual painted geometry, and offset
-    // into front coordinates once, so the numbers stay readable against the file header's diagram.
+    // A is centred in the front (§7.4.3); the probes below are in the fixture's own canvas
+    // coordinates and are offset into front coordinates once, so they stay readable against the
+    // diagram above.
     //
     // ax/ay come out NEGATIVE here, and that is load-bearing — do not "fix" it by shrinking the
     // build size to match the artwork, or by assuming ax >= 0. Under `exact: true`, source() sets
     // `aLongSide = sourceLongSide` unconditionally (sheet.ts:767-773) — maxSize is never consulted
-    // for artwork sizing — so on this padded 160x160 fixture `handle.artwork` is 160x160, while the
-    // front built below is only 128x128, i.e. smaller than its own artwork. That gives
+    // for artwork sizing — so on this 160x160 fixture `handle.artwork` is 160x160, while the front
+    // built below is only 128x128, i.e. smaller than its own artwork. That gives
     // `ax = round((128 - 160) / 2) = -16`, and the clip this implies is real: build() places
     // `artworkRect` with the identical `Math.round((size - artwork) / 2)` formula (sheet.ts:1157-
     // 1161), so the artwork overflows the front by 16px on every edge inside it. It is harmless
-    // only because the painted content sits at bitmap x/y in [40,120), strictly inside the visible
-    // artwork window (artwork-local [16,144) on each axis) — only transparent margin gets clipped.
-    // And because `at()` below reapplies this same `ax`/`ay` that build() itself used, the negative
-    // offset cancels out of every probe: `at(x, y)` reads front pixel (16 + x, 16 + y), which stays
-    // inside [0,128) for all five probes here.
+    // only because the painted content sits at x in [32, 128) and y in [56, 104), strictly inside
+    // the visible artwork window (artwork-local [16, 144) on each axis) — only transparent margin
+    // gets clipped. And because `at()` reapplies the same `ax`/`ay` that build() itself used, the
+    // negative offset cancels out of every probe: the five reads below land at front x in [20, 96]
+    // and y in [63, 64], all well inside [0, 128).
     const ax = Math.round((front.width - handle.artwork.w) / 2)
     const ay = Math.round((front.height - handle.artwork.h) / 2)
-    const at = (x: number, y: number) => readTexel(ctx, front.texture, ax + PAD + x, ay + PAD + y)
+    const at = (x: number, y: number) => readTexel(ctx, front.texture, ax + x, ay + y)
 
-    // Both components carry paper: alpha well above the shader's own 0.002 identity cutoff.
-    // (12, 48) sits inside the left component's rect (x in [8,40), y in [24,72)) and strictly left
-    // of the hole (x >= 18), so it reads the component's own paper and nothing else.
-    expect(at(12, 48)[3]).toBeGreaterThan(200)
-    expect(at(72, 48)[3]).toBeGreaterThan(200)
+    // Both components carry paper: alpha well above the shader's own 0.002 identity cutoff. Each
+    // probe sits inside its own component's rect, and the left one is strictly left of the hole.
+    expect(at(CX + 4, CY + 24)[3]).toBeGreaterThan(200)
+    expect(at(CX + COMP_W + GAP + 16, CY + 24)[3]).toBeGreaterThan(200)
 
-    // The gap between them is not bridged: a single merged hull would fill x = 48.
-    expect(at(48, 48)[3]).toBeLessThan(64)
+    // The gap between them is not bridged. Measured: alpha 0 at the midpoint. With the component
+    // count pinned at 2 above, this reads as "two sheets that do not touch" rather than merely
+    // "no sheet rendered here".
+    expect(at(CX + COMP_W + GAP / 2, CY + 24)[3]).toBeLessThan(64)
 
-    // The hole is still a hole. It sits inside the left component's outer loop, so anything that
-    // "took the largest contour" or filled interior loops would make this opaque — i.e. this must
-    // read LOW alpha, using the same "not paper" bound as the gap probe above. Measured: both reads
-    // are exactly 0 (see the file header's guard-band note).
-    expect(at(24, 48)[3]).toBeLessThan(64)
-    expect(at(24, 47)[3]).toBeLessThan(64)
+    // The hole is filled, by design — §8.2 keeps only OUTER loops, so the traced polygon has no
+    // inner loop and the sheet runs straight under the artwork's hole ("a magazine cutout has no
+    // holes", `hull.ts`'s module header). Measured: both probes read alpha exactly 255, against
+    // the LOW alpha this file asserted while `build()` still forced `uEdgeMode == 2` and the probe
+    // was reading the artwork's own alpha instead of the sheet. Doubling as the positive control
+    // for the mask itself — see the file header — these two are the only probes here that can
+    // distinguish a correctly placed sheet from no sheet at all.
+    expect(at(HOLE_X + 6, HOLE_Y + 8)[3]).toBeGreaterThan(200)
+    expect(at(HOLE_X + 6, HOLE_Y + 7)[3]).toBeGreaterThan(200)
+
+    sheet.releaseFront(front)
+    sheet.dispose()
   })
 
   it('reports a rect that spans both components rather than only the larger one', async () => {
@@ -190,9 +249,9 @@ describe('holes and components survive into the built front (§8.2, §11)', () =
     if (GlError.is(handle) || SheetError.is(handle) || isAborted(handle)) {
       return expect.fail(`source() refused: ${String(handle)}`)
     }
-    // The silhouette box spans x = 8+PAD .. 88+PAD — both squares — not 8+PAD .. 40+PAD or
-    // 56+PAD .. 88+PAD.
-    expect(handle.rect.w).toBeGreaterThan(70)
+    // The silhouette box spans the whole composite, x in [32, 128) — both squares — not just one
+    // of them, which would be only COMP_W (32) wide.
+    expect(handle.rect.w).toBeGreaterThan(2 * COMP_W + GAP - 10)
     sheet.dispose()
   })
 })

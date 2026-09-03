@@ -620,10 +620,15 @@ describe('task 12 fix round 1 (findings 1, 2, 3)', () => {
       sheet.dispose()
       return
     }
-    // renderFront's own one draw call, and nothing from either field pass — a regression that
-    // stopped reusing source()'s own work would push this back into double digits (pass A alone
-    // is `2 * (schedule.length + 1) + 1`).
-    expect(draws).toBe(1)
+    // renderFront's own one draw, plus the hull field's own pass A (design 2026-09-02 §2) — and
+    // nothing from the tight or loose passes, which are consumed from `source()`'s own build. The
+    // count is exact rather than approximate: the hull field is the built size, 128x128, so
+    // `scheduleFor` (gl-sdf.ts:295) gives `levels = ceil(log2(128)) = 7`, a schedule of
+    // `[64,32,16,8,4,2,1]` plus the extra unit pass = 8 entries, and pass A therefore spends
+    // `2 * (8 + 1) + 1 = 19` draws (gl-sdf.ts:407). 19 + renderFront's 1 = 20. A regression that
+    // stopped reusing `source()`'s tight and loose fields would add pass A a second time and pass B
+    // on top, which this exact count still catches.
+    expect(draws).toBe(20)
 
     sheet.releaseFront(front)
     sheet.dispose()

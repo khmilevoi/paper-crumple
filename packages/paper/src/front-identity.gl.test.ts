@@ -20,17 +20,23 @@
  * different surface: the **front**, which is a composite the filter's output is drawn into, not
  * the filter's own output.
  *
- * Every `edgeMode: 'hull'` call through the public `build()` passes `paperField: null`
- * unconditionally (`sheet.ts`'s `build()`), which forces `uEdgeMode == 2` in the shader regardless
- * of the caller's `minDist`/`maxDist`. At `uEdgeMode == 2` the coverage mask is derived directly
- * from the artwork's own alpha, with no growth margin (`paper-shader.ts`, the `uEdgeMode == 2`
- * branch: "Hull at `minDist = maxDist = 0`: the sheet is the artwork itself, so the mask is the
- * alpha read as a distance"). `main()`'s final `outColor` is `premul / outA`, which is exactly
- * `(0, 0, 0, 0)` wherever that mask is zero — i.e. wherever the source's own alpha was zero. So the
- * front, by design, does not preserve RGB outside the artwork's own opaque silhouette: it composites
- * the artwork onto (present but see-through) nothing, and there is nothing there to read RGB from.
- * A future reader must not "fix" this file's partitioned assertions back into a full-rect
- * byte-for-byte claim — that claim is false at this surface, and true only at Pool A.
+ * `build()` supplies a real `paperField` at the default `hull` knobs (`sheet.ts`'s `build()`), so
+ * the front compared here is `uEdgeMode == 1` — not the `uEdgeMode == 2` this file was originally
+ * written against, when `build()` still passed `paperField: null` unconditionally. At
+ * `uEdgeMode == 1` the coverage mask is the hull polygon's own distance field rather than the
+ * artwork's alpha, and the sheet follows that polygon, which sits *outside* the artwork's
+ * silhouette. So an alpha-0 texel of A is no longer uniformly empty: the ones the sheet reaches
+ * carry opaque paper, and only the ones it does not reach are still exactly `(0, 0, 0, 0)`. Which
+ * of the two any given texel lands in depends on the build size, because `maxDist` is a
+ * `reference: 'sprite-px'` knob and scales as `value * front.h / KNOB_REFERENCE_PX`
+ * (`paper-renderer.ts:42-45`) — so the two tests below measure their split rather than deriving it,
+ * and they measure different splits.
+ *
+ * The front still does not preserve the artwork's RGB under zero alpha, and a future reader must
+ * still not "fix" this file's partitioned assertions back into a full-rect byte-for-byte claim.
+ * That claim is now false for a second, independent reason: it was already false because the
+ * alpha-0 texels did not carry the source's RGB, and it is now *also* false because most of them
+ * do not read `(0, 0, 0, 0)` either — they read paper.
  */
 import { afterEach, describe, expect, it } from 'vitest'
 import { GlError, SheetError, isAborted } from '@paper-crumple/core'
@@ -167,12 +173,24 @@ function pickTexels(bytes: ArrayLike<number>, texels: readonly number[]): number
 describe("the front's artwork rect through readPixels, partitioned by alpha", () => {
   /**
    * Ruling 1: the oracle is split by the *source's own* alpha, not compared whole against the raw
-   * source bytes. At `uEdgeMode == 2` (see the file header) `outColor` is exactly `(0,0,0,0)`
-   * wherever the source's alpha was 0, and byte-identical to the source wherever it was 255 — this
-   * fixture's alpha is only ever 0 or 255 (`sourceBytes` above), so the two classes partition every
-   * texel of A and nothing is left unasserted. Measured: of the 1600 texels in the 40x40 artwork
-   * rect, all 784 alpha-255 texels match the source byte for byte and all 816 alpha-0 texels read
-   * exactly `(0,0,0,0)`, with zero exceptions in either class.
+   * source bytes. This fixture's alpha is only ever 0 or 255 (`sourceBytes` above), so the two
+   * classes partition every texel of A.
+   *
+   * The alpha-255 half is untouched by the move to `uEdgeMode == 1` (see the file header): an
+   * opaque texel still has `sheetCov == 1`, so `front = mix(sheet, img.rgb, 1.0)`
+   * (`paper-shader.ts:1693`) and the artwork's own bytes survive. The alpha-0 half moved, and is
+   * re-measured rather than derived. Measured, of the 1600 texels in the 40x40 artwork rect: all
+   * 784 alpha-255 texels still match the source byte for byte, and all 816 alpha-0 texels now read
+   * opaque paper — at this build the alpha-0 class does not split at all, the sheet covers it
+   * entire.
+   *
+   * That it does not split is arithmetic rather than luck, which is why the counts below are pinned
+   * separately instead of summed into one. `exact: true` puts the 40x40 artwork 1:1 into the
+   * 128x128 front; the fixture's opaque silhouette is `x, y in [6, 34)`, so the artwork rect's own
+   * corner — its farthest point from that silhouette — is `sqrt(6^2 + 6^2) ~= 8.49` px away, while
+   * the default `maxDist` of 72 reference px scales to `72 * 128 / 1000 = 9.216` front px. The
+   * sheet outreaches the rect, so nothing inside it is left clear. Test 2 below builds at
+   * `front.h = 32`, where that same knob scales to 2.3 px, and there the class does split.
    */
   it('reads back every texel of A unchanged where opaque, and (0,0,0,0) where transparent', async () => {
     const ctx = open()
@@ -206,10 +224,27 @@ describe("the front's artwork rect through readPixels, partitioned by alpha", ()
     expect(firstDifferencesAt(got, want, opaque, handle.artwork.w)).toEqual([])
     expect(pickTexels(got, opaque)).toEqual(pickTexels(want, opaque))
 
-    const zero = new Array(empty.length * 4).fill(0)
-    const wantZero = new Uint8Array(got.length)
-    expect(firstDifferencesAt(got, wantZero, empty, handle.artwork.w)).toEqual([])
-    expect(pickTexels(got, empty)).toEqual(zero)
+    // Under `uEdgeMode == 1` the alpha-0 class is no longer uniformly `(0,0,0,0)`: the texels the
+    // hull polygon's sheet covers carry opaque paper, and only the ones it does not reach stay
+    // clear. Measured at this build the sheet covers the whole artwork rect, so `clear` is empty —
+    // Ruling 1 above shows why that is arithmetic, not luck. Both counts are measured and pinned
+    // individually rather than summed, so a hull that silently stopped reaching inside the artwork
+    // rect would fail here rather than widen under a stale comment.
+    const covered = empty.filter((t) => got[t * 4 + 3] === 255)
+    const clear = empty.filter((t) => got[t * 4 + 3] === 0)
+    expect(covered.length).toBe(816)
+    expect(clear.length).toBe(0)
+    expect(covered.length + clear.length).toBe(empty.length)
+    // Paper, not a stray copy of the artwork: the default `paperColor` (#f7f4ed) reads high on all
+    // three channels. Measured, the per-channel minimum over all 816 covered texels is
+    // (241, 238, 231), so the bound below clears it by ~90 counts; the artwork's own RGB at the
+    // sixteen texels sampled (row 0 of the rect) is `g = 40, b = 17`, nowhere near it.
+    for (const t of covered.slice(0, 16)) {
+      expect(got[t * 4]).toBeGreaterThan(150)
+      expect(got[t * 4 + 1]).toBeGreaterThan(150)
+      expect(got[t * 4 + 2]).toBeGreaterThan(150)
+    }
+    expect(pickTexels(got, clear)).toEqual(new Array(clear.length * 4).fill(0))
 
     sheet.releaseFront(front)
     sheet.dispose()
@@ -276,10 +311,32 @@ describe("the front's artwork rect through readPixels, partitioned by alpha", ()
     expect(firstDifferencesAt(got, reference, opaque, handle.artwork.w)).toEqual([])
     expect(pickTexels(got, opaque)).toEqual(pickTexels(reference, opaque))
 
-    const zero = new Array(empty.length * 4).fill(0)
-    const wantZero = new Uint8Array(got.length)
-    expect(firstDifferencesAt(got, wantZero, empty, handle.artwork.w)).toEqual([])
-    expect(pickTexels(got, empty)).toEqual(zero)
+    // Under `uEdgeMode == 1` the reference's alpha-0 class is no longer uniformly `(0,0,0,0)` on
+    // the front. It splits three ways here, not two as in test 1: `front.h = 32` scales the default
+    // `maxDist` of 72 reference px to only `72 * 32 / 1000 = 2.3` px, so the sheet reaches a little
+    // way past the silhouette and stops well inside the artwork rect, leaving a covered class, a
+    // still-clear class, and the polygon's own antialiased edge in between. All three counts are
+    // measured and pinned individually rather than summed, so a hull that stopped reaching inside
+    // the rect, or a feathered edge that grew, would fail here rather than widen under a stale
+    // comment. The feathered class is pinned by count only and its bytes are left unasserted,
+    // exactly as Ruling 3 leaves the reference's own partial-alpha ring unasserted, and for the
+    // same reason: no oracle in this file predicts them.
+    const covered = empty.filter((t) => got[t * 4 + 3] === 255)
+    const clear = empty.filter((t) => got[t * 4 + 3] === 0)
+    const feathered = empty.filter((t) => got[t * 4 + 3] !== 0 && got[t * 4 + 3] !== 255)
+    expect(covered.length).toBe(37)
+    expect(clear.length).toBe(276)
+    expect(feathered.length).toBe(55)
+    expect(covered.length + clear.length + feathered.length).toBe(empty.length)
+    // Paper, not a stray copy of the artwork: the default `paperColor` (#f7f4ed) reads high on all
+    // three channels. Measured, the per-channel minimum over all 37 covered texels is
+    // (242, 239, 232), so the bound below clears it by ~90 counts.
+    for (const t of covered.slice(0, 16)) {
+      expect(got[t * 4]).toBeGreaterThan(150)
+      expect(got[t * 4 + 1]).toBeGreaterThan(150)
+      expect(got[t * 4 + 2]).toBeGreaterThan(150)
+    }
+    expect(pickTexels(got, clear)).toEqual(new Array(clear.length * 4).fill(0))
 
     sheet.releaseFront(front)
     sheet.dispose()
