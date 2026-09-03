@@ -988,4 +988,95 @@ describe('the hull polygon as a real paper field (design 2026-09-02, §2-§3)', 
     sheet.releaseFront(front)
     sheet.dispose()
   })
+
+  /**
+   * Fix round 1, finding 1: the test above runs at `sx === sy === 1` (a square 64x64 source at
+   * `sdfRes` 128 gives a 128x128 source field, and a 128x128 request gives a 128x128 field), so it
+   * cannot see the one real judgement call in `build()`'s step 6b — that the hull's points scale by
+   * `sx = field.w / srcField.w` and `sy = field.h / srcField.h` SEPARATELY. A swapped or inverted
+   * pair passes it unchanged.
+   *
+   * `sprite()` is 48x32, so `srcField` is 128x86 while a 128x128 request gives a 128x128 field:
+   * `sx = 1`, `sy = 128 / 86 ≈ 1.488`. Both mistakes were run against this test to check it
+   * actually catches them, rather than assumed to be caught:
+   *   correct   bbox [28,26,104,103], centre (66.0, 64.5) — passes
+   *   swapped   (`field.w / srcField.h`, `field.h / srcField.w`) — the mask slides sideways;
+   *             the x centre is off by 13, the bound below is 6
+   *   inverted  (`srcField.w / field.w`, `srcField.h / field.h`) — the mask shrinks towards the
+   *             origin; the y centre is off by 14, the bound below is 6
+   * Both mutations leave the square-source test above GREEN, which is precisely why this one
+   * exists.
+   */
+  it('scales the hull mask per axis when the source and the request disagree on aspect', async () => {
+    const ctx = open()
+    const sheet = paperSheet()
+    sheet.mount(ctx)
+    const bitmap = await sprite() // 48x32 — the source field is 128x86, this build's is 128x128
+    const handle = await sheet.source(bitmap, { maxSize: 128, exact: false })
+    bitmap.close()
+    expect(GlError.is(handle) || SheetError.is(handle) || isAborted(handle)).toBe(false)
+    if (GlError.is(handle) || SheetError.is(handle) || isAborted(handle)) return
+
+    const front = sheet.build(handle, { w: 128, h: 128 }, defaultsFor('hull') as never)
+    expect(front instanceof Error, String((front as Error)?.message)).toBe(false)
+    if (front instanceof Error) return
+
+    // The source aspect is kept end to end, so `sprite()`'s own ellipse (radii `w/3` and `h/3`
+    // about the source's centre) is an ellipse about the FRONT's centre with these radii, and the
+    // artwork is centred by `build()`'s own step 8 rect. `+ 2` clears the upsample ramp and the
+    // shader's ~1px antialias, exactly as in the test above.
+    const got = readRect(ctx, front.texture, 0, 0, front.width, front.height)
+    const rx = 16 * (handle.artwork.w / 48) + 2
+    const ry = (32 / 3) * (handle.artwork.h / 32) + 2
+    const cx = front.width / 2
+    const cy = front.height / 2
+    let x0 = front.width
+    let y0 = front.height
+    let x1 = -1
+    let y1 = -1
+    const outside: number[] = []
+    for (let y = 0; y < front.height; y++) {
+      for (let x = 0; x < front.width; x++) {
+        if (got[(y * front.width + x) * 4 + 3] <= 200) continue
+        if (x < x0) x0 = x
+        if (x > x1) x1 = x
+        if (y < y0) y0 = y
+        if (y > y1) y1 = y
+        if (((x + 0.5 - cx) / rx) ** 2 + ((y + 0.5 - cy) / ry) ** 2 > 1) {
+          outside.push(y * front.width + x)
+        }
+      }
+    }
+
+    // Mode 1 still reached, and the paper is paper — the same oracle as the test above, restated
+    // for an elliptical silhouette.
+    expect(outside.length).toBeGreaterThan(0)
+    for (const t of outside.slice(0, 16)) {
+      expect(got[t * 4]).toBeGreaterThan(150)
+      expect(got[t * 4 + 1]).toBeGreaterThan(150)
+      expect(got[t * 4 + 2]).toBeGreaterThan(150)
+    }
+
+    // The mask landed CENTRED. The hull is centred on the artwork and the artwork is centred in
+    // the front, so the paper's own bounding box must be centred too — and this is what a swapped
+    // `sx`/`sy` cannot produce: swapping multiplies x by 1.488 and y by 1 about the field's origin,
+    // which slides the whole mask right and up rather than rescaling it in place.
+    expect(Math.abs((x0 + x1) / 2 - cx)).toBeLessThan(6)
+    expect(Math.abs((y0 + y1) / 2 - cy)).toBeLessThan(6)
+
+    // It grew OUTWARD on both axes, which is the property the two centre bounds above cannot see:
+    // a mask that landed centred but at the wrong scale would still pass them.
+    expect((x1 - x0) / 2).toBeGreaterThan(rx)
+    expect((y1 - y0) / 2).toBeGreaterThan(ry)
+
+    // And it is the polygon the sheet grew to, not the frame: nothing reaches any edge of the
+    // front. A swapped `sx` overruns the right edge, so this catches that mistake a second time.
+    expect(x0).toBeGreaterThan(0)
+    expect(y0).toBeGreaterThan(0)
+    expect(x1).toBeLessThan(front.width - 1)
+    expect(y1).toBeLessThan(front.height - 1)
+
+    sheet.releaseFront(front)
+    sheet.dispose()
+  })
 })

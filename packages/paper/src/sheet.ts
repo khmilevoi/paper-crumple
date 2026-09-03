@@ -1241,9 +1241,17 @@ export function paperSheet(options?: PaperSheetOptions): PaperSheet {
       tight,
       loose,
       // The hull polygon's own field (design 2026-09-02 §3): non-null exactly when the handle
-      // carries a polygon hull with at least one drawable component, which is what makes
-      // `paper-renderer.ts:169` select `uEdgeMode = 1`. `use-alpha` and an all-dropped hull keep
-      // `null` and so keep mode 2, bit-identical to before this change.
+      // carries a polygon hull with at least one drawable component — in `hull` AND `both` modes
+      // alike, since step 6b above reads the handle, never `edgeMode`. In `hull` mode that is what
+      // makes `paper-renderer.ts:169` select `uEdgeMode = 1`. `use-alpha` and an all-dropped hull
+      // keep `null`, and so keep mode 2, bit-identical to before this change.
+      //
+      // `both` mode changes here too, and deliberately: `paper-renderer.ts:168-172` already
+      // substitutes this field for BOTH `tightField` and `looseTexture` when `edgeMode === 'both'`
+      // (its own port of the ancestor spike's `edge.js:104-110`), so the silhouette becomes the
+      // polygon's contour rather than the tight/loose union. That path was written but never
+      // exercised, because `build()` hardcoded `null` until now. Growing `both`'s sheet extent to
+      // match is Task 4's concern, not this one's — this is not a "no change" claim for `both`.
       paperField,
       edgeMode,
       values: knobValues,
