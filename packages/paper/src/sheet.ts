@@ -1174,7 +1174,11 @@ export function paperSheet(options?: PaperSheetOptions): PaperSheet {
     // see this file's own row-order note at lines 457-472).
     const srcField = dimsForLongSide(handle.sdfRes, handle.srcW, handle.srcH, 2)
     let paperField: Field | null = fieldRecord.paperField
-    if (paperField === null && handle.hull.kind === 'polygons' && hullComponentCount(handle.hull) > 0) {
+    if (
+      paperField === null &&
+      handle.hull.kind === 'polygons' &&
+      hullComponentCount(handle.hull) > 0
+    ) {
       const bytes = fillHullMask(
         handle.hull,
         field.w,
