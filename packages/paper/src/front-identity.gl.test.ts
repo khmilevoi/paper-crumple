@@ -184,13 +184,20 @@ describe("the front's artwork rect through readPixels, partitioned by alpha", ()
    * opaque paper — at this build the alpha-0 class does not split at all, the sheet covers it
    * entire.
    *
-   * That it does not split is arithmetic rather than luck, which is why the counts below are pinned
-   * separately instead of summed into one. `exact: true` puts the 40x40 artwork 1:1 into the
-   * 128x128 front; the fixture's opaque silhouette is `x, y in [6, 34)`, so the artwork rect's own
-   * corner — its farthest point from that silhouette — is `sqrt(6^2 + 6^2) ~= 8.49` px away, while
-   * the default `maxDist` of 72 reference px scales to `72 * 128 / 1000 = 9.216` front px. The
-   * sheet outreaches the rect, so nothing inside it is left clear. Test 2 below builds at
-   * `front.h = 32`, where that same knob scales to 2.3 px, and there the class does split.
+   * That it does not split holds with a wide margin rather than by a coincidence of two close
+   * numbers, and the reason is a change of framing between `source()` and `build()`, not the knob
+   * arithmetic. The hull is traced in `source()`, at *that* call's own front size: under
+   * `exact: true` that is `exactFrontLongSide(40, p) = 49` (`sheet.ts:782`), not the 128 this test
+   * later builds at. `build()` then carries the field over in **uv** space — `artworkUv` is a flat
+   * `p` inset, independent of the built size (`sheet.ts:1107-1112`) — while `renderFront` places
+   * the artwork in **pixel** space, `round((size - artwork) / 2)` (`sheet.ts:1258-1263`). At
+   * `size = 128` those two framings diverge hard. Measured on this very build: the artwork rect
+   * lands at `[44, 84)`, while the sheet spans `x in [23, 103]` and `y in [21, 105]` — an overhang
+   * of roughly 20px on every side, so every texel of the rect is covered many times over.
+   *
+   * Test 2 below is not the same situation, and there the class does split: `maxSize: 32` with
+   * `exact: false` makes `source()`'s own front the build size, so the two framings coincide and
+   * `maxDist` scales to `72 * 32 / 1000 = 2.3` px.
    */
   it('reads back every texel of A unchanged where opaque, and (0,0,0,0) where transparent', async () => {
     const ctx = open()
@@ -227,9 +234,12 @@ describe("the front's artwork rect through readPixels, partitioned by alpha", ()
     // Under `uEdgeMode == 1` the alpha-0 class is no longer uniformly `(0,0,0,0)`: the texels the
     // hull polygon's sheet covers carry opaque paper, and only the ones it does not reach stay
     // clear. Measured at this build the sheet covers the whole artwork rect, so `clear` is empty —
-    // Ruling 1 above shows why that is arithmetic, not luck. Both counts are measured and pinned
-    // individually rather than summed, so a hull that silently stopped reaching inside the artwork
-    // rect would fail here rather than widen under a stale comment.
+    // Ruling 1 above gives the mechanism, and how much room there is to spare. Both counts are
+    // pinned individually rather than summed so the split is stated outright rather than implied.
+    // Be honest about what the pair can catch, though: the sheet overhangs the rect by ~20px on
+    // every side, so a hull that merely lost some reach would not move these numbers at all. Only
+    // one that stopped rendering, or shrank past that whole overhang, flips `clear` off 0. The
+    // tight bound on the sheet's own edge is test 2's, where the two framings coincide.
     const covered = empty.filter((t) => got[t * 4 + 3] === 255)
     const clear = empty.filter((t) => got[t * 4 + 3] === 0)
     expect(covered.length).toBe(816)
