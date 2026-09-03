@@ -174,7 +174,12 @@ export const AbortedError = taggedError('AbortedError', 'ERR_ABORTED')
 export const MotionError = taggedError('MotionError', 'ERR_MOTION')
 /** §10.1 — a pose index outside `0 … poseCount - 1` for the pack in hand. */
 export const PoseError = taggedError('PoseError', 'ERR_POSE')
-/** §8.5 — `build()` was called with a handle whose artwork left the scratch pool. */
+/**
+ * §8.5 — `build()` was called with a handle whose artwork left the scratch pool; or, §6.3, one
+ * whose hull was traced at other hull-tier knob values than the build asks for. One class for
+ * both, because the recovery is one row of §8.5's table: the supplier, `source()` again (at the
+ * current knobs, `SourceOptions.knobs`), then the rebuild — and only the stage can walk it.
+ */
 export const SourceExpiredError = taggedError('SourceExpiredError', 'ERR_SOURCE_EXPIRED')
 /** §4.0.1 — the element already carries a non-2D context, or already has a live view. */
 export const ViewError = taggedError('ViewError', 'ERR_VIEW')

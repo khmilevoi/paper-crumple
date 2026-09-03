@@ -9,8 +9,10 @@ interface RowParts {
 }
 
 /**
- * One row: a heading, the control(s) `body` holds, and the one-line note the brief's Step 1
- * table asks for — rendered so a reader sees *why* the control exists, not just what it does.
+ * One row: a heading and the control(s) `body` holds. The explanatory note the brief's Step 1
+ * table asks for is attached as the heading's `title` — a native hover tooltip — rather than
+ * rendered inline, so a reader sees *why* the control exists without every row paying for a
+ * permanently visible paragraph.
  */
 function row(label: string, note: string): RowParts {
   const root = document.createElement('div')
@@ -19,16 +21,12 @@ function row(label: string, note: string): RowParts {
   const head = document.createElement('div')
   head.className = 'config-head'
   head.textContent = label
+  head.title = note
   root.append(head)
 
   const body = document.createElement('div')
   body.className = 'config-body'
   root.append(body)
-
-  const noteEl = document.createElement('p')
-  noteEl.className = 'config-note'
-  noteEl.textContent = note
-  root.append(noteEl)
 
   return { root, body }
 }
@@ -42,19 +40,23 @@ function radioRow<T extends string>(
   onPick: (v: T) => void,
 ): HTMLElement {
   const { root, body } = row(label, note)
+  const group = document.createElement('div')
+  group.className = 'segmented'
+  group.id = name
+  group.setAttribute('role', 'radiogroup')
+  group.setAttribute('aria-label', label)
   for (const opt of options) {
-    const wrap = document.createElement('label')
-    const input = document.createElement('input')
-    input.type = 'radio'
-    input.name = name
-    input.value = opt
-    input.checked = opt === value
-    input.addEventListener('change', () => {
-      if (input.checked) onPick(opt)
-    })
-    wrap.append(input, document.createTextNode(` ${opt}`))
-    body.append(wrap)
+    const btn = document.createElement('button')
+    btn.type = 'button'
+    btn.className = 'segmented-btn'
+    btn.textContent = opt
+    btn.setAttribute('role', 'radio')
+    btn.setAttribute('aria-checked', String(opt === value))
+    if (opt === value) btn.classList.add('segmented-btn--active')
+    btn.addEventListener('click', () => onPick(opt))
+    group.append(btn)
   }
+  body.append(group)
   return root
 }
 
@@ -84,21 +86,65 @@ function packsRow(
   onPick: (next: readonly BucketName[]) => void,
 ): HTMLElement {
   const { root, body } = row('packs', note)
+  const group = document.createElement('div')
+  group.className = 'segmented'
+  group.setAttribute('role', 'group')
+  group.setAttribute('aria-label', 'packs')
   for (const name of BUCKET_NAMES) {
-    const wrap = document.createElement('label')
-    const input = document.createElement('input')
-    input.type = 'checkbox'
-    input.checked = value.includes(name)
-    input.addEventListener('change', () => {
-      const next = input.checked
-        ? BUCKET_NAMES.filter((b) => value.includes(b) || b === name)
-        : value.filter((b) => b !== name)
+    const active = value.includes(name)
+    const btn = document.createElement('button')
+    btn.type = 'button'
+    btn.className = 'segmented-btn'
+    btn.textContent = name
+    btn.setAttribute('aria-pressed', String(active))
+    if (active) btn.classList.add('segmented-btn--active')
+    btn.addEventListener('click', () => {
+      const next = active
+        ? value.filter((b) => b !== name)
+        : BUCKET_NAMES.filter((b) => value.includes(b) || b === name)
       onPick(next)
     })
-    wrap.append(input, document.createTextNode(` ${name}`))
-    body.append(wrap)
+    group.append(btn)
   }
+  body.append(group)
   return root
+}
+
+/** Paints the already-covered part of a range track, per styles.css's `--fill-pct` contract. */
+function setFillPct(rangeInput: HTMLInputElement, min: number, max: number, value: number): void {
+  const pct = max > min ? ((value - min) / (max - min)) * 100 : 0
+  rangeInput.style.setProperty('--fill-pct', `${pct}%`)
+}
+
+/**
+ * Wires a number input and its slider duplicate to each other: dragging the slider updates the
+ * number (and vice versa), `onPick` fires from either, and the slider's `--fill-pct` fill tracks
+ * whichever one moved. Shared by every `numberRow` call instead of repeating the wiring three
+ * times.
+ */
+function syncNumberAndRange(
+  numberInput: HTMLInputElement,
+  rangeInput: HTMLInputElement,
+  min: number,
+  max: number,
+  onPick: (v: number) => void,
+): void {
+  setFillPct(rangeInput, min, max, Number(rangeInput.value))
+
+  rangeInput.addEventListener('input', () => {
+    const v = Number(rangeInput.value)
+    numberInput.value = rangeInput.value
+    setFillPct(rangeInput, min, max, v)
+    onPick(v)
+  })
+
+  numberInput.addEventListener('change', () => {
+    const v = Number(numberInput.value)
+    if (Number.isNaN(v)) return
+    rangeInput.value = String(v)
+    setFillPct(rangeInput, min, max, v)
+    onPick(v)
+  })
 }
 
 function numberRow(
@@ -108,19 +154,29 @@ function numberRow(
   onPick: (v: number) => void,
 ): HTMLElement {
   const { root, body } = row(label, note)
-  const input = document.createElement('input')
-  input.type = 'number'
-  input.className = 'config-input'
-  input.min = String(o.min)
-  input.max = String(o.max)
-  if (o.step !== undefined) input.step = String(o.step)
-  input.value = String(o.value)
-  input.addEventListener('change', () => {
-    const v = Number(input.value)
-    if (Number.isNaN(v)) return
-    onPick(v)
-  })
-  body.append(input)
+  const step = o.step ?? 1
+
+  const numberInput = document.createElement('input')
+  numberInput.type = 'number'
+  numberInput.className = 'range-number'
+  numberInput.min = String(o.min)
+  numberInput.max = String(o.max)
+  numberInput.step = String(step)
+  numberInput.value = String(o.value)
+
+  const rangeInput = document.createElement('input')
+  rangeInput.type = 'range'
+  rangeInput.min = String(o.min)
+  rangeInput.max = String(o.max)
+  rangeInput.step = String(step)
+  rangeInput.value = String(o.value)
+
+  syncNumberAndRange(numberInput, rangeInput, o.min, o.max, onPick)
+
+  const wrap = document.createElement('div')
+  wrap.className = 'range-row'
+  wrap.append(rangeInput, numberInput)
+  body.append(wrap)
   return root
 }
 
@@ -228,6 +284,14 @@ export function createConfigPanel(
     )
 
     root.append(statusEl)
+
+    // The sidebar's "01 Source" header carries a short mono summary of the live factory options,
+    // same as every `panel.ts`-generated section's own `.accordion-summary` — `edgeMode` is the
+    // one option that reshapes the whole knob set, `packs` the one most readers will change next.
+    const summaryEl = document.getElementById('source-summary')
+    if (summaryEl !== null) {
+      summaryEl.textContent = `${current.edgeMode} · ${current.packs.join('+')}`
+    }
   }
 
   render()

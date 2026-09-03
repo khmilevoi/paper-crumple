@@ -18,7 +18,7 @@
  * defaulting to `tiles: null`. The knob, the uniform and the sampler are wired throughout, so
  * supplying a tile later is a value change and not a redesign.
  */
-import { AssetError, GlError, KNOB_REFERENCE_PX } from '@paper-crumple/core'
+import { AssetError, GlError, KNOB_REFERENCE_PX, PackError } from '@paper-crumple/core'
 import type {
   Aborted,
   DrawArgs,
@@ -46,7 +46,20 @@ import type { Pack } from './pack.js'
 import type { PackModule } from './pack-module.js'
 import { createPackStore } from './pack-store.js'
 import type { PackStore } from './pack-store.js'
+import { resolveSchedule } from './schedule.js'
+import type { PoseSchedule, PoseScheduleInput } from './schedule.js'
 import { DEBUG_VIEWS, SHEET_FS, SHEET_VS } from './shaders.js'
+
+/** One shape for the two places a schedule and a pack disagree: `setPoses` now, `load` later. */
+function cannotPlay(
+  bucket: string,
+  cause: InstanceType<typeof PackError>,
+): InstanceType<typeof PackError> {
+  return new PackError(
+    `bakedMotion: bucket '${bucket}' cannot play the pose schedule: ${cause.message}`,
+    { cause },
+  )
+}
 
 /** Alpha 0.5 is "no grain": `grainK = 1 + (0.5 - 0.5) * uGrain` is exactly 1 (`material.js:120`). */
 const NEUTRAL_FIBRE = new Uint8Array([128, 128, 255, 128])
@@ -63,8 +76,42 @@ export interface BakedFit extends MotionFit {
 
 export interface BakedClip extends MotionClip {
   readonly frameCount: number
+  /**
+   * **Live.** The source's `poses` override while one is set, the manifest's own key frames
+   * otherwise. The core reads it at every draw and every run (§5.3, `MotionClip`), so a
+   * `setPoses` after `load()` reaches every clip already handed out without a re-`load`.
+   */
   readonly keyFrames: readonly number[]
+  /** Live too: the override's dwell table, or absent — `DWELL_MS` — for the manifest schedule. */
+  readonly dwells?: readonly number[]
   readonly bucket: string
+}
+
+/**
+ * What `bakedMotion()` returns: the `MotionSource` §5.3 specifies, plus the three members a
+ * consumer editing the pose schedule at runtime needs. A consumer typing the source as
+ * `MotionSource` sees none of them and loses nothing.
+ */
+export interface BakedMotion extends MotionSource<MotionLookKnobs, BakedFit, BakedClip> {
+  /**
+   * The packs resident right now, in the order they were supplied — what a pose editor reads
+   * `frameCount`, `frames[].index` and the manifest's own `keyFrames` from. Empty until the first
+   * `load()` resolves; a bucket leaves when its last clip is released.
+   */
+  packs(): readonly Pack[]
+  /** The schedule every clip plays, or `null`: each pack's own manifest, at `DWELL_MS`. */
+  readonly poses: PoseSchedule | null
+  /**
+   * Plays `input` on every clip — resident, and still to load — in place of the manifests' key
+   * frames; `null` restores them. Validated now against every resident pack, under
+   * `setKeyFrames`'s rules plus a dwell per pose, and again against each pack that arrives later,
+   * whose `load()` then returns the `PackError` instead of a clip. A failed call changes nothing.
+   *
+   * The change is read at the next draw and the next run. A run in flight keeps the plan it
+   * started with and renders its remaining poses through the new key frames, so a consumer
+   * stops it first (`stage.stop({ all: true })`) and redraws at `'flat'`.
+   */
+  setPoses(input: PoseScheduleInput | null): InstanceType<typeof PackError> | undefined
 }
 
 export interface BakedMotionOptions {
@@ -85,9 +132,7 @@ interface Mounted {
   readonly fibre: Texture
 }
 
-export function bakedMotion(
-  o: BakedMotionOptions,
-): MotionSource<MotionLookKnobs, BakedFit, BakedClip> {
+export function bakedMotion(o: BakedMotionOptions): BakedMotion {
   const store: PackStore = createPackStore({
     packs: o.packs,
     ...(o.fetch ? { fetch: o.fetch } : {}),
@@ -96,6 +141,17 @@ export function bakedMotion(
   const meshes = new Map<string, SheetMesh>()
   let mounted: Mounted | null = null
   let disposed = false
+  /** The override every clip's `keyFrames` and `dwells` getters read through. */
+  let poses: PoseSchedule | null = null
+
+  function residentPacks(): readonly Pack[] {
+    const out: Pack[] = []
+    for (const m of o.packs) {
+      const pack = store.get(m.bucket)
+      if (pack !== undefined) out.push(pack)
+    }
+    return out
+  }
 
   // A bucket losing its last reference takes its mesh and its clip with it.
   store.onEvict((bucket) => {
@@ -198,12 +254,30 @@ export function bakedMotion(
       if (pack instanceof Error) return pack
       if (typeof pack === 'symbol') return pack
 
+      // An override set while this pack was not resident is checked against it here, where a
+      // `PackError` has a legal slot in `LoadError`. The reference `acquire` took is handed back:
+      // a caller that receives an Error receives no clip, and will never call `release`.
+      if (poses !== null) {
+        const checked = resolveSchedule(poses, pack.frameCount)
+        if (PackError.is(checked)) {
+          store.release(fit.bucket)
+          return cannotPlay(fit.bucket, checked)
+        }
+      }
+
       const existing = clips.get(fit.bucket)
       if (existing) return existing
       const clip: BakedClip = {
         bucket: fit.bucket,
         frameCount: pack.frameCount,
-        keyFrames: pack.keyFrames,
+        // Getters, not snapshots: the core reads `keyFrames` at every draw and `dwells` at every
+        // run, which is what lets `setPoses` reach a clip that is already in a sprite record.
+        get keyFrames() {
+          return poses?.keyFrames ?? pack.keyFrames
+        },
+        get dwells() {
+          return poses?.dwells
+        },
       }
       clips.set(fit.bucket, clip)
       return clip
@@ -360,6 +434,29 @@ export function bakedMotion(
 
     release(clip) {
       store.release(clip.bucket)
+    },
+
+    packs: residentPacks,
+
+    get poses() {
+      return poses
+    },
+
+    setPoses(input) {
+      if (input === null) {
+        poses = null
+        return undefined
+      }
+      // No pack resident yet means no slot bound to check against, so the structural rules run
+      // alone here — `load()` checks the bound against each pack as it arrives.
+      const resolved = resolveSchedule(input, Number.POSITIVE_INFINITY)
+      if (PackError.is(resolved)) return resolved
+      for (const pack of residentPacks()) {
+        const checked = resolveSchedule(input, pack.frameCount)
+        if (PackError.is(checked)) return cannotPlay(pack.bucket, checked)
+      }
+      poses = resolved
+      return undefined
     },
 
     dispose() {

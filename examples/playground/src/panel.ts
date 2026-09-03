@@ -1,6 +1,6 @@
 import * as pc from '@paper-crumple/core'
 import type { KnobDescriptor, NumberKnob, IntKnob } from '@paper-crumple/core'
-import { labelFor, GROUP_ORDER } from './labels'
+import { labelFor, GROUP_ORDER, tabFor } from './labels'
 import type { BuiltStage } from './config'
 
 export type KnobValues = Readonly<Record<string, string | number | boolean>>
@@ -78,11 +78,23 @@ function baseRow(key: string): RowParts {
   return { root, head, body }
 }
 
+/**
+ * The design's custom track+fill+thumb (`.range-track-wrap` > `.range-track` > `.range-fill` +
+ * `.range-thumb`), backed by a real `<input type="range">` kept for free keyboard support, pointer
+ * drag and native `input` events — reimplementing drag physics on divs would be strictly more risk
+ * for the same result. The native input is stacked on top of the hand-drawn track, fully
+ * transparent (`.range-track-wrap input[type='range']` in styles.css), so it captures every
+ * pointer/keyboard interaction while the divs underneath do the painting. `.range-number` is a
+ * real editable `<input type="number">` (not a readout span) kept in sync with the range in both
+ * directions; either one changing writes through the SAME path — `bindRow()` below still only ever
+ * listens on `.knob-input` (the range), so a number edit re-dispatches a real `input` event on the
+ * range rather than duplicating the write-back logic.
+ */
 function numberControl(key: string, k: NumberKnob | IntKnob, value: number): HTMLElement {
   // IntKnob declares no `step` at all — not even `undefined` — so the fallback has to be picked
   // under a `kind` narrow rather than by reading `k.step` on the unnarrowed union.
   const step = k.kind === 'number' ? (k.step ?? (k.max - k.min) / 200) : 1
-  const { root, body } = baseRow(key)
+  const { root, head, body } = baseRow(key)
 
   const range = document.createElement('input')
   range.type = 'range'
@@ -92,14 +104,78 @@ function numberControl(key: string, k: NumberKnob | IntKnob, value: number): HTM
   range.step = String(step)
   range.value = String(value)
 
-  const readout = document.createElement('span')
-  readout.className = 'knob-readout'
-  readout.textContent = String(value)
+  const number = document.createElement('input')
+  number.type = 'number'
+  number.className = 'range-number'
+  number.min = String(k.min)
+  number.max = String(k.max)
+  number.step = String(step)
+  number.value = String(value)
+  // The row's own grid is `1fr auto` with `.range-track-wrap` pinned to `grid-column: 1 / -1`
+  // (styles.css) so it always claims a full row on its own; placing the number explicitly in
+  // column 2 puts it on the row *above* the track, pushed to the right edge by the empty 1fr
+  // column next to it, without any extra styles.css rule.
+  number.style.gridColumn = '2'
+
+  const trackWrap = document.createElement('div')
+  trackWrap.className = 'range-track-wrap'
+  const track = document.createElement('div')
+  track.className = 'range-track'
+  const fill = document.createElement('div')
+  fill.className = 'range-fill'
+  const thumb = document.createElement('div')
+  thumb.className = 'range-thumb'
+  track.append(fill, thumb)
+  trackWrap.append(track, range)
+
+  // `baseRow()` appends `head` (label + badges, badges attached later by `attachBadges()`)
+  // straight under `root` — the layout every other control kind wants. This one wants `head`
+  // sharing the first grid row of `.range-row` with the number, in column 1 opposite the number's
+  // column 2, so it's pulled back out of `root` and dropped in here instead. `boolControl` /
+  // `colorControl` / `enumControl` still call `baseRow()` unchanged and keep `head` where it put
+  // it.
+  root.removeChild(head)
+  head.style.gridColumn = '1'
+
+  const row = document.createElement('div')
+  row.className = 'range-row'
+  row.append(head, number, trackWrap)
+  body.append(row)
+
+  const fillPct = (v: number): number => {
+    const span = k.max - k.min
+    const pct = span === 0 ? 0 : ((v - k.min) / span) * 100
+    return Math.min(100, Math.max(0, pct))
+  }
+  const syncVisual = (v: number): void => {
+    const pct = `${String(fillPct(v))}%`
+    fill.style.width = pct
+    thumb.style.left = pct
+  }
+  syncVisual(value)
+
+  // Dragging/keying the (invisible) native range: mirror into the number field and repaint the
+  // hand-drawn track. `bindRow()` already listens for `input` on `.knob-input` (this element), so
+  // this listener only has to keep the OTHER control in sync, not write anywhere.
   range.addEventListener('input', () => {
-    readout.textContent = range.value
+    number.value = range.value
+    syncVisual(Number(range.value))
   })
 
-  body.append(range, readout)
+  // Editing the number field: push the value onto the range (which clamps it to min/max the same
+  // way the slider itself would), read the clamped result back so the number field never shows a
+  // value the slider disagrees with, repaint, then dispatch a real `input` event on the range so
+  // `bindRow()`'s single listener is the only place that ever calls `onSet`. A mid-edit value like
+  // a bare "-" parses to `NaN`; skip the write-back until it is a real number again rather than
+  // snapping the range to some default.
+  number.addEventListener('input', () => {
+    if (number.value === '' || Number.isNaN(Number(number.value))) return
+    range.value = number.value
+    number.value = range.value
+    syncVisual(Number(range.value))
+    range.dispatchEvent(new Event('input', { bubbles: true }))
+  })
+
   return root
 }
 
@@ -138,6 +214,67 @@ function enumControl(key: string, values: readonly string[], value: string): HTM
   return root
 }
 
+/**
+ * The design's chip-grid rendering of `motion.debug` specifically (the enum descriptor, six
+ * channel names) — `sheet.debug` is the unrelated int descriptor (a 0-7 range) and stays a
+ * `numberControl` slider, untouched. A real `<select class="knob-input">` is kept, hidden, next
+ * to the chips: it is what `bindRow()` already listens to (`.knob-input` + `input`), so the chips
+ * only ever move the select's value and dispatch a real `input` event on it rather than
+ * duplicating `bindRow`'s write-back path. `display: none` is enough here — `bindRow()` finds it
+ * by `querySelector`, which does not care whether the element is visible.
+ */
+function debugChipControl(key: string, values: readonly string[], value: string): HTMLElement {
+  const { root, body } = baseRow(key)
+
+  const select = document.createElement('select')
+  select.className = 'knob-input'
+  select.style.display = 'none'
+  for (const v of values) {
+    const opt = document.createElement('option')
+    opt.value = v
+    opt.textContent = v
+    opt.selected = v === value
+    select.append(opt)
+  }
+
+  const grid = document.createElement('div')
+  grid.className = 'debug-chip-grid'
+  const chips = new Map<string, HTMLButtonElement>()
+
+  for (const v of values) {
+    const chip = document.createElement('button')
+    chip.type = 'button'
+    chip.className = 'debug-chip'
+    chip.classList.toggle('debug-chip--active', v === value)
+
+    const swatch = document.createElement('span')
+    swatch.className = 'debug-chip-swatch'
+    const label = document.createElement('span')
+    label.textContent = v
+    chip.append(swatch, label)
+
+    chip.addEventListener('click', () => {
+      if (select.value === v) return
+      select.value = v
+      select.dispatchEvent(new Event('input', { bubbles: true }))
+      select.dispatchEvent(new Event('change'))
+    })
+
+    grid.append(chip)
+    chips.set(v, chip)
+  }
+
+  // The write-back itself runs off the `input` event above (`bindRow()`); this `change` listener
+  // only keeps the active chip in sync with the select's current value — fired from the same
+  // click, and available for anything else that ever changes `select.value` directly.
+  select.addEventListener('change', () => {
+    for (const [v, chip] of chips) chip.classList.toggle('debug-chip--active', v === select.value)
+  })
+
+  body.append(grid, select)
+  return root
+}
+
 /** `docs/USAGE.md` §7's loop, made real. `noFallthroughCasesInSwitch` is on and every arm
  *  returns, so a sixth descriptor kind added to the library is a type error here, not a control
  *  that silently fails to render. No `default:` arm — a default is exactly what would hide that
@@ -156,7 +293,11 @@ function controlFor(
     case 'color':
       return colorControl(key, String(current))
     case 'enum':
-      return enumControl(key, k.values, String(current))
+      // The design's 3-column swatch-chip grid, for `motion.debug` only — every other enum knob
+      // keeps the plain `<select>`.
+      return key === 'motion.debug'
+        ? debugChipControl(key, k.values, String(current))
+        : enumControl(key, k.values, String(current))
   }
 }
 
@@ -231,6 +372,40 @@ function clearInlineError(key: string): void {
   box.hidden = true
 }
 
+/** `GROUP_ORDER` entries carry spaces and an em dash (`Silhouette — hull`); an element id needs
+ *  neither, so every id derived from a group name goes through this first. */
+function slugifyGroup(group: string): string {
+  return group.replace(/[^a-zA-Z0-9]+/g, '-').replace(/^-+|-+$/g, '')
+}
+
+/**
+ * The sidebar's numbering is one continuous sequence across the whole page (`index.html`'s
+ * static "01 Source" / "03 Poses" / "04 Sound" sections interleaved with the tabs this module
+ * generates), not a self-contained 01, 02, 3... local to `#panel`. `#panel` renders one tab per
+ * `tabFor()` result (see `render()` below) and each of those tabs' number in the *global*
+ * sequence is fixed regardless of the order this module happens to emit them in — "Edge" is
+ * always "02", "Look & debug" is always "05", and the tabs `labels.ts` has no mapping for
+ * ("Fold", "Ball", "Resolution" — `tabFor()` returns the group name unchanged when
+ * `GROUP_TO_TAB` has no entry for it) continue the sequence at "06", "07", "08". This table is
+ * therefore hand-maintained against `index.html`'s static numbering rather than derived from
+ * `orderedTabs`'s own position — a CSS counter would silently renumber every generated tab
+ * whenever `index.html`'s static section count changes, which is exactly the failure mode this
+ * table exists to avoid.
+ *
+ * Numeric rather than the zero-padded display string ("02", not just "2"): the same value drives
+ * both the `.accordion-number` text below (formatted with `padStart` at the point of use) and each
+ * section's inline `order` style, which needs a real CSS integer. Keeping one numeric source and
+ * formatting it once for display beats parsing a zero-padded string back into a number, or storing
+ * the number twice under two keys that could drift apart.
+ */
+const TAB_NUMBER: ReadonlyMap<string, number> = new Map([
+  ['Edge', 2],
+  ['Look & debug', 5],
+  ['Fold', 6],
+  ['Ball', 7],
+  ['Resolution', 8],
+])
+
 export function createPanel(
   onSet: (key: string, value: string | number | boolean, target: SetTarget) => Error | undefined,
   onCount: (sheet: number, motion: number) => void,
@@ -240,6 +415,17 @@ export function createPanel(
   let currentView: pc.View | null = null
   let currentSprite: pc.Sprite | null = null
   let entries: Entry[] = []
+  // Which accordion sections are open — carried across `rebuild()` (an edge-mode swap, say) so a
+  // reader who collapsed "Ball" stays collapsed rather than being reset to fully-open every time
+  // the stage rebuilds. `null` means "not yet initialised" (first render only); `render()` seeds
+  // it to every tab open the first time it sees `null` and leaves it alone after that. The set of
+  // tabs itself is effectively constant across rebuilds (every `GROUP_ORDER` group folds into one
+  // of a fixed handful of tabs via `tabFor`, and "Paper & Edge" always has at least the `Paper`
+  // group's entries), so a tab a reader closed keeps meaning the same section on the next rebuild
+  // even though its *content* can change underneath it — "Paper & Edge" holds both
+  // `Silhouette — hull` and `Silhouette — torn`'s sub-cards, and only one of the two is ever
+  // populated at a time.
+  let openTabs: Set<string> | null = null
 
   const values: Record<string, string | number | boolean> = {}
   const defaults: Record<string, string | number | boolean> = {}
@@ -306,7 +492,10 @@ export function createPanel(
     panelRoot.append(controls)
 
     // Group by `labelFor(key)?.group`, ordered by `GROUP_ORDER`; unlabelled descriptors go into a
-    // final `Unlabelled` group so they are impossible to miss.
+    // final `Unlabelled` group so they are impossible to miss. This is the demo's existing knob
+    // taxonomy (`labels.ts`) — tabs below are one per group that actually has entries on the live
+    // stage, not a new grouping invented for the layout. A hull-mode build, for instance, never
+    // populates "Silhouette — torn", so that tab simply does not appear.
     const groups = new Map<string, Entry[]>()
     for (const entry of entries) {
       const group = labelFor(entry.key)?.group ?? 'Unlabelled'
@@ -314,30 +503,148 @@ export function createPanel(
       if (list) list.push(entry)
       else groups.set(group, [entry])
     }
+    const orderedGroups = [...GROUP_ORDER, 'Unlabelled'].filter((g) => groups.has(g))
 
-    for (const group of [...GROUP_ORDER, 'Unlabelled']) {
-      const list = groups.get(group)
-      if (list === undefined) continue
-      list.sort((a, b) => (labelFor(a.key)?.order ?? 0) - (labelFor(b.key)?.order ?? 0))
-
-      const details = document.createElement('details')
-      details.open = true
-      const summary = document.createElement('summary')
-      summary.textContent = `${group} (${String(list.length)})`
-      details.append(summary)
-
-      for (const { key, k } of list) {
-        const row = controlFor(key, k, values[key] ?? k.default)
-        attachBadges(row, key, k)
-        if (k.dev) {
-          row.dataset.knobDev = 'true'
-          row.hidden = !showDev
-        }
-        bindRow(row, key, k)
-        details.append(row)
+    // A tab is one per *tab group* (`tabFor`), not one per `labels.ts` group — see `tabFor`'s own
+    // comment. `orderedTabs` is built by first encounter while walking `orderedGroups`, so it
+    // inherits `GROUP_ORDER`'s sequence for free instead of needing a second ordering table that
+    // could drift from it.
+    const orderedTabs: string[] = []
+    const tabMembers = new Map<string, string[]>()
+    for (const group of orderedGroups) {
+      const tab = tabFor(group)
+      const members = tabMembers.get(tab)
+      if (members) members.push(group)
+      else {
+        tabMembers.set(tab, [group])
+        orderedTabs.push(tab)
       }
-      panelRoot.append(details)
     }
+
+    // `controls` (the "write to" / "show dev knobs" row) has no `TAB_NUMBER` entry of its own —
+    // it isn't a numbered section — but `#panel { display: contents }` (styles.css) makes it a
+    // flex item of `#sidebar` just like every numbered section, so leaving its `order` at the
+    // unset default (0) would float it above even "01 Source". Instead it ties with whichever
+    // tab sorts first and, since flex breaks ties by document order and this element is appended
+    // before any tab section, that tie always resolves in its favour — it lands immediately
+    // before the first knob tab, same as its original DOM position.
+    const firstTabOrder = Math.min(99, ...orderedTabs.map((tab) => TAB_NUMBER.get(tab) ?? 99))
+    controls.style.order = String(firstTabOrder)
+
+    // First render only: every section starts open. After that `openTabs` is whatever the reader
+    // last left it at (see the declaration above) — the set of tabs is stable across rebuilds, so
+    // there is nothing here to reconcile against a changed tab list.
+    if (openTabs === null) openTabs = new Set(orderedTabs)
+    const sectionsOpen = openTabs
+
+    const accordion = document.createElement('div')
+    accordion.className = 'knob-accordion'
+
+    orderedTabs.forEach((tab) => {
+      const members = tabMembers.get(tab)
+      if (members === undefined) return
+      const count = members.reduce((sum, group) => sum + (groups.get(group)?.length ?? 0), 0)
+
+      const slug = slugifyGroup(tab)
+      const headerId = `knob-tab-${slug}`
+      const bodyId = `knob-panel-${slug}`
+
+      const section = document.createElement('div')
+      section.className = 'accordion-section'
+      // Visual position across the WHOLE sidebar, not just within `#panel`: `#panel { display:
+      // contents }` (styles.css) promotes this section to a flex item of `#sidebar` directly, so
+      // this `order` is compared against the inline `order` on `index.html`'s static sections —
+      // together they put every numbered section in 01..09 order regardless of DOM position.
+      const tabNumber = TAB_NUMBER.get(tab)
+      section.style.order = String(tabNumber ?? 99)
+
+      const header = document.createElement('button')
+      header.type = 'button'
+      header.className = 'accordion-header'
+      header.id = headerId
+      header.setAttribute('aria-controls', bodyId)
+
+      // Numbered like the sidebar's own `.accordion-number` cards, continuing the SAME global
+      // sequence `index.html`'s static sections use ("01 Source", "02" here, "03 Poses", "04
+      // Sound", "05" here, "06"+ here) — see `TAB_NUMBER`'s comment above for why this can't be
+      // derived from `index` in `orderedTabs`.
+      const number = document.createElement('span')
+      number.className = 'accordion-number'
+      number.textContent = tabNumber === undefined ? '0?' : String(tabNumber).padStart(2, '0')
+
+      const title = document.createElement('span')
+      title.className = 'accordion-title'
+      title.textContent = tab
+
+      const summary = document.createElement('span')
+      summary.className = 'accordion-summary'
+      summary.textContent = `${String(count)} knob${count === 1 ? '' : 's'}`
+
+      const chevron = document.createElement('span')
+      chevron.className = 'accordion-chevron'
+      chevron.setAttribute('aria-hidden', 'true')
+      chevron.textContent = '⌄'
+
+      header.append(number, title, summary, chevron)
+
+      const body = document.createElement('div')
+      body.className = 'accordion-body'
+      body.id = bodyId
+      body.setAttribute('aria-labelledby', headerId)
+      body.hidden = !sectionsOpen.has(tab)
+      header.setAttribute('aria-expanded', String(!body.hidden))
+
+      // A section's own open/closed state — independent of every other section, unlike the old
+      // tabs' exclusive selection. No re-render (that would drop in-progress focus and, for a
+      // `range` input mid-drag, its pointer capture); a `<button>` gets Enter/Space for free, so
+      // there is no keydown handler to write here the way the old roving-tabindex tablist needed.
+      header.addEventListener('click', () => {
+        const nowOpen = body.hidden
+        body.hidden = !nowOpen
+        header.setAttribute('aria-expanded', String(nowOpen))
+        if (nowOpen) sectionsOpen.add(tab)
+        else sectionsOpen.delete(tab)
+      })
+
+      // A tab spanning more than one `labels.ts` group renders each as its own bordered sub-card
+      // (`.knob-subcard`) — the design's "Hull knobs"/"Torn knobs"/"Shared" pattern, generalised to
+      // whatever groups actually share this tab. A tab with exactly one member has nothing to
+      // separate from and renders flat, same as before this table existed.
+      const multiMember = members.length > 1
+
+      for (const group of members) {
+        const list = groups.get(group)
+        if (list === undefined) continue
+        list.sort((a, b) => (labelFor(a.key)?.order ?? 0) - (labelFor(b.key)?.order ?? 0))
+
+        let target: HTMLElement = body
+        if (multiMember) {
+          target = document.createElement('div')
+          target.className = 'knob-subcard'
+          const head = document.createElement('div')
+          head.className = 'knob-subcard-head'
+          head.textContent = group
+          target.append(head)
+          body.append(target)
+        }
+
+        for (const { key, k } of list) {
+          const row = controlFor(key, k, values[key] ?? k.default)
+          attachBadges(row, key, k)
+          if (k.dev) {
+            row.dataset.knobDev = 'true'
+            row.hidden = !showDev
+          }
+          bindRow(row, key, k)
+          target.append(row)
+        }
+      }
+
+      section.append(header, body)
+      accordion.append(section)
+    })
+
+    panelRoot.append(accordion)
   }
 
   function rebuild(built: BuiltStage, view: pc.View | null, sprite: pc.Sprite | null): void {

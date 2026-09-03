@@ -31,6 +31,7 @@ function handleAt(srcW: number, srcH: number): PaperSheetHandle {
     spriteKey: 'k',
     rect: { x: 10, y: 10, w: srcW - 20, h: srcH - 20 },
     frontRect: { x: 2, y: 2, w: 380, h: 380 },
+    front: { w: 384, h: 384 },
     artwork: { w: 326, h: 326 },
     overscan: 0.09,
     sdfRes: 192,
@@ -40,6 +41,7 @@ function handleAt(srcW: number, srcH: number): PaperSheetHandle {
     exact: false,
     edgeMode: 'hull',
     hull: fortyVertexHull(),
+    hullKnobs: { minDist: 22, maxDist: 72, angularity: 0.7, seed: 3 },
     alive: true,
     bytes: 0,
   }
@@ -95,6 +97,45 @@ describe('freezeOverscan (spec 8.6)', () => {
 
   it('returns a KnobError rather than NaN when the radius cannot fit the reference plane', () => {
     expect(KnobError.is(freezeOverscan({ ...hullDefaults, maxDist: 600 }, 0))).toBe(true)
+  })
+
+  // The paint radius is quoted against the front's HEIGHT (`paper-renderer.ts`'s own
+  // `uPxScale = front.h / KNOB_REFERENCE_PX`), but the margin `p` buys is a uv fraction of each
+  // axis's own length — so on a front narrower than it is tall the x margin is only `w / h` of the
+  // radius. A 2:3 sprite at hull defaults reserved 0.667 × 84 ≈ 56 reference px on x for a paint
+  // radius of 84: the demo's every portrait sample tripped the guard band on axis x.
+  it('scales the reserve by h/w for a portrait front so the x margin still holds the paint radius', () => {
+    const plain = freezeOverscan(hullDefaults, 0)
+    const tall = freezeOverscan(hullDefaults, 0, 3 / 2)
+    expect(KnobError.is(plain)).toBe(false)
+    expect(KnobError.is(tall)).toBe(false)
+    if (KnobError.is(plain) || KnobError.is(tall)) return
+    // The x margin, as a fraction of the front's width, is `p / (1 + 2p)`; in the height's
+    // reference frame that is `p / (1 + 2p) × (w / h)` of 1000 — and it must cover the radius.
+    const xMarginRef = (tall.overscan / (1 + 2 * tall.overscan)) * (2 / 3) * 1000
+    expect(xMarginRef).toBeGreaterThanOrEqual(tall.radius - 1e-9)
+    // The plain reserve, applied to the same front, does not — this is the bug.
+    expect((plain.overscan / (1 + 2 * plain.overscan)) * (2 / 3) * 1000).toBeLessThan(plain.radius)
+    // The RADIUS is untouched: `checkReserve` compares paint radii, which know nothing of aspect.
+    expect(tall.radius).toBeCloseTo(plain.radius, 9)
+  })
+
+  it('leaves a landscape or square front at the plain reserve, whose y margin already equals the radius', () => {
+    const plain = freezeOverscan(hullDefaults, 0)
+    const wide = freezeOverscan(hullDefaults, 0, 2 / 3)
+    const square = freezeOverscan(hullDefaults, 0, 1)
+    expect(KnobError.is(plain)).toBe(false)
+    if (KnobError.is(plain) || KnobError.is(wide) || KnobError.is(square)) return
+    expect(wide.overscan).toBe(plain.overscan)
+    expect(square.overscan).toBe(plain.overscan)
+    expect(freezeOverscan(hullDefaults, 0, Number.NaN)).toEqual(plain)
+  })
+
+  it('applies headroom and the h/w scale to the same radius, so the KnobError ceiling moves with both', () => {
+    // 84 × 1.5 × 4 = 504 reference px per side: past the plane for THIS sprite even though the
+    // factory (scale 1, 84 × 4 = 336) accepted the same headroom.
+    expect(KnobError.is(freezeOverscan(hullDefaults, 3, 1.5))).toBe(true)
+    expect(KnobError.is(freezeOverscan(hullDefaults, 3, 1))).toBe(false)
   })
 })
 

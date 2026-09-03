@@ -49,9 +49,12 @@ const DEFAULT_CLIP = 'mixkit-quick-paper-crumple-sound-2996'
 
 type SyncMode = 'scale' | 'fixed'
 
-const SYNC_MODES: ReadonlyArray<{ id: SyncMode; label: string }> = [
-  { id: 'scale', label: 'scale the run to the clip' },
-  { id: 'fixed', label: 'fixed run, clip plays over it' },
+// `short` is what the button shows — the sidebar is only 396px wide, and the full `label` wraps
+// onto two lines there. `label` is not lost: it goes on the button's `title` (a hover tooltip)
+// and still describes the mode everywhere else (the inspector's `rows()`, for one).
+const SYNC_MODES: ReadonlyArray<{ id: SyncMode; short: string; label: string }> = [
+  { id: 'scale', short: 'scale to clip', label: 'scale the run to the clip' },
+  { id: 'fixed', short: 'fixed', label: 'fixed run, clip plays over it' },
 ]
 
 const FLAT_POSE = 0
@@ -142,16 +145,26 @@ export interface SequenceSpec {
   readonly reverse: boolean
 }
 
-/** The gaps a `play(from, to)` spends: `DWELL_MS[from..to)`, walked in the run's direction. */
-function traversedDwells(from: number, to: number): number[] {
+/**
+ * The gaps a `play(from, to)` spends: `schedule[from..to)`, walked in the run's direction.
+ * `schedule` defaults to `pc.DWELL_MS` but a caller bound to a custom pose schedule (`poses.ts`,
+ * via `transport.ts`'s own `currentDwells`) passes its actual dwells instead — the authored
+ * six-pose cadence is one instance of a dwell table, not the only one.
+ */
+function traversedDwells(from: number, to: number, schedule: readonly number[]): number[] {
   const direction = to >= from ? 1 : -1
   const out: number[] = []
-  for (let p = from; p !== to; p += direction) out.push(pc.DWELL_MS[p])
+  for (let p = from; p !== to; p += direction) out.push(schedule[p])
   return out
 }
 
-export function playSpec(from: number, to: number, prefix = ''): SequenceSpec {
-  const dwells = traversedDwells(from, to)
+export function playSpec(
+  from: number,
+  to: number,
+  prefix = '',
+  schedule: readonly number[] = pc.DWELL_MS,
+): SequenceSpec {
+  const dwells = traversedDwells(from, to, schedule)
   return {
     label: `${prefix}${to < from ? 'unfold' : 'fold'} ${String(from)} → ${String(to)}`,
     authored: dwells.reduce((a, b) => a + b, 0),
@@ -163,12 +176,14 @@ export function playSpec(from: number, to: number, prefix = ''): SequenceSpec {
 /**
  * A swap's basis, mirroring `authoredSwapTotal`: the rise's gaps, the ball's own dwell as the
  * hold — the gap no ordinary traversal ever spends — and the fall's gaps. The library does not
- * export the helper, so the demo repeats the ten-gap shape rather than guessing at it.
+ * export the helper, so the demo repeats the ten-gap shape rather than guessing at it. `schedule`
+ * defaults to `pc.DWELL_MS`; its own last index is the ball pose, whatever the schedule's length.
  */
-export function swapSpec(from: number): SequenceSpec {
-  const rise = traversedDwells(from, BALL_POSE)
-  const fall = traversedDwells(BALL_POSE - 1, FLAT_POSE)
-  const dwells = [...rise, pc.DWELL_MS[BALL_POSE], ...fall]
+export function swapSpec(from: number, schedule: readonly number[] = pc.DWELL_MS): SequenceSpec {
+  const ballPose = schedule.length - 1
+  const rise = traversedDwells(from, ballPose, schedule)
+  const fall = traversedDwells(ballPose - 1, FLAT_POSE, schedule)
+  const dwells = [...rise, schedule[ballPose], ...fall]
   return {
     label: `swap from ${String(from)}`,
     authored: dwells.reduce((a, b) => a + b, 0),
@@ -300,16 +315,37 @@ export function createAudio(
   clipSelect.className = 'transport-input'
   clipSelect.disabled = true
 
-  const syncSelect = document.createElement('select')
-  syncSelect.className = 'transport-input'
-  syncSelect.disabled = true
+  // The sync mode is a two-way choice ("scale the run to the clip" vs. "fixed run, clip plays
+  // over it"), so in the v2 design it is a `.segmented` control rather than a `<select>` — same
+  // `SYNC_MODES` list and the same `state.sync`/`persist`/`paint` wiring underneath, just a
+  // different widget on top of it.
+  const syncGroup = document.createElement('div')
+  syncGroup.className = 'segmented'
+  const syncButtons = new Map<SyncMode, HTMLButtonElement>()
   for (const mode of SYNC_MODES) {
-    const option = document.createElement('option')
-    option.value = mode.id
-    option.textContent = mode.label
-    syncSelect.append(option)
+    const button = document.createElement('button')
+    button.type = 'button'
+    button.className = 'segmented-btn'
+    button.textContent = mode.short
+    button.title = mode.label
+    button.disabled = true
+    button.addEventListener('click', () => {
+      if (state.sync === mode.id) return
+      state.sync = mode.id
+      persist()
+      paint()
+      onChange()
+      updateSyncButtons()
+    })
+    syncGroup.append(button)
+    syncButtons.set(mode.id, button)
   }
-  syncSelect.value = state.sync
+
+  function updateSyncButtons(): void {
+    for (const [id, button] of syncButtons) {
+      button.classList.toggle('segmented-btn--active', id === state.sync)
+    }
+  }
 
   const volumeInput = document.createElement('input')
   volumeInput.type = 'range'
@@ -323,7 +359,18 @@ export function createAudio(
   volumeOut.className = 'transport-readout'
   volumeOut.textContent = `vol ${state.volume.toFixed(2)}`
 
-  row.append(enableLabel, clipSelect, syncSelect, volumeInput, volumeOut)
+  // Mirrors `poseInput`'s treatment in transport.ts: `--fill-pct` (styles.css) paints the track up
+  // to the thumb and has to be recomputed on init and on every `input` event.
+  function refreshVolumeFill(): void {
+    const min = Number(volumeInput.min)
+    const max = Number(volumeInput.max)
+    const value = Number(volumeInput.value)
+    const pct = max > min ? ((value - min) / (max - min)) * 100 : 0
+    volumeInput.style.setProperty('--fill-pct', `${String(pct)}%`)
+  }
+  refreshVolumeFill()
+
+  row.append(enableLabel, clipSelect, syncGroup, volumeInput, volumeOut)
 
   const readout = document.createElement('p')
   readout.className = 'transport-readout transport-audio-readout'
@@ -616,6 +663,20 @@ export function createAudio(
     )
   }
 
+  // The sidebar's "04 Sound" header carries a short mono summary, same as every `panel.ts`-
+  // generated section's own `.accordion-summary` — mirrors `stage-bg.ts`'s own direct
+  // `document.getElementById` for its slot, since `main.ts` is off-limits for this change.
+  function updateSummary(): void {
+    const el = document.getElementById('sound-summary')
+    if (el === null) return
+    if (!state.enabled) {
+      el.textContent = 'off'
+      return
+    }
+    const clipId = activeClipId()
+    el.textContent = clipId === NO_CLIP ? 'on · silent' : (clipById(clipId)?.label ?? clipId)
+  }
+
   function paint(spec: SequenceSpec = DEFAULT_SPEC): void {
     const clipId = activeClipId()
     const length = clipMs(clipId)
@@ -645,6 +706,8 @@ export function createAudio(
     } else {
       note.textContent = `audio assets present (${assetsText()}) — ${ASSETS_ORIGIN}`
     }
+
+    updateSummary()
   }
 
   function rows(): ReadonlyArray<readonly [string, string]> {
@@ -712,7 +775,7 @@ export function createAudio(
 
   function setControlsEnabled(): void {
     clipSelect.disabled = !state.enabled
-    syncSelect.disabled = !state.enabled
+    for (const button of syncButtons.values()) button.disabled = !state.enabled
     volumeInput.disabled = !state.enabled
   }
 
@@ -740,17 +803,10 @@ export function createAudio(
     onChange()
   })
 
-  syncSelect.addEventListener('change', () => {
-    const next = SYNC_MODES.find((m) => m.id === syncSelect.value)
-    if (next !== undefined) state.sync = next.id
-    persist()
-    paint()
-    onChange()
-  })
-
   volumeInput.addEventListener('input', () => {
     state.volume = Number(volumeInput.value)
     volumeOut.textContent = `vol ${state.volume.toFixed(2)}`
+    refreshVolumeFill()
     if (gain !== null) gain.gain.value = state.volume
     persist()
     onChange()
@@ -758,6 +814,7 @@ export function createAudio(
 
   fillClipSelect()
   setControlsEnabled()
+  updateSyncButtons()
   paint()
 
   return { element, beginSequence, endSequence, cancel, rows }

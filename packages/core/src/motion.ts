@@ -19,6 +19,14 @@ export interface MotionClip {
   readonly frameCount: number
   /** Pose index to stored-frame index. */
   readonly keyFrames: readonly number[]
+  /**
+   * The clip's own dwell table (§7.2): one entry per pose, `keyFrames.length` long, so that
+   * `'ball'` and the swap's ball hold name the same pose. Absent, the stage schedules against
+   * `DWELL_MS` — right for a six-pose clip and for nothing else. Read at every run, the way
+   * `keyFrames` is read at every draw: a slot may hand out a clip whose schedule changes under
+   * it, and the next run picks the change up.
+   */
+  readonly dwells?: readonly number[]
 }
 
 /** Everything a draw needs, passed on every call — there is no "current instance" (§5). */

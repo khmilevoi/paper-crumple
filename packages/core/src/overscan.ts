@@ -137,7 +137,11 @@ export function exactFrontLongSide(sourceLongSide: number, overscan: number): nu
 export interface GuardCheckInput {
   /** The front texture, in texels. */
   readonly frontSize: Size
-  /** The hull's extent in front texel space, margin included. */
+  /**
+   * The hull's extent in front texel space, margin included: silhouette plus paint radius, and
+   * ideally continuous and unclamped — a box clamped to the plane stops at exactly 0.5, so it can
+   * say that a sheet intrudes but never how far it really reaches.
+   */
   readonly hullExtent: Rect
 }
 

@@ -11,18 +11,6 @@ const BROADCAST_STAGGER_MS = 40
 const BROKEN_KEY = 'broken'
 
 const FLAT_POSE = 0
-const BALL_POSE = pc.DWELL_MS.length - 1
-
-/**
- * `PoseRef` is an input type: `'flat'` and `'ball'` resolve to indices on the way into the
- * library and nothing it reports ever carries the names back. The audio schedule is computed
- * from `pc.DWELL_MS` by index, so the same resolution has to happen here first.
- */
-function poseIndex(ref: pc.PoseRef): number {
-  if (ref === 'flat') return FLAT_POSE
-  if (ref === 'ball') return BALL_POSE
-  return ref
-}
 
 export interface TransportHandle {
   /**
@@ -64,6 +52,25 @@ export function createTransport(
   let currentRun: pc.Run<pc.PlayResult | pc.SwapResult> | null = null
   let runController: AbortController | null = null
   let unsubscribers: Array<() => void> = []
+  // The active pose schedule's dwells: `pc.DWELL_MS` until `bind()` sees a `built.motion.poses`
+  // override (`poses.ts`'s `setPoses`), which can change the pose count. Read at every `bind()`
+  // rather than once at module load — that is the only point in the rebuild sequence where the
+  // current stage's actual schedule is known (§ task brief).
+  let currentDwells: readonly number[] = pc.DWELL_MS
+
+  /**
+   * `PoseRef` is an input type: `'flat'` and `'ball'` resolve to indices on the way into the
+   * library and nothing it reports ever carries the names back. The audio schedule is computed
+   * from `currentDwells` by index, so the same resolution has to happen here first — against the
+   * *bound* schedule's length, not the authored six-pose one, or a custom pack's 'ball' would
+   * compute the wrong audio plan even though `hero.play('flat', 'ball', …)` itself already
+   * resolves correctly inside the library (`resolvePose`, keyed off the resident clip).
+   */
+  function poseIndex(ref: pc.PoseRef): number {
+    if (ref === 'flat') return FLAT_POSE
+    if (ref === 'ball') return currentDwells.length - 1
+    return ref
+  }
 
   const root = document.createElement('div')
   root.className = 'transport'
@@ -76,21 +83,55 @@ export function createTransport(
   statusLine.className = 'transport-status'
   root.append(statusLine)
 
-  // --- Step 2: the pose scrubber ---------------------------------------------------------
+  // --- Step 2: the pose scrubber -----------------------------------------------------------
+  // `pc.DWELL_MS.length` is 6 poses by default — few enough to render as a strip of frame buttons
+  // (the design's "pose strip") instead of a continuous `<input type="range">`; each step is
+  // exactly one integer pose, so a strip loses nothing a slider had. `.pose-step`/
+  // `.pose-step--active` are already styled in styles.css for this purpose. `poses.ts` can change
+  // the pose count at runtime (`bakedMotion().setPoses`), so the strip cannot be built once at
+  // module load — `rebuildPoseStrip` runs again on every `bind()`, reading the schedule that is
+  // actually resident (`currentDwells`) rather than the authored default.
   const poseRow = document.createElement('div')
   poseRow.className = 'transport-row'
   const poseLabel = document.createElement('span')
   poseLabel.textContent = 'pose (draw only — no run, no events)'
-  const poseInput = document.createElement('input')
-  poseInput.type = 'range'
-  poseInput.className = 'transport-input'
-  poseInput.min = '0'
-  poseInput.max = String(pc.DWELL_MS.length - 1)
-  poseInput.step = '1'
+  const poseStrip = document.createElement('div')
+  poseStrip.className = 'pose-strip'
+  let poseSteps: HTMLButtonElement[] = []
   const poseReadout = document.createElement('span')
   poseReadout.className = 'transport-readout'
 
+  function rebuildPoseStrip(): void {
+    poseStrip.replaceChildren()
+    poseSteps = []
+    const last = currentDwells.length - 1
+    for (let i = 0; i < currentDwells.length; i += 1) {
+      const step = document.createElement('button')
+      step.type = 'button'
+      step.className = 'pose-step'
+      const value = document.createElement('span')
+      value.className = 'pose-step-value'
+      value.textContent = String(i)
+      const label = document.createElement('span')
+      label.className = 'pose-step-label'
+      label.textContent = i === FLAT_POSE ? 'flat' : i === last ? 'ball' : ''
+      step.append(value, label)
+      step.addEventListener('click', () => {
+        if (hero === null) return
+        hero.draw(i)
+        refreshPoseReadout()
+      })
+      poseSteps.push(step)
+      poseStrip.append(step)
+    }
+    refreshPoseReadout()
+  }
+
   function refreshPoseReadout(): void {
+    const current = hero === null ? -1 : hero.pose
+    for (let i = 0; i < poseSteps.length; i += 1) {
+      poseSteps[i].classList.toggle('pose-step--active', i === current)
+    }
     if (hero === null) {
       poseReadout.textContent = ''
       return
@@ -98,12 +139,12 @@ export function createTransport(
     poseReadout.textContent = `hero.pose ${String(hero.pose)} · hero.state ${hero.state}`
   }
 
-  poseInput.addEventListener('input', () => {
-    if (hero === null) return
-    hero.draw(Number(poseInput.value))
-    refreshPoseReadout()
-  })
-  poseRow.append(poseLabel, poseInput, poseReadout)
+  // Built once up front against the authored default, exactly as the old top-level loop did, so
+  // the strip is never empty before the first `bind()` lands; `bind()` rebuilds it again against
+  // whatever schedule is actually resident.
+  rebuildPoseStrip()
+
+  poseRow.append(poseLabel, poseStrip, poseReadout)
   root.append(poseRow)
 
   // --- Step 3: fold, unfold, stop ---------------------------------------------------------
@@ -111,12 +152,15 @@ export function createTransport(
   foldRow.className = 'transport-row'
   const foldButton = document.createElement('button')
   foldButton.type = 'button'
+  foldButton.className = 'btn-primary'
   foldButton.textContent = 'fold (flat → ball)'
   const unfoldButton = document.createElement('button')
   unfoldButton.type = 'button'
+  unfoldButton.className = 'btn-secondary'
   unfoldButton.textContent = 'unfold (ball → flat)'
   const stopButton = document.createElement('button')
   stopButton.type = 'button'
+  stopButton.className = 'btn-secondary'
   stopButton.textContent = 'stop'
 
   async function runFold(from: pc.PoseRef, to: pc.PoseRef): Promise<void> {
@@ -127,7 +171,7 @@ export function createTransport(
     // of the sync — `playPlan` spreads it over the traversed dwells as
     // `(duration × cumulative) / authored`, so the authored uneven cadence survives and the run
     // ends when the clip does.
-    const duration = audio.beginSequence(playSpec(poseIndex(from), poseIndex(to)))
+    const duration = audio.beginSequence(playSpec(poseIndex(from), poseIndex(to), '', currentDwells))
     // `start` is already emitted, synchronously, before this line returns.
     const run = hero.play(from, to, { duration: duration ?? FOLD_DURATION_MS })
     currentRun = run
@@ -155,9 +199,11 @@ export function createTransport(
   broadcastRow.className = 'transport-row'
   const broadcastFoldButton = document.createElement('button')
   broadcastFoldButton.type = 'button'
+  broadcastFoldButton.className = 'btn-secondary'
   broadcastFoldButton.textContent = 'broadcast fold (all views)'
   const broadcastUnfoldButton = document.createElement('button')
   broadcastUnfoldButton.type = 'button'
+  broadcastUnfoldButton.className = 'btn-secondary'
   broadcastUnfoldButton.textContent = 'broadcast unfold (all views)'
   const broadcastReportEl = document.createElement('pre')
   broadcastReportEl.className = 'transport-report'
@@ -168,7 +214,9 @@ export function createTransport(
     // tile still finishes `(views − 1) × stagger` after the clip ends. That overhang is real and
     // is printed below rather than hidden — the clip cannot be stretched to cover it without
     // desynchronising every individual tile from it.
-    const duration = audio.beginSequence(playSpec(poseIndex(from), poseIndex(to), 'broadcast '))
+    const duration = audio.beginSequence(
+      playSpec(poseIndex(from), poseIndex(to), 'broadcast ', currentDwells),
+    )
     // `stage.play` never returns an Error and never rejects — it keeps the §4.4 report instead
     // of a `Run`, because one settled value cannot say tile 3 was busy while tile 5 had no sprite.
     const r = await built.stage.play(from, to, {
@@ -196,6 +244,7 @@ export function createTransport(
   swapSelect.className = 'transport-input'
   const swapButton = document.createElement('button')
   swapButton.type = 'button'
+  swapButton.className = 'btn-secondary'
   swapButton.textContent = 'swap'
   const reduceIndicator = document.createElement('span')
   reduceIndicator.className = 'transport-readout'
@@ -276,7 +325,7 @@ export function createTransport(
     // park at the ball is never rescaled below the time the new sprite takes to load, so a first,
     // uncached swap runs longer than the clip by that load. The inspector's `last run` row
     // measures it rather than hiding it.
-    const duration = audio.beginSequence(swapSpec(hero.pose))
+    const duration = audio.beginSequence(swapSpec(hero.pose, currentDwells))
     // `start` has already been emitted, synchronously, before this line — `swapTo` mints its own
     // internal key from the source, so it never collides with the grid's `sample.id` keys.
     const run = hero.swapTo(src, {
@@ -334,6 +383,11 @@ export function createTransport(
     hero = nextHero
     gridViews = nextGridViews
     currentSampleId = hero?.sprite?.key ?? null
+    // `poses.ts`'s `setPoses` can leave `built.motion.poses` non-null with a different pose count
+    // than the authored six; this is the one point in the rebuild sequence where that is known, so
+    // the pose strip and the audio schedule below both key off it instead of `pc.DWELL_MS` fixed.
+    currentDwells = built.motion.poses?.dwells ?? pc.DWELL_MS
+    rebuildPoseStrip()
 
     // No hero view means nothing to subscribe to and no pose to read back. Every control below
     // already guards `hero === null` on its own handler, so the transport renders in full and
@@ -342,7 +396,6 @@ export function createTransport(
       unsubscribers.push(hero.on('start', refreshPoseReadout))
       unsubscribers.push(hero.on('step', refreshPoseReadout))
       unsubscribers.push(hero.on('end', refreshPoseReadout))
-      poseInput.value = String(hero.pose)
     }
     refreshPoseReadout()
     refreshReduceIndicator()

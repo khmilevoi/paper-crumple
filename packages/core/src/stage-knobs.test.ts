@@ -1,10 +1,10 @@
-import { describe, expect, it } from 'vitest'
+import { describe, expect, it, vi } from 'vitest'
 import { isAborted } from './abort.js'
 import { KnobError } from './errors.js'
-import { createStage } from './stage.js'
+import { createStage, type StageEnv } from './stage.js'
 import { createFakeTimers } from './testing/fake-timers.js'
 import { asBitmap, fakeBitmap } from './testing/fake-source.js'
-import { fakeMotion, fakeSheet, stageEnv } from './testing/fake-slots.js'
+import { fakeMotion, fakeSheet, stageEnv, type FakeSheetOptions } from './testing/fake-slots.js'
 
 // A forced deviation from the plan's literal test code: `KnobPatch`, `ViewKnobPatch` and
 // `SpriteKnobPatch` are instantiated here at the widest slot type (`readonly KnobDescriptor[]`,
@@ -80,6 +80,32 @@ describe('set() at the three scopes', () => {
     const s = await scene()
     expect(s.sprite.set({ sheetEdge: 0.9 } as never)).toBeUndefined()
     expect(s.sprite.set({ sheetTint: 0.1 } as never)).toBeUndefined()
+    s.stage.dispose()
+  })
+
+  // §6.6 — core defaults -> slot defaults -> stage -> sprite -> view. The stage layer sat in
+  // `knobsFor()` for the draw and nowhere for the build, and the sprite layer was seeded with a
+  // full copy of the defaults rather than the sprite's own delta, which let it shadow every
+  // stage-level value on the draw path too. So a `stage.set()` of a front-class knob, the
+  // playground's default scope, changed the URL hash and nothing on the canvas.
+  it('a stage-level front-class set() reaches build(), and the sprite layer still wins over it', async () => {
+    const s = await scene()
+    s.stage.set({ sheetEdge: 0.9 } as never)
+    expect(s.sheet.calls.build.at(-1)?.knobs.sheetEdge).toBe(0.9)
+    s.sprite.set({ sheetEdge: 0.3 } as never)
+    expect(s.sheet.calls.build.at(-1)?.knobs.sheetEdge).toBe(0.3)
+    s.stage.set({ sheetEdge: 0.7 } as never)
+    expect(s.sheet.calls.build.at(-1)?.knobs.sheetEdge).toBe(0.3)
+    s.stage.dispose()
+  })
+
+  it('a stage-level draw-class set() reaches the draw, and the view layer still wins over it', async () => {
+    const s = await scene()
+    const drawn = () => s.motion.calls.draw.at(-1)?.knobs as Record<string, unknown> | undefined
+    s.stage.set({ motionTilt: 0.5 } as never)
+    expect(drawn()?.motionTilt).toBe(0.5)
+    s.view.set({ motionTilt: -0.5 } as never)
+    expect(drawn()?.motionTilt).toBe(-0.5)
     s.stage.dispose()
   })
 
@@ -162,5 +188,304 @@ describe('budget and usage', () => {
     s.stage.budget({ bytes: 2 })
     expect(s.stage.warnings.filter((w) => w.message.includes('unreclaimable'))).toHaveLength(1)
     s.stage.dispose()
+  })
+})
+
+/**
+ * §8.5 — the pool keeps ONE artwork slot, keyed by sprite, and every `source()` takes it. So in
+ * any scene with two sprites, a front-class `set()` on the one sourced first finds its artwork
+ * gone and `build()` answers `SourceExpiredError`. The design's answer is the re-source row of
+ * §8.5's table (the supplier, `source()` again, then the rebuild), and the stage is the party
+ * that has to walk it: a slot cannot, because it never sees the supplier.
+ */
+describe('a front-class set() on a sprite whose artwork another sprite displaced (§8.5)', () => {
+  async function twoSprites(o: { sheet?: FakeSheetOptions; env?: Partial<StageEnv> } = {}) {
+    const timers = createFakeTimers()
+    const sheet = fakeSheet(o.sheet)
+    const motion = fakeMotion()
+    const seen: Array<{ error: Error; observed: boolean }> = []
+    const stage = await createStage(
+      {
+        sheet,
+        motion,
+        maxSize: 384,
+        present: 'blit',
+        onError: (e) => seen.push({ error: e.error, observed: e.observed }),
+      },
+      stageEnv({ timers, ...o.env }),
+    )
+    if (stage instanceof Error || isAborted(stage)) return expect.fail('stage refused')
+    const a = await stage.add('/a.png', { key: 'a' })
+    const b = await stage.add('/b.png', { key: 'b' })
+    const view = stage.view({ canvas: destCanvas() })
+    if (a instanceof Error || isAborted(a) || b instanceof Error || isAborted(b)) {
+      return expect.fail('add refused')
+    }
+    if (view instanceof Error) return expect.fail('view refused')
+    view.show(a)
+    // `b` was sourced last, so the one artwork slot is b's and a's handle is expired.
+    expect(sheet.artworkKey()).toBe(2)
+    return { stage, sheet, motion, timers, a, b, view, seen }
+  }
+
+  /** A `gate` that lets the scene's own two `source()` calls through and parks every later one. */
+  function parkLaterSources() {
+    const parked: Array<() => void> = []
+    let sourced = 0
+    const gate = (): Promise<void> => {
+      sourced += 1
+      return sourced <= 2 ? Promise.resolve() : new Promise<void>((r) => parked.push(r))
+    }
+    return { parked, gate }
+  }
+
+  it('re-sources the sprite, rebuilds its front from the new handle and redraws — no orphan', async () => {
+    const s = await twoSprites()
+    const sources = s.sheet.calls.source.length
+    const draws = s.motion.calls.draw.length
+    s.a.set({ sheetEdge: 0.9 } as never)
+    // The re-source is a decode, so it lands on a later turn; until then the view keeps the
+    // front it last drew (§8.8) and nothing is reported, because nothing has gone wrong.
+    await vi.waitFor(() => expect(s.sheet.calls.source.length).toBe(sources + 1))
+    await vi.waitFor(() => expect(s.motion.calls.draw.length).toBeGreaterThan(draws))
+    expect(s.sheet.artworkKey()).toBe(3)
+    expect(s.sheet.calls.build.at(-1)?.handle.id).toBe(3)
+    // The handle the re-source replaced is released exactly once, and only after the new one
+    // was in hand — a released handle cannot be built from, and the view was still drawing.
+    expect(s.sheet.calls.release.map((h) => h.id)).toEqual([1])
+    expect(s.seen).toEqual([])
+    s.stage.dispose()
+  })
+
+  it('coalesces a drag: sixty set() calls during one re-source land one source() and one rebuild', async () => {
+    const { parked, gate } = parkLaterSources()
+    const s = await twoSprites({ sheet: { gate } })
+    const sources = s.sheet.calls.source.length
+    const builds = s.sheet.calls.build.length
+    s.a.set({ sheetEdge: 0.1 } as never)
+    await vi.waitFor(() => expect(parked).toHaveLength(1))
+    for (let i = 1; i < 60; i += 1) s.a.set({ sheetEdge: i / 100 } as never)
+    expect(s.sheet.calls.source.length).toBe(sources + 1)
+    // One build attempt found the slot taken; the fifty-nine after it did not try again.
+    expect(s.sheet.calls.build.length).toBe(builds + 1)
+    parked[0]?.()
+    await vi.waitFor(() => expect(s.sheet.calls.build.length).toBe(builds + 2))
+    expect(s.sheet.calls.build.at(-1)?.handle.id).toBe(3)
+    expect(s.sheet.calls.source.length).toBe(sources + 1)
+    expect(s.seen).toEqual([])
+    s.stage.dispose()
+  })
+
+  it('a stage-level set() over three sprites re-sources them one at a time, each built before the next is sourced', async () => {
+    const s = await twoSprites()
+    const c = await s.stage.add('/c.png', { key: 'c' })
+    if (c instanceof Error || isAborted(c)) return expect.fail('add refused')
+    const mark = s.sheet.order.length
+    s.stage.set({ sheetEdge: 0.7 } as never)
+    await vi.waitFor(() => expect(s.sheet.calls.build.at(-1)?.handle.id).toBe(5))
+    // `c` held the slot and built at once; `a` then `b` were re-sourced, and never both in
+    // flight — `source()` suspends after it has taken the slot, so two at a time would displace
+    // each other and neither's build would ever find its own artwork.
+    expect(s.sheet.order.slice(mark)).toEqual([
+      'build',
+      'build',
+      'build',
+      'releaseFront',
+      'source',
+      'build',
+      'releaseFront',
+      'release',
+      'source',
+      'build',
+      'releaseFront',
+      'release',
+    ])
+    expect(s.seen).toEqual([])
+    s.stage.dispose()
+  })
+
+  it('prepare() waits for the re-source it caused and returns the sprite once the front is rebuilt', async () => {
+    const s = await twoSprites()
+    s.view.play('flat', 'ball')
+    s.a.set({ sheetEdge: 0.9 } as never)
+    const sources = s.sheet.calls.source.length
+    const prepared = await s.stage.prepare('a')
+    expect(prepared).toBe(s.a)
+    expect(s.sheet.calls.source.length).toBe(sources + 1)
+    expect(s.sheet.calls.build.at(-1)?.handle.id).toBe(3)
+    expect(s.seen).toEqual([])
+    s.stage.dispose()
+  })
+
+  it('reports a failed re-source once as an orphan, keeps the last front and the handle, and retries on the next set()', async () => {
+    let fetches = 0
+    const s = await twoSprites({
+      env: {
+        sourceEnv: {
+          fetch: async () => {
+            fetches += 1
+            if (fetches > 2) return Promise.reject(new Error('offline'))
+            return {
+              ok: true,
+              status: 200,
+              headers: { get: () => null },
+              blob: async () => new Blob(['png'], { type: 'image/png' }),
+            }
+          },
+          createImageBitmap: async () => asBitmap(fakeBitmap({ width: 40, height: 30 })),
+        },
+      },
+    })
+    const before = { ...s.a.frontSize }
+    s.a.set({ sheetEdge: 0.9 } as never)
+    await vi.waitFor(() => expect(s.seen).toHaveLength(1))
+    expect(s.seen[0]?.observed).toBe(false)
+    expect(s.seen[0]?.error.message).toContain('/a.png')
+    expect(s.a.frontSize).toEqual(before)
+    expect(s.sheet.calls.release).toEqual([])
+    expect(s.stage.usage().fronts).toBe(2)
+    // The next front-class set() tries again rather than remembering the failure.
+    s.a.set({ sheetEdge: 0.8 } as never)
+    await vi.waitFor(() => expect(fetches).toBe(4))
+    s.stage.dispose()
+  })
+
+  it('remove() during a re-source releases the late handle and builds nothing from it', async () => {
+    const { parked, gate } = parkLaterSources()
+    const s = await twoSprites({ sheet: { gate } })
+    s.a.set({ sheetEdge: 0.9 } as never)
+    await vi.waitFor(() => expect(parked).toHaveLength(1))
+    const builds = s.sheet.calls.build.length
+    expect(s.stage.remove('a', { detach: true })).toBeUndefined()
+    parked[0]?.()
+    await vi.waitFor(() => expect(s.sheet.calls.release.map((h) => h.id)).toEqual([1, 3]))
+    expect(s.sheet.calls.build.length).toBe(builds)
+    expect(s.seen).toEqual([])
+    s.stage.dispose()
+  })
+})
+
+/**
+ * §6.3 — `hull` is a tier of its own: "invalidate the hull cache, then front", and the hull cache
+ * key is "every knob at or above 'hull'". The hull, its cache and its key live inside `source()`
+ * (§5.2), so the value a hull-tier knob holds has to reach `source()` — a `build()` at any other
+ * value answers `SourceExpiredError`, the re-source row of §8.5's table, walked by the stage
+ * exactly as for a displaced artwork slot. A stage that re-sourced WITHOUT the values would trace
+ * at the slot's defaults again, find the same drift on the rebuild, and either orphan every
+ * hull-tier set() or loop for its life.
+ */
+describe('a hull-tier set() re-sources at the current knob values (§6.3)', () => {
+  async function oneSprite(
+    o: { sheet?: FakeSheetOptions; before?: (stage: StageOf) => void } = {},
+  ) {
+    const timers = createFakeTimers()
+    const sheet = fakeSheet(o.sheet)
+    const motion = fakeMotion()
+    const seen: Array<{ error: Error; observed: boolean }> = []
+    const stage = await createStage(
+      {
+        sheet,
+        motion,
+        maxSize: 384,
+        present: 'blit',
+        onError: (e) => seen.push({ error: e.error, observed: e.observed }),
+      },
+      stageEnv({ timers }),
+    )
+    if (stage instanceof Error || isAborted(stage)) return expect.fail('stage refused')
+    o.before?.(stage)
+    const a = await stage.add('/a.png', { key: 'a' })
+    const view = stage.view({ canvas: destCanvas() })
+    if (a instanceof Error || isAborted(a)) return expect.fail('add refused')
+    if (view instanceof Error) return expect.fail('view refused')
+    view.show(a)
+    // One sprite: the artwork slot is still this sprite's, so nothing but the hull tier can make
+    // its `build()` expire — what isolates the row under test from the displaced-slot row.
+    expect(sheet.artworkKey()).toBe(1)
+    return { stage, sheet, motion, timers, a, view, seen }
+  }
+  type StageOf = Exclude<Awaited<ReturnType<typeof createStage>>, Error | symbol>
+
+  it('add() sources at the projected sheet knobs, hull tier included, and builds at the same values', async () => {
+    const s = await oneSprite({ before: (stage) => stage.set({ sheetHull: 0.3 } as never) })
+    expect(s.sheet.calls.source.at(-1)?.o.knobs?.sheetHull).toBe(0.3)
+    expect(s.sheet.calls.build.at(-1)?.knobs.sheetHull).toBe(0.3)
+    expect(s.seen).toEqual([])
+    s.stage.dispose()
+  })
+
+  it('re-sources at the new value, rebuilds from the new handle and redraws — no orphan, and again on the next move', async () => {
+    const s = await oneSprite()
+    const sources = s.sheet.calls.source.length
+    const draws = s.motion.calls.draw.length
+    s.a.set({ sheetHull: 0.9 } as never)
+    await vi.waitFor(() => expect(s.sheet.calls.source.length).toBe(sources + 1))
+    expect(s.sheet.calls.source.at(-1)?.o.knobs?.sheetHull).toBe(0.9)
+    await vi.waitFor(() => expect(s.motion.calls.draw.length).toBeGreaterThan(draws))
+    expect(s.sheet.artworkKey()).toBe(2)
+    expect(s.sheet.calls.build.at(-1)?.handle.id).toBe(2)
+    expect(s.sheet.calls.build.at(-1)?.knobs.sheetHull).toBe(0.9)
+    expect(s.sheet.calls.release.map((h) => h.id)).toEqual([1])
+    expect(s.seen).toEqual([])
+    // The second move is the one the old path lost: the sprite was orphaned, not re-sourced.
+    s.a.set({ sheetHull: 0.2 } as never)
+    await vi.waitFor(() => expect(s.sheet.calls.build.at(-1)?.handle.id).toBe(3))
+    expect(s.sheet.calls.source.length).toBe(sources + 2)
+    expect(s.sheet.calls.source.at(-1)?.o.knobs?.sheetHull).toBe(0.2)
+    expect(s.sheet.calls.build.at(-1)?.knobs.sheetHull).toBe(0.2)
+    expect(s.sheet.calls.release.map((h) => h.id)).toEqual([1, 2])
+    expect(s.seen).toEqual([])
+    s.stage.dispose()
+  })
+
+  it('a stage-level set() over the sprite re-sources it too, at the stage value', async () => {
+    const s = await oneSprite()
+    const sources = s.sheet.calls.source.length
+    s.stage.set({ sheetHull: 0.7 } as never)
+    await vi.waitFor(() => expect(s.sheet.calls.build.at(-1)?.handle.id).toBe(2))
+    expect(s.sheet.calls.source.length).toBe(sources + 1)
+    expect(s.sheet.calls.source.at(-1)?.o.knobs?.sheetHull).toBe(0.7)
+    expect(s.seen).toEqual([])
+    s.stage.dispose()
+  })
+
+  it('a hull-tier set() that lands inside add()’s own decode is applied once the sprite is shown', async () => {
+    const parked: Array<() => void> = []
+    const gate = (): Promise<void> => new Promise<void>((r) => parked.push(r))
+    const timers = createFakeTimers()
+    const sheet = fakeSheet({ gate })
+    const motion = fakeMotion()
+    const seen: Array<{ error: Error; observed: boolean }> = []
+    const stage = await createStage(
+      {
+        sheet,
+        motion,
+        maxSize: 384,
+        present: 'blit',
+        onError: (e) => seen.push({ error: e.error, observed: e.observed }),
+      },
+      stageEnv({ timers }),
+    )
+    if (stage instanceof Error || isAborted(stage)) return expect.fail('stage refused')
+    const adding = stage.add('/a.png', { key: 'a' })
+    await vi.waitFor(() => expect(parked).toHaveLength(1))
+    // The record is not registered yet, so this set() reaches no sprite; the front that add()
+    // builds is at the values source() traced at (the two must agree, §6.3), never at these.
+    stage.set({ sheetHull: 0.8 } as never)
+    parked[0]?.()
+    const a = await adding
+    if (a instanceof Error || isAborted(a)) return expect.fail('add refused')
+    expect(sheet.calls.source.at(-1)?.o.knobs?.sheetHull).toBe(0.5)
+    expect(sheet.calls.build.at(-1)?.knobs.sheetHull).toBe(0.5)
+    const view = stage.view({ canvas: destCanvas() })
+    if (view instanceof Error) return expect.fail('view refused')
+    view.show(a)
+    await vi.waitFor(() => expect(parked).toHaveLength(2))
+    parked[1]?.()
+    await vi.waitFor(() => expect(sheet.calls.build.at(-1)?.handle.id).toBe(2))
+    expect(sheet.calls.source.at(-1)?.o.knobs?.sheetHull).toBe(0.8)
+    expect(sheet.calls.build.at(-1)?.knobs.sheetHull).toBe(0.8)
+    expect(seen).toEqual([])
+    stage.dispose()
   })
 })

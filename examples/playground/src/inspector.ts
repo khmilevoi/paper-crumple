@@ -68,9 +68,9 @@ export function createInspector(): Inspector {
   factsSection.className = 'inspector-section'
   const factsHeading = document.createElement('h3')
   factsHeading.textContent = 'Facts'
-  const factsList = document.createElement('dl')
-  factsList.className = 'inspector-facts'
-  factsSection.append(factsHeading, factsList)
+  const factsGrid = document.createElement('div')
+  factsGrid.className = 'metric-grid'
+  factsSection.append(factsHeading, factsGrid)
 
   // --- Warnings ------------------------------------------------------------------------------
   const warningsSection = document.createElement('section')
@@ -94,9 +94,9 @@ export function createInspector(): Inspector {
   usageSection.className = 'inspector-section'
   const usageHeading = document.createElement('h3')
   usageHeading.textContent = 'Usage'
-  const usageList = document.createElement('dl')
-  usageList.className = 'inspector-usage'
-  usageSection.append(usageHeading, usageList)
+  const usageGrid = document.createElement('div')
+  usageGrid.className = 'metric-grid'
+  usageSection.append(usageHeading, usageGrid)
 
   // --- Audio ----------------------------------------------------------------------------------
   const audioSection = document.createElement('section')
@@ -168,23 +168,41 @@ export function createInspector(): Inspector {
     }
   }
 
+  function setTiles(grid: HTMLDivElement, tiles: ReadonlyArray<readonly [string, string]>): void {
+    grid.replaceChildren()
+    for (const [label, value] of tiles) {
+      const tile = document.createElement('div')
+      tile.className = 'metric-tile'
+      const labelEl = document.createElement('span')
+      labelEl.className = 'metric-label'
+      labelEl.textContent = label
+      const valueEl = document.createElement('span')
+      valueEl.className = 'metric-value'
+      valueEl.textContent = value
+      tile.append(labelEl, valueEl)
+      grid.append(tile)
+    }
+  }
+
   function renderFacts(): void {
     const dup = pc.assertSingleCore()
-    const rows: Array<readonly [string, string]> = [
+    const tiles: Array<readonly [string, string]> = [
       ['pc.VERSION', pc.VERSION],
       ['assertSingleCore()', dup instanceof Error ? dup.message : 'ok — single core in this realm'],
     ]
     if (built !== null) {
-      rows.push(
-        ['caps.maxTextureSize', String(built.stage.caps.maxTextureSize)],
+      tiles.push(
+        ['Max texture', String(built.stage.caps.maxTextureSize)],
         ['caps.floatRT', String(built.stage.caps.floatRT)],
         ['caps.timer', String(built.stage.caps.timer)],
         ['stage.lost', String(built.stage.lost)],
         ['surface.presentable', String(built.stage.surface.presentable)],
         ['stage.views.length', String(built.stage.views.length)],
+        ['Build time', `${built.buildMs.toFixed(1)} ms`],
+        ['Warnings', String(built.stage.warnings.length)],
       )
     }
-    setRows(factsList, rows)
+    setTiles(factsGrid, tiles)
   }
 
   function renderWarnings(): void {
@@ -204,7 +222,7 @@ export function createInspector(): Inspector {
   }
 
   function renderUsage(): void {
-    const rows: Array<readonly [string, string]> = []
+    const tiles: Array<readonly [string, string]> = []
     if (built !== null) {
       const u = built.stage.usage()
       const budgetText =
@@ -212,25 +230,25 @@ export function createInspector(): Inspector {
           ? formatBytes(u.bytes)
           : `${formatBytes(u.bytes)} / ${formatBytes(budgetBytes)} ` +
             `(${((u.bytes / budgetBytes) * 100).toFixed(1)}%)`
-      rows.push(
+      tiles.push(
         ['front bytes / budget', budgetText],
         ['reclaimable', formatBytes(u.reclaimable)],
         ['unreclaimable', formatBytes(u.unreclaimable)],
-        ['fronts', String(u.fronts)],
-        ['pinned', String(u.pinned)],
-        ['attached', String(u.attached)],
+        ['Fronts', String(u.fronts)],
+        ['Pinned', String(u.pinned)],
+        ['Attached', String(u.attached)],
         ['handles', String(u.handles)],
       )
       const hero = built.stage.views[0]
       if (hero !== undefined) {
-        rows.push(
-          ['hero.idealSize', `${String(hero.idealSize.w)} × ${String(hero.idealSize.h)}`],
-          ['hero.state', hero.state],
-          ['hero.pose', String(hero.pose)],
+        tiles.push(
+          ['Ideal size', `${String(hero.idealSize.w)} × ${String(hero.idealSize.h)}`],
+          ['Hero state', hero.state],
+          ['Hero pose', String(hero.pose)],
         )
       }
     }
-    setRows(usageList, rows)
+    setTiles(usageGrid, tiles)
   }
 
   function renderAudio(): void {

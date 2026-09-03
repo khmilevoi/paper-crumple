@@ -9,6 +9,7 @@ coverage/
 .claude/worktrees/
 test-results/
 playwright-report/
+.playwright-mcp
 .vitest-attachments/
 
 # Sound for the playground demo. The .wav files come from the throwaway spike the library was

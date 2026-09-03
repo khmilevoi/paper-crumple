@@ -41,7 +41,14 @@ export const DEFAULT_CONFIG: DemoConfig = {
   present: 'blit',
   cssPx: 320,
   budgetMb: 64,
-  overscanHeadroom: 0,
+  // The library reserves exactly the paint radius (spec 8.6's `p = r / (1000 - 2r)`), which
+  // leaves a silhouette that fills its own bitmap — `camel-coat`, "a photo that still carries
+  // its background" — no clearance at all for the shader's guard band, the outer 1.8 % of the
+  // front (`GUARD_BAND_INNER = 0.482`) that it cuts flat. Headroom buys that clearance as a
+  // fraction of the radius: 0.25 is ~37 reference px at `torn`'s defaults (r ~ 150) and ~21 at
+  // `hull`'s (r = 84), both past the band's 18 with room for the field's texel rounding. The
+  // samples with a transparent border of their own (every other one) need none of it.
+  overscanHeadroom: 0.25,
 }
 
 /**

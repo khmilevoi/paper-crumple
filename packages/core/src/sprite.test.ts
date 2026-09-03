@@ -39,6 +39,41 @@ describe('stage.add()', () => {
     stage.dispose()
   })
 
+  // Spec 5.4's chain is `motion.fit(H.rect)` and spec 8.6 has `maxSize` bound the front texture;
+  // the two only agree when the rect `fit` sizes the bucket box over is already in FRONT texels.
+  // Handing it the source-pixel `rect` sized every front at the source's own scale, so a 640 px
+  // sweater on a 512 px surface got an 853 px front: the blit view drew its bottom-left corner
+  // and the sprite came out cropped and shifted off the canvas's centre.
+  it("sizes the front from the paper's box in front texels (frontRect), never the source-pixel rect, so it fits the surface (spec 5.4, 8.6)", async () => {
+    const sheet = fakeSheet()
+    const motion = fakeMotion()
+    const env = stageEnv()
+    const { stage } = await mounted({
+      sheet,
+      motion,
+      env: {
+        ...env,
+        sourceEnv: {
+          ...env.sourceEnv,
+          // A source far larger than the 384 px surface `mounted()` builds.
+          createImageBitmap: async () => asBitmap(fakeBitmap({ width: 1024, height: 512 })),
+        },
+      },
+    })
+    const s = await stage.add('/big.png', { key: 'big' })
+    if (s instanceof Error || isAborted(s)) return expect.fail('add refused')
+    const handle = sheet.calls.build[0]?.handle
+    expect(handle).toBeDefined()
+    if (handle === undefined) return
+    expect(motion.calls.fit[0]?.rect).toEqual(handle.frontRect)
+    expect(motion.calls.fit[0]?.rect).not.toEqual(handle.rect)
+    expect(s.frontSize.w).toBeLessThanOrEqual(384)
+    expect(s.frontSize.h).toBeLessThanOrEqual(384)
+    // The public `sprite.rect` keeps spec 5.2's source pixels; only what `fit` sizes over moved.
+    expect(s.rect).toEqual({ x: 0, y: 0, w: 1024, h: 512 })
+    stage.dispose()
+  })
+
   it('passes the key-derived preset into motion.fit as the override (D5)', async () => {
     const { stage, motion } = await mounted()
     await stage.add('/a.png', { key: 'sweater' })

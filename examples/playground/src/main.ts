@@ -7,6 +7,8 @@ import { createPanel } from './panel'
 import type { SetTarget } from './panel'
 import { createConfigPanel } from './config-panel'
 import { createTransport } from './transport'
+import { createPoseEditor } from './poses'
+import { createStageBackground } from './stage-bg'
 import { createInspector } from './inspector'
 import { createAudio } from './audio'
 import { decodeState, emitCode, encodeState } from './state'
@@ -15,6 +17,10 @@ const line = document.getElementById('version-line')
 const knobCount = document.getElementById('knob-count')
 const copyCodeBtn = document.getElementById('copy-code-btn')
 const emittedCodeEl = document.getElementById('emitted-code')
+const statusPill = document.getElementById('status-pill')
+const statusPillText = statusPill?.querySelector<HTMLElement>('.masthead-status-text') ?? null
+const headerChip = document.getElementById('header-chip')
+const resetBtn = document.getElementById('reset-btn')
 
 interface Live {
   readonly built: BuiltStage
@@ -34,6 +40,23 @@ let currentConfig: DemoConfig = DEFAULT_CONFIG
 const sample = SAMPLES.find((s) => s.id === DEFAULT_SAMPLE_ID)
 
 const inspector = createInspector()
+
+// A pure visual dev aid, independent of any stage/sample state — wired once, up front.
+createStageBackground()
+
+// Sidebar accordion toggle: the static `.accordion-header` buttons index.html always has at
+// parse time (Source / Poses / Sound / Share — "Edge" / "Look & debug" / "Fold" / "Ball" /
+// "Resolution" are `panel.ts`'s own generated sections and wire their own click handlers), never
+// re-created — so this wires them once at module load rather than via delegation. All four start
+// open (no `hidden` in the markup), matching the current layout.
+document.querySelectorAll<HTMLButtonElement>('.accordion-header').forEach((header) => {
+  const body = header.nextElementSibling
+  if (!(body instanceof HTMLElement)) return
+  header.addEventListener('click', () => {
+    body.hidden = !body.hidden
+    header.classList.toggle('accordion-header--collapsed', body.hidden)
+  })
+})
 
 /**
  * The one piece of routing this demo has to get right (§6.6): `stage.set` and `sprite.set` take
@@ -116,6 +139,7 @@ function onSet(
   target: SetTarget,
 ): Error | undefined {
   const result = applyKnob(key, value, target)
+  setStatusPill(!(result instanceof Error), result instanceof Error ? result.message : `${key} set`)
   scheduleHashSync()
   return result
 }
@@ -154,6 +178,18 @@ inspector.setAudioSource(audio.rows)
 
 const transport = createTransport(report, audio)
 
+// "03 Poses" accordion: mounts itself into `#poses-editor`. `bind()` below runs after `mountHero`
+// so the pack it reads (`built.motion.packs()[0]`) is already resident, exactly as `transport.bind`
+// and `panel.rebuild` are timed against the same rebuild.
+const poses = createPoseEditor(report)
+
+// `createTransport` above mounts `audio.element` into `#transport` (it appends it there itself,
+// see `transport.ts`'s own comment on that line) — sidebar section "04 Sound" wants it as its own
+// numbered accordion body instead. `appendChild` on an already-mounted element moves it rather
+// than cloning it, so this is a relocation, not a re-mount: no listener `audio.ts` attached to it
+// is lost.
+document.getElementById('sound-section')?.append(audio.element)
+
 // The grid's mounted views, kept so a rebuild's `transport.bind` always describes the stage that
 // is actually live — mirroring `live` above for the same reason.
 let gridViews: Map<string, pc.View> = new Map()
@@ -166,11 +202,51 @@ let gridViews: Map<string, pc.View> = new Map()
 // a key `torn` had and `hull` doesn't simply never comes up). A rebuild is not a reset.
 let buildController: AbortController | null = null
 
-function report(text: string): void {
-  if (line) line.textContent = text
+/**
+ * Masthead chips (`#version-line`, `.masthead-status-text`) are one-line UI, not a diagnostic
+ * readout — but every caller below builds its message as a full sentence, often with a
+ * parenthetical aside tacked on for the accordion sections' own status lines (which *do* have
+ * room for it). This is the one place that gap gets closed: strip a trailing `(...)` aside first
+ * (that is where the long explanations live), then hard-cap what's left. The untouched `text` is
+ * still set as a `title`, so the full message stays one hover away.
+ */
+function shortStatus(text: string, maxLen = 64): string {
+  const parenIdx = text.indexOf('(')
+  const withoutAside = parenIdx >= 0 ? text.slice(0, parenIdx) : text
+  const trimmed = withoutAside.replace(/[\s·—-]+$/u, '')
+  if (trimmed.length <= maxLen) return trimmed
+  const cut = trimmed.slice(0, maxLen)
+  const lastSpace = cut.lastIndexOf(' ')
+  const boundary = lastSpace > maxLen / 2 ? lastSpace : maxLen
+  return `${cut.slice(0, boundary).trimEnd()}…`
+}
+
+/**
+ * `#status-pill`: the one place `ok`/`bad` gets painted onto the masthead dot. Shared between
+ * `report()` (every rebuild-path message already carries its own ok/bad) and `onSet` below (a
+ * knob write's success/failure, which never goes through `report()` at all).
+ */
+function setStatusPill(ok: boolean, text: string): void {
+  if (statusPill !== null) {
+    statusPill.hidden = false
+    statusPill.classList.toggle('masthead-status--ok', ok)
+    statusPill.classList.toggle('masthead-status--bad', !ok)
+  }
+  if (statusPillText !== null) {
+    statusPillText.textContent = shortStatus(text)
+    statusPillText.title = text
+  }
+}
+
+function report(text: string, ok = true): void {
+  if (line) {
+    line.textContent = shortStatus(text)
+    line.title = text
+  }
   configPanel.setStatus(text)
   transport.setStatus(text)
   inspector.line(text)
+  setStatusPill(ok, text)
 }
 
 async function rebuild(next: DemoConfig): Promise<void> {
@@ -182,7 +258,7 @@ async function rebuild(next: DemoConfig): Promise<void> {
   live = null
 
   if (sample === undefined) {
-    report(`playground: unknown default sample "${DEFAULT_SAMPLE_ID}"`)
+    report(`playground: unknown default sample "${DEFAULT_SAMPLE_ID}"`, false)
     return
   }
 
@@ -190,7 +266,7 @@ async function rebuild(next: DemoConfig): Promise<void> {
   if (built === pc.ABORTED) return
   if (built instanceof Error) {
     inspector.observed('buildStage', built)
-    report(`playground: stage build failed: ${built.message}`)
+    report(`playground: stage build failed: ${built.message}`, false)
     return
   }
 
@@ -210,7 +286,7 @@ async function rebuild(next: DemoConfig): Promise<void> {
     if (resized instanceof Error) {
       inspector.observed('stage.resize', resized)
       built.stage.dispose()
-      report(`playground: direct surface layout failed: ${resized.message}`)
+      report(`playground: direct surface layout failed: ${resized.message}`, false)
       return
     }
     heroRect = layout.heroRect
@@ -234,7 +310,7 @@ async function rebuild(next: DemoConfig): Promise<void> {
   const hero = mounted instanceof Error ? null : mounted
   if (mounted instanceof Error) {
     inspector.observed('mountHero', mounted)
-    report(`playground: hero mount failed: ${mounted.message}`)
+    report(`playground: hero mount failed: ${mounted.message}`, false)
   }
 
   const grid = await mountGrid(built, SAMPLES, controller.signal, tileRects)
@@ -251,26 +327,43 @@ async function rebuild(next: DemoConfig): Promise<void> {
   live = { built, view: hero?.view ?? null, sprite: hero?.sprite ?? null }
   panel.rebuild(built, live.view, live.sprite)
   transport.bind(built, live.view, gridViews)
+  // After `transport.bind`, same reasoning: the pack the editor reads off `built.motion` is only
+  // resident once `mountHero` above has landed, and a rebuild's fresh `bakedMotion()` has no
+  // override — `poses.bind` re-applies whatever draft the reader was already editing to it.
+  poses.bind(built, live.view, gridViews)
   // The hero view now exists on `built.stage.views` — refresh once more so Usage's idealSize /
   // state / pose describe it rather than the pre-mount snapshot `attach` above took.
   inspector.refreshUsage()
   syncHash()
 
-  configPanel.setStatus(
+  if (headerChip !== null) {
+    const knobTotal = built.sheet.knobs.length + built.motion.knobs.length
+    headerChip.textContent = `${String(knobTotal)} knobs · ${built.buildMs.toFixed(1)} ms`
+    headerChip.hidden = false
+  }
+
+  report(
     (hero === null ? 'stage rebuilt, hero NOT mounted (see the masthead and EVENTS) · ' : '') +
       `rebuilt in ${built.buildMs.toFixed(1)} ms · ${built.stage.warnings.length} warnings · ` +
       `sheet.overscan ${built.sheet.overscan.toFixed(3)} (the factory baseline, computed once ` +
       `from this factory's default knob values before any sprite exists — a mounted sprite's own ` +
       `frozen reserve is a different number the moment an edge knob moves)`,
+    hero !== null,
   )
 
   // Only on a mounted hero: otherwise this would overwrite the `report()` above and the masthead
   // would claim a clean build for a page showing no sprite.
-  if (line && hero !== null)
-    line.textContent =
+  if (line && hero !== null) {
+    const mountedLine =
       `core ${pc.VERSION} · ${SAMPLES.length} samples · ${pc.DWELL_MS.length} dwells · ` +
       `${built.stage.warnings.length} warnings · maxTextureSize ${built.stage.caps.maxTextureSize} · ` +
       `built in ${built.buildMs.toFixed(1)}ms`
+    line.textContent = mountedLine
+    // The `report()` call above already set `line.title` to its own (longer) message; this
+    // overwrite replaces the visible text but not, unless refreshed here, the tooltip — leaving a
+    // hover showing a diagnostic paragraph that no longer matches what's on screen.
+    line.title = mountedLine
+  }
 }
 
 // The URL hash a reader may have opened this page with, decoded exactly once at load. A
@@ -281,6 +374,23 @@ if (initialHashState instanceof Error) inspector.observed('decodeState', initial
 const initialConfig = initialHashState instanceof Error ? DEFAULT_CONFIG : initialHashState.config
 
 const configPanel = createConfigPanel(initialConfig, (next) => void rebuild(next))
+
+// Reset: factory options first (`configPanel.set` + the rebuild it drives), then `panel.reset()`
+// once that rebuild has actually landed. `rebuild()`'s own `panel.rebuild` call carries forward
+// any knob the reader dragged away from its default whenever the new stage's descriptor set still
+// declares that key (its preserved-value carry-over, by design — a rebuild is not a reset). Firing
+// `panel.reset()` synchronously here would race that carry-over, since `rebuild` is async and its
+// `panel.rebuild` call hasn't run yet; chaining it onto the returned promise instead lets it run
+// against the freshly rendered controls and snap every one of them back to its default.
+if (resetBtn !== null) {
+  resetBtn.hidden = false
+  resetBtn.addEventListener('click', () => {
+    configPanel.set(DEFAULT_CONFIG)
+    void rebuild(DEFAULT_CONFIG).then(() => {
+      panel.reset()
+    })
+  })
+}
 
 if (copyCodeBtn !== null) {
   copyCodeBtn.addEventListener('click', () => {
@@ -344,7 +454,12 @@ async function boot(): Promise<void> {
   const dup = pc.assertSingleCore()
   if (dup instanceof Error) {
     inspector.observed('assertSingleCore', dup)
-    if (line) line.textContent = `core duplicated: ${dup.message}`
+    const message = `core duplicated: ${dup.message}`
+    if (line) {
+      line.textContent = shortStatus(message)
+      line.title = message
+    }
+    setStatusPill(false, message)
     return
   }
 

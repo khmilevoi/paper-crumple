@@ -126,8 +126,12 @@ describe('stage.view()', () => {
     const view = stage.view({ canvas: el })
     if (view instanceof Error) return expect.fail('view refused')
     view.show(sprite)
-    // stageEnv()'s dpr is 2, and the fake front is 40x30, so the cap bites on both axes.
-    expect(el.width).toBe(Math.min(200, sprite.frontSize.w))
+    // stageEnv()'s dpr is 2, and the fake front is 40x30 in a 100x50 box: the cap binds on the
+    // height (30 of 100) and the width follows the box's own 2:1 shape, so the front sits 1:1
+    // with bars at the sides rather than stretched to a 40x30 store the box then reshapes.
+    expect(sprite.frontSize).toEqual({ w: 40, h: 30 })
+    expect(el.height).toBe(30)
+    expect(el.width).toBe(60)
     stage.dispose()
   })
 

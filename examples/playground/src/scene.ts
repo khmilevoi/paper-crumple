@@ -84,6 +84,66 @@ export function planDirectLayout(width: number, tileCount: number): DirectLayout
   return { surfaceW: w, surfaceH: w + tileH * rows, heroRect, tileRects }
 }
 
+/**
+ * Badges over `#hero-slot`, floated with `.stage-chip` (a host with `position: relative` is
+ * already true of `#hero-slot`, per that class's own comment in styles.css) — matching the
+ * design's stage overlay exactly: top-left carries the live pose readout (accented — it is the
+ * one number that changes every frame of a run) next to the mounted sample's id, top-right
+ * carries the sheet's edge mode. `present` has no equivalent on the design's stage overlay (it is
+ * a factory option, already visible in the "01 Source" accordion's segmented control), so it is
+ * not duplicated up here.
+ *
+ * The two top-left chips sit in a small flex row rather than each being independently
+ * `position: absolute`, because `.stage-chip`'s own absolute positioning would otherwise stack
+ * them on top of each other; `position: static` inline overrides that for just these two so the
+ * row's own `display: flex` lays them out side by side, while the wrapper itself carries the
+ * absolute placement.
+ *
+ * The DOM is torn down and remounted on every `rebuild()` (`heroCanvas`'s `slot.replaceChildren()`
+ * runs first), so the pose chip's `view.on(...)` subscriptions are always scoped to the view they
+ * were created against — there is never a stale value to chase and never a duplicate on rebuild.
+ */
+function mountHeroChips(built: BuiltStage, sample: Sample, view: pc.View): void {
+  const slot = document.getElementById(HERO_SLOT)
+  if (slot === null) return
+
+  const topLeft = document.createElement('div')
+  topLeft.style.position = 'absolute'
+  topLeft.style.top = '10px'
+  topLeft.style.left = '10px'
+  topLeft.style.display = 'flex'
+  topLeft.style.gap = '6px'
+
+  const poseChip = document.createElement('span')
+  poseChip.className = 'stage-chip stage-chip--accent'
+  poseChip.style.position = 'static'
+  topLeft.append(poseChip)
+
+  const sampleChip = document.createElement('span')
+  sampleChip.className = 'stage-chip'
+  sampleChip.style.position = 'static'
+  sampleChip.textContent = sample.id
+  topLeft.append(sampleChip)
+
+  slot.append(topLeft)
+
+  const edgeChip = document.createElement('span')
+  edgeChip.className = 'stage-chip'
+  edgeChip.style.top = '10px'
+  edgeChip.style.right = '10px'
+  edgeChip.textContent = `edge: ${built.sheet.edgeMode}`
+  slot.append(edgeChip)
+
+  const lastPose = (built.motion.poses?.dwells ?? pc.DWELL_MS).length - 1
+  const updatePose = (): void => {
+    poseChip.textContent = `pose ${String(view.pose)} / ${String(lastPose)}`
+  }
+  updatePose()
+  view.on('start', updatePose)
+  view.on('step', updatePose)
+  view.on('end', updatePose)
+}
+
 export async function mountHero(
   built: BuiltStage,
   sample: Sample,
@@ -110,6 +170,7 @@ export async function mountHero(
     if (view instanceof Error) return view
     const shown = view.show(sprite)
     if (shown instanceof Error) return shown
+    mountHeroChips(built, sample, view)
     return { view, sprite }
   }
 
@@ -123,6 +184,7 @@ export async function mountHero(
 
   const sprite = view.sprite
   if (sprite === null) return new Error('playground: mount returned a view with no sprite')
+  mountHeroChips(built, sample, view)
   return { view, sprite }
 }
 

@@ -3,6 +3,7 @@ import { ABORTED, GlError, SheetError, SourceExpiredError, isAborted } from '@pa
 import {
   checkGuardBand,
   frontBytes,
+  GUARD_BAND_INNER,
   KNOB_REFERENCE_PX,
   overscanRadius,
 } from '@paper-crumple/core/unstable'
@@ -317,6 +318,106 @@ async function compactSprite(w = 64, h = 64): Promise<ImageBitmap> {
   return createImageBitmap(canvas, { premultiplyAlpha: 'none', colorSpaceConversion: 'none' })
 }
 
+/**
+ * An opaque rectangle inset `inset` px from every edge of a `w x h` canvas — `inset: 0` is a
+ * full-bleed photo (the demo's camel coat, "a photo that still carries its background"), and a
+ * 12 % inset on a 2:3 canvas is the demo's trench coat / jeans silhouette to within a few px.
+ */
+async function boxSprite(w: number, h: number, inset: number): Promise<ImageBitmap> {
+  const data = new Uint8ClampedArray(w * h * 4)
+  for (let y = 0; y < h; y++) {
+    for (let x = 0; x < w; x++) {
+      const inside = x >= inset && x < w - inset && y >= inset && y < h - inset
+      const p = (y * w + x) * 4
+      data[p] = 200
+      data[p + 1] = 120
+      data[p + 2] = 60
+      data[p + 3] = inside ? 255 : 0
+    }
+  }
+  const canvas = new OffscreenCanvas(w, h)
+  canvas.getContext('2d')!.putImageData(new ImageData(data, w, h), 0, 0)
+  return createImageBitmap(canvas, { premultiplyAlpha: 'none', colorSpaceConversion: 'none' })
+}
+
+/**
+ * The paint radius is quoted against the front's HEIGHT (`paper-renderer.ts`'s `uPxScale`), while
+ * `artworkUv`'s `[-p, -p]` buys the same uv FRACTION on both axes — so on a portrait front the x
+ * margin is only `w / h` of the reserve, and every 2:3 demo sample (trench, jeans, avatar, camel
+ * coat) was refused with "the hull reaches 0.5000 of the front on axis x" while the landscape
+ * ones (sweater, sneakers) sailed through. The reserve must be scaled by `h / w` for such a
+ * sprite (`freezeOverscan`'s third argument), and the guard band must read the sheet's real,
+ * unrounded reach rather than §8.3's rect — whose 4 % margin is bucket-decision safety, not paint,
+ * and whose clamp to the plane can never report more than 0.5000.
+ */
+describe('portrait sprites and the guard band (spec 8.6)', () => {
+  function refused(handle: unknown): handle is Error {
+    return GlError.is(handle) || SheetError.is(handle) || isAborted(handle)
+  }
+
+  it('sources a 2:3 torn sprite with a 12 % transparent border at zero headroom (the trench coat)', async () => {
+    const ctx = open()
+    const sheet = paperSheet({ edgeMode: 'torn' })
+    sheet.mount(ctx)
+    const bitmap = await boxSprite(64, 96, 8)
+    const handle = await sheet.source(bitmap, { maxSize: 128, exact: false })
+    bitmap.close()
+    expect(refused(handle), String((handle as Error)?.message)).toBe(false)
+    if (GlError.is(handle) || SheetError.is(handle) || isAborted(handle)) return
+    // The x margin now holds the paint radius: the reserve is larger than the factory's baseline,
+    // which is a square sprite's.
+    expect(handle.overscan).toBeGreaterThan(sheet.overscan)
+    sheet.dispose()
+  })
+
+  it('sources a full-bleed 2:3 torn photo once the headroom covers the band (the camel coat)', async () => {
+    const ctx = open()
+    // 0.25 × ~150 reference px of torn-default radius is ~37 px of clearance beyond the paint,
+    // against the band's 18 — the demo's own `DEFAULT_CONFIG.overscanHeadroom`.
+    const sheet = paperSheet({ edgeMode: 'torn', overscanHeadroom: 0.25 })
+    sheet.mount(ctx)
+    const bitmap = await boxSprite(64, 96, 0)
+    const handle = await sheet.source(bitmap, { maxSize: 128, exact: false })
+    bitmap.close()
+    expect(refused(handle), String((handle as Error)?.message)).toBe(false)
+    sheet.dispose()
+  })
+
+  it('still refuses a full-bleed photo at zero headroom, naming a reach inside the band', async () => {
+    const ctx = open()
+    const sheet = paperSheet({ edgeMode: 'torn' })
+    sheet.mount(ctx)
+    const bitmap = await boxSprite(64, 96, 0)
+    const handle = await sheet.source(bitmap, { maxSize: 128, exact: false })
+    bitmap.close()
+    expect(SheetError.is(handle)).toBe(true)
+    if (!SheetError.is(handle)) return
+    expect(handle.message).toContain('guard band')
+    expect(handle.message).toContain('re-add required')
+    // The reserve leaves exactly zero clearance for a silhouette that fills its own bitmap, so
+    // the paint reaches the front's edge to within the half texel between the silhouette's own
+    // texel centres and its true edge — a real figure inside the band (measured: 0.4962 here),
+    // where the clamped §8.3 rect the check used to read could only ever say a flat 0.5000.
+    const reached = Number(/reaches (\d+\.\d+)/.exec(handle.message)?.[1])
+    expect(reached).toBeGreaterThan(GUARD_BAND_INNER)
+    expect(reached).toBeLessThanOrEqual(0.5)
+    sheet.dispose()
+  })
+
+  it('sources a full-bleed square in hull mode once the headroom covers the band', async () => {
+    const ctx = open()
+    // `ambient-pins.gl.test.ts` documents this exact refusal and pads its fixture around it;
+    // 0.4 × 84 reference px is ~34 of clearance against the band's 18.
+    const sheet = paperSheet({ overscanHeadroom: 0.4 })
+    sheet.mount(ctx)
+    const bitmap = await boxSprite(48, 48, 0)
+    const handle = await sheet.source(bitmap, { maxSize: 128, exact: false })
+    bitmap.close()
+    expect(refused(handle), String((handle as Error)?.message)).toBe(false)
+    sheet.dispose()
+  })
+})
+
 describe('build() (spec 5.2, 8.1, 8.5, 8.7)', () => {
   async function mounted() {
     const ctx = open()
@@ -396,6 +497,49 @@ describe('build() (spec 5.2, 8.1, 8.5, 8.7)', () => {
     sheet.dispose()
   })
 
+  // Core's §8.5 re-source of a borrowed `ImageBitmap` the caller still holds open: `source()` of
+  // the same object mints the same spriteKey (`spriteInfoFor`), so the second handle shares the
+  // first one's hull entry and artwork slot. Releasing the superseded handle — which core does
+  // once the new one is in hand — must hand back nothing the live one owns, or the live handle's
+  // very next `build()` expires again and the re-source loops for the stage's life.
+  it('re-source() of a bitmap still open yields a second handle under the same key, and releasing the first leaves the second buildable (spec 8.5)', async () => {
+    const ctx = open()
+    const sheet = paperSheet()
+    sheet.mount(ctx)
+
+    const bitmapA = await sprite(48, 32)
+    const first = await sheet.source(bitmapA, { maxSize: 128, exact: false })
+    expect(GlError.is(first) || SheetError.is(first) || isAborted(first)).toBe(false)
+    if (GlError.is(first) || SheetError.is(first) || isAborted(first)) return
+
+    // Another sprite takes the slot — what makes the re-source necessary in the first place.
+    const bitmapB = await sprite(48, 32)
+    const other = await sheet.source(bitmapB, { maxSize: 128, exact: false })
+    bitmapB.close()
+    expect(GlError.is(other) || SheetError.is(other) || isAborted(other)).toBe(false)
+
+    const second = await sheet.source(bitmapA, { maxSize: 128, exact: false })
+    bitmapA.close()
+    expect(GlError.is(second) || SheetError.is(second) || isAborted(second)).toBe(false)
+    if (GlError.is(second) || SheetError.is(second) || isAborted(second)) return
+    expect(second.spriteKey).toBe(first.spriteKey)
+
+    sheet.release(first)
+    const front = sheet.build(second, { w: 128, h: 96 }, defaultsFor('hull') as never)
+    expect(front instanceof Error, String((front as Error)?.message)).toBe(false)
+    if (front instanceof Error) {
+      sheet.dispose()
+      return
+    }
+    sheet.releaseFront(front)
+    // A second release of the same handle is inert too: the key it carries is the live one's.
+    sheet.release(first)
+    const again = sheet.build(second, { w: 128, h: 96 }, defaultsFor('hull') as never)
+    expect(again instanceof Error, String((again as Error)?.message)).toBe(false)
+    if (!(again instanceof Error)) sheet.releaseFront(again)
+    sheet.dispose()
+  })
+
   it('names "re-add required" when a knob moves past the frozen reserve (spec 8.6)', async () => {
     const m = await mounted()
     expect(m).toBeDefined()
@@ -405,6 +549,108 @@ describe('build() (spec 5.2, 8.1, 8.5, 8.7)', () => {
     const front = sheet.build(handle, { w: 128, h: 128 }, past as never)
     expect(SheetError.is(front)).toBe(true)
     expect((front as Error).message).toContain('re-add required')
+    sheet.dispose()
+  })
+
+  // Spec 6.3: a hull-tier knob (minDist/maxDist/angularity/seed) moving off the value the hull was
+  // traced at is `invalidates: 'hull'` — "invalidate the hull cache, then front" — and the
+  // hull, its cache and its key live inside `source()` (spec 5.2). So the answer is the same
+  // re-source row of spec 8.5's table the displaced artwork slot takes, and it has to be the same
+  // error class: core's `rebuildFront` re-sources on `SourceExpiredError` and orphans any other
+  // `BuildError` (spec 10.6, no caller on the stack). A `SheetError` here orphaned every
+  // hull-tier set() for the sprite's life.
+  it('answers SourceExpiredError, never a bare SheetError, when a hull-tier knob moves off the traced value (spec 6.3)', async () => {
+    const m = await mounted()
+    expect(m).toBeDefined()
+    if (m === undefined) return
+    const { sheet, handle } = m
+    // `maxDist` moves DOWN: at this factory's zero headroom any increase is §8.6's reserve
+    // check first (step 4 precedes step 6), which is the other error class on purpose.
+    for (const moved of [{ minDist: 40 }, { maxDist: 60 }, { angularity: 0.2 }, { seed: 9 }]) {
+      const front = sheet.build(handle, { w: 128, h: 128 }, {
+        ...defaultsFor('hull'),
+        ...moved,
+      } as never)
+      expect(SourceExpiredError.is(front), JSON.stringify(moved)).toBe(true)
+      expect((front as Error).message).toContain('source()')
+    }
+    sheet.dispose()
+  })
+
+  it('source() traces at the knobs it is given, records the hull tier on the handle, and build() at them succeeds (spec 6.3)', async () => {
+    const ctx = open()
+    const sheet = paperSheet()
+    sheet.mount(ctx)
+    const bitmap = await sprite()
+    const atDefaults = await sheet.source(bitmap, { maxSize: 128, exact: false })
+    expect(GlError.is(atDefaults) || SheetError.is(atDefaults) || isAborted(atDefaults)).toBe(false)
+    if (GlError.is(atDefaults) || SheetError.is(atDefaults) || isAborted(atDefaults)) return
+    // `minDist` and `seed` leave the reserve alone (r_hull = maxDist + slop, spec 8.6), so the
+    // only thing that can differ between the two handles is the trace itself.
+    const moved = { ...defaultsFor('hull'), minDist: 40, seed: 9 }
+    const at = await sheet.source(bitmap, { maxSize: 128, exact: false, knobs: moved })
+    bitmap.close()
+    expect(GlError.is(at) || SheetError.is(at) || isAborted(at)).toBe(false)
+    if (GlError.is(at) || SheetError.is(at) || isAborted(at)) return
+    expect(at.hullKnobs).toEqual({ minDist: 40, maxDist: 72, angularity: 0.7, seed: 9 })
+    expect(atDefaults.hullKnobs).toEqual({ minDist: 22, maxDist: 72, angularity: 0.7, seed: 3 })
+    expect(at.hull).not.toEqual(atDefaults.hull)
+    const front = sheet.build(at, { w: 128, h: 128 }, moved as never)
+    expect(front instanceof Error, String((front as Error)?.message)).toBe(false)
+    if (!(front instanceof Error)) sheet.releaseFront(front)
+    // The defaults are now the drifted values, for this handle.
+    const drifted = sheet.build(at, { w: 128, h: 128 }, defaultsFor('hull') as never)
+    expect(SourceExpiredError.is(drifted)).toBe(true)
+    sheet.dispose()
+  })
+
+  it('source() ignores knob keys this mode does not declare; a torn sheet records seed alone as its hull tier', async () => {
+    const ctx = open()
+    const sheet = paperSheet({ edgeMode: 'torn' })
+    sheet.mount(ctx)
+    const bitmap = await sprite()
+    const handle = await sheet.source(bitmap, {
+      maxSize: 128,
+      exact: false,
+      knobs: { minDist: 40, maxDist: 80, angularity: 0.2, seed: 9, notAKnob: 1 },
+    })
+    bitmap.close()
+    expect(GlError.is(handle) || SheetError.is(handle) || isAborted(handle)).toBe(false)
+    if (GlError.is(handle) || SheetError.is(handle) || isAborted(handle)) return
+    // `seed` is a common knob at the hull tier; the hull-only three are absent in torn mode.
+    expect(handle.hullKnobs).toEqual({ seed: 9 })
+    const front = sheet.build(handle, { w: 128, h: 128 }, {
+      ...defaultsFor('torn'),
+      seed: 9,
+    } as never)
+    expect(front instanceof Error, String((front as Error)?.message)).toBe(false)
+    if (!(front instanceof Error)) sheet.releaseFront(front)
+    // Live-demo regression: the reserve, `p` and the artwork size are frozen at add() for the
+    // sprite's life (spec 8.6), so `source()` may take ONLY the hull tier from the projection. A
+    // version that read the live `tearAmp`/`thickness`/`looseness` here handed back a handle with
+    // a larger `p` (a smaller artwork in the same bucket) and, on a portrait sprite, refused
+    // outright with "could not derive overscan" where `build()`'s reserve check is the honest
+    // surface — six orphans per stage-level set() in the demo's torn grid.
+    const tall = await sprite(32, 48)
+    const atDefaults = await sheet.source(tall, { maxSize: 128, exact: false })
+    expect(GlError.is(atDefaults) || SheetError.is(atDefaults) || isAborted(atDefaults)).toBe(false)
+    if (GlError.is(atDefaults) || SheetError.is(atDefaults) || isAborted(atDefaults)) return
+    const dragged = await sheet.source(tall, {
+      maxSize: 128,
+      exact: false,
+      knobs: { ...defaultsFor('torn'), tearAmp: 60, thickness: 40, looseness: 0.8, seed: 9 },
+    })
+    tall.close()
+    expect(
+      GlError.is(dragged) || SheetError.is(dragged) || isAborted(dragged),
+      String((dragged as Error)?.message),
+    ).toBe(false)
+    if (GlError.is(dragged) || SheetError.is(dragged) || isAborted(dragged)) return
+    expect(dragged.overscan).toBe(atDefaults.overscan)
+    expect(dragged.artwork).toEqual(atDefaults.artwork)
+    expect(dragged.front).toEqual(atDefaults.front)
+    expect(dragged.sdfRes).toBe(atDefaults.sdfRes)
+    expect(dragged.hullKnobs).toEqual({ seed: 9 })
     sheet.dispose()
   })
 
@@ -637,13 +883,15 @@ describe('task 12 fix round 1 (findings 1, 2, 3)', () => {
 
 describe("task 12 fix round 2 (build()'s rect conversion)", () => {
   // The finding: build()'s step 9 used to scale `handle.rect` (source pixels) UNIFORMLY by
-  // `frontLongSide / sourceLongSide` into this call's own front space — correct only at `p = 0`,
-  // because a uniform scale carries no offset term and so drops the margin fraction `p` encodes
-  // the moment this build's requested `size` differs from the add-time front. `torn` mode's own
-  // ~0.19-0.22 overscan (task 10's own report) is margin enough to make the two formulas diverge
-  // by tens of px once `size` (200x200) differs from the add-time front (128x128) — not a
-  // rounding wobble.
-  it("build()'s rect inverts the artworkUv margin mapping at THIS build's size, not a uniform handle.rect scale", async () => {
+  // `frontLongSide / sourceLongSide` into this call's own front space — which carries no origin
+  // term, so it drops the margin around the artwork the moment this build's requested `size`
+  // differs from the add-time front. The rect tracks the artwork's own placement instead: the
+  // artwork is copied 1:1 into every front (spec 7.4.2) and the paper is built around it, so
+  // between the trace front (128x128, `maxSize` above) and a 200x200 build the paper's box moves
+  // by exactly the artwork's origin shift and keeps its size. `torn` mode's own ~0.19-0.22
+  // overscan (task 10's own report) puts that tens of px from the uniform scale — not a rounding
+  // wobble.
+  it("build()'s rect moves with the artwork's 1:1 placement at THIS build's size, not a uniform handle.rect scale", async () => {
     const ctx = open()
     const sheet = paperSheet({ edgeMode: 'torn' })
     sheet.mount(ctx)
@@ -671,22 +919,22 @@ describe("task 12 fix round 2 (build()'s rect conversion)", () => {
 
     const srcW = handle.srcW
     const srcH = handle.srcH
-    const p = handle.overscan
-    expect(p).toBeGreaterThan(0.15) // torn's own headline figure (~0.19-0.22); a real margin to invert
-    const scale = 1 + 2 * p
-    // The exact inverse of `frontRectToSourceRect`'s own `sourceUv = frontUv*scale - p`:
-    // `frontUv = sourceUv/scale + p/scale`.
-    const toFront = (uSource: number, frontDim: number) => (uSource / scale + p / scale) * frontDim
-
-    const expectedX0 = toFront(handle.rect.x / srcW, size.w)
-    const expectedY0 = toFront(handle.rect.y / srcH, size.h)
-    const expectedX1 = toFront((handle.rect.x + handle.rect.w) / srcW, size.w)
-    const expectedY1 = toFront((handle.rect.y + handle.rect.h) / srcH, size.h)
-
-    expect(front.rect.x).toBeCloseTo(expectedX0, 0)
-    expect(front.rect.y).toBeCloseTo(expectedY0, 0)
-    expect(front.rect.w).toBeCloseTo(expectedX1 - expectedX0, 0)
-    expect(front.rect.h).toBeCloseTo(expectedY1 - expectedY0, 0)
+    expect(handle.overscan).toBeGreaterThan(0.15) // torn's own headline figure; a real margin to move
+    expect(handle.front).toEqual({ w: 128, h: 128 })
+    // `build()`'s own `artworkPlacement`: centred, 1:1, origin rounded to whole texels.
+    const placementIn = (front: { w: number; h: number }) => ({
+      x: Math.round((front.w - handle.artwork.w) / 2),
+      y: Math.round((front.h - handle.artwork.h) / 2),
+    })
+    const trace = placementIn(handle.front)
+    const here = placementIn(size)
+    expect(here.x - trace.x).toBeGreaterThan(20) // the shift is the thing under test, so it is real
+    expect(front.rect).toEqual({
+      x: handle.frontRect.x + here.x - trace.x,
+      y: handle.frontRect.y + here.y - trace.y,
+      w: handle.frontRect.w,
+      h: handle.frontRect.h,
+    })
 
     // Explicitly not what the old uniform-scale formula
     // (`scaleRect(handle.rect, frontLongSide / sourceLongSide)`) would have produced, so a
@@ -846,11 +1094,13 @@ describe('fix round 1 — the CPU-fallback field (findings 1, 2, 3, 4)', () => {
     sheet.dispose()
   })
 
-  // Finding 3: `handle.rect` must invert the exact `artworkUv` affine map, not a uniform
-  // `sourceLongSide / frontLongSide` scale — the two agree only at `p = 0`. `torn` mode's own
-  // ~0.19-0.22 overscan (task 10's own report) makes the two formulas' predictions diverge by
-  // tens of px, so a regression back to the uniform scale is caught, not just a rounding wobble.
-  it('handle.rect inverts the artworkUv margin mapping, not a uniform frontRect scale (finding 3)', async () => {
+  // Finding 3: `handle.rect` must go through the artwork's own placement in the front — the box
+  // the seed pass framed the field on — not a uniform `sourceLongSide / frontLongSide` scale,
+  // which has no origin term and so drops the margin. `torn` mode's own ~0.19-0.22 overscan (task
+  // 10's own report) makes that margin ~19 px of a 128 px front, so the two formulas' predictions
+  // diverge by tens of px and a regression back to the uniform scale is caught, not just a
+  // rounding wobble.
+  it('handle.rect subtracts the artwork placement and scales by src / artwork, not a uniform frontRect scale (finding 3)', async () => {
     const ctx = open()
     const sheet = paperSheet({ edgeMode: 'torn' })
     sheet.mount(ctx)
@@ -871,15 +1121,32 @@ describe('fix round 1 — the CPU-fallback field (findings 1, 2, 3, 4)', () => {
     const front = { w: 128, h: 128 }
     const srcW = 64
     const srcH = 64
-    const p = handle.overscan
-    expect(p).toBeGreaterThan(0.15) // torn's own headline figure (~0.19-0.22); a real margin to invert
-    const scale = 1 + 2 * p
-    const toSource = (uFront: number, srcDim: number) => (uFront * scale - p) * srcDim
+    expect(handle.overscan).toBeGreaterThan(0.15) // torn's own headline figure; a real margin
+    expect(handle.front).toEqual(front)
+    // `source()`'s own `artworkPlacement`, then `src / artwork` per axis — the resample maps the
+    // full source onto the full artwork, so that is the whole of the scale.
+    const placement = {
+      x: Math.round((front.w - handle.artwork.w) / 2),
+      y: Math.round((front.h - handle.artwork.h) / 2),
+    }
+    expect(placement.x).toBeGreaterThan(10)
+    const toSource = (v: number, origin: number, artworkDim: number, srcDim: number) =>
+      ((v - origin) * srcDim) / artworkDim
 
-    const expectedX0 = toSource(handle.frontRect.x / front.w, srcW)
-    const expectedY0 = toSource(handle.frontRect.y / front.h, srcH)
-    const expectedX1 = toSource((handle.frontRect.x + handle.frontRect.w) / front.w, srcW)
-    const expectedY1 = toSource((handle.frontRect.y + handle.frontRect.h) / front.h, srcH)
+    const expectedX0 = toSource(handle.frontRect.x, placement.x, handle.artwork.w, srcW)
+    const expectedY0 = toSource(handle.frontRect.y, placement.y, handle.artwork.h, srcH)
+    const expectedX1 = toSource(
+      handle.frontRect.x + handle.frontRect.w,
+      placement.x,
+      handle.artwork.w,
+      srcW,
+    )
+    const expectedY1 = toSource(
+      handle.frontRect.y + handle.frontRect.h,
+      placement.y,
+      handle.artwork.h,
+      srcH,
+    )
 
     expect(handle.rect.x).toBeCloseTo(expectedX0, 0)
     expect(handle.rect.y).toBeCloseTo(expectedY0, 0)
@@ -1028,11 +1295,14 @@ describe('the hull polygon as a real paper field (design 2026-09-02, §2-§3)', 
 
     // The source aspect is kept end to end, so `sprite()`'s own ellipse (radii `w/3` and `h/3`
     // about the source's centre) is an ellipse about the FRONT's centre with these radii, and the
-    // artwork is centred by `build()`'s own step 8 rect. `+ 2` clears the upsample ramp and the
-    // shader's ~1px antialias, exactly as in the test above.
+    // artwork is centred by `build()`'s own placement — 1:1, so the radii are artwork px, at
+    // whatever origin a 128x128 front gives a 107x71 artwork (the trace front was 128x85: the
+    // mask has to land translated to that new origin, not scaled about the field's corner).
+    // `+ 2` clears the upsample ramp and the shader's ~1px antialias, exactly as in the test above.
     const got = readRect(ctx, front.texture, 0, 0, front.width, front.height)
-    const rx = 16 * (handle.artwork.w / 48) + 2
-    const ry = (32 / 3) * (handle.artwork.h / 32) + 2
+    const rx = 16 * (handle.artwork.w / 48)
+    const ry = (32 / 3) * (handle.artwork.h / 32)
+    const aa = 2
     const cx = front.width / 2
     const cy = front.height / 2
     let x0 = front.width
@@ -1047,7 +1317,7 @@ describe('the hull polygon as a real paper field (design 2026-09-02, §2-§3)', 
         if (x > x1) x1 = x
         if (y < y0) y0 = y
         if (y > y1) y1 = y
-        if (((x + 0.5 - cx) / rx) ** 2 + ((y + 0.5 - cy) / ry) ** 2 > 1) {
+        if (((x + 0.5 - cx) / (rx + aa)) ** 2 + ((y + 0.5 - cy) / (ry + aa)) ** 2 > 1) {
           outside.push(y * front.width + x)
         }
       }
@@ -1070,9 +1340,13 @@ describe('the hull polygon as a real paper field (design 2026-09-02, §2-§3)', 
     expect(Math.abs((y0 + y1) / 2 - cy)).toBeLessThan(6)
 
     // It grew OUTWARD on both axes, which is the property the two centre bounds above cannot see:
-    // a mask that landed centred but at the wrong scale would still pass them.
-    expect((x1 - x0) / 2).toBeGreaterThan(rx)
-    expect((y1 - y0) / 2).toBeGreaterThan(ry)
+    // a mask that landed centred but at the wrong scale would still pass them. The polygon sits
+    // at least `minDist` (22 reference px, quoted against the TRACE front's height — the hull is
+    // traced once, in `source()`, and moves 1:1 with the artwork) past the silhouette, less the
+    // repair pass's quarter-texel slack; half of that is a floor no rounding can eat.
+    const reach = (22 * handle.front.h) / 1000 / 2
+    expect((x1 - x0) / 2).toBeGreaterThan(rx + reach)
+    expect((y1 - y0) / 2).toBeGreaterThan(ry + reach)
 
     // And it is the polygon the sheet grew to, not the frame: nothing reaches any edge of the
     // front. A swapped `sx` overruns the right edge, so this catches that mistake a second time.
@@ -1238,4 +1512,127 @@ describe('the hull polygon as a real paper field (design 2026-09-02, §2-§3)', 
     hullSheet.dispose()
     bothSheet.dispose()
   })
+})
+
+/**
+ * 160x80 with an opaque 100x50 rectangle centred in it: transparent padding on every side, so the
+ * paper's box is smaller than the artwork and the bucket-shaped front `motion.fit` sizes over it
+ * (spec 5.4) is smaller than the front `source()` traced on. The rectangle's own edges are what
+ * make "paper on every side" measurable to the pixel.
+ */
+async function paddedRect(w = 160, h = 80): Promise<ImageBitmap> {
+  const data = new Uint8ClampedArray(w * h * 4)
+  for (let y = 0; y < h; y++) {
+    for (let x = 0; x < w; x++) {
+      const inside = x >= 30 && x < 130 && y >= 15 && y < 65
+      const p = (y * w + x) * 4
+      data[p] = 200
+      data[p + 1] = 40
+      data[p + 2] = 40
+      data[p + 3] = inside ? 255 : 0
+    }
+  }
+  return createImageBitmap(new ImageData(data, w, h), {
+    premultiplyAlpha: 'none',
+    colorSpaceConversion: 'none',
+  })
+}
+
+/** Inclusive bbox of the texels `keep` accepts, in the readback's own y-down rows. */
+function bboxOf(
+  bytes: Uint8Array,
+  w: number,
+  h: number,
+  keep: (i: number) => boolean,
+): { x0: number; y0: number; x1: number; y1: number } {
+  let x0 = w
+  let y0 = h
+  let x1 = -1
+  let y1 = -1
+  for (let y = 0; y < h; y++) {
+    for (let x = 0; x < w; x++) {
+      if (!keep((y * w + x) * 4)) continue
+      if (x < x0) x0 = x
+      if (x > x1) x1 = x
+      if (y < y0) y0 = y
+      if (y > y1) y1 = y
+    }
+  }
+  return { x0, y0, x1, y1 }
+}
+
+describe('build() at a bucket-shaped size (spec 5.4, 8.6)', () => {
+  // `motion.fit(handle.frontRect)` returns the paper's own box for any aspect inside the stretch
+  // clamp, and the core builds the front at exactly that size — which is NOT the front `source()`
+  // traced on (384 x 192 here). The artwork is copied into the front 1:1 wherever the front puts it
+  // (spec 7.4.2), so the paper — the fields the shader cuts it from, the hull mask, and the rect
+  // the motion layer centres on — has to follow the artwork's pixel placement. Framing the fields
+  // by a flat `p` inset instead scaled the silhouette to `size / (1 + 2p)`: at this size that was
+  // a paper smaller than the artwork, which in hull mode vanished behind it entirely.
+  for (const edgeMode of ['torn', 'hull'] as const) {
+    it(`keeps the paper around the 1:1 artwork and centred on front.rect (${edgeMode})`, async () => {
+      const ctx = open()
+      const sheet = paperSheet({ edgeMode })
+      sheet.mount(ctx)
+      const bitmap = await paddedRect()
+      const handle = await sheet.source(bitmap, { maxSize: 384, exact: false })
+      bitmap.close()
+      expect(
+        GlError.is(handle) || SheetError.is(handle) || isAborted(handle),
+        String((handle as Error)?.message),
+      ).toBe(false)
+      if (GlError.is(handle) || SheetError.is(handle) || isAborted(handle)) {
+        sheet.dispose()
+        return
+      }
+
+      const size = { w: handle.frontRect.w, h: handle.frontRect.h }
+      expect(size.w).toBeLessThan(384)
+      expect(size.h).toBeLessThan(192)
+      const front = sheet.build(handle, size, defaultsFor(edgeMode) as never)
+      expect(front instanceof Error, String((front as Error)?.message)).toBe(false)
+      if (front instanceof Error) {
+        sheet.dispose()
+        return
+      }
+
+      const w = front.width
+      const h = front.height
+      const got = readRect(ctx, front.texture, 0, 0, w, h)
+      const paper = bboxOf(got, w, h, (i) => got[i + 3] > 8)
+      // The artwork's own red against paper that reads high on every channel.
+      const art = bboxOf(got, w, h, (i) => got[i] > 150 && got[i + 1] < 100 && got[i + 3] > 8)
+      expect(art.x1).toBeGreaterThan(art.x0)
+
+      // 1:1 (spec 7.4.2): the opaque rectangle is 100/160 x 50/80 of A, wherever the front put it.
+      expect(Math.abs(art.x1 - art.x0 + 1 - (handle.artwork.w * 100) / 160)).toBeLessThanOrEqual(2)
+      expect(Math.abs(art.y1 - art.y0 + 1 - (handle.artwork.h * 50) / 80)).toBeLessThanOrEqual(2)
+
+      // Paper on every side of it — `thickness` (torn) and `minDist` (hull) are both 22 reference
+      // px, i.e. 2-3 px at this front height, so 2 is the honest floor.
+      expect(art.x0 - paper.x0).toBeGreaterThanOrEqual(2)
+      expect(paper.x1 - art.x1).toBeGreaterThanOrEqual(2)
+      expect(art.y0 - paper.y0).toBeGreaterThanOrEqual(2)
+      expect(paper.y1 - art.y1).toBeGreaterThanOrEqual(2)
+
+      // Centred on the artwork (a hull vertex wanders inside [minDist, maxDist], hence the slack)
+      // and on `front.rect`, which is what `motion.draw` centres the sheet on.
+      const paperC = [(paper.x0 + paper.x1 + 1) / 2, (paper.y0 + paper.y1 + 1) / 2]
+      const artC = [(art.x0 + art.x1 + 1) / 2, (art.y0 + art.y1 + 1) / 2]
+      const rectC = [front.rect.x + front.rect.w / 2, front.rect.y + front.rect.h / 2]
+      expect(Math.abs(paperC[0] - artC[0])).toBeLessThanOrEqual(5)
+      expect(Math.abs(paperC[1] - artC[1])).toBeLessThanOrEqual(5)
+      expect(Math.abs(paperC[0] - rectC[0])).toBeLessThanOrEqual(3)
+      expect(Math.abs(paperC[1] - rectC[1])).toBeLessThanOrEqual(3)
+
+      // And the rect is the paper's box: nothing drawn lies outside it (1 px for the AA ramp).
+      expect(paper.x0).toBeGreaterThanOrEqual(front.rect.x - 1)
+      expect(paper.y0).toBeGreaterThanOrEqual(front.rect.y - 1)
+      expect(paper.x1).toBeLessThanOrEqual(front.rect.x + front.rect.w)
+      expect(paper.y1).toBeLessThanOrEqual(front.rect.y + front.rect.h)
+
+      sheet.releaseFront(front)
+      sheet.dispose()
+    })
+  }
 })

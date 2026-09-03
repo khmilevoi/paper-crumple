@@ -80,6 +80,22 @@ void main() {
   // identity path keeps 0.002 so pose 0 stays the byte-exact sprite the identity job measures.
   float discardCutoff = uIdentity == 1 ? 0.002 : 0.4;
   if (alpha < discardCutoff) discard;
+  // The same no-blend draw binds the OTHER side of that alpha test too: a survivor is written to
+  // the framebuffer as-is, so a partial alpha there is never "half paper over the fold behind it"
+  // but "half page background through the ball" -- the canvas is alpha: true, and the browser
+  // composites whatever alpha the sheet left. Compaction is what makes that band reachable: at a
+  // floor of 0.5 (pose 4, a 135 ms dwell in every run) the sheet outside the torn/hull silhouette,
+  // which is the whole outer shell of the baked ball, has front.a == 0, survives on the floor
+  // alone, and would leave 0.5 behind -- a soap-bubble shell with the page showing through it. So
+  // once the floor itself clears the alpha test the sheet is solid: everything the floor lifts is
+  // compaction paper, and paper has coverage 1 or none. Below that the sheet's own coverage is
+  // written, as before, so poses 0 to 3 (floors 0, 0, 0, 0.0741) are untouched: pose 0 stays the
+  // byte-exact sprite and the torn/hull fringe keeps its soft alpha until compaction takes the
+  // sheet over at pose 4. Not a dithered discard: the transport draws six discrete poses with a
+  // dwell between them, so a stochastic 50 % discard would read as a static screen-door for the
+  // whole dwell, never as a dissolve. The identity path is excluded outright rather than by the
+  // floor being 0 there, so a pack that mis-states frame 0's floor cannot turn pose 0 solid.
+  float coverage = uIdentity == 0 && uAlphaFloor >= discardCutoff ? 1.0 : alpha;
   float fibre = texture(uFibre, vUv * uFibreScale).a;
   float grainK = 1.0 + (fibre - 0.5) * uGrain;
   vec3 n = normalize(vNormal);
@@ -109,5 +125,5 @@ void main() {
   if (uDebug == 3) { outColor = vec4(vUv, 0.0, 1.0); return; }
   if (uDebug == 4) { outColor = vec4(vec3(front.a), 1.0); return; }
   if (uDebug == 5) { outColor = gl_FrontFacing ? vec4(0.2, 0.9, 0.3, 1.0) : vec4(0.9, 0.3, 0.2, 1.0); return; }
-  outColor = vec4(rgb * shade, alpha);
+  outColor = vec4(rgb * shade, coverage);
 }`

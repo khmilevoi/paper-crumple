@@ -67,6 +67,16 @@ describe('the compaction ramp — the property §4.2 depends on (§9.1)', () => 
     expect(SHEET_FS).toContain('rgb = mix(')
   })
 
+  it('writes solid coverage, not the floor, once the floor clears the alpha test (no blend, §3.1)', () => {
+    // A survivor of the depth-tested discard is written unblended, so a partial alpha lets the
+    // page through the ball; the compaction shell at pose 4 (floor 0.5) must be coverage 1.
+    expect(SHEET_FS).toContain(
+      'float coverage = uIdentity == 0 && uAlphaFloor >= discardCutoff ? 1.0 : alpha;',
+    )
+    expect(SHEET_FS).toContain('outColor = vec4(rgb * shade, coverage);')
+    expect(SHEET_FS).not.toContain('outColor = vec4(rgb * shade, alpha);')
+  })
+
   it('reads the light from the manifest and not from a knob (§6.2, §9.3)', () => {
     expect(SHEET_FS).toContain('uniform vec3 uLight;')
     expect(SHEET_FS).not.toContain('lightAngle')

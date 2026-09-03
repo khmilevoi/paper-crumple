@@ -57,8 +57,8 @@ import type { PaperSheetHandle } from './handle.js'
 import { hullCache } from './hull-cache.js'
 import type { HullCache, HullCacheKey } from './hull-cache.js'
 import { DISTANCE_WAVELENGTH_PX, buildHull, fillHullMask, toleranceFor } from './hull.js'
-import { hullComponentCount, hullExtent } from './hull-shape.js'
-import type { HullShape } from './hull-shape.js'
+import { boundsExtent, hullBounds, hullComponentCount } from './hull-shape.js'
+import type { HullShape, VertexBounds } from './hull-shape.js'
 import { defaultsFor, descriptorsFor, edgeParamsFrom, resolveSdfRes } from './paper-knobs.js'
 import type { PaperEdgeMode } from './paper-knobs.js'
 import { createPaperRenderer } from './paper-renderer.js'
@@ -109,8 +109,10 @@ export interface PaperSheetOptions {
  * `freezeOverscan`). The two coincide only while a sprite's edge knobs still sit at this
  * factory's defaults; the instant a consumer sets, say, a larger `maxDist` on one sprite,
  * `sheet.overscan` keeps reporting the factory baseline and that sprite's own handle carries the
- * sprite's real, larger reserve. Neither number is wrong; they answer different questions asked
- * at different times.
+ * sprite's real, larger reserve. A sprite taller than it is wide carries a larger reserve even
+ * at the defaults — `freezeOverscan` scales the radius by the front's `h / w` so the x margin
+ * holds it (its own doc comment says why), and this baseline is a square sprite's. Neither
+ * number is wrong; they answer different questions asked at different times.
  */
 export interface PaperSheet extends SheetRenderer<Knobs, PaperSheetHandle> {
   readonly edgeMode: PaperEdgeMode
@@ -207,6 +209,16 @@ interface Mounted {
    *  cannot call `.dispose()` on it without this map. */
   readonly frontTextures: WeakMap<SheetFront, { texture: Texture }>
   /**
+   * Live handles per spriteKey. A spriteKey is minted per bitmap OBJECT IDENTITY
+   * (`spriteInfoFor`, below), so re-`source()`ing a bitmap the caller still holds open — core's
+   * §8.5 re-source of a borrowed `ImageBitmap`, once another sprite has taken the artwork slot —
+   * yields a second handle under the FIRST one's key, sharing its hull entry and its slot.
+   * `release()` hands those back only with the last handle under the key: without the count,
+   * releasing the superseded handle would free what the live one had just re-sourced, and the
+   * live one's next `build()` would expire again, forever.
+   */
+  readonly liveHandles: Map<string, number>
+  /**
    * Task 12's own addition: what the last `buildField`/`blurField` call (from either `source()`
    * or `build()`) left the shared Pool A field slots holding. `buildField`/`blurField` write into
    * one shared `sdf.tight` / `sdf.loose` slot apiece (§8.1) — there is no per-sprite storage for a
@@ -261,10 +273,29 @@ function dimsForLongSide(longSide: number, srcW: number, srcH: number, floor = 1
 }
 
 /**
+ * The sheet's reach for the guard band (§8.6): `centres` — texel-centre coordinates, either the
+ * silhouette box's own texel indices or a hull's vertex bounds — pushed out by `radius` field
+ * texels on every side, as a front-px `Rect` that is continuous, unrounded and unclamped. Texel
+ * centres sit at `i + 0.5`. Per-axis scale rather than `source()`'s single `texel`, because
+ * `dimsForLongSide` rounds the field's short side and a fraction of the FRONT is what the
+ * shader's `q` measures.
+ */
+function reachRect(centres: VertexBounds, radius: number, field: Size, front: Size): Rect {
+  const sx = front.w / field.w
+  const sy = front.h / field.h
+  const x0 = (centres.minX + 0.5 - radius) * sx
+  const y0 = (centres.minY + 0.5 - radius) * sy
+  const x1 = (centres.maxX + 0.5 + radius) * sx
+  const y1 = (centres.maxY + 0.5 + radius) * sy
+  return { x: x0, y: y0, w: x1 - x0, h: y1 - y0 }
+}
+
+/**
  * A numeric knob value, or `fallback` when the key is absent from `values` — which happens for
- * real here: `values` is always `defaultsFor(edgeMode)` (§5.2 passes no per-sprite knob values to
- * `source()`), and a `torn`-only or `hull`-only descriptor is simply not in the other mode's set
- * (`edgeParamsFrom`'s own `num` helper makes the same allowance).
+ * real here: `values` is `defaultsFor(edgeMode)` under whatever the caller projected into
+ * `SourceOptions.knobs` (§6.3), declared keys only, and a `torn`-only or `hull`-only descriptor
+ * is simply not in the other mode's set (`edgeParamsFrom`'s own `num` helper makes the same
+ * allowance).
  */
 function numKnob(values: Knobs, key: string, fallback: number): number {
   const v = values[key]
@@ -272,76 +303,63 @@ function numKnob(values: Knobs, key: string, fallback: number): number {
 }
 
 /**
- * Maps `rect`, read as a fraction of `fromDims`, through the affine map `u -> u*scale + offset`,
- * then back into pixels of `toDims`. The one primitive both rect conversions between front space
- * and source space share, so the two directions (source() -> `handle.rect`, and build()'s own
- * step 9, below) can never independently drift from one another — a `scale`/`offset` pair derived
- * once from `p` is the only thing that differs between them (fix round 2, "build()'s rect
- * conversion contradicts source()'s").
+ * Where the unpadded artwork sits inside a front of `front` texels: centred, at its own size, copied
+ * 1:1 (spec 7.4.2 — texels are copied, never resampled, so the origin is rounded to whole texels).
+ * One expression for every front this module frames — `source()`'s trace front and whatever size
+ * `build()` is asked for — because the seed pass, the CPU fallback, the hull mask, `renderFront`'s
+ * `artworkRect` and the rect the motion layer centres on must all agree on it. Framing the fields by
+ * a flat `p` inset instead (`artworkUv = fieldUv * (1+2p) - p`) coincides with this only when the
+ * front is `artwork * (1+2p)`, which a bucket-shaped front (spec 5.4, 8.6) is not: there the inset
+ * scaled the silhouette to `size / (1+2p)` while the artwork stayed 1:1, and the paper came out
+ * smaller than the image it was meant to surround.
  */
-function mapRectAffine(
-  rect: Rect,
-  fromDims: Size,
-  toDims: Size,
-  scale: number,
-  offset: number,
-): Rect {
-  const mapX = (u: number) => (u * scale + offset) * toDims.w
-  const mapY = (u: number) => (u * scale + offset) * toDims.h
-  const x0 = mapX(rect.x / fromDims.w)
-  const y0 = mapY(rect.y / fromDims.h)
-  const x1 = mapX((rect.x + rect.w) / fromDims.w)
-  const y1 = mapY((rect.y + rect.h) / fromDims.h)
+function artworkPlacement(front: Size, artwork: Size): Rect {
+  return {
+    x: Math.round((front.w - artwork.w) / 2),
+    y: Math.round((front.h - artwork.h) / 2),
+    w: artwork.w,
+    h: artwork.h,
+  }
+}
+
+/**
+ * The seed pass's `uArtworkUv` (`gl-sdf.ts`) for that placement: field uv — which is front uv, the
+ * field being a plain resample of the front — into artwork uv, `(uv * front - placement.xy) /
+ * placement.wh`, as a `(scale.xy, offset.xy)` pair.
+ */
+function artworkUvFor(placement: Rect, front: Size): readonly [number, number, number, number] {
+  return [
+    front.w / placement.w,
+    front.h / placement.h,
+    -placement.x / placement.w,
+    -placement.y / placement.h,
+  ]
+}
+
+/** The field's texel grid for a front: the same long-side rule, floored at 2 (§7.4.3). */
+function fieldDimsFor(sdfRes: number, front: Size): Size {
+  return dimsForLongSide(sdfRes, front.w, front.h, 2)
+}
+
+/**
+ * `frontRect` (front texels, at the front `placement` was taken in) to `rect` (source pixels):
+ * subtract the artwork's origin, then one scale per axis — the resample maps the FULL source onto
+ * the FULL artwork (`srcRect` at the call site: no crop, no offset), so artwork texels and source
+ * pixels differ by `src / artwork` alone. Rounded at the ends, like the front rect it comes from.
+ */
+function frontRectToSourceRect(frontRect: Rect, placement: Rect, src: Size): Rect {
+  const sx = src.w / placement.w
+  const sy = src.h / placement.h
+  const x0 = (frontRect.x - placement.x) * sx
+  const y0 = (frontRect.y - placement.y) * sy
+  const x1 = (frontRect.x + frontRect.w - placement.x) * sx
+  const y1 = (frontRect.y + frontRect.h - placement.y) * sy
   return {
     x: Math.round(x0),
     y: Math.round(y0),
     w: Math.max(1, Math.round(x1 - x0)),
     h: Math.max(1, Math.round(y1 - y0)),
   }
-}
-
-/**
- * `frontRect` (front pixels, at THIS front's own `front` dims) to `rect` (source pixels),
- * inverting the exact `artworkUv` affine map rather than a uniform long-side scale (fix round 1,
- * finding 3). See the call site's own comment for why front-space uv and source-space uv are
- * related by the identical `scale`/`offset` pair `artworkUv` already uses between field space and
- * artwork space: `sourceUv = frontUv*(1+2p) - p`.
- */
-function frontRectToSourceRect(
-  frontRect: Rect,
-  front: Size,
-  srcW: number,
-  srcH: number,
-  p: number,
-): Rect {
-  const scale = 1 + 2 * p
-  return mapRectAffine(frontRect, front, { w: srcW, h: srcH }, scale, -p)
-}
-
-/**
- * The exact inverse of `frontRectToSourceRect`: `rect` (source pixels, fixed at add-time) to a
- * front-pixel rect at `front` — whatever dims THIS `build()` call actually requested, which need
- * not match the front `source()` traced the handle at. Algebra: `sourceUv = frontUv*scale - p`
- * (the forward map) solves to `frontUv = sourceUv/scale + p/scale`, i.e. the same affine form
- * with `scale' = 1/scale`, `offset' = p/scale` — so this is `mapRectAffine` with that pair, not a
- * second, independently-written conversion (fix round 2). `p` is `handle.overscan`, frozen at
- * add-time and independent of the size requested here, so the mapping is well-defined for any
- * `size` a caller passes to `build()`.
- *
- * Before this fix, build()'s step 9 instead scaled `handle.rect` uniformly by
- * `frontLongSide / sourceLongSide` — correct only at `p = 0`, because a uniform scale carries no
- * offset term and so silently drops the margin fraction `p` encodes whenever this build's
- * requested size differs from the add-time front size.
- */
-function sourceRectToFrontRect(
-  sourceRect: Rect,
-  srcW: number,
-  srcH: number,
-  front: Size,
-  p: number,
-): Rect {
-  const scale = 1 + 2 * p
-  return mapRectAffine(sourceRect, { w: srcW, h: srcH }, front, 1 / scale, p / scale)
 }
 
 /**
@@ -453,15 +471,13 @@ function readBackField(ctx: GlContext, field: Field, texelPx: number): Float32Ar
  * flip rows (fix round 1, finding 1 — see below for why not, with the measurement to back it):**
  *
  * 1. *Margin.* `buildField`'s seed pass (`gl-sdf.ts`'s `SEED_FS`) reads the artwork through
- *    `artworkUv = fieldUv * (1+2p) - p`, so the artwork occupies a *sub-rectangle* of the
- *    field inset by the overscan margin `p`, not the whole field. `drawImage`'s 5-argument form
- *    reproduces exactly that sub-rectangle: solving `artworkUv(fieldUv) = 0` and `= 1` for
- *    `fieldUv` gives the artwork's own span in field pixels,
- *    `[p * dim / (1+2p), (p + 1) * dim / (1+2p)]` on each axis — a rectangle of `dim / (1+2p)`
- *    centred in the field, which is exactly `{ dx, dy, dWidth, dHeight }` below. The canvas starts fully
- *    transparent, so the untouched margin reads alpha 0 — "outside" — matching the seed pass's own
- *    `inRange` guard, which never samples the artwork there either. The original report's
- *    departure 2 named exactly this gap; this is what closes it.
+ *    `artworkUvFor(placement, front)`, so the artwork occupies a *sub-rectangle* of the field —
+ *    `placement`, the artwork's centred 1:1 box in the front, scaled by `field / front` — not the
+ *    whole field. `drawImage`'s 5-argument form reproduces exactly that sub-rectangle, which is
+ *    `{ dx, dy, dWidth, dHeight }` below. The canvas starts fully transparent, so the untouched
+ *    margin reads alpha 0 — "outside" — matching the seed pass's own `inRange` guard, which never
+ *    samples the artwork there either. The original report's departure 2 named exactly this gap;
+ *    this is what closes it.
  * 2. *Orientation — NOT a mismatch here, checked rather than assumed.* The original report's
  *    departure asserted "GPU-native y-up… canvas-native y-down…", by analogy with `engine.js`'s
  *    own `cpuSdfYUp`. That analogy does not hold for THIS package's actual upload path:
@@ -483,7 +499,8 @@ function cpuFieldFallback(
   bitmap: ImageBitmap,
   w: number,
   h: number,
-  p: number,
+  placement: Rect,
+  front: Size,
 ): InstanceType<typeof GlError> | Float32Array {
   const canvas = attempt(
     () => new OffscreenCanvas(w, h),
@@ -499,16 +516,15 @@ function cpuFieldFallback(
     return new GlError('paperSheet: source() CPU-field fallback 2D context unavailable')
   }
 
-  // The same artworkUv map `buildField`'s seed pass applies (`gl-sdf.ts:80`, "Departure 2" in
-  // that file's own header comment) — the artwork spans `[p/scale, (p+1)/scale]` of each axis, not
-  // `[0, 1]`. `p` is a fraction of the ARTWORK (`p = r / (1000 - 2r)`, `front = artwork * scale`),
-  // so the margin is `p * artwork`, i.e. `p / scale` of the field — dividing by `scale` here is
-  // what keeps the artwork centred and the two margins equal.
-  const scale = 1 + 2 * p
-  const dWidth = w / scale
-  const dHeight = h / scale
-  const dx = (p * w) / scale
-  const dy = (p * h) / scale
+  // The same placement `buildField`'s seed pass reads the artwork at (`artworkUvFor`, "Departure
+  // 2" in `gl-sdf.ts`'s own header comment): the artwork's 1:1 box in the front, at the field's
+  // own resolution — front uv is field uv, so each axis scales by `field / front`.
+  const kx = w / front.w
+  const ky = h / front.h
+  const dx = placement.x * kx
+  const dy = placement.y * ky
+  const dWidth = placement.w * kx
+  const dHeight = placement.h * ky
 
   const drawn = attempt(
     () => c2d.drawImage(bitmap, dx, dy, dWidth, dHeight),
@@ -543,11 +559,12 @@ function acquireCpuField(
   tight: Field,
   texelPx: number,
   bitmap: ImageBitmap,
-  p: number,
+  placement: Rect,
+  front: Size,
 ): InstanceType<typeof GlError> | Float32Array {
   const readBack = readBackField(ctx, tight, texelPx)
   if (readBack !== null) return readBack
-  return cpuFieldFallback(bitmap, tight.width, tight.height, p)
+  return cpuFieldFallback(bitmap, tight.width, tight.height, placement, front)
 }
 
 export function paperSheet(options?: PaperSheetOptions): PaperSheet {
@@ -555,6 +572,41 @@ export function paperSheet(options?: PaperSheetOptions): PaperSheet {
   const tileSet: PaperTileSet | null = options?.tiles ?? null
   const overscanHeadroom = options?.overscanHeadroom ?? 0
   const knobDescriptors = descriptorsFor(edgeMode)
+
+  /**
+   * §6.3 — the values a trace runs at: this mode's defaults, with the HULL TIER alone taken from
+   * the caller's projection of §6.6's ladder for the sprite (`SourceOptions.knobs`) — declared
+   * keys only, so a torn sheet handed `minDist` keeps ignoring it, exactly as `build()` does. No
+   * projection traces at the defaults.
+   *
+   * Nothing else in `source()` may follow the live knobs. The reserve and the overscan `p` it
+   * derives — and with `p` the artwork's own resolution `A = maxSize / (1 + 2p)` — are frozen at
+   * add() for the sprite's life (§8.6): a re-source that read the live `tearAmp` or `looseness`
+   * handed back a handle with another `p` than the fit was sized over, so `build()` placed a
+   * smaller artwork in the same bucket, and on a portrait sprite the `h / w`-scaled reserve ran
+   * off the reference plane and `source()` itself refused ("could not derive overscan") where
+   * `build()`'s own reserve check (step 4) is the honest surface. `sdfRes` and `looseness` stay
+   * at the defaults for the same reason `build()` re-blurs at the live `looseness` itself.
+   */
+  function valuesFor(knobs: Knobs | undefined): Knobs {
+    const out = defaultsFor(edgeMode)
+    if (knobs === undefined) return out
+    for (const d of knobDescriptors) {
+      const v = knobs[d.key]
+      if (d.invalidates === 'hull' && v !== undefined) out[d.key] = v
+    }
+    return out
+  }
+
+  /** The hull-tier slice of `values`, the way `PaperSheetHandle.hullKnobs` records it (§6.3). */
+  function hullTierOf(values: Knobs): Knobs {
+    const out: Record<string, string | number | boolean> = {}
+    for (const d of knobDescriptors) {
+      const v = values[d.key]
+      if (d.invalidates === 'hull' && v !== undefined) out[d.key] = v
+    }
+    return out
+  }
 
   // §6.5/§8.6: the factory-level baseline. See `PaperSheet.overscan`'s doc comment for why this
   // is not the same number `add()` later freezes onto a sprite's own handle.
@@ -671,6 +723,7 @@ export function paperSheet(options?: PaperSheetOptions): PaperSheet {
       tiles: neutral,
       liveFronts: new Set<Texture>(),
       frontTextures: new WeakMap<SheetFront, { texture: Texture }>(),
+      liveHandles: new Map<string, number>(),
       lastFieldBuild: null,
     }
 
@@ -752,32 +805,38 @@ export function paperSheet(options?: PaperSheetOptions): PaperSheet {
     // Abort check point 1 (§10.5): on entry, before any GPU work is spent.
     if (signalAborted(o.signal)) return ABORTED
 
-    // §5.2 passes no per-sprite knob values to source(); the hull-trace-relevant work here runs
-    // at this factory's default values, exactly as the factory-level `overscan` above does.
-    const values = defaultsFor(edgeMode)
+    // §6.3 — the hull cache key is "every knob at or above 'hull'", so the trace runs at the
+    // hull-tier values the caller projected for the sprite, over this factory's defaults. The
+    // reserve, `p` and the artwork size derived below stay at the defaults (`valuesFor`'s own doc
+    // comment: §8.6 freezes them at add()).
+    const values = valuesFor(o.knobs)
     const edgeParams = edgeParamsFrom(edgeMode, values)
-
-    // Step 1: handle-level overscan.
-    const sourceReserve = freezeOverscan(edgeParams, overscanHeadroom)
-    if (KnobError.is(sourceReserve)) {
-      // `KnobError` is not a member of `SourceError` (only `SheetError | GlError` are, per
-      // amendment 1's `results.ts`), so it is wrapped rather than returned "as is" at the type
-      // level; the cause is preserved. Unreachable for any of the three edge modes at their own
-      // defaults (`paperSheet()`'s own `overscan` computation above notes the same thing), kept
-      // because §10.8 forbids unwrapping an `Error | T` unchecked even when a branch is believed
-      // dead.
-      return new SheetError('paperSheet: source() could not derive overscan', {
-        cause: sourceReserve,
-      })
-    }
-    const p = sourceReserve.overscan
 
     const info = spriteInfoFor(bitmap)
     const spriteKey = info.key
-
-    // Steps 2-3: frontLongSide, A_long, and A itself (source aspect kept).
     const srcW = info.srcW
     const srcH = info.srcH
+
+    // Step 1: handle-level overscan. The front keeps the source's aspect (`dimsForLongSide`,
+    // below), so `srcH / srcW` IS the front's `h / w` that `freezeOverscan` scales a portrait
+    // sprite's reserve by — its own doc comment says why the x margin needs it.
+    const sourceReserve = freezeOverscan(edgeParams, overscanHeadroom, srcH / srcW)
+    if (KnobError.is(sourceReserve)) {
+      // `KnobError` is not a member of `SourceError` (only `SheetError | GlError` are, per
+      // amendment 1's `results.ts`), so it is wrapped rather than returned "as is" at the type
+      // level; the cause is preserved. Reachable, unlike the factory-level branch `paperSheet()`
+      // refuses `mount()` on: the `h / w` scale applies on top of `overscanHeadroom`, so a
+      // headroom the factory accepted for a square sprite can still push a tall sprite's reserve
+      // past the reference plane.
+      return new SheetError(
+        `paperSheet: source() could not derive overscan for a ${srcW}x${srcH} source — its h/w ` +
+          'scales the reserve (spec 8.6); pass a smaller overscanHeadroom or smaller edge knobs',
+        { cause: sourceReserve },
+      )
+    }
+    const p = sourceReserve.overscan
+
+    // Steps 2-3: frontLongSide, A_long, and A itself (source aspect kept).
     const sourceLongSide = Math.max(srcW, srcH)
     const frontLongSide = o.exact ? exactFrontLongSide(sourceLongSide, p) : o.maxSize
     const aLongSide = o.exact ? sourceLongSide : artworkLongSide(o.maxSize, p)
@@ -787,9 +846,11 @@ export function paperSheet(options?: PaperSheetOptions): PaperSheet {
     const sdfRes = resolveSdfRes(numKnob(values, 'sdfRes', 0), frontLongSide)
 
     // The front's own size (never materialised as a texture here — task 12's `build()` does
-    // that) and the field's size, both keeping the source aspect at their own long side.
+    // that) and the field's size, both keeping the source aspect at their own long side; and
+    // where the artwork sits in that front, which every framing below is taken from.
     const front = dimsForLongSide(frontLongSide, srcW, srcH)
-    const field = dimsForLongSide(sdfRes, front.w, front.h, 2)
+    const field = fieldDimsFor(sdfRes, front)
+    const placement = artworkPlacement(front, artwork)
 
     // Step 5: pools, sized at { artwork, sdfRes } — created lazily here, reused across sprites,
     // re-created (with disposal) when a later sprite needs a bigger Pool A.
@@ -834,11 +895,11 @@ export function paperSheet(options?: PaperSheetOptions): PaperSheet {
       info.lastArtwork = artwork
     }
 
-    // Step 7: buildField — the margin applied as a uv offset, at no cost (§8.5).
-    const artworkUvScale = 1 + 2 * p
+    // Step 7: buildField — the margin applied as a uv offset, at no cost (§8.5): the artwork's
+    // own placement in the front, expressed in uv.
     const tight = sdf.buildField({
       artwork: artworkTexture,
-      artworkUv: [artworkUvScale, artworkUvScale, -p, -p],
+      artworkUv: artworkUvFor(placement, front),
       width: field.w,
       height: field.h,
       sourceLongSide: frontLongSide,
@@ -898,7 +959,7 @@ export function paperSheet(options?: PaperSheetOptions): PaperSheet {
 
     let hull: HullShape | undefined = m.cache.get(cacheKey)
     if (hull === undefined) {
-      const cpu = acquireCpuField(m.ctx, tight, texel, bitmap, p)
+      const cpu = acquireCpuField(m.ctx, tight, texel, bitmap, placement, front)
       if (GlError.is(cpu)) return cpu
 
       // `torn` mode declares no hull-only descriptors at all — `values.minDist`/`maxDist` are
@@ -935,15 +996,21 @@ export function paperSheet(options?: PaperSheetOptions): PaperSheet {
 
     // The rect (§8.3, no source-sized readback): hull/both take it from the polygon's own
     // extent; torn (and any use-alpha hull) take it from the silhouette's own box, grown by the
-    // overscan radius.
-    let box: AlphaBox | undefined =
-      hull.kind === 'use-alpha' ? undefined : hullExtent(hull, field.w, field.h)
-    if (box === undefined) {
+    // overscan radius. `reach` is the SAME two terms — silhouette plus paint radius — kept for
+    // the guard band as continuous front px, neither rounded nor clamped: `growBox`, `scaleBox`
+    // and `sheetRect` each round outward (a texel or a pixel per step — quantisation the reserve
+    // never promised to cover), `sheetRect`'s 4 % is §8.3's bucket-decision safety rather than
+    // paint, and a box clamped to the plane stops at exactly 0.5, so it cannot say how far an
+    // under-reserved sheet really reaches.
+    const bounds = hullBounds(hull)
+    let box: AlphaBox
+    let reach: Rect
+    if (bounds === undefined) {
       // Only reachable for `torn` (always `use-alpha`) or a degenerate empty trace. The CPU field
       // is not retained past the cache-hit branch above, so a use-alpha rect always re-acquires
       // it — cheap relative to the trace it replaces, and never on the hot (cached-hull) path for
       // hull/both.
-      const cpu = acquireCpuField(m.ctx, tight, texel, bitmap, p)
+      const cpu = acquireCpuField(m.ctx, tight, texel, bitmap, placement, front)
       if (GlError.is(cpu)) return cpu
       const raw = signedFieldExtent(cpu, field.w, field.h)
       if (raw === undefined) {
@@ -951,8 +1018,16 @@ export function paperSheet(options?: PaperSheetOptions): PaperSheet {
       }
       // `overscanRadius` is reference px (like `minDist`/`maxDist`); `k` is the same
       // reference-px-to-field-texel conversion the hull trace uses above.
-      box = growBox(raw, overscanRadius(edgeParams) * k, field.w, field.h)
-    } else if (edgeMode === 'both') {
+      const radius = overscanRadius(edgeParams) * k
+      box = growBox(raw, radius, field.w, field.h)
+      reach = reachRect(
+        { minX: raw.x0, minY: raw.y0, maxX: raw.x1, maxY: raw.y1 },
+        radius,
+        field,
+        front,
+      )
+    } else {
+      box = boundsExtent(bounds, field.w, field.h)
       // Finding F1. `extent.ts:5-7` says the polygon's vertices already sit `maxDist` past the
       // silhouette, so the polygon's own box is the sheet's extent. That holds for `hull` and
       // fails for `both`: there the torn path draws outward FROM the contour, by exactly the
@@ -961,31 +1036,34 @@ export function paperSheet(options?: PaperSheetOptions): PaperSheet {
       // slop — roughly 111 reference px at this package's own knob defaults (22 + 61.2 + 16 + 12),
       // against roughly 36 from `SHEET_MARGIN_FRAC`'s 4 %. Derived from the same function the frozen
       // reserve is derived from, so the two can never drift apart. Until the hull polygon became
-      // a real field this was invisible, because `both` never reached the polygon at all.
-      box = growBox(box, (overscanRadius(edgeParams) - edgeParams.maxDist) * k, field.w, field.h)
+      // a real field this was invisible, because `both` never reached the polygon at all. For
+      // `hull` the same expression is the slop alone (`r_hull - maxDist`): the antialiasing the
+      // reach carries past the polygon, which the rect leaves to `sheetRect`'s 4 %.
+      const beyond = (overscanRadius(edgeParams) - edgeParams.maxDist) * k
+      if (edgeMode === 'both') box = growBox(box, beyond, field.w, field.h)
+      reach = reachRect(bounds, beyond, field, front)
     }
 
     const frontBox = scaleBox(box, texel)
     const frontRect = sheetRectFromExtent(frontBox, front.w, front.h)
 
-    // Step 9 (guard band, §8.6): before allocating anything the caller will not receive.
-    const guardBand = checkGuardBand({ frontSize: front, hullExtent: frontRect })
+    // Step 9 (guard band, §8.6): before allocating anything the caller will not receive. Read off
+    // `reach`, not `frontRect` — the rect comment above gives the three reasons.
+    const guardBand = checkGuardBand({ frontSize: front, hullExtent: reach })
     if (guardBand !== undefined) return guardBand
 
-    // `rect` (source pixels) inverts the SAME uv remap `artworkUv` applies between field space and
-    // artwork space (§8.5), not a uniform `sourceLongSide / frontLongSide` scale (fix round 1,
-    // finding 3): front space and field space are both plain resamples of the one padded
-    // rectangle (`dimsForLongSide` at different long-side figures, no offset between them), and
-    // artwork space and source space are related the same way (the resample step maps the FULL
-    // source 1:1 onto the FULL artwork — see `srcRect` above — no crop, no offset). So front-uv and
-    // source-uv are related by the identical affine map `artworkUv` already uses,
-    // `sourceUv = frontUv * (1+2p) - p`, applied once here rather than assumed away.
-    const rect = frontRectToSourceRect(frontRect, front, srcW, srcH, p)
+    // `rect` (source pixels) goes through the artwork's own placement — the very box the seed
+    // pass framed the field on (§8.5) — not a uniform `sourceLongSide / frontLongSide` scale (fix
+    // round 1, finding 3): a uniform scale has no origin term, so it drops the margin the
+    // placement encodes. Artwork texels and source pixels then differ by `src / artwork` alone,
+    // because the resample maps the FULL source onto the FULL artwork (`srcRect` above).
+    const rect = frontRectToSourceRect(frontRect, placement, { w: srcW, h: srcH })
 
     const handle: PaperSheetHandle = {
       spriteKey,
       rect,
       frontRect,
+      front,
       artwork,
       overscan: p,
       sdfRes,
@@ -995,9 +1073,11 @@ export function paperSheet(options?: PaperSheetOptions): PaperSheet {
       exact: o.exact,
       edgeMode,
       hull,
+      hullKnobs: hullTierOf(values),
       alive: true,
       bytes: 0,
     }
+    m.liveHandles.set(spriteKey, (m.liveHandles.get(spriteKey) ?? 0) + 1)
     return { ...handle, bytes: handleBytesFor(handle) }
   }
 
@@ -1070,7 +1150,6 @@ export function paperSheet(options?: PaperSheetOptions): PaperSheet {
     // as the brief's own step 4 states; a caller who genuinely needs to drag `looseness` past the
     // frozen reserve gets the "re-add required" `SheetError` this check exists to produce, and one
     // who needs the room reserves it up front with a larger `overscanHeadroom` (spec 8.6).
-    const defaults = defaultsFor(edgeMode)
     const reserveCheck = checkReserve(reserve, edgeParamsFrom(edgeMode, knobValues))
     if (reserveCheck !== undefined) return reserveCheck
 
@@ -1082,7 +1161,11 @@ export function paperSheet(options?: PaperSheetOptions): PaperSheet {
     // no longer holds this sprite's tight field). Pass B (the blur) is re-run alone whenever
     // `looseness` itself moved — never pass A — which is what makes dragging it cheap.
     const frontLongSide = Math.max(size.w, size.h)
-    const field = dimsForLongSide(handle.sdfRes, size.w, size.h, 2)
+    const field = fieldDimsFor(handle.sdfRes, size)
+    // Where the artwork sits in THIS front — 1:1, centred (spec 7.4.2) — whatever `size` the
+    // bucket fit asked for. The field, the hull mask and the rect below are all framed on it,
+    // exactly as `source()` framed its own front: what moved between the two is this origin.
+    const placement = artworkPlacement(size, handle.artwork)
     const cachedField = m.lastFieldBuild
     const tightReusable =
       cachedField !== null &&
@@ -1103,11 +1186,9 @@ export function paperSheet(options?: PaperSheetOptions): PaperSheet {
     if (tightReusable) {
       tight = cachedField.tight
     } else {
-      const p = handle.overscan
-      const artworkUvScale = 1 + 2 * p
       const built = sdf.buildField({
         artwork: artworkTexture,
-        artworkUv: [artworkUvScale, artworkUvScale, -p, -p],
+        artworkUv: artworkUvFor(placement, size),
         width: field.w,
         height: field.h,
         sourceLongSide: frontLongSide,
@@ -1142,28 +1223,35 @@ export function paperSheet(options?: PaperSheetOptions): PaperSheet {
 
     // Step 6 (spec 6.3): a hull-tier knob (`minDist`, `maxDist`, `angularity`, `seed`) moving off
     // the value `source()` traced the handle's hull at is `invalidates: 'hull'`, which the core
-    // resolves by calling `source()` again — `build()` never silently retraces, which would hide
-    // a cache miss the invalidation ladder exists to surface. `source()` always traces at
-    // `defaultsFor(edgeMode)` (spec 5.2 passes no per-sprite knobs to it), so that is what "the
-    // ones the handle was built at" means here. Checked after the field rebuild above (never
-    // before it, per the brief's own numbered order), even though the rebuild's own work is
-    // wasted on the error path below — each step catches its own honest precondition, in the
-    // stated sequence, rather than being reordered for a marginal saving on an error path.
+    // resolves by calling `source()` again, at the current knobs — `build()` never silently
+    // retraces, which would hide a cache miss the invalidation ladder exists to surface. The
+    // values the trace ran at are the handle's own `hullKnobs` (`source()` records the hull tier
+    // of `SourceOptions.knobs` there), so that is what "the ones the handle was built at" means.
+    // `SourceExpiredError`, never a bare `SheetError`: core's `rebuildFront` walks §8.5's
+    // re-source row on that class alone and orphans every other `BuildError` (§10.6, no caller on
+    // the stack) — a `SheetError` here orphaned the sprite on every hull-tier set() for its life.
+    // Checked after the field rebuild above (never before it, per the brief's own numbered
+    // order), even though the rebuild's own work is wasted on the error path below — each step
+    // catches its own honest precondition, in the stated sequence, rather than being reordered
+    // for a marginal saving on an error path.
     const hullTierKeys = knobDescriptors.filter((d) => d.invalidates === 'hull')
-    const hullChanged = hullTierKeys.some((d) => knobValues[d.key] !== defaults[d.key])
+    const hullChanged = hullTierKeys.some((d) => knobValues[d.key] !== handle.hullKnobs[d.key])
     if (hullChanged) {
-      return new SheetError(
+      return new SourceExpiredError(
         'paperSheet: build() — a hull-invalidating knob (minDist/maxDist/angularity/seed) moved ' +
-          "off the value source() traced this handle's hull at (spec 6.3); call source() again",
+          "off the value this handle's hull was traced at (spec 6.3); source() again, with the " +
+          'current knobs',
       )
     }
 
     // Step 6b (design §2, §3, §5): the hull polygon's own field, and the reason `uEdgeMode`
     // becomes 1 rather than 2. The polygon lives in the texels of the field `source()` traced on,
-    // which keeps the SOURCE aspect (`source()`'s own `dimsForLongSide`); this build's field keeps
-    // the REQUESTED size's aspect. Both carry the artwork under the identical `artworkUv` map at
-    // the same frozen `p`, so a given artwork point has the same uv in both spaces and the two
-    // reconcile by a plain scale — no new handle state (design §5).
+    // around the artwork placed 1:1 in `handle.front`; this build's field is over `size`, with the
+    // artwork placed 1:1 again but at another origin. So a hull texel goes to that front's px,
+    // then to artwork px (minus the trace placement), back to this front's px (plus this
+    // placement), and into this field's texels: one scale and one translation per axis, which is
+    // what `fillHullMask`'s `sx, sy, tx, ty` are. A scale alone reconciled the two only while
+    // both fronts were `artwork * (1 + 2p)` — never true of a bucket-shaped build (spec 8.6).
     //
     // The mask is a dedicated, non-pooled `RGBA8UI` allocation disposed inside this call (the
     // pattern `artwork.ts:26-28` establishes), so §8.1's fixed Pool A budget is untouched; only
@@ -1172,20 +1260,19 @@ export function paperSheet(options?: PaperSheetOptions): PaperSheet {
     // Uploaded unflipped — `UNPACK_FLIP_Y_WEBGL` stays pinned false and the mask inherits the
     // field's row order, exactly as the artwork does (§6; the p10 plan's `yUp` flag is superseded,
     // see this file's own row-order note at lines 457-472).
-    const srcField = dimsForLongSide(handle.sdfRes, handle.srcW, handle.srcH, 2)
+    const srcField = fieldDimsFor(handle.sdfRes, handle.front)
+    const tracePlacement = artworkPlacement(handle.front, handle.artwork)
+    const hullSx = (handle.front.w / srcField.w) * (field.w / size.w)
+    const hullSy = (handle.front.h / srcField.h) * (field.h / size.h)
+    const hullTx = ((placement.x - tracePlacement.x) * field.w) / size.w
+    const hullTy = ((placement.y - tracePlacement.y) * field.h) / size.h
     let paperField: Field | null = fieldRecord.paperField
     if (
       paperField === null &&
       handle.hull.kind === 'polygons' &&
       hullComponentCount(handle.hull) > 0
     ) {
-      const bytes = fillHullMask(
-        handle.hull,
-        field.w,
-        field.h,
-        field.w / srcField.w,
-        field.h / srcField.h,
-      )
+      const bytes = fillHullMask(handle.hull, field.w, field.h, hullSx, hullSy, hullTx, hullTy)
       // `undefined` is "no drawable component", not a failure (design §7): the sheet stays on
       // `uEdgeMode = 2` and renders exactly as it does today. A GL failure below is a different
       // thing and is never swallowed into this branch.
@@ -1255,17 +1342,12 @@ export function paperSheet(options?: PaperSheetOptions): PaperSheet {
       return target
     }
 
-    const artworkRect: Rect = {
-      x: Math.round((size.w - handle.artwork.w) / 2),
-      y: Math.round((size.h - handle.artwork.h) / 2),
-      w: handle.artwork.w,
-      h: handle.artwork.h,
-    }
-
     const renderFailed = m.renderer.renderFront(m.tiles, {
       target: drawTargetFor(target),
       front: size,
-      artworkRect,
+      // The same box the fields above were framed on, so the paper the shader cuts from them
+      // surrounds the texels it copies from the artwork (spec 7.4.2).
+      artworkRect: placement,
       artwork: artworkTexture,
       tight,
       loose,
@@ -1292,18 +1374,18 @@ export function paperSheet(options?: PaperSheetOptions): PaperSheet {
       return renderFailed
     }
 
-    // Step 9 (fix round 2): `rect` is `handle.rect` (SOURCE pixels, frozen at add-time) mapped
-    // into THIS call's own front space, at `size` — the exact inverse of the affine map
-    // `frontRectToSourceRect` used to derive `handle.rect` in the first place, never a uniform
-    // `frontLongSide / sourceLongSide` scale. A uniform scale is only correct at `p = 0`: it
-    // carries no offset term, so whenever this build's requested `size` differs from the add-time
-    // front size AND `p > 0`, it silently drops the margin fraction the affine map encodes,
-    // producing a rect that disagrees with `source()`'s own (the finding this round fixes —
-    // `SheetFront.rect` is what public callers place artwork with, so the disagreement is a
-    // visible mis-placement, not an internal inconsistency). `handle.overscan` is frozen at
-    // add-time and independent of `size`, so `sourceRectToFrontRect` is well-defined here
-    // regardless of how this call's requested `size` relates to the add-time front.
-    const rect = sourceRectToFrontRect(handle.rect, handle.srcW, handle.srcH, size, handle.overscan)
+    // Step 9: `rect` is the paper's box in THIS front. The artwork is 1:1 in the trace front and
+    // in this one, and the paper is built around the artwork, so the box `source()` measured moves
+    // with the artwork's origin and nothing else — a translation, not a rescale (fix round 2's
+    // uniform `frontLongSide / sourceLongSide` scale, correct only at `p = 0`, is the thing this
+    // must never regress to). `SheetFront.rect` is what the motion layer centres the sheet on, so
+    // a rect that did not track the paper would be a visible mis-placement on the canvas.
+    const rect: Rect = {
+      x: handle.frontRect.x + placement.x - tracePlacement.x,
+      y: handle.frontRect.y + placement.y - tracePlacement.y,
+      w: handle.frontRect.w,
+      h: handle.frontRect.h,
+    }
 
     const result: SheetFront = {
       texture: front.handle,
@@ -1330,6 +1412,9 @@ export function paperSheet(options?: PaperSheetOptions): PaperSheet {
   }
 
   function release(handle: PaperSheetHandle): void {
+    // A second release() of the same handle must not reach the count, the cache or the pool: by
+    // then the key it carries may be a live handle's (see `Mounted.liveHandles`).
+    if (handle.alive === false) return
     // Set before the `mounted === null` early return, not after: a `release()` that arrives
     // after `dispose()` has nothing left to invalidate or release back to the pool, but the
     // handle itself is still genuinely no longer alive, and this flag is the only thing a caller
@@ -1337,6 +1422,14 @@ export function paperSheet(options?: PaperSheetOptions): PaperSheet {
     // flag should tell the truth regardless of what currently reads it.
     handle.alive = false
     if (mounted === null) return
+    const remaining = (mounted.liveHandles.get(handle.spriteKey) ?? 1) - 1
+    if (remaining > 0) {
+      // Another handle under this key — the re-source of a still-open bitmap — owns the hull
+      // entry and the artwork slot now. This one hands back nothing but itself.
+      mounted.liveHandles.set(handle.spriteKey, remaining)
+      return
+    }
+    mounted.liveHandles.delete(handle.spriteKey)
     mounted.cache.invalidate(handle.spriteKey)
     if (mounted.pools !== null && mounted.pools.poolA.artworkKey() === handle.spriteKey) {
       // The literal slot name `'artwork'` is `ArtworkPool.holdArtwork`'s own internal convention

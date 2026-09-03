@@ -182,8 +182,8 @@ the signal fired — either answer contradicts §10.5's "keep what is already pa
 where the caller can see it.
 
 **The destination canvas is sized for you.** `BlitTarget.size` defaults to `'managed'`, under which
-the stage sets `canvas.width/height` to `round(cssSize × devicePixelRatio)`, capped at the front
-size, whenever it is stale. It reads `getBoundingClientRect()` once per draw, which needs no
+the stage sets `canvas.width/height` to `round(cssSize × devicePixelRatio)`, shrunk as a whole —
+keeping the box's own shape — until the front fits it 1:1 on one axis, whenever it is stale. It reads `getBoundingClientRect()` once per draw, which needs no
 observer: draws happen six times per fold, not sixty times per second. A zero CSS size — a hidden
 element — is left alone rather than resized to zero. Without this the headline scenario ships blurry
 on every retina grid, because a consumer's `<canvas>` arrives at its stock 300×150 backing store and
@@ -801,8 +801,8 @@ only when the sheet's screen footprint is an exact, integer-aligned 1:1 map of t
 grid, which the bucket stretch and non-integer cover-scale make untrue in general.
 
 Managed sizing narrows the gap without closing it. The destination backing store is now
-`round(cssSize × devicePixelRatio)` capped at the front size, so the stock 300×150 case is gone and
-the blit never upsamples; the destination is also cleared before each `drawImage`, so nothing of a
+`round(cssSize × devicePixelRatio)` shrunk uniformly to meet the front (never capped per axis,
+which would reshape the sprite), so the stock 300×150 case is gone and the blit never upsamples; the destination is also cleared before each `drawImage`, so nothing of a
 previous sprite survives in the letterbox bars. A 1:1 blit is now reachable — size the CSS box so
 that `cssSize × dpr` lands on the front size — rather than accidental, but it is still not the
 default and the guarantee above is still the one being made.

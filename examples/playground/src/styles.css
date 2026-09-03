@@ -1,44 +1,76 @@
 /*
  * The playground is an instrument panel, not a showcase: dense rows, a monospace column for
  * every value a control reports, badges legible at a glance, and — above everything else — a
- * stage column that never loses its space to the controls flanking it. Three columns collapse to
- * one at 1100px; the stage keeps a real minimum width on both sides of that line.
+ * stage column that never loses its space to the controls flanking it. The layout is two columns
+ * (stage + one merged `#sidebar`) as part of the "Control Panel v2" redesign — the old
+ * `#config-column`/`#panel-column` split is gone; both now live inside `#sidebar` as
+ * `.sidebar-card` sections. Below 1100px everything collapses to one column, with the stage
+ * reordered first so a reader never has to scroll past a wall of controls to see it.
  */
 
 :root {
   color-scheme: dark;
-  --bg: #0d0f13;
-  --panel-bg: #15181f;
-  --panel-bg-raised: #1b1f28;
-  --well-bg: #0a0c10;
-  --border: #262b36;
-  --border-soft: #1d212a;
-  --fg: #e6e8ee;
-  --fg-dim: #9aa0ac;
-  --fg-faint: #6b7280;
-  --accent: #5fb3ff;
-  --accent-dim: #2c5a7d;
-  --ok: #63c774;
+  --bg: #0c0d0b;
+  --panel-bg: #14150f;
+  --panel-bg-raised: #1a1b14;
+  --well-bg: #101109;
+  --input-bg: #1a1b14;
+  --input-border: #34362c;
+  --border: #23241d;
+  --border-soft: #1f2019;
+  --fg: #f0eee2;
+  --fg-dim: #9b9b8b;
+  --fg-faint: #6e6e62;
+  --fg-faintest: #57574e;
+  --accent: #d9ff62;
+  --accent-hover: #eaffa0;
+  --accent-dim: rgba(217, 255, 98, 0.45);
+  --accent-ink: #16180a;
+  --ok: #86e2a6;
+  --ok-bg: rgba(134, 226, 166, 0.09);
+  --ok-border: rgba(134, 226, 166, 0.32);
   --warn: #e0a94a;
-  --bad: #e2685f;
+  --bad: #ff7a6b;
+  --bad-bg: rgba(255, 122, 107, 0.1);
+  --bad-border: rgba(255, 122, 107, 0.4);
   --dev: #b98af0;
-  --mono: 'SFMono-Regular', Consolas, 'Liberation Mono', Menlo, monospace;
-  --sans: system-ui, -apple-system, 'Segoe UI', sans-serif;
-  --radius: 6px;
-  --radius-sm: 4px;
+  --mono: 'JetBrains Mono', ui-monospace, 'SFMono-Regular', Consolas, monospace;
+  --sans: 'Space Grotesk', ui-sans-serif, system-ui, -apple-system, 'Segoe UI', sans-serif;
+  --radius: 12px;
+  --radius-sm: 8px;
+  --radius-pill: 999px;
 }
 
 * {
   box-sizing: border-box;
 }
 
+/* Native WebKit spin-arrows on every `input[type="number"]` (`.range-number`, `.config-input`,
+   and any other number field) sit right against the digits and read as a stray glyph rather than
+   a control — e.g. "0.035" misreads as "0,03!" with the arrow overlapping the last digit — which
+   fights the compact mono readout the rest of the panel relies on. Hidden globally, not scoped to
+   one class, since no number field in this design wants them. */
+input[type='number']::-webkit-outer-spin-button,
+input[type='number']::-webkit-inner-spin-button {
+  -webkit-appearance: none;
+  margin: 0;
+}
+
+input[type='number'] {
+  -moz-appearance: textfield;
+}
+
 body {
   margin: 0;
-  background: var(--bg);
+  /* Two faint radial accents anchored top-left and top-right, over the near-black ground —
+     the page reads as lit rather than flat without either one calling attention to itself. */
+  background:
+    radial-gradient(1100px 520px at 12% -8%, rgba(217, 255, 98, 0.05), transparent 62%),
+    radial-gradient(900px 460px at 100% 0%, rgba(255, 255, 255, 0.028), transparent 58%), var(--bg);
   color: var(--fg);
   font-family: var(--sans);
   font-size: 14px;
-  line-height: 1.35;
+  line-height: 1.5;
 }
 
 h1,
@@ -56,6 +88,15 @@ h2 {
   color: var(--fg-dim);
 }
 
+a {
+  color: var(--accent);
+  text-decoration: none;
+}
+
+a:hover {
+  color: var(--accent-hover);
+}
+
 button {
   font: inherit;
   color: inherit;
@@ -67,8 +108,19 @@ button {
 }
 
 button:hover {
-  border-color: var(--accent-dim);
+  border-color: var(--accent);
   color: var(--accent);
+}
+
+/* Raw text/number inputs and selects get the "well" treatment (a shade lighter than the panel
+   they sit in) everywhere by default; a range input is excluded because its native track is what
+   `--accent` (via `accent-color` below) already styles, and boxing it up would fight that. */
+input:not([type='range']),
+select {
+  background: var(--input-bg);
+  border: 1px solid var(--input-border);
+  border-radius: var(--radius-sm);
+  padding: 0.2rem 0.45rem;
 }
 
 input,
@@ -78,44 +130,158 @@ select {
   accent-color: var(--accent);
 }
 
+/* Custom range slider skin — every `input[type=range]` in the playground (`.knob-input`,
+   `.transport-input`, anything future) gets the same flat 4px track and a bordered accent thumb,
+   cross-browser via the vendor pseudo-elements (`accent-color` above stays as a fallback for
+   anything that supports neither). `--fill-pct` is an optional custom property a caller can set
+   inline (`style="--fill-pct: 42%"`) to paint the already-covered part of the track in accent
+   colour up to the thumb without a second DOM node; it defaults to 0% so a slider that never sets
+   it just shows the flat track. Firefox has no fill-by-percentage equivalent of the WebKit
+   gradient trick, so it gets the built-in `::-moz-range-progress` instead. */
+input[type='range'] {
+  --fill-pct: 0%;
+  appearance: none;
+  -webkit-appearance: none;
+  width: 100%;
+  height: 14px;
+  background: transparent;
+  cursor: pointer;
+}
+
+input[type='range']::-webkit-slider-runnable-track {
+  height: 4px;
+  border-radius: 3px;
+  background: linear-gradient(to right, var(--accent) var(--fill-pct), #2a2c22 var(--fill-pct));
+}
+
+input[type='range']::-moz-range-track {
+  height: 4px;
+  border-radius: 3px;
+  background: #2a2c22;
+}
+
+input[type='range']::-moz-range-progress {
+  height: 4px;
+  border-radius: 3px;
+  background: var(--accent);
+}
+
+input[type='range']::-webkit-slider-thumb {
+  -webkit-appearance: none;
+  appearance: none;
+  width: 14px;
+  height: 14px;
+  margin-top: -5px;
+  border-radius: 50%;
+  background: var(--fg);
+  border: 2px solid var(--accent);
+  box-shadow: 0 2px 6px rgba(0, 0, 0, 0.55);
+}
+
+input[type='range']::-moz-range-thumb {
+  width: 14px;
+  height: 14px;
+  border-radius: 50%;
+  background: var(--fg);
+  border: 2px solid var(--accent);
+  box-shadow: 0 2px 6px rgba(0, 0, 0, 0.55);
+}
+
+input[type='range']:focus-visible {
+  outline: none;
+}
+
+input[type='range']:focus-visible::-webkit-slider-thumb {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+}
+
+input[type='range']:focus-visible::-moz-range-thumb {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+}
+
 /* ---------------------------------------------------------------------------------------------
  * Masthead
  * ------------------------------------------------------------------------------------------- */
 
+/* One line, always — matching the design's fixed-height sticky header. Every child that can grow
+   (`.masthead-status-text`, `#version-line`, `#header-chip`) is hard-truncated with an ellipsis
+   (below) rather than allowed to wrap the row onto a second line. */
 #masthead {
+  position: sticky;
+  top: 0;
+  z-index: 10;
   display: flex;
-  align-items: baseline;
-  gap: 1rem;
-  padding: 0.6rem 1rem;
+  align-items: center;
+  gap: 18px;
+  padding: 13px 24px;
   border-bottom: 1px solid var(--border);
-  background: var(--panel-bg);
+  background: rgba(12, 13, 11, 0.92);
+  backdrop-filter: blur(8px);
+  -webkit-backdrop-filter: blur(8px);
+}
+
+.masthead-brand {
+  display: flex;
+  align-items: center;
+  gap: 11px;
+  min-width: 0;
+  flex-shrink: 0;
+}
+
+.masthead-titles {
+  min-width: 0;
 }
 
 #masthead h1 {
   margin: 0;
-  font-size: 0.95rem;
+  font-size: 13px;
+  font-weight: 700;
+  letter-spacing: 0.15em;
+  text-transform: uppercase;
 }
 
+.masthead-subtitle {
+  font-size: 10.5px;
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+  color: var(--fg-faint);
+}
+
+/* Truncated like `.accordion-summary`/`#header-chip` — this chip has no design counterpart (see
+   index.html's comment on it), so it must never be the reason the header grows past one line. */
 #version-line {
-  font-family: var(--mono);
-  font-size: 0.78rem;
-  color: var(--fg-dim);
-  margin: 0;
-  overflow-wrap: anywhere;
+  max-width: 260px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* Pinned to the far right, same as the design's own trailing `margin-left:auto` wrapper around
+   its header chip + Reset — everything in normal flow before this (brand, status pill) stays put. */
+.masthead-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-left: auto;
+  min-width: 0;
+  flex-shrink: 0;
 }
 
 /* ---------------------------------------------------------------------------------------------
- * The three-column layout — collapses to one column under 1100px. The centre column carries a
- * real min-width above that line so the side columns cannot squeeze the stage before the
- * breakpoint does its job; below the line the stage is reordered first, since it is the one
- * thing on the page a reader should never have to scroll past a wall of controls to see.
+ * The layout — a hero stage and one 396px `#sidebar`, merging what used to be the separate
+ * `#config-column`/`#panel-column` grid cells into one scrolling column. Below 1100px everything
+ * collapses to one column, with the stage reordered first.
  * ------------------------------------------------------------------------------------------- */
 
 main {
   display: grid;
-  grid-template-columns: 260px minmax(360px, 1fr) 300px;
-  gap: 0.75rem;
-  padding: 0.75rem;
+  grid-template-columns: minmax(0, 1fr) 396px;
+  max-width: 1720px;
+  margin: 0 auto;
+  padding: 20px 24px 56px;
+  gap: 20px;
   align-items: start;
 }
 
@@ -129,49 +295,61 @@ main {
   }
 }
 
-#config-column,
-#panel-column,
 #stage-column {
   background: var(--panel-bg);
   border: 1px solid var(--border);
   border-radius: var(--radius);
   padding: 0.65rem;
   min-width: 0;
-}
-
-#stage-column {
   min-height: 420px;
   display: flex;
   flex-direction: column;
   gap: 0.6rem;
 }
 
-#config-column {
+/* `#sidebar` is the single merged column: `.sidebar-card` sections (factory options, knobs,
+   share) stack inside it, each its own bordered card, the whole thing sticky and independently
+   scrollable so a tall knob list never pushes the stage or the page footer around. */
+#sidebar {
   display: flex;
   flex-direction: column;
-  gap: 0.75rem;
+  gap: 14px;
+  min-width: 0;
   position: sticky;
   top: 0.75rem;
   max-height: calc(100vh - 1.5rem);
   overflow-y: auto;
-}
-
-#panel-column {
-  position: sticky;
-  top: 0.75rem;
-  max-height: calc(100vh - 1.5rem);
-  overflow-y: auto;
-  display: flex;
-  flex-direction: column;
-  gap: 0.5rem;
 }
 
 @media (max-width: 1100px) {
-  #config-column,
-  #panel-column {
+  #sidebar {
     position: static;
     max-height: none;
   }
+}
+
+/* `#panel` is `panel.ts`'s single mount point, holding several `.accordion-section`s it
+   generates as one contiguous block. `display: contents` drops `#panel` itself out of the flex
+   formatting context — it stops being a box and its children become flex items of `#sidebar`
+   directly — so each child's `order` (set inline by `panel.ts` via `TAB_NUMBER`, and by
+   `index.html`'s static sections) is compared across the whole sidebar instead of being trapped
+   inside this wrapper. `#panel` carries no visual styles of its own, so nothing is lost by
+   removing it from the box tree. `.knob-accordion` (`panel.ts`'s own inner wrapper around every
+   generated `.accordion-section`, itself styled nowhere in this file) needs the same treatment —
+   `order` only affects direct flex items, so without this second `display: contents` the
+   sections would still be trapped one level down, inside a single unordered flex item, and the
+   fix above would set their `order` with no visible effect. */
+#panel,
+.knob-accordion {
+  display: contents;
+}
+
+.sidebar-card {
+  background: var(--panel-bg);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: 0.75rem;
+  min-width: 0;
 }
 
 /* ---------------------------------------------------------------------------------------------
@@ -268,7 +446,7 @@ main {
   padding: 0.3rem 0.45rem;
   border: 1px solid var(--bad);
   border-radius: var(--radius-sm);
-  background: rgba(226, 104, 95, 0.12);
+  background: var(--bad-bg);
   color: var(--bad);
   font-family: var(--mono);
   font-size: 0.74rem;
@@ -290,42 +468,50 @@ main {
 
 .knob-badge {
   font-family: var(--mono);
-  font-size: 0.62rem;
+  font-size: 0.58rem;
   letter-spacing: 0.03em;
   text-transform: uppercase;
-  padding: 0.1rem 0.4rem;
-  border-radius: 999px;
+  padding: 0.05rem 0.35rem;
+  border-radius: var(--radius-pill);
   border: 1px solid transparent;
   white-space: nowrap;
 }
 
+/* On the row's own grid these sit beside the label in a fixed-width first column, on every knob
+ * row (`.knob-badge--level` alone is on ALL of them) — halved alpha vs. the badge colours used
+ * elsewhere (e.g. `--ok-bg`/`--ok-border` on `.masthead-status--ok`) so they read as a quiet
+ * annotation next to the slider rather than competing with it for attention. */
 .knob-badge--level {
-  background: rgba(95, 179, 255, 0.12);
-  border-color: rgba(95, 179, 255, 0.35);
+  background: rgba(217, 255, 98, 0.06);
+  border-color: rgba(217, 255, 98, 0.18);
   color: var(--accent);
 }
 
 .knob-badge--reference {
-  background: rgba(99, 199, 116, 0.12);
-  border-color: rgba(99, 199, 116, 0.35);
+  background: rgba(134, 226, 166, 0.045);
+  border-color: rgba(134, 226, 166, 0.16);
   color: var(--ok);
   cursor: help;
 }
 
 .knob-badge--warning {
-  background: rgba(224, 169, 74, 0.14);
-  border-color: rgba(224, 169, 74, 0.4);
+  background: rgba(224, 169, 74, 0.07);
+  border-color: rgba(224, 169, 74, 0.2);
   color: var(--warn);
 }
 
 .knob-badge--dev {
-  background: rgba(185, 138, 240, 0.14);
-  border-color: rgba(185, 138, 240, 0.4);
+  background: rgba(185, 138, 240, 0.07);
+  border-color: rgba(185, 138, 240, 0.2);
   color: var(--dev);
 }
 
 /* ---------------------------------------------------------------------------------------------
- * The knob panel's controls strip and its collapsible groups.
+ * The knob panel's controls strip and its tabbed groups. Tabs replace what used to be one long
+ * stack of always-open `<details>` sections — the exact shape that clipped/overflowed at normal
+ * viewport widths in the reference spike's panel. `.knob-tabs` wraps onto multiple rows rather
+ * than scrolling horizontally, since the sidebar this sits in is only ~300px at the 3-column
+ * breakpoint and up to eight groups (`labels.ts`'s `GROUP_ORDER`) never fit one row there.
  * ------------------------------------------------------------------------------------------- */
 
 .knob-controls {
@@ -371,44 +557,107 @@ main {
   color: var(--fg-dim);
 }
 
-#panel details {
-  border: 1px solid var(--border-soft);
-  border-radius: var(--radius-sm);
+.knob-tabs {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.3rem;
+  padding-bottom: 0.5rem;
   margin-bottom: 0.4rem;
-  background: var(--panel-bg-raised);
+  border-bottom: 1px solid var(--border);
 }
 
-#panel summary {
-  cursor: pointer;
-  padding: 0.4rem 0.55rem;
-  font-size: 0.74rem;
+.knob-tab {
+  font: inherit;
+  color: var(--fg-dim);
+  background: var(--panel-bg-raised);
+  border: 1px solid var(--border-soft);
+  border-radius: var(--radius-sm);
+  padding: 0.3rem 0.55rem;
+  font-size: 0.72rem;
   font-weight: 600;
-  letter-spacing: 0.03em;
+  letter-spacing: 0.02em;
+  cursor: pointer;
+  white-space: nowrap;
+}
+
+.knob-tab:hover {
+  color: var(--fg);
+  border-color: var(--accent-dim);
+}
+
+.knob-tab[aria-selected='true'] {
+  color: var(--accent);
+  border-color: var(--accent-dim);
+  background: rgba(217, 255, 98, 0.14);
+}
+
+.knob-tab:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 1px;
+}
+
+.knob-tabpanel[hidden] {
+  display: none;
+}
+
+/* A tab spanning more than one `labels.ts` group (`panel.ts`'s `tabFor`) renders each group as
+   its own bordered sub-card instead of one undifferentiated list — the design's "Hull knobs" /
+   "Torn knobs" / "Shared" sub-cards on the Edge tab, generalised to whichever groups actually
+   share a tab (also Motion / Debug under "Look & Debug"). A tab with only one member group never
+   gets a sub-card wrapper, so it stays exactly as flat as it was before this existed. */
+.knob-subcard {
+  border: 1px solid var(--border-soft);
+  border-radius: var(--radius-sm);
+  background: var(--panel-bg-raised);
+  padding: 0.5rem 0.6rem;
+  margin-bottom: 0.5rem;
+}
+
+.knob-subcard:last-child {
+  margin-bottom: 0;
+}
+
+.knob-subcard .knob-row:first-of-type {
+  padding-top: 0;
+}
+
+.knob-subcard .knob-row:last-of-type {
+  border-bottom: none;
+  padding-bottom: 0;
+}
+
+.knob-subcard-head {
+  display: flex;
+  align-items: center;
+  gap: 0.4rem;
+  margin-bottom: 0.3rem;
+  font-size: 0.72rem;
+  font-weight: 600;
+  letter-spacing: 0.04em;
   text-transform: uppercase;
   color: var(--fg-dim);
 }
 
-#panel summary:hover {
-  color: var(--fg);
+.knob-subcard-head::before {
+  content: '';
+  flex-shrink: 0;
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: var(--accent);
 }
 
-#panel details[open] summary {
-  border-bottom: 1px solid var(--border-soft);
-}
-
-#panel details > .knob-row {
-  padding-left: 0.55rem;
-  padding-right: 0.55rem;
+/* NEW: a muted marker for a subcard whose knobs are shared across siblings rather than owned by
+   one of them (the design's "Shared" subcard under Hull/Torn) — same head, dimmer dot. Not wired
+   into panel.ts's tabFor yet; that decision belongs to whichever agent reworks the subcard split. */
+.knob-subcard-head--muted::before {
+  background: var(--fg-dim);
 }
 
 /* ---------------------------------------------------------------------------------------------
- * Share block
+ * Share block — a `.sidebar-card` like its siblings now, so it needs none of its own border/
+ * spacing overrides; only the emitted-code well below is specific to it.
  * ------------------------------------------------------------------------------------------- */
-
-#share {
-  border-top: 1px solid var(--border);
-  padding-top: 0.6rem;
-}
 
 #emitted-code {
   margin: 0.5rem 0 0;
@@ -431,6 +680,7 @@ main {
  * ------------------------------------------------------------------------------------------- */
 
 #hero-slot {
+  position: relative;
   display: flex;
   justify-content: center;
   align-items: center;
@@ -439,6 +689,66 @@ main {
   border: 1px solid var(--border-soft);
   border-radius: var(--radius-sm);
   overflow: hidden;
+}
+
+/* ---------------------------------------------------------------------------------------------
+ * Stage background presets — a pure visual dev aid, not part of the crumple config. The preset
+ * class lives on `#stage-column`, the nearest shared ancestor of `#hero-slot` and every
+ * `.grid-tile-canvas`, so one click changes the backdrop behind the hero and every grid tile at
+ * once. `stage-bg-dark` restates the default `--well-bg` explicitly (rather than leaving it as
+ * "no class") so all three presets are one flat, equally-specific set of overrides.
+ * ------------------------------------------------------------------------------------------- */
+
+.stage-bg-controls {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 0.4rem;
+  font-size: 0.76rem;
+}
+
+.stage-bg-label {
+  color: var(--fg-dim);
+  margin-right: 0.2rem;
+}
+
+.stage-bg-controls button {
+  font-size: 0.74rem;
+  padding: 0.25rem 0.5rem;
+}
+
+.stage-bg-controls button[aria-pressed='true'] {
+  border-color: var(--accent-dim);
+  color: var(--accent);
+}
+
+.stage-bg-dark #hero-slot,
+.stage-bg-dark .grid-tile-canvas {
+  background: var(--well-bg);
+}
+
+.stage-bg-light #hero-slot,
+.stage-bg-light .grid-tile-canvas {
+  background: #f2ede1;
+}
+
+/* The classic alpha checkerboard — 8px squares, two greys — because it is the one backdrop a
+   truly transparent canvas can never blend into, unlike a solid colour that might coincidentally
+   match the paper or the page. */
+.stage-bg-checker #hero-slot,
+.stage-bg-checker .grid-tile-canvas {
+  background-image:
+    linear-gradient(45deg, #808080 25%, transparent 25%),
+    linear-gradient(-45deg, #808080 25%, transparent 25%),
+    linear-gradient(45deg, transparent 75%, #808080 75%),
+    linear-gradient(-45deg, transparent 75%, #808080 75%);
+  background-size: 16px 16px;
+  background-position:
+    0 0,
+    0 8px,
+    8px -8px,
+    -8px 0;
+  background-color: #b3b3b3;
 }
 
 /* `direct` present hands `#hero-slot` the stage's own surface canvas (unclassed — it is one
@@ -457,6 +767,63 @@ main {
    itself once per draw. */
 .hero-canvas {
   display: block;
+}
+
+/* NEW: a small absolutely-positioned badge meant to float over `#hero-slot` (pose name, frame
+   count, whatever a future stage overlay wants to surface without stealing layout space). The
+   host is responsible for `position: relative`, already true of `#hero-slot` above. */
+.stage-chip {
+  position: absolute;
+  padding: 5px 10px;
+  border-radius: 7px;
+  font-family: var(--mono);
+  font-size: 11.5px;
+  background: rgba(255, 255, 255, 0.04);
+  border: 1px solid #2a2c22;
+  color: var(--fg-dim);
+}
+
+.stage-chip--accent {
+  background: rgba(217, 255, 98, 0.12);
+  border-color: rgba(217, 255, 98, 0.4);
+  color: var(--accent);
+}
+
+/* NEW: the drag-and-drop-a-file-onto-the-stage affordance. Sits absolutely over whichever element
+   hosts it (`#hero-slot`, most likely) and is toggled with `[hidden]`/a visibility class from JS,
+   not with this stylesheet — this only defines what "active" looks like. */
+.stage-drop-overlay {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: rgba(217, 255, 98, 0.06);
+  box-shadow: inset 0 0 0 2px var(--accent);
+  border-radius: var(--radius-sm);
+  animation: dropPulse 1.1s ease-in-out infinite;
+  pointer-events: none;
+}
+
+@keyframes dropPulse {
+  0%,
+  100% {
+    opacity: 0.75;
+  }
+  50% {
+    opacity: 1;
+  }
+}
+
+.stage-drop-overlay-label {
+  background: var(--accent);
+  color: var(--accent-ink);
+  padding: 9px 16px;
+  border-radius: 9px;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  font-size: 12.5px;
 }
 
 #transport {
@@ -536,7 +903,7 @@ main {
 .transport-audio-note {
   margin: 0.25rem 0 0;
   font-size: 0.72rem;
-  color: var(--fg-faint);
+  color: var(--fg-faintest);
   line-height: 1.4;
   overflow-wrap: anywhere;
 }
@@ -575,7 +942,7 @@ main {
 .grid-tile-label {
   font-family: var(--mono);
   font-size: 0.66rem;
-  color: var(--fg-faint);
+  color: var(--fg-faintest);
   max-width: 100px;
   text-align: center;
   overflow-wrap: anywhere;
@@ -687,4 +1054,453 @@ main {
   .inspector-channels {
     grid-template-columns: 1fr;
   }
+}
+
+/* ---------------------------------------------------------------------------------------------
+ * NEW — "Control Panel v2" primitives. Nothing below this line is referenced by the current
+ * markup yet; these classes exist so the agents reworking index.html/panel.ts/transport.ts/
+ * config-panel.ts have a finished visual vocabulary to build against instead of inventing one
+ * mid-refactor. Each block below corresponds to one numbered pattern in that redesign's spec.
+ * ------------------------------------------------------------------------------------------- */
+
+/* 1 — header status pill (ok/bad), with a small dot indicator. */
+.masthead-status {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 13px;
+  border-radius: var(--radius-pill);
+  font-family: var(--mono);
+  font-size: 12px;
+  flex-shrink: 1;
+  min-width: 0;
+}
+
+.masthead-status-text {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.masthead-status-dot {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  flex-shrink: 0;
+  background: currentColor;
+}
+
+.masthead-status--ok {
+  color: var(--ok);
+  background: var(--ok-bg);
+  border: 1px solid var(--ok-border);
+}
+
+.masthead-status--bad {
+  color: var(--bad);
+  background: var(--bad-bg);
+  border: 1px solid var(--bad-border);
+}
+
+/* 2 — the generic chip primitive: a small mono-text pill, neutral by default, with an accent
+   variant for a value worth calling out (a pose name, a sample count, an edge mode). `.chip` is
+   the base any one-off badge should reach for; `.masthead-chip` is a header-specific alias kept
+   for the header row's own chip so it isn't renamed out from under it. */
+.chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  font-family: var(--mono);
+  font-size: 11.5px;
+  padding: 5px 10px;
+  border-radius: var(--radius-sm);
+  background: rgba(255, 255, 255, 0.03);
+  border: 1px solid var(--border);
+  color: var(--fg-dim);
+  white-space: nowrap;
+}
+
+.chip--neutral {
+  background: rgba(255, 255, 255, 0.03);
+  border-color: var(--border);
+  color: var(--fg-dim);
+}
+
+.chip--accent {
+  background: rgba(217, 255, 98, 0.12);
+  border-color: rgba(217, 255, 98, 0.4);
+  color: var(--accent);
+}
+
+.masthead-chip {
+  font-family: var(--mono);
+  font-size: 11.5px;
+  padding: 6px 11px;
+  border-radius: var(--radius-sm);
+  background: var(--panel-bg);
+  border: 1px solid var(--border);
+  color: var(--fg-dim);
+}
+
+/* 3 — the header's Reset action: quiet until hovered, then it reads as the accent it's about to
+   act with. */
+.masthead-reset {
+  background: transparent;
+  border: 1px solid var(--input-border);
+  color: var(--fg-dim);
+  font-family: var(--sans);
+  font-size: 12px;
+  font-weight: 600;
+  padding: 6px 12px;
+  border-radius: var(--radius-sm);
+  cursor: pointer;
+}
+
+.masthead-reset:hover {
+  border-color: var(--accent);
+  color: var(--accent);
+}
+
+/* 4 — the small lime mark to the left of the wordmark in the header. */
+.masthead-mark {
+  display: inline-block;
+  width: 9px;
+  height: 20px;
+  border-radius: 2px;
+  background: var(--accent);
+}
+
+/* 7 — accordion sidebar section: a numbered, collapsible card replacing the always-open stack
+   of `<details>`-like blocks the current sidebar uses. */
+.accordion-section {
+  background: var(--panel-bg);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+}
+
+.accordion-header {
+  width: 100%;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 13px 15px;
+  background: transparent;
+  border: none;
+  color: var(--fg);
+  cursor: pointer;
+  text-align: left;
+}
+
+.accordion-number {
+  font-family: var(--mono);
+  font-size: 10.5px;
+  color: var(--fg-faint);
+  flex-shrink: 0;
+}
+
+.accordion-title {
+  font-size: 12px;
+  font-weight: 600;
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+}
+
+.accordion-summary {
+  margin-left: auto;
+  font-family: var(--mono);
+  font-size: 11.5px;
+  color: var(--fg-faint);
+  max-width: 150px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.accordion-chevron {
+  flex-shrink: 0;
+  font-size: 9px;
+  color: var(--fg-faint);
+  transition: transform 0.15s ease;
+}
+
+/* Collapsed state, toggled by main.ts's accordion click handler. `.accordion-body[hidden]` above
+   already hides the body; this only rotates the chevron to match. */
+.accordion-header--collapsed .accordion-chevron {
+  transform: rotate(-90deg);
+}
+
+.accordion-body {
+  padding: 0 15px 14px;
+}
+
+.accordion-body[hidden] {
+  display: none;
+}
+
+/* One row inside an accordion body — a thin top rule separates it from the row above, and the
+   first row in a body has nothing above it to separate from. */
+.accordion-row {
+  border-top: 1px solid var(--border-soft);
+  padding: 9px 0;
+}
+
+.accordion-row:first-child {
+  border-top: none;
+  padding-top: 0;
+}
+
+/* 8 — segmented control: an off/on set of buttons in one pill-cornered track, for a mode choice
+   that used to be a `<select>` or a radio `<fieldset>` (e.g. `.knob-target`). */
+.segmented {
+  display: inline-flex;
+  gap: 3px;
+  padding: 3px;
+  background: var(--well-bg);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+}
+
+.segmented-btn {
+  font-family: var(--sans);
+  font-size: 12px;
+  font-weight: 600;
+  background: transparent;
+  border: none;
+  color: var(--fg-dim);
+  padding: 6px 11px;
+  border-radius: 7px;
+  cursor: pointer;
+}
+
+.segmented-btn--active {
+  background: var(--accent);
+  color: var(--accent-ink);
+  font-weight: 700;
+}
+
+/* 9 — a custom slider: track, fill, and thumb positioned by JS (as percentages) instead of a
+   native `<input type="range">`, plus a small number readout that doubles as a direct-entry
+   field. Meant to replace `.knob-input[type='range']` + `.knob-readout` pairs one knob at a time,
+   not all at once — both are left exactly as they are above. */
+.range-row {
+  display: grid;
+  grid-template-columns: 1fr auto;
+  align-items: center;
+  gap: 10px;
+}
+
+.range-track-wrap {
+  position: relative;
+  grid-column: 1 / -1;
+  height: 20px;
+  display: flex;
+  align-items: center;
+  cursor: pointer;
+}
+
+/* The real `<input type="range">` `numberControl()` (panel.ts) overlays on top of this hand-drawn
+   track: full-size, fully transparent, so it still owns every pointer/keyboard interaction while
+   `.range-fill`/`.range-thumb` do the painting. */
+.range-track-wrap input[type='range'] {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  margin: 0;
+  opacity: 0;
+}
+
+.range-track {
+  position: relative;
+  width: 100%;
+  height: 4px;
+  border-radius: 3px;
+  background: #2a2c22;
+}
+
+.range-fill {
+  position: absolute;
+  left: 0;
+  top: 0;
+  bottom: 0;
+  border-radius: 3px;
+  background: var(--accent);
+}
+
+.range-thumb {
+  position: absolute;
+  top: 50%;
+  width: 14px;
+  height: 14px;
+  border-radius: 50%;
+  background: var(--fg);
+  border: 2px solid var(--accent);
+  box-shadow: 0 2px 6px rgba(0, 0, 0, 0.55);
+  transform: translate(-50%, -50%);
+}
+
+.range-number {
+  width: 62px;
+  background: var(--well-bg);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  padding: 3px 7px;
+  color: var(--accent);
+  font-family: var(--mono);
+  font-size: 12px;
+  text-align: right;
+}
+
+/* 11 — diagnostics metric tiles, laid out as a small grid (auto-fit so the grid works whether
+   the sidebar ends up with three tiles or eight). */
+.metric-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(110px, 1fr));
+  gap: 8px;
+}
+
+.metric-tile {
+  background: #131410;
+  border: 1px solid var(--border-soft);
+  border-radius: 10px;
+  padding: 10px 12px;
+}
+
+.metric-label {
+  font-size: 10px;
+  text-transform: uppercase;
+  letter-spacing: 0.11em;
+  color: var(--fg-faint);
+}
+
+.metric-value {
+  font-family: var(--mono);
+  font-size: 13px;
+  color: #e6e4d8;
+}
+
+/* 12 — the transport's pose strip: a row of equal-width steps, one per named pose, with the
+   current one picked out in accent. */
+.pose-strip {
+  display: flex;
+  gap: 6px;
+}
+
+.pose-step {
+  flex: 1 1 0;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 1px;
+  padding: 7px 2px;
+  border-radius: var(--radius-sm);
+  border: 1px solid var(--border);
+  background: var(--well-bg);
+  color: var(--fg-dim);
+  cursor: pointer;
+}
+
+.pose-step--active {
+  border-color: var(--accent);
+  background: rgba(217, 255, 98, 0.14);
+  color: var(--accent);
+}
+
+.pose-step-value {
+  font-family: var(--mono);
+  font-size: 12.5px;
+  font-weight: 500;
+}
+
+.pose-step-label {
+  font-size: 9.5px;
+  text-transform: uppercase;
+  letter-spacing: 0.09em;
+  opacity: 0.55;
+}
+
+/* 13 — debug channel toggles: a grid of small chips, each with a colour swatch (set inline per
+   channel by JS) and a label, replacing `.knob-dev-toggle`'s plain checkbox-and-text pairing. */
+.debug-chip-grid {
+  display: grid;
+  grid-template-columns: repeat(3, 1fr);
+  gap: 6px;
+}
+
+.debug-chip {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 7px 9px;
+  border-radius: var(--radius-sm);
+  border: 1px solid var(--border);
+  background: var(--well-bg);
+  color: var(--fg-dim);
+  cursor: pointer;
+}
+
+.debug-chip--active {
+  border-color: var(--accent);
+  background: rgba(217, 255, 98, 0.1);
+  color: var(--fg);
+}
+
+.debug-chip-swatch {
+  width: 8px;
+  height: 8px;
+  border-radius: 2px;
+  flex-shrink: 0;
+  background: var(--fg-dim);
+}
+
+/* 14 — button variants: primary (Fold), secondary (Unfold and friends), and the small square
+   icon buttons the transport's step controls use. */
+.btn-primary {
+  font: inherit;
+  background: var(--accent);
+  border: 1px solid var(--accent);
+  color: var(--accent-ink);
+  font-weight: 700;
+  padding: 9px 18px;
+  border-radius: var(--radius-sm);
+  cursor: pointer;
+}
+
+.btn-primary:hover {
+  filter: brightness(1.08);
+}
+
+.btn-secondary {
+  font: inherit;
+  background: var(--input-bg);
+  border: 1px solid var(--input-border);
+  color: var(--fg);
+  font-weight: 600;
+  padding: 9px 18px;
+  border-radius: var(--radius-sm);
+  cursor: pointer;
+}
+
+.btn-secondary:hover {
+  border-color: var(--accent);
+  color: var(--accent);
+}
+
+.btn-icon {
+  width: 34px;
+  height: 34px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: var(--radius-sm);
+  border: 1px solid var(--border);
+  background: var(--well-bg);
+  color: var(--fg-dim);
+  cursor: pointer;
+  padding: 0;
+}
+
+.btn-icon:hover {
+  border-color: var(--input-border);
+  color: var(--fg);
 }

@@ -365,7 +365,10 @@ export function rasterizeHull(
  * square exactly 4 texels wide and two pieces of paper sharing an edge seamless. Components union
  * rather than cancel: every outer loop is counter-clockwise (`contours.ts:79-82`), so overlapping
  * pieces accumulate winding 2 and both fill; nothing is merged or deduplicated. `sx` / `sy` scale
- * hull texels into this build's field dimensions (design §5).
+ * hull texels into this build's field dimensions (design §5) and `tx` / `ty` then translate them:
+ * a build's front is whatever size the bucket fit asked for, with the artwork sitting 1:1 at its
+ * own centred origin, so the hull traced around that artwork in `source()`'s field moves with it —
+ * a scale about the field's origin alone cannot carry that shift.
  *
  * A component with fewer than three vertices is skipped, exactly as `rasterizeHull` skips it.
  * Returns `undefined` when no texel was filled — an empty hull, one whose every component is
@@ -383,6 +386,8 @@ export function fillHullMask(
   h: number,
   sx: number,
   sy: number,
+  tx = 0,
+  ty = 0,
 ): Uint8Array | undefined {
   // Gather the edges of every drawable component once, scaled, as `ax, ay, bx, by` quadruples.
   let edgeCount = 0
@@ -401,11 +406,11 @@ export function fillHullMask(
     if (end - start < 3) continue
     for (let v = start; v < end; v++) {
       const u = v + 1 < end ? v + 1 : start
-      const ay = hull.points[v * 2 + 1] * sy
-      edges[e++] = hull.points[v * 2] * sx
+      const ay = hull.points[v * 2 + 1] * sy + ty
+      edges[e++] = hull.points[v * 2] * sx + tx
       edges[e++] = ay
-      edges[e++] = hull.points[u * 2] * sx
-      edges[e++] = hull.points[u * 2 + 1] * sy
+      edges[e++] = hull.points[u * 2] * sx + tx
+      edges[e++] = hull.points[u * 2 + 1] * sy + ty
       if (ay < yMin) yMin = ay
       if (ay > yMax) yMax = ay
     }

@@ -42,6 +42,7 @@ export interface SpriteRecord {
   exact: boolean
   pinned: boolean
   attachCount: number
-  /** Namespaced paths, per §6.2's ground truth. */
+  /** Namespaced paths, per §6.2's ground truth — the sprite's own delta over the stage layer
+   *  (§6.6), never a snapshot of the defaults: a full copy would shadow every stage-level value. */
   knobs: KnobValues
 }

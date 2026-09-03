@@ -92,13 +92,34 @@ export function hullBytes(hull: HullShape): number {
  * the minimum, ceil on the maximum — because a paper extent that rounds inward clips the paper, and
  * clamps to the grid. `undefined` when there is nothing to take a minimum over.
  *
- * The margin is `sheetRect`'s (`mask.ts`); the guard-band comparison against this extent is P10's.
+ * The margin is `sheetRect`'s (`mask.ts`); the guard band reads `hullBounds` below, not this.
  */
 export function hullExtent(
   hull: HullShape,
   w: number,
   h: number,
 ): { x0: number; y0: number; x1: number; y1: number } | undefined {
+  const b = hullBounds(hull)
+  if (b === undefined) return undefined
+  return boundsExtent(b, w, h)
+}
+
+/** The exact min/max over a hull's vertices, in the texel-centre coordinates the vertices carry. */
+export interface VertexBounds {
+  readonly minX: number
+  readonly minY: number
+  readonly maxX: number
+  readonly maxY: number
+}
+
+/**
+ * `hullExtent` before its rounding and clamping: the vertices' own min/max, continuous. The guard
+ * band (spec 8.6) reads THIS rather than the extent, because a box rounded outward charges the
+ * check for a texel the reserve never promised, and one clamped to the plane cannot say how far
+ * past the plane's edge a sheet really reaches — it stops at exactly 0.5. `undefined` when there
+ * is nothing to take a minimum over.
+ */
+export function hullBounds(hull: HullShape): VertexBounds | undefined {
   if (hull.kind === 'use-alpha') return undefined
   const n = hullVertexCount(hull)
   if (n === 0) return undefined
@@ -114,10 +135,19 @@ export function hullExtent(
     if (y < minY) minY = y
     if (y > maxY) maxY = y
   }
+  return { minX, minY, maxX, maxY }
+}
+
+/** `hullExtent`'s rounding — outward — and clamp, applied to bounds already taken. */
+export function boundsExtent(
+  b: VertexBounds,
+  w: number,
+  h: number,
+): { x0: number; y0: number; x1: number; y1: number } {
   return {
-    x0: Math.min(Math.max(Math.floor(minX), 0), w - 1),
-    y0: Math.min(Math.max(Math.floor(minY), 0), h - 1),
-    x1: Math.min(Math.max(Math.ceil(maxX), 0), w - 1),
-    y1: Math.min(Math.max(Math.ceil(maxY), 0), h - 1),
+    x0: Math.min(Math.max(Math.floor(b.minX), 0), w - 1),
+    y0: Math.min(Math.max(Math.floor(b.minY), 0), h - 1),
+    x1: Math.min(Math.max(Math.ceil(b.maxX), 0), w - 1),
+    y1: Math.min(Math.max(Math.ceil(b.maxY), 0), h - 1),
   }
 }

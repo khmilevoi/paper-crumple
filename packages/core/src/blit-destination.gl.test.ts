@@ -239,3 +239,115 @@ describe("the destination clear under fit: 'contain' (§4.0.1, §4.3)", () => {
     expect(probe(el, Math.floor(el.width / 2), Math.floor(el.height / 2))).toEqual([0, 255, 0, 255])
   })
 })
+
+/**
+ * A motion that places the sheet the way the real slot does — `packages/motion/src/source.ts`
+ * scales the front into `out.dest` with ONE uniform factor and centres it there — and paints
+ * that box green with a red marker over its top-left fifth. `paintingMotion()` floods the whole
+ * `dest`, which cannot tell "the blit copied the box the sheet was drawn in" apart from "the blit
+ * copied some other window of a surface that is flat colour everywhere"; the marker can, and it
+ * also catches a vertical flip.
+ *
+ * Coordinates are GL's: origin bottom-left, y up, absolute on the surface, exactly what
+ * `bindTarget` feeds to `gl.scissor`. The marker sits at the sheet's GL top, which `drawImage`
+ * shows at the destination's top.
+ */
+function placingMotion(): MotionSource {
+  const inner = fakeMotion()
+  let gl: WebGL2RenderingContext | null = null
+  const wrapper = Object.create(inner) as FakeMotion
+  Object.assign(wrapper, {
+    mount(ctx: Parameters<MotionSource['mount']>[0]) {
+      gl = ctx.gl
+      return inner.mount(ctx)
+    },
+    draw(a: Parameters<FakeMotion['draw']>[0]) {
+      const result = inner.draw(a)
+      if (gl !== null) {
+        const { front, out } = a
+        const k = Math.min(out.dest.w / front.width, out.dest.h / front.height)
+        const w = front.width * k
+        const h = front.height * k
+        const x = out.dest.x + (out.dest.w - w) / 2
+        const y = out.dest.y + (out.dest.h - h) / 2
+        gl.enable(gl.SCISSOR_TEST)
+        gl.scissor(Math.round(x), Math.round(y), Math.round(w), Math.round(h))
+        gl.clearColor(0, 1, 0, 1)
+        gl.clear(gl.COLOR_BUFFER_BIT)
+        gl.scissor(Math.round(x), Math.round(y + h * 0.8), Math.round(w * 0.2), Math.round(h * 0.2))
+        gl.clearColor(1, 0, 0, 1)
+        gl.clear(gl.COLOR_BUFFER_BIT)
+        gl.disable(gl.SCISSOR_TEST)
+      }
+      return result
+    },
+  })
+  return wrapper as unknown as MotionSource
+}
+
+const GREEN = [0, 255, 0, 255]
+const RED = [255, 0, 0, 255]
+const CLEAR = [0, 0, 0, 0]
+
+/**
+ * The window `blitPlan()` copies out is the front-sized corner of the surface, `(0, 0, w, h)` in
+ * GL coordinates. The box the view hands the motion to draw in must be that same window — for a
+ * non-square front a whole-surface box centres the sheet somewhere else on the square surface,
+ * and the copy shows a shifted, cropped slice of it. `fakeSheet()` builds the front at the
+ * bitmap's own size, so a 200x100 bitmap on a 256x256 surface is exactly the case.
+ */
+describe("the copied window is the box the sheet was drawn in (§4.0.1, fit: 'contain')", () => {
+  it('lands a non-square front where contain says it lands, marker and all', async () => {
+    const stage = await blitStage(256, placingMotion())
+    if (stage === null) return expect.fail('stage refused')
+    const el = tile({ w: 96, h: 96 })
+    el.width = 96
+    el.height = 96
+    const view = stage.view({ canvas: el, fit: 'contain', size: 'manual' })
+    if (view instanceof Error) return expect.fail(view.message)
+
+    const wide = await stage.add(solidSource(200, 100), { key: 'wide' })
+    if (wide instanceof Error || isAborted(wide)) return expect.fail(String(wide))
+    expect(view.show(wide)).toBeUndefined()
+    // The premise: the front is non-square, so the corner window and a centred box differ.
+    expect(view.idealSize).toEqual({ w: 200, h: 100 })
+
+    // contain: scale min(96/200, 96/100) = 0.48, a 96x48 band at y = 24.
+    expect(probe(el, 48, 47)).toEqual(GREEN) // its centre
+    expect(probe(el, 90, 68)).toEqual(GREEN) // its bottom-right
+    expect(probe(el, 8, 28)).toEqual(RED) // the marker, top-left fifth: x < 19, 24 <= y < 34
+    expect(probe(el, 8, 66)).toEqual(GREEN) // and not at the bottom-left: no vertical flip
+    expect(probe(el, 48, 10)).toEqual(CLEAR) // the letterbox bars stay clear
+    expect(probe(el, 48, 85)).toEqual(CLEAR)
+  })
+
+  it('follows the front across a show() of the other aspect on the same view', async () => {
+    const stage = await blitStage(256, placingMotion())
+    if (stage === null) return expect.fail('stage refused')
+    const el = tile({ w: 96, h: 96 })
+    el.width = 96
+    el.height = 96
+    const view = stage.view({ canvas: el, fit: 'contain', size: 'manual' })
+    if (view instanceof Error) return expect.fail(view.message)
+
+    const wide = await stage.add(solidSource(200, 100), { key: 'wide' })
+    if (wide instanceof Error || isAborted(wide)) return expect.fail(String(wide))
+    expect(view.show(wide)).toBeUndefined()
+    expect(probe(el, 48, 47)).toEqual(GREEN)
+
+    // The view's target was resolved once, at view() time, when no front existed yet; the box it
+    // draws in has to follow the front it draws, not the first front it ever saw.
+    const tall = await stage.add(solidSource(100, 200), { key: 'tall' })
+    if (tall instanceof Error || isAborted(tall)) return expect.fail(String(tall))
+    expect(view.show(tall)).toBeUndefined()
+    expect(view.idealSize).toEqual({ w: 100, h: 200 })
+
+    // contain: scale 0.48 again, a 48x96 band at x = 24.
+    expect(probe(el, 47, 48)).toEqual(GREEN) // its centre
+    expect(probe(el, 68, 90)).toEqual(GREEN) // its bottom-right
+    expect(probe(el, 28, 8)).toEqual(RED) // the marker: 24 <= x < 34, y < 19
+    expect(probe(el, 28, 88)).toEqual(GREEN) // no vertical flip
+    expect(probe(el, 10, 48)).toEqual(CLEAR) // the pillarbox bars stay clear
+    expect(probe(el, 85, 48)).toEqual(CLEAR)
+  })
+})

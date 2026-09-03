@@ -22,6 +22,7 @@ import {
 } from './errors.js'
 import type { KnobDescriptor } from './forward.js'
 import { createFrontLru, type FrontLru, type FrontLruUsage } from './front-lru.js'
+import type { Size } from './geometry.js'
 import { createGlContext, type CoreGlContext } from './gl-context.js'
 import { createScratchPools, type ScratchPools } from './gl-pools.js'
 import type { DrawTarget, GlCaps } from './gl.js'
@@ -38,7 +39,7 @@ import type { KnobPatch, KnobSetter } from './knob-patch.js'
 import type { Invalidates } from './knobs.js'
 import { presetForImageId } from './preset.js'
 import type { PoseRef } from './pose.js'
-import { createRebuildQueue, type RebuildQueue } from './rebuild-queue.js'
+import { createRebuildQueue } from './rebuild-queue.js'
 import type { AddError, PlayResult, ReadyError, SetResult, SwapResult } from './results.js'
 import { createRun, settledRun, type Run, type RunOwner } from './run.js'
 import {
@@ -363,26 +364,6 @@ export async function createStage(
     },
   })
 
-  const rebuildQueue = createRebuildQueue({
-    timers,
-    rebuild: (key) => {
-      const record = sprites.get(key)
-      if (record === undefined) return
-      const front = o.sheet.build(
-        record.handle,
-        record.fit.frontSize,
-        registry.projector('sheet')(record.knobs) as never,
-      )
-      if (front instanceof Error) {
-        policy.orphan(front, null)
-        return
-      }
-      if (record.front !== null) o.sheet.releaseFront(record.front)
-      record.front = front
-      lru.insert({ key, bytes: front.bytes, reclaimable: record.source.reclaimable })
-    },
-  })
-
   const warnings: Error[] = host.warnings.map((w) => new GlError(w))
   let lost = false
   let disposed = false
@@ -395,7 +376,6 @@ export async function createStage(
     registry,
     pools,
     lru,
-    rebuildQueue,
     sprites,
     reserved,
     bus,
@@ -446,7 +426,6 @@ interface StageParts {
   registry: KnobRegistry
   pools: ScratchPools
   lru: FrontLru
-  rebuildQueue: RebuildQueue
   sprites: Map<string, SpriteRecord>
   /** Keys whose `add()` is in flight. A live key is refused whether or not it has finished. */
   reserved: Set<string>
@@ -486,6 +465,157 @@ function buildStage(p: StageParts): BuiltStage {
   let batching = false
   const views: View[] = []
   let swapCounter = 0
+
+  /**
+   * §8.5's re-source path, in flight, keyed by sprite. The pool keeps ONE artwork slot and every
+   * `source()` takes it, so a `build()` on any sprite but the last one sourced answers
+   * `SourceExpiredError` — the "artwork slot was taken by another sprite" row of §8.5's table,
+   * whose recovery is the supplier, `source()` again, then the rebuild. Only the stage can walk
+   * it: a slot never sees the supplier. One entry per key, so a slider dragged while the decode
+   * is out lands exactly one rebuild, at the knob values current when it lands.
+   */
+  const resourcing = new Map<string, Promise<Error | undefined>>()
+  /**
+   * Re-sources run one at a time, stage-wide. `source()` suspends after it has taken the slot
+   * (its abort check points, §10.5), so two in flight would displace each other and neither's
+   * `build()` would ever find its own artwork — a stage-level `set()` over a grid would loop.
+   */
+  let resourceChain: Promise<unknown> = Promise.resolve()
+
+  // The queue lives with the rebuild it drives: `rebuildKey` needs the views, for the redraw a
+  // re-source ends in, and the views are this function's.
+  const rebuildQueue = createRebuildQueue({ timers: p.timers, rebuild: rebuildKey })
+
+  /** The queue's callback — no caller on the stack, so a failure is an orphan (§10.6). */
+  function rebuildKey(key: string): void {
+    const record = p.sprites.get(key)
+    if (record === undefined) return
+    const failed = rebuildFront(record)
+    if (failed !== undefined) p.policy.orphan(failed, null)
+  }
+
+  /**
+   * Rebuild one front from a resident handle. Synchronous when the artwork is in the slot — the
+   * drag row of §8.5's table, ~1–2 ms and no source touched. When `build()` answers
+   * `SourceExpiredError` — the artwork slot taken by another sprite (§8.5), or a hull-tier knob
+   * moved off the value the handle's hull was traced at (§6.3) — the re-source row is scheduled
+   * instead and `undefined` is returned: the view keeps drawing the front it has (§8.8) until the
+   * new one lands, and nothing has failed yet — if the re-source does fail, `resourceFront`
+   * reports that. Any other `BuildError` is the caller's to route; a §8.6 knob dragged past the
+   * frozen reserve is one ("re-add required"), and no rebuild can re-add.
+   */
+  function rebuildFront(record: SpriteRecord): AddError | undefined {
+    // A re-source in flight for this key builds at the knob values current when it lands, so
+    // there is nothing to do now: sixty set() calls inside one decode are one rebuild.
+    if (resourcing.has(record.key)) return undefined
+    // §6.6's ladder at build time: core defaults -> slot defaults -> stage -> sprite. No view
+    // layer — a front is shared by every view showing the sprite, and a view owns draw class
+    // only (amendment 20). The sprite's layer alone would drop every stage-level value.
+    const front = p.o.sheet.build(
+      record.handle,
+      record.fit.frontSize,
+      p.registry.projector('sheet')(knobsFor(record, {})) as never,
+    )
+    if (SourceExpiredError.is(front)) {
+      void resourceFront(record)
+      return undefined
+    }
+    if (front instanceof Error) return front
+    if (record.front !== null) p.o.sheet.releaseFront(record.front)
+    record.front = front
+    p.lru.insert({ key: record.key, bytes: front.bytes, reclaimable: record.source.reclaimable })
+    return undefined
+  }
+
+  /**
+   * Schedule the re-source for one sprite, or join the one already in flight. The failure, if
+   * any, is orphaned exactly once, by the run that produced it — the rebuild that started it had
+   * no caller on the stack, and a `prepare()` that joins later reads `record.front` to decide
+   * what it returns.
+   */
+  function resourceFront(record: SpriteRecord): Promise<Error | undefined> {
+    const key = record.key
+    const inFlight = resourcing.get(key)
+    if (inFlight !== undefined) return inFlight
+    const run: Promise<Error | undefined> = resourceChain.then(
+      () => resource(record),
+      // Nothing upstream rejects — every step returns its failure — but a chain that could be
+      // broken by one rejection would stay broken for the stage's life, so it is settled here.
+      () => undefined,
+    )
+    resourcing.set(key, run)
+    resourceChain = run
+    void run.then((failed) => {
+      if (resourcing.get(key) === run) resourcing.delete(key)
+      if (failed !== undefined) p.policy.orphan(failed, null)
+    })
+    return run
+  }
+
+  /**
+   * §8.5's re-source, for one sprite: the supplier — §8.5.1's re-supplier where one was derived,
+   * the arm's own `acquire` otherwise, so a borrowed bitmap that is still open re-sources too —
+   * then `source()`, then the rebuild. The record's fit and clip stay: the supplier returns the
+   * image the key was registered with (§8.5.1), so the rect it yields is the rect they were
+   * built over. Resolves to the failure rather than emitting it; `resourceFront` routes it.
+   */
+  async function resource(record: SpriteRecord): Promise<Error | undefined> {
+    const key = record.key
+    const live = (): boolean => p.sprites.get(key) === record && dead() === undefined
+    if (!live()) return undefined
+    const got =
+      record.source.resupply !== undefined
+        ? await record.source.resupply({ key })
+        : await record.source.acquire()
+    // No signal is passed, so ABORTED cannot come back; narrowed because the type says it can.
+    if (isAborted(got)) return undefined
+    if (got instanceof Error) return got
+    if (!live()) {
+      if (got.owned) attempt(() => got.bitmap.close())
+      return undefined
+    }
+    const handle = await p.o.sheet.source(got.bitmap, {
+      maxSize: p.host.surface.width,
+      exact: record.exact,
+      // §6.3 — the hull is traced at the sprite's current values, hull tier included. A knob that
+      // moves again while this decode is out shows up as drift on the rebuild below, which
+      // schedules the next re-source rather than losing the move.
+      knobs: p.registry.projector('sheet')(knobsFor(record, {})),
+    })
+    // §8.5.4 — the stage closes every bitmap it obtained and never closes one it was given.
+    if (got.owned) attempt(() => got.bitmap.close())
+    if (isAborted(handle)) return undefined
+    if (handle instanceof Error) return handle
+    if (!live()) {
+      // Removed, replaced or disposed while the decode was out: the handle that arrived late is
+      // nobody's, so it goes straight back.
+      p.o.sheet.release(handle)
+      return undefined
+    }
+    // amendment 10 — a `200` on the conditional re-supply: the bytes moved under a key that
+    // promised they would not. The fresh handle traced its own hull, so the new artwork cannot
+    // inherit the old torn edge; the warning is what remains to be said.
+    if ('freshness' in got && got.freshness === 'changed') warnReplaced(key)
+    const previous = record.handle
+    record.handle = handle
+    // This run is over before the rebuild, so a build that finds the slot taken again — an
+    // `add()` that landed inside the same window — schedules its own re-source instead of
+    // being swallowed by this one's in-flight entry.
+    resourcing.delete(key)
+    const failed = rebuildFront(record)
+    // The previous handle goes back only now, with the new one in hand and built from: a
+    // released handle cannot be built from, and the view was drawing from this record the
+    // whole time the decode was out.
+    p.o.sheet.release(previous)
+    if (failed !== undefined) return failed
+    // Whatever the queue still held for this key just landed, at the current values.
+    rebuildQueue.forget(key)
+    // §8.8 — an idle view redraws now; a running one picks the new front up at its next step.
+    for (const v of views) {
+      if (internals(v).spriteKey === key && v.state === 'idle') v.refresh()
+    }
+    return undefined
+  }
 
   // §10.6's policy is P9's, applied to `stage.play`'s report: a mid-run draw failure reaches the
   // stage through `RunHost.reportError`, never through the run's settled value (P4 settles a run
@@ -537,12 +667,12 @@ function buildStage(p: StageParts): BuiltStage {
     // §8.8 demand 3 — a front-class set() on a sprite with attachCount > 0. On a running view it
     // marks dirty and the rebuild lands at the top of the next step, at most one dwell later; on
     // an idle view the rebuild and a redraw happen synchronously inside set().
-    p.rebuildQueue.mark(record.key)
+    rebuildQueue.mark(record.key)
     const running = views.some(
       (v) => internals(v).spriteKey === record.key && v.state !== 'idle' && v.state !== 'disposed',
     )
     if (running) return
-    p.rebuildQueue.drain({ demand: 'front-set', mandatory: record.key })
+    rebuildQueue.drain({ demand: 'front-set', mandatory: record.key })
     for (const v of views) if (internals(v).spriteKey === record.key) v.refresh()
   }
 
@@ -580,9 +710,21 @@ function buildStage(p: StageParts): BuiltStage {
   /** §4.1's "never a silent overwrite" applied to elements. */
   const claimed = new Set<HTMLCanvasElement>()
 
-  function resolveTarget(t: ViewTarget): DrawTarget | InstanceType<typeof ViewError> {
+  /**
+   * How a view's `DrawTarget` is derived for each draw, given the front it is about to draw. A
+   * `{ framebuffer }` or `{ rect }` view's target is fixed for the view's life; a blit view's
+   * follows the front, which is why this is a rule and not a value.
+   */
+  type TargetRule = (front: Size) => DrawTarget
+
+  function resolveTarget(t: ViewTarget): TargetRule | InstanceType<typeof ViewError> {
     if ('framebuffer' in t) {
-      return { framebuffer: t.framebuffer, viewport: t.viewport, dest: t.rect ?? t.viewport }
+      const fixed: DrawTarget = {
+        framebuffer: t.framebuffer,
+        viewport: t.viewport,
+        dest: t.rect ?? t.viewport,
+      }
+      return () => fixed
     }
     if ('rect' in t) {
       // D2 — the one target check that stays at runtime, because `presentable` is the result of
@@ -594,21 +736,37 @@ function buildStage(p: StageParts): BuiltStage {
         )
       }
       const box = { x: 0, y: 0, w: p.host.surface.width, h: p.host.surface.height }
-      return { framebuffer: null, viewport: box, dest: t.rect }
+      const fixed: DrawTarget = { framebuffer: null, viewport: box, dest: t.rect }
+      return () => fixed
     }
-    // A blit view draws at the surface's **origin**, one view at a time, and is copied out.
-    const box = { x: 0, y: 0, w: p.host.surface.width, h: p.host.surface.height }
-    return { framebuffer: null, viewport: box, dest: box }
+    // A blit view draws at the surface's **origin**, one view at a time, and is copied out. Its
+    // `dest` is the front's own box there — `(0, 0, w, h)` in GL coordinates, the very window
+    // `blitPlan()` reads back as `(0, surface.h - h, w, h)` in the 2D canvas's top-left ones — so
+    // "what is drawn" and "what is copied" name one rectangle. It is derived per draw rather than
+    // fixed here because no front exists when `view()` runs, and `swapTo` / `crumpleTo` replace it
+    // later with one of another aspect. The whole-surface `dest` this used to return broke that
+    // invariant for every non-square front: motion scales the front into `dest` with one uniform
+    // factor and centres it (`packages/motion/src/source.ts`), so the sheet landed in the middle of
+    // the square surface while the blit copied the front-sized corner — a shifted, cropped slice.
+    // `viewport` stays the whole surface, as it is for a `{ rect }` view: motion places the sheet
+    // relative to `viewport`'s origin, so the box is what carries the geometry, and one shape of
+    // target across both default-framebuffer views is one fewer thing to keep in step.
+    return (front) => ({
+      framebuffer: null,
+      viewport: { x: 0, y: 0, w: p.host.surface.width, h: p.host.surface.height },
+      dest: { x: 0, y: 0, w: front.w, h: front.h },
+    })
   }
 
   function drawInto(
     record: SpriteRecord,
-    target: DrawTarget,
+    targetFor: TargetRule,
     pose: number,
     viewLayer: KnobValues,
   ): Error | undefined {
     const front = record.front
     if (front === null) return new GlError('the front is not resident; prepare() it first')
+    const target = targetFor({ w: front.width, h: front.height })
     const frame = record.clip.keyFrames[pose] ?? 0
     return p.ctx.scope((s) => {
       s.bindTarget(target)
@@ -618,9 +776,12 @@ function buildStage(p: StageParts): BuiltStage {
       // the duration of the stage's draws is this plan's.
       attempt(() => gl.disable(gl.STENCIL_TEST))
       // §7.3 — never clear the default framebuffer. The replacement is a scissored clear over the
-      // view's **own rect**, fixed for the view's life, so there is no union-of-rectangles problem
-      // and no fringe left by a smaller successor. `clear()` is absent from `DrawScope` entirely,
-      // so a slot cannot clear at all.
+      // view's **own rect** — fixed for the view's life for a `{ rect }` or `{ framebuffer }`
+      // view, the current front's box for a blit view (`resolveTarget`) — so there is no
+      // union-of-rectangles problem and no fringe left by a smaller successor: what a blit view
+      // leaves on the surface outside a later, smaller box is never copied out, because
+      // `blitPlan().src` is exactly that box. `clear()` is absent from `DrawScope` entirely, so a
+      // slot cannot clear at all.
       s.enable('SCISSOR_TEST', true)
       attempt(() => gl.scissor(target.dest.x, target.dest.y, target.dest.w, target.dest.h))
       attempt(() => gl.clearColor(0, 0, 0, 0))
@@ -691,7 +852,7 @@ function buildStage(p: StageParts): BuiltStage {
     return copied instanceof Error ? new GlError('the blit failed', { cause: copied }) : undefined
   }
 
-  function createViewObject(t: ViewTarget, target: DrawTarget): View {
+  function createViewObject(t: ViewTarget, targetFor: TargetRule): View {
     const bus = createEventBus()
     let state: ViewState = 'idle'
     let pose = 0
@@ -703,11 +864,11 @@ function buildStage(p: StageParts): BuiltStage {
       if (record === null) return
       // §8.8 — until a rebuild lands the view draws the last front it drew successfully, at the
       // new pose: never a blank frame, never a skipped step.
-      if (record.front === null || p.rebuildQueue.dirty(record.key)) {
-        p.rebuildQueue.drain({ demand: 'show', mandatory: record.key })
+      if (record.front === null || rebuildQueue.dirty(record.key)) {
+        rebuildQueue.drain({ demand: 'show', mandatory: record.key })
       }
       pose = next
-      const drawn = drawInto(record, target, next, viewLayer)
+      const drawn = drawInto(record, targetFor, next, viewLayer)
       if (drawn !== undefined) {
         // No caller on the stack for a step, and `refresh` / `draw` return `void` by design, so
         // every dropped frame is an orphan (§10.6).
@@ -725,19 +886,21 @@ function buildStage(p: StageParts): BuiltStage {
     function paintOnce(r: SpriteRecord, next: number): Error | undefined {
       // §8.8 demand 2 — the top of a step callback whose next render needs a dirty or
       // non-resident front. One mandatory item, whatever it costs, plus whatever fits in 4 ms.
-      if (r.front === null || p.rebuildQueue.dirty(r.key)) {
-        p.rebuildQueue.drain({ demand: 'step', mandatory: r.key })
+      if (r.front === null || rebuildQueue.dirty(r.key)) {
+        rebuildQueue.drain({ demand: 'step', mandatory: r.key })
       }
-      const drawn = drawInto(r, target, next, viewLayer)
+      const drawn = drawInto(r, targetFor, next, viewLayer)
       if (drawn !== undefined) return drawn
       return 'canvas' in t ? blitOut(t, r) : undefined
     }
 
-    // The controller is re-created whenever the pack behind the view changes, because
-    // `RunControllerConfig.poseCount` must equal the schedule's length or 'ball' and the swap's
-    // ball index name different poses. `MotionClip.keyFrames.length` is where that number lives.
+    // The controller is re-created whenever the schedule behind the view changes, because
+    // `RunControllerConfig.poseCount` must equal the dwell table's length or 'ball' and the swap's
+    // ball index name different poses. `MotionClip.keyFrames.length` is where the count lives
+    // and `MotionClip.dwells` is the table — absent, the runner's own `DWELL_MS`.
     let controller: RunController<SpriteRecord> | null = null
     let poseCount = 1
+    let poseDwells: readonly number[] | undefined = undefined
     let currentRun: Run<PlayResult | SwapResult> | null = null
 
     const host: RunHost = {
@@ -767,11 +930,32 @@ function buildStage(p: StageParts): BuiltStage {
 
     function controllerFor(): RunController<SpriteRecord> {
       const count = record?.clip.keyFrames.length ?? 1
-      if (controller === null || count !== poseCount) {
-        controller?.dispose()
-        poseCount = count
-        controller = createRunController<SpriteRecord>(host, { poseCount: count })
+      const dwells = record?.clip.dwells
+      const stale = controller
+      if (stale !== null && count === poseCount && dwells === poseDwells) return stale
+      if (stale !== null) {
+        // Ends any live run with `completed: false` — and announces `'disposed'`, which is the
+        // *controller's* state and not the view's. The view outlives its controllers, so it is
+        // `idle` once this returns; were the announcement left standing, a `play()` the new
+        // controller then refuses (a `PoseError` on a stale `view.pose`, say) would never
+        // overwrite it, and the view would refuse every later call as if it had been disposed.
+        stale.dispose()
+        // The `end` that dispose emitted is allowed to call `play()`. That call re-enters here,
+        // installs a controller keyed to this same clip and starts its run on it; a second
+        // controller would orphan that run, so the installed one is returned instead.
+        const installed = controller
+        if (installed !== null && installed !== stale) return installed
+        // A handler on that `end` may instead have disposed the view itself, which takes it out of
+        // `views`. A disposed controller refuses every call, which is what the view now owes.
+        if (!views.includes(view)) return stale
+        state = 'idle'
       }
+      poseCount = count
+      poseDwells = dwells
+      controller = createRunController<SpriteRecord>(host, {
+        poseCount: count,
+        ...(dwells === undefined ? {} : { dwells }),
+      })
       return controller
     }
 
@@ -876,7 +1060,7 @@ function buildStage(p: StageParts): BuiltStage {
           if (record.front === null) {
             // §8.8 demand 5 — settlement while the view is rising or parked. The park is free
             // time and the ideal moment to build the incoming front.
-            p.rebuildQueue.drain({ demand: 'target-settled', mandatory: record.key })
+            rebuildQueue.drain({ demand: 'target-settled', mandatory: record.key })
           }
           return undefined
         },
@@ -1040,10 +1224,20 @@ function buildStage(p: StageParts): BuiltStage {
     if (isAborted(acquired)) return ABORTED
     if (acquired instanceof Error) return acquired
 
+    // §6.6 — core defaults -> slot defaults -> stage, and no sprite layer yet: the record's own
+    // layer below starts EMPTY, the sprite's delta over the stage. Seeded with a copy of the
+    // defaults instead, it shadowed every stage-level value for as long as the sprite lived —
+    // `stage.set()` of any knob changed nothing a view of an existing sprite drew or built.
+    const at = knobsFor(null, {})
+    const sheetKnobs = p.registry.projector('sheet')(at)
     const handle = await p.o.sheet.source(acquired.bitmap, {
       maxSize: p.host.surface.width,
       exact: opts.exact === true,
       signal: opts.signal,
+      // §6.3 — the hull is traced at the stage's current values, hull tier included, and the
+      // first front is built at the SAME values below: the two must agree, or `build()` answers
+      // `SourceExpiredError` and `add()` has no re-source row to fall back on.
+      knobs: sheetKnobs,
     })
     // §8.5.4 — the stage closes every bitmap it obtained and never closes one it was given.
     if (acquired.owned) attempt(() => acquired.bitmap.close())
@@ -1051,7 +1245,12 @@ function buildStage(p: StageParts): BuiltStage {
     if (handle instanceof Error) return handle
 
     // D5 — the key selects the fold preset, and "a grid must not fold in unison" depends on it.
-    const fit = p.o.motion.fit(handle.rect, presetForImageId(key))
+    // `frontRect`, not `rect`: `fit` sizes the front over the box it is given, in that box's own
+    // units (§5.3), and the front has to be in front texels — bounded by `maxSize`, the surface's
+    // side (§8.6) — for the blit view's `(0, 0, w, h)` box to fit the surface at all. The
+    // source-pixel `rect` sized a 640 px source's front at 853 px on a 512 px surface, which the
+    // view then drew clipped to its bottom-left corner: a cropped sprite, off the canvas's centre.
+    const fit = p.o.motion.fit(handle.frontRect, presetForImageId(key))
     if (fit instanceof Error) {
       p.o.sheet.release(handle)
       return fit
@@ -1063,12 +1262,7 @@ function buildStage(p: StageParts): BuiltStage {
       return isAborted(clip) ? ABORTED : clip
     }
 
-    const knobs = p.registry.defaults()
-    const front = p.o.sheet.build(
-      handle,
-      fit.frontSize,
-      p.registry.projector('sheet')(knobs) as never,
-    )
+    const front = p.o.sheet.build(handle, fit.frontSize, sheetKnobs as never)
     if (front instanceof Error) {
       p.o.motion.release(clip)
       p.o.sheet.release(handle)
@@ -1077,6 +1271,14 @@ function buildStage(p: StageParts): BuiltStage {
       // `SheetError` rather than widening `AddError` itself.
       return SourceExpiredError.is(front) ? new SheetError(front.message, { cause: front }) : front
     }
+    // A set() that landed while the decode was out never saw this sprite — the record is not in
+    // `p.sprites` until the caller registers it — so the front above is at the values `source()`
+    // traced at, not at the stage's current ones. Marked dirty here (by key: the queue needs no
+    // record), so the next demand on it (§8.8: show, step, prepare, a front-class set) rebuilds it
+    // — a hull-tier move through the re-source row, anything else in place. Draw-class movement
+    // rides along: one redundant rebuild in a window this narrow, against a second bookkeeping
+    // path that would have to know the class.
+    if (Object.keys(delta(at, knobsFor(null, {}))).length > 0) rebuildQueue.mark(key)
 
     // Boxed rather than a bare `let`: `sprite`'s getters must close over `record`, which does not
     // exist until after `sprite` is built. `record` itself is assigned exactly once, so it stays
@@ -1122,7 +1324,7 @@ function buildStage(p: StageParts): BuiltStage {
       exact: opts.exact === true,
       pinned: false,
       attachCount: 0,
-      knobs,
+      knobs: {},
     }
     box.record = record
     return record
@@ -1212,23 +1414,6 @@ function buildStage(p: StageParts): BuiltStage {
     return out
   }
 
-  /** Rebuild one front from a resident handle. The LRU dropped the front, not the sprite. */
-  function rebuildFront(record: SpriteRecord): AddError | undefined {
-    const front = p.o.sheet.build(
-      record.handle,
-      record.fit.frontSize,
-      p.registry.projector('sheet')(record.knobs) as never,
-    )
-    if (front instanceof Error) {
-      // `BuildError` carries `SourceExpiredError`, which `AddError` does not — folded into a
-      // `SheetError` exactly as `buildSprite` does above.
-      return SourceExpiredError.is(front) ? new SheetError(front.message, { cause: front }) : front
-    }
-    record.front = front
-    p.lru.insert({ key: record.key, bytes: front.bytes, reclaimable: record.source.reclaimable })
-    return undefined
-  }
-
   /**
    * amendment 10 — P15's staleness check reports a `200` on a conditional re-supply, which means
    * the bytes moved under a key §8.5.1 promised would not move. `replace()` is what that turns
@@ -1261,11 +1446,28 @@ function buildStage(p: StageParts): BuiltStage {
     // is stale, so returning it early would make `prepare` the one demand that never rebuilds.
     // The prepared key is the mandatory item; the rest of the queue rides along in the budget.
     if (record.front !== null) {
-      if (p.rebuildQueue.dirty(key)) p.rebuildQueue.drain({ demand: 'prepare', mandatory: key })
-      return record.sprite
+      if (rebuildQueue.dirty(key)) rebuildQueue.drain({ demand: 'prepare', mandatory: key })
+    } else {
+      // The LRU dropped the front, not the sprite.
+      const rebuilt = rebuildFront(record)
+      if (rebuilt !== undefined) return p.policy.returned(rebuilt, null)
     }
-    const rebuilt = rebuildFront(record)
-    if (rebuilt !== undefined) return p.policy.returned(rebuilt, null)
+    // §8.5.1 — `prepare` "invokes the supplier, re-runs source() and rebuilds": when the rebuild
+    // above found the artwork slot taken, that is what is in flight now, and `prepare` is the
+    // one demand that waits for it rather than returning a front it knows is stale or absent.
+    const pending = resourcing.get(key)
+    if (pending !== undefined) {
+      const failed = await pending
+      if (record.front === null) {
+        const message = `prepare('${key}') could not restore the front; the re-source failed`
+        return p.policy.returned(
+          failed === undefined
+            ? new SheetError(message)
+            : new SheetError(message, { cause: failed }),
+          null,
+        )
+      }
+    }
     return record.sprite
   }
 
@@ -1313,7 +1515,7 @@ function buildStage(p: StageParts): BuiltStage {
       // time, and `prepare(key)` would build a front from a released handle.
       p.sprites.delete(key)
       p.lru.remove(key)
-      p.rebuildQueue.forget(key)
+      rebuildQueue.forget(key)
       return ABORTED
     }
     if (built instanceof Error) {
@@ -1367,7 +1569,7 @@ function buildStage(p: StageParts): BuiltStage {
     p.o.motion.release(record.clip)
     p.sprites.delete(key)
     p.lru.remove(key)
-    p.rebuildQueue.forget(key)
+    rebuildQueue.forget(key)
     return undefined
   }
 
@@ -1601,9 +1803,9 @@ function buildStage(p: StageParts): BuiltStage {
         }
         claimed.add(t.canvas)
       }
-      const target = resolveTarget(t)
-      if (target instanceof Error) return p.policy.returned(target, null)
-      const created = createViewObject(t, target)
+      const targetFor = resolveTarget(t)
+      if (targetFor instanceof Error) return p.policy.returned(targetFor, null)
+      const created = createViewObject(t, targetFor)
       views.push(created)
       return created
     },

@@ -1,5 +1,5 @@
 import { ABORTED, type Aborted } from '../abort.js'
-import { GlError, MotionError, SheetError } from '../errors.js'
+import { GlError, MotionError, SheetError, SourceExpiredError } from '../errors.js'
 import type { DrawResult, KnobDescriptor, Knobs } from '../forward.js'
 import type { Rect, Size } from '../geometry.js'
 import type { DrawScope, GlCaps, GlContext } from '../gl.js'
@@ -74,6 +74,12 @@ export function fakeGlContext(caps?: Partial<GlCaps>): FakeGlContext {
 export interface FakeSheetHandle extends SheetHandle {
   readonly id: number
   readonly src: Size
+  /**
+   * The `sheetHull` value this handle was "traced" at (§6.3) — `SourceOptions.knobs`'s, or the
+   * descriptor's default when none reached `source()`; `undefined` under a knob set that does
+   * not declare `sheetHull` at all.
+   */
+  readonly tracedAt: number | undefined
 }
 
 export interface FakeSheetOptions {
@@ -90,19 +96,27 @@ export interface FakeSheetOptions {
 export interface FakeSheet extends SheetRenderer<Knobs, FakeSheetHandle> {
   readonly calls: {
     readonly source: Array<{ bitmap: ImageBitmap; o: SourceOptions }>
-    readonly build: Array<{ handle: FakeSheetHandle; size: Size }>
+    readonly build: Array<{ handle: FakeSheetHandle; size: Size; knobs: Knobs }>
     readonly release: FakeSheetHandle[]
     readonly releaseFront: SheetFront[]
   }
   /** Method names in call order — the whole of D3's `replace()` ordering assertion. */
   readonly order: readonly string[]
   readonly disposed: boolean
+  /** The handle whose artwork the one scratch slot holds (§8.5), or `null`. */
+  artworkKey(): number | null
 }
 
-/** Two descriptors, one per invalidation class the stage branches on. */
+/**
+ * Three descriptors: one per invalidation class the stage branches on (draw, front), and one at
+ * the hull tier, which the stage does not branch on but the SLOT does (§6.3) — `build()` at a
+ * hull-tier value other than the one the handle was sourced at is `SourceExpiredError`, and the
+ * stage has to re-source at the current values, not merely re-source.
+ */
 const FAKE_SHEET_KNOBS = knobs([
   { key: 'sheetTint', kind: 'number', invalidates: 'draw', default: 0, min: 0, max: 1 },
   { key: 'sheetEdge', kind: 'number', invalidates: 'front', default: 0.5, min: 0, max: 1 },
+  { key: 'sheetHull', kind: 'number', invalidates: 'hull', default: 0.5, min: 0, max: 1 },
 ])
 
 export function fakeSheet(o: FakeSheetOptions = {}): FakeSheet {
@@ -110,9 +124,26 @@ export function fakeSheet(o: FakeSheetOptions = {}): FakeSheet {
   let disposed = false
   const order: string[] = []
   const calls: FakeSheet['calls'] = { source: [], build: [], release: [], releaseFront: [] }
+  // §8.5 — "the pool keeps one artwork slot, keyed by sprite". Every `source()` takes it, so
+  // `build()` for any handle but the most recently sourced one is `SourceExpiredError`, exactly
+  // as the real slot answers. Modelled here rather than left out because the stage's re-source
+  // path exists for this answer and nothing else, and a fake with an unbounded pool would let
+  // that path rot unexercised.
+  let artworkKey: number | null = null
+  // Annotated: on TypeScript 5.0 (the floor, §6.8) `.find` on a union of two array types is not
+  // callable, and `o.knobs`'s type and the tuple `knobs([...])` infers are two such types.
+  const descriptors: readonly KnobDescriptor[] = o.knobs ?? FAKE_SHEET_KNOBS
+  // §6.3 — what `source()` "traces" at: the projected value when one reached it, else the
+  // descriptor's default (exactly the real slot's fallback), else nothing to compare against.
+  const hullDefault = descriptors.find((d) => d.key === 'sheetHull')?.default
+  const tracedAtFor = (opts: SourceOptions): number | undefined => {
+    const given = opts.knobs?.['sheetHull']
+    if (typeof given === 'number') return given
+    return typeof hullDefault === 'number' ? hullDefault : undefined
+  }
 
   return {
-    knobs: o.knobs ?? FAKE_SHEET_KNOBS,
+    knobs: descriptors,
     overscan: o.overscan ?? 0.08,
     mount: () => undefined,
     async source(bitmap, opts): Promise<SourceError | Aborted | FakeSheetHandle> {
@@ -123,19 +154,49 @@ export function fakeSheet(o: FakeSheetOptions = {}): FakeSheet {
       if (aborted(opts.signal)) return ABORTED
       if (o.sourceFails !== undefined) return o.sourceFails
       const src = { w: bitmap.width, h: bitmap.height }
+      // The paper's box in front texels: the front keeps the source aspect at a long side of
+      // `maxSize` (spec 7.4.3), so this is the source box scaled down to it, never up.
+      const k = Math.min(1, opts.maxSize / Math.max(src.w, src.h))
+      const id = nextId++
+      artworkKey = id
       return {
-        id: nextId++,
+        id,
         src,
+        tracedAt: tracedAtFor(opts),
         rect: { x: 0, y: 0, w: src.w, h: src.h },
+        frontRect: {
+          x: 0,
+          y: 0,
+          w: Math.max(1, Math.round(src.w * k)),
+          h: Math.max(1, Math.round(src.h * k)),
+        },
         // A handle holds no image data at all (§8.5): this is the declared model, not a heap
         // measurement, and it is independent of source size.
         bytes: 1712,
       }
     },
-    build(handle, size): BuildError | SheetFront {
+    build(handle, size, knobs): BuildError | SheetFront {
       order.push('build')
-      calls.build.push({ handle, size })
+      calls.build.push({ handle, size, knobs })
       if (o.buildFails !== undefined) return o.buildFails
+      if (artworkKey !== handle.id) {
+        return new SourceExpiredError(
+          `fakeSheet: handle ${String(handle.id)}'s artwork is no longer in the pool (§8.5)`,
+        )
+      }
+      // §6.3 — a hull-tier value other than the one the handle was traced at is the same answer
+      // as a displaced slot: `source()` again, at the current values. Same class, on purpose.
+      const wanted = knobs['sheetHull']
+      if (
+        typeof wanted === 'number' &&
+        handle.tracedAt !== undefined &&
+        wanted !== handle.tracedAt
+      ) {
+        return new SourceExpiredError(
+          `fakeSheet: handle ${String(handle.id)}'s hull was traced at sheetHull ` +
+            `${String(handle.tracedAt)}, not ${String(wanted)} (§6.3)`,
+        )
+      }
       return {
         texture: {} as WebGLTexture,
         width: size.w,
@@ -151,6 +212,7 @@ export function fakeSheet(o: FakeSheetOptions = {}): FakeSheet {
     release(handle) {
       order.push('release')
       calls.release.push(handle)
+      if (artworkKey === handle.id) artworkKey = null
     },
     dispose() {
       order.push('dispose')
@@ -161,6 +223,7 @@ export function fakeSheet(o: FakeSheetOptions = {}): FakeSheet {
     get disposed() {
       return disposed
     },
+    artworkKey: () => artworkKey,
   }
 }
 
@@ -178,6 +241,8 @@ export interface FakeMotionOptions {
   readonly drawFails?: InstanceType<typeof GlError>
   readonly gate?: () => Promise<void>
   readonly poseCount?: number
+  /** The clip's own dwell table. Read at each `load`, so a test can change it between sprites. */
+  readonly dwells?: readonly number[]
   readonly knobs?: readonly KnobDescriptor[]
 }
 
@@ -226,6 +291,7 @@ export function fakeMotion(o: FakeMotionOptions = {}): FakeMotion {
         id: nextId++,
         frameCount: poseCount * 2,
         keyFrames: Array.from({ length: poseCount }, (_, i) => i * 2),
+        ...(o.dwells === undefined ? {} : { dwells: o.dwells }),
       }
     },
     draw(a): InstanceType<typeof GlError> | DrawResult {

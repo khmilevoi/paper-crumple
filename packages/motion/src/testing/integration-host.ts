@@ -83,7 +83,9 @@ export function stubSheet(
         fronts.findIndex((f) => f.size.w === bitmap.width && f.size.h === bitmap.height),
       )
       const f = fronts[which]!
-      return { which, rect: f.rect, bytes: 256 }
+      // The stub's fronts are already in front texels, so the paper's box is the same rect in
+      // both units (`SheetHandle.frontRect` is what the stage hands `motion.fit`).
+      return { which, rect: f.rect, frontRect: f.rect, bytes: 256 }
     },
     build(handle, size, knobs): SheetFront | InstanceType<typeof GlError> {
       // The stub doesn't use size or knobs; everything built on it is about the motion path

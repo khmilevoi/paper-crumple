@@ -24,7 +24,7 @@ describe('blitPlan', () => {
     expect(p.clear).toEqual([{ x: 0, y: 0, w: 300, h: 60 }])
   })
 
-  it("fit: 'contain' letterboxes and names the bars to clear", () => {
+  it("fit: 'contain' letterboxes and clears the whole destination, not just the bars", () => {
     const p = blitPlan({
       surface: { w: 512, h: 512 },
       front: { w: 100, h: 100 },
@@ -33,10 +33,11 @@ describe('blitPlan', () => {
     })
     // A square front inside a 300x100 box scales to 100x100 and is centred horizontally.
     expect(p.dest).toEqual({ x: 100, y: 0, w: 100, h: 100 })
-    expect(p.clear).toEqual([
-      { x: 0, y: 0, w: 100, h: 100 },
-      { x: 200, y: 0, w: 100, h: 100 },
-    ])
+    // The front's own silhouette (crumpled paper) carries internal transparency that changes
+    // shape between draws even though `dest` itself does not — a bars-only clear leaves the
+    // previous draw's opaque pixels sitting under the new front's transparent regions. Clearing
+    // `dest` too, every draw, is what makes that not happen.
+    expect(p.clear).toEqual([{ x: 0, y: 0, w: 300, h: 100 }])
   })
 
   it("fit: 'contain' letterboxes on the other axis too", () => {
@@ -47,10 +48,7 @@ describe('blitPlan', () => {
       fit: 'contain',
     })
     expect(p.dest).toEqual({ x: 0, y: 100, w: 100, h: 100 })
-    expect(p.clear).toEqual([
-      { x: 0, y: 0, w: 100, h: 100 },
-      { x: 0, y: 200, w: 100, h: 100 },
-    ])
+    expect(p.clear).toEqual([{ x: 0, y: 0, w: 100, h: 300 }])
   })
 
   it('clears the whole destination when the front is degenerate rather than drawing nothing', () => {
@@ -86,6 +84,32 @@ describe('managedBackingStore', () => {
         current: { w: 10, h: 10 },
       }),
     ).toEqual({ w: 384, h: 384 })
+  })
+
+  // The backing store is drawn into the CSS box by the browser, stretched to it — so its aspect
+  // must be the box's, or the sprite is stretched with it. A cap taken per axis gave a 384x192
+  // front a 384x192 backing store inside a square box: the paper came out twice as tall as it
+  // is. The cap is uniform instead: the box shrinks, keeping its shape, until the front fits it
+  // 1:1 on one axis and letterboxes on the other under `contain` — still never past the front on
+  // the axis that binds, so the blit still never upsamples.
+  it('shrinks the box uniformly to the front rather than per axis, so a landscape front in a square box keeps its shape', () => {
+    expect(
+      managedBackingStore({
+        cssSize: { w: 400, h: 400 },
+        dpr: 1,
+        front: { w: 384, h: 192 },
+        current: { w: 10, h: 10 },
+      }),
+    ).toEqual({ w: 384, h: 384 })
+    // The binding axis can be the other one: a portrait front in a wide box.
+    expect(
+      managedBackingStore({
+        cssSize: { w: 300, h: 100 },
+        dpr: 2,
+        front: { w: 120, h: 180 },
+        current: { w: 10, h: 10 },
+      }),
+    ).toEqual({ w: 540, h: 180 })
   })
 
   it('answers null when the backing store is already correct, so no draw resets it', () => {

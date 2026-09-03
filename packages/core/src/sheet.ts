@@ -9,6 +9,13 @@ import type { BuildError, SourceError } from './results.js'
 export interface SheetHandle {
   /** The silhouette's box, in source pixels. */
   readonly rect: Rect
+  /**
+   * The same box in **front** texels — at the front `source()` sized for its `maxSize` (§7.4.3),
+   * which is the scale `build()` copies the artwork into a front at, 1:1 (§7.4.2). This is the
+   * rect `motion.fit` sizes the bucket box over (§5.4): a fit sized over the source-pixel `rect`
+   * would put the front at the source's own scale, and §8.6 has `maxSize` bound the front.
+   */
+  readonly frontRect: Rect
   /** The slot's own accounting. The LRU has a byte budget and must not infer `w × h × 4`. */
   readonly bytes: number
 }
@@ -31,6 +38,16 @@ export type SourceOptions = {
   maxSize: number
   exact: boolean
   signal?: AbortSignal
+  /**
+   * The sheet's knob values for the sprite — §6.6's ladder projected onto the slot, the very bag
+   * `build()` is handed. §6.3 makes `hull` a tier of its own ("invalidate the hull cache, then
+   * front", keyed on "every knob at or above `'hull'`"), and §5.2 moves the hull, its cache and
+   * its key inside `source()` — so the values the hull-tier knobs hold have to reach `source()`,
+   * or a `build()` at any value but the slot's own defaults has no hull to build from and can
+   * only answer `SourceExpiredError`. Optional: a slot driven without a stage traces at its
+   * defaults.
+   */
+  knobs?: Knobs
 }
 
 /**

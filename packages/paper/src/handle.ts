@@ -7,7 +7,7 @@
  * Error naming "re-add required" rather than a silent clamp.
  */
 import { KnobError, SheetError } from '@paper-crumple/core'
-import type { Rect, Size } from '@paper-crumple/core'
+import type { Knobs, Rect, Size } from '@paper-crumple/core'
 import {
   handleBytes,
   overscanFromRadius,
@@ -24,8 +24,18 @@ export interface PaperSheetHandle extends SheetHandle {
   readonly spriteKey: string
   /** §5.2: the silhouette's box, in **source** pixels. */
   readonly rect: Rect
-  /** The same box in **front** texels — what `SheetFront.rect` reports and the guard band reads. */
+  /**
+   * The same box in **front** texels — the box `motion.fit` sizes the bucket front over, the one
+   * the guard band reads, and what `SheetFront.rect` reports once moved with the artwork into
+   * whatever front `build()` is asked for.
+   */
   readonly frontRect: Rect
+  /**
+   * The front `source()` sized for its `maxSize` and traced the hull on, in texels. `frontRect`
+   * and the hull's own texels are relative to the artwork's centred, 1:1 placement in THIS front;
+   * `build()` needs it to carry both into a front of another size.
+   */
+  readonly front: Size
   /** `A`, the unpadded artwork the resample wrote (§8.5). */
   readonly artwork: Size
   readonly overscan: number
@@ -36,6 +46,15 @@ export interface PaperSheetHandle extends SheetHandle {
   readonly exact: boolean
   readonly edgeMode: PaperEdgeMode
   readonly hull: HullShape
+  /**
+   * §6.3 — the hull-tier knob values (`invalidates: 'hull'`: `minDist`, `maxDist`, `angularity`
+   * and `seed` in this package, whichever of them the mode declares) the hull was traced at,
+   * keyed as the descriptors are. `build()` compares the values it is handed against these and
+   * answers `SourceExpiredError` on any difference: the trace lives inside `source()` (§5.2), so
+   * a moved hull-tier knob is a re-source at the new values, never a retrace `build()` does on
+   * its own.
+   */
+  readonly hullKnobs: Knobs
   /** Cleared by `release()`; a `build()` on a released handle is a `SheetError`. */
   alive: boolean
   readonly bytes: number
@@ -69,14 +88,28 @@ export interface OverscanReserve {
  * §8.6. `headroom` inflates the **radius** rather than the overscan, because the reserve is a
  * distance and `p = r / (1000 - 2r)` is not linear in `r`: inflating `p` would reserve a margin
  * no knob value can actually reach.
+ *
+ * `heightOverWidth` is the front's `h / w`, and matters only above 1. The radius is quoted
+ * against the front's HEIGHT (`paper-renderer.ts`'s own `uPxScale = front.h / KNOB_REFERENCE_PX`,
+ * and `source()`'s `k`), but the margin `p` buys is the same uv FRACTION of each axis — so on a
+ * front narrower than it is tall the x margin holds only `w / h` of the radius, and a silhouette
+ * that comes within the difference of its own bitmap's side is sliced flat by the guard band on
+ * axis x. That was every 2:3 demo sample at the demo's own defaults: `0.667 × 150 ≈ 100`
+ * reference px of x margin against a paint radius of 150. Scaling the radius by `h / w` before it
+ * becomes `p` makes the x margin exactly the radius (the y margin, already exact, grows with it);
+ * below 1 the y margin is the exact one and the x margin already the larger, so nothing is
+ * scaled. The RADIUS returned stays the paint radius, unscaled — `checkReserve` compares paint
+ * radii, which know nothing of aspect.
  */
 export function freezeOverscan(
   params: EdgeParams,
   headroom: number,
+  heightOverWidth = 1,
 ): InstanceType<typeof KnobError> | OverscanReserve {
   const room = Number.isFinite(headroom) && headroom > 0 ? headroom : 0
   const radius = overscanRadius(params) * (1 + room)
-  const overscan = overscanFromRadius(radius)
+  const scale = Number.isFinite(heightOverWidth) && heightOverWidth > 1 ? heightOverWidth : 1
+  const overscan = overscanFromRadius(radius * scale)
   if (KnobError.is(overscan)) return overscan
   return { overscan, radius }
 }

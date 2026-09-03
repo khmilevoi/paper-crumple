@@ -524,4 +524,34 @@ describe('fillHullMask', () => {
     }
     expect(wrong.slice(0, 8)).toEqual([])
   })
+
+  // `build()` places the artwork 1:1 in a front of whatever size the bucket fit asked for, so a
+  // hull traced in `source()`'s field lands in this build's field shifted as well as scaled: the
+  // artwork's origin moved. A scale about the field's origin cannot express that shift.
+  it('translates the polygon by tx/ty after scaling, so a moved artwork origin moves the mask with it', () => {
+    const square: [number, number][] = [
+      [1, 1],
+      [5, 1],
+      [5, 5],
+      [1, 5],
+    ]
+    const hull = packPolygons([square], 0, 1)
+    const w = 16
+    const h = 16
+    const bytes = fillHullMask(hull, w, h, 2, 1, 3, 4)
+    expect(bytes).toBeDefined()
+    if (bytes === undefined) return
+    const moved = square.map(([x, y]) => [x * 2 + 3, y * 1 + 4] as const)
+    const wrong: string[] = []
+    for (let y = 0; y < h; y++) {
+      for (let x = 0; x < w; x++) {
+        const want = windingAt([moved], x, y) !== 0 ? 255 : 0
+        if (alphaAt(bytes, w, x, y) !== want) wrong.push(`(${x},${y}): want ${want}`)
+      }
+    }
+    expect(wrong.slice(0, 8)).toEqual([])
+    // The unshifted span `[2, 10) x [1, 5)` is empty now: the mask moved rather than grew.
+    expect(alphaAt(bytes, w, 4, 2)).toBe(0)
+    expect(alphaAt(bytes, w, 6, 6)).toBe(255)
+  })
 })

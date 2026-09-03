@@ -27,10 +27,12 @@
  * artwork's alpha, and the sheet follows that polygon, which sits *outside* the artwork's
  * silhouette. So an alpha-0 texel of A is no longer uniformly empty: the ones the sheet reaches
  * carry opaque paper, and only the ones it does not reach are still exactly `(0, 0, 0, 0)`. Which
- * of the two any given texel lands in depends on the build size, because `maxDist` is a
- * `reference: 'sprite-px'` knob and scales as `value * front.h / KNOB_REFERENCE_PX`
- * (`paper-renderer.ts:42-45`) — so the two tests below measure their split rather than deriving it,
- * and they measure different splits.
+ * of the two any given texel lands in depends on the front the hull was TRACED on: `minDist` and
+ * `maxDist` are `reference: 'sprite-px'` knobs, scaled by that front's height when `source()`
+ * traces the polygon once, and the polygon then moves 1:1 with the artwork into whatever front
+ * `build()` is asked for (`sheet.ts`'s `artworkPlacement`). The two tests below trace at different
+ * front heights (49 and 32), so they measure their split rather than deriving it, and they
+ * measure different splits.
  *
  * The front still does not preserve the artwork's RGB under zero alpha, and a future reader must
  * still not "fix" this file's partitioned assertions back into a full-rect byte-for-byte claim.
@@ -180,24 +182,23 @@ describe("the front's artwork rect through readPixels, partitioned by alpha", ()
    * opaque texel still has `sheetCov == 1`, so `front = mix(sheet, img.rgb, 1.0)`
    * (`paper-shader.ts:1693`) and the artwork's own bytes survive. The alpha-0 half moved, and is
    * re-measured rather than derived. Measured, of the 1600 texels in the 40x40 artwork rect: all
-   * 784 alpha-255 texels still match the source byte for byte, and all 816 alpha-0 texels now read
-   * opaque paper — at this build the alpha-0 class does not split at all, the sheet covers it
-   * entire.
+   * 784 alpha-255 texels still match the source byte for byte, and the 816 alpha-0 texels split
+   * 178 covered (opaque paper) / 638 still clear, with no feathered texel between them.
    *
-   * That it does not split holds with a wide margin rather than by a coincidence of two close
-   * numbers, and the reason is a change of framing between `source()` and `build()`, not the knob
-   * arithmetic. The hull is traced in `source()`, at *that* call's own front size: under
-   * `exact: true` that is `exactFrontLongSide(40, p) = 49` (`sheet.ts:782`), not the 128 this test
-   * later builds at. `build()` then carries the field over in **uv** space — `artworkUv` is a flat
-   * `p` inset, independent of the built size (`sheet.ts:1107-1112`) — while `renderFront` places
-   * the artwork in **pixel** space, `round((size - artwork) / 2)` (`sheet.ts:1258-1263`). At
-   * `size = 128` those two framings diverge hard. Measured on this very build: the artwork rect
-   * lands at `[44, 84)`, while the sheet spans `x in [23, 103]` and `y in [21, 105]` — an overhang
-   * of roughly 20px on every side, so every texel of the rect is covered many times over.
+   * The split is the hull's own reach, and nothing else. The hull is traced in `source()`, at
+   * *that* call's own front: under `exact: true` that is `exactFrontLongSide(40, p) = 49`, not the
+   * 128 this test later builds at, so `minDist`/`maxDist` (22/72 reference px) are 1.1/3.5 px
+   * there. `build()` then places the artwork 1:1 at `round((size - artwork) / 2)` and carries the
+   * polygon into the 128 front translated to that same origin (`sheet.ts`'s `artworkPlacement`,
+   * `fillHullMask`'s `tx`/`ty`), so the sheet sits 1-4 px around the 28x28 silhouette: measured,
+   * the artwork rect lands at `[44, 84)` and the sheet spans `[48, 79]` on both axes — inside the
+   * rect, which is what leaves 638 of its alpha-0 texels clear. Before `artworkPlacement`, the
+   * field was framed by a flat `p` inset instead, which at `size = 128` stretched the sheet to
+   * `[23, 103]` — an overhang of roughly 20 px on every side that covered the whole rect and hid
+   * the hull's real reach.
    *
-   * Test 2 below is not the same situation, and there the class does split: `maxSize: 32` with
-   * `exact: false` makes `source()`'s own front the build size, so the two framings coincide and
-   * `maxDist` scales to `72 * 32 / 1000 = 2.3` px.
+   * Test 2 below traces at a 32 px front, where `maxDist` scales to `72 * 32 / 1000 = 2.3` px, and
+   * its split is measured separately.
    */
   it('reads back every texel of A unchanged where opaque, and (0,0,0,0) where transparent', async () => {
     const ctx = open()
@@ -233,22 +234,20 @@ describe("the front's artwork rect through readPixels, partitioned by alpha", ()
 
     // Under `uEdgeMode == 1` the alpha-0 class is no longer uniformly `(0,0,0,0)`: the texels the
     // hull polygon's sheet covers carry opaque paper, and only the ones it does not reach stay
-    // clear. Measured at this build the sheet covers the whole artwork rect, so `clear` is empty —
-    // Ruling 1 above gives the mechanism, and how much room there is to spare. Both counts are
-    // pinned individually rather than summed so the split is stated outright rather than implied.
-    // Be honest about what the pair can catch, though: the sheet overhangs the rect by ~20px on
-    // every side, so a hull that merely lost some reach would not move these numbers at all. Only
-    // one that stopped rendering, or shrank past that whole overhang, flips `clear` off 0. The
-    // tight bound on the sheet's own edge is test 2's, where the two framings coincide.
+    // clear. Measured at this build the sheet covers a 1-4 px ring around the silhouette and
+    // nothing beyond it — Ruling 1 above gives the mechanism and the numbers. Both counts are
+    // pinned individually rather than summed so the split is stated outright rather than implied,
+    // and because the sheet's reach is now the hull's own (traced at a 49 px front, carried over
+    // 1:1), a hull that lost or gained reach moves them.
     const covered = empty.filter((t) => got[t * 4 + 3] === 255)
     const clear = empty.filter((t) => got[t * 4 + 3] === 0)
-    expect(covered.length).toBe(816)
-    expect(clear.length).toBe(0)
+    expect(covered.length).toBe(178)
+    expect(clear.length).toBe(638)
     expect(covered.length + clear.length).toBe(empty.length)
     // Paper, not a stray copy of the artwork: the default `paperColor` (#f7f4ed) reads high on all
-    // three channels. Measured, the per-channel minimum over all 816 covered texels is
+    // three channels. Measured, the per-channel minimum over all 178 covered texels is
     // (241, 238, 231), so the bound below clears it by ~90 counts; the artwork's own RGB at the
-    // sixteen texels sampled (row 0 of the rect) is `g = 40, b = 17`, nowhere near it.
+    // sixteen texels sampled (the ring's first row) is `g = 40..94, b <= 17`, nowhere near it.
     for (const t of covered.slice(0, 16)) {
       expect(got[t * 4]).toBeGreaterThan(150)
       expect(got[t * 4 + 1]).toBeGreaterThan(150)
@@ -325,21 +324,22 @@ describe("the front's artwork rect through readPixels, partitioned by alpha", ()
     // the front. It splits three ways here, not two as in test 1: `front.h = 32` scales the default
     // `maxDist` of 72 reference px to only `72 * 32 / 1000 = 2.3` px, so the sheet reaches a little
     // way past the silhouette and stops well inside the artwork rect, leaving a covered class, a
-    // still-clear class, and the polygon's own antialiased edge in between. All three counts are
-    // measured and pinned individually rather than summed, so a hull that stopped reaching inside
-    // the rect, or a feathered edge that grew, would fail here rather than widen under a stale
-    // comment. The feathered class is pinned by count only and its bytes are left unasserted,
-    // exactly as Ruling 3 leaves the reference's own partial-alpha ring unasserted, and for the
-    // same reason: no oracle in this file predicts them.
+    // still-clear class, and the polygon's own antialiased edge in between — a wider one than in
+    // test 1, because at 2.3 px the polygon's edge crosses the artwork's own texel grid at an
+    // angle almost everywhere. All three counts are measured and pinned individually rather than
+    // summed, so a hull that stopped reaching inside the rect, or a feathered edge that grew, would
+    // fail here rather than widen under a stale comment. The feathered class is pinned by count
+    // only and its bytes are left unasserted, exactly as Ruling 3 leaves the reference's own
+    // partial-alpha ring unasserted, and for the same reason: no oracle in this file predicts them.
     const covered = empty.filter((t) => got[t * 4 + 3] === 255)
     const clear = empty.filter((t) => got[t * 4 + 3] === 0)
     const feathered = empty.filter((t) => got[t * 4 + 3] !== 0 && got[t * 4 + 3] !== 255)
-    expect(covered.length).toBe(37)
-    expect(clear.length).toBe(276)
-    expect(feathered.length).toBe(55)
+    expect(covered.length).toBe(54)
+    expect(clear.length).toBe(247)
+    expect(feathered.length).toBe(67)
     expect(covered.length + clear.length + feathered.length).toBe(empty.length)
     // Paper, not a stray copy of the artwork: the default `paperColor` (#f7f4ed) reads high on all
-    // three channels. Measured, the per-channel minimum over all 37 covered texels is
+    // three channels. Measured, the per-channel minimum over all 54 covered texels is
     // (242, 239, 232), so the bound below clears it by ~90 counts.
     for (const t of covered.slice(0, 16)) {
       expect(got[t * 4]).toBeGreaterThan(150)

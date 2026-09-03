@@ -63,3 +63,8 @@ export type { SheetMesh } from './mesh.js'
 // --- P11: the MotionSource itself (§5.3) ---
 export { bakedMotion } from './source.js'
 export type { BakedClip, BakedFit, BakedMotionOptions } from './source.js'
+
+// --- the runtime pose schedule: key frames and dwells a consumer edits without a re-bake (§7.2, §9.1) ---
+export { dwellsFor, evenKeyFrames, resolveSchedule } from './schedule.js'
+export type { PoseSchedule, PoseScheduleInput } from './schedule.js'
+export type { BakedMotion } from './source.js'
