@@ -1147,4 +1147,65 @@ describe('the hull polygon as a real paper field (design 2026-09-02, §2-§3)', 
     sheet.releaseFront(front)
     sheet.dispose()
   })
+
+  /**
+   * Finding F1. `both` decorates the hull polygon's contour with the torn path, which draws
+   * OUTWARD from it by `thickness + 0.6*looseness*tearAmp + midAmp + 4*fiberLen` — the terms
+   * `overscanRadius` collects as `r_both - maxDist`. The extent took the polygon's own box and
+   * grew it by nothing, so the sheet window was sized for the polygon and the fringe was sliced
+   * flat at its edge. Compared against `hull` on the same sprite, because the polygon underneath
+   * the two is the same one and the difference is exactly the reach.
+   */
+  it("reserves the torn path's outward reach in both mode's sheet rect (F1)", async () => {
+    const ctx = open()
+    const hullSheet = paperSheet({ edgeMode: 'hull' })
+    const bothSheet = paperSheet({ edgeMode: 'both' })
+    hullSheet.mount(ctx)
+    bothSheet.mount(ctx)
+
+    const a = await compactSprite()
+    const hullHandle = await hullSheet.source(a, { maxSize: 128, exact: false })
+    a.close()
+    const b = await compactSprite()
+    const bothHandle = await bothSheet.source(b, { maxSize: 128, exact: false })
+    b.close()
+    const bad =
+      GlError.is(hullHandle) ||
+      SheetError.is(hullHandle) ||
+      isAborted(hullHandle) ||
+      GlError.is(bothHandle) ||
+      SheetError.is(bothHandle) ||
+      isAborted(bothHandle)
+    expect(bad, 'both source() calls must succeed for this fixture').toBe(false)
+    if (
+      GlError.is(hullHandle) ||
+      SheetError.is(hullHandle) ||
+      isAborted(hullHandle) ||
+      GlError.is(bothHandle) ||
+      SheetError.is(bothHandle) ||
+      isAborted(bothHandle)
+    ) {
+      return
+    }
+
+    const params = edgeParamsFrom('both', defaultsFor('both'))
+    // Reference px are a fraction of the front's long side (`KNOB_REFERENCE_PX` is 1000), and
+    // this sprite is square at maxSize 128, so the front's long side is 128.
+    const reachFrontPx = ((overscanRadius(params) - params.maxDist) * 128) / 1000
+    expect(reachFrontPx).toBeGreaterThan(1)
+
+    // The reach is added on each side, then `sheetRect`'s own 4 % margin applies to both rects
+    // alike, so the growth in width survives the comparison. Half the derived figure is asserted
+    // rather than the whole, because the box clamps at the frame: the claim is that the reach is
+    // reserved, not that it is reserved to the last texel.
+    expect(bothHandle.frontRect.w).toBeGreaterThanOrEqual(
+      hullHandle.frontRect.w + Math.floor(reachFrontPx),
+    )
+    expect(bothHandle.frontRect.h).toBeGreaterThanOrEqual(
+      hullHandle.frontRect.h + Math.floor(reachFrontPx),
+    )
+
+    hullSheet.dispose()
+    bothSheet.dispose()
+  })
 })
