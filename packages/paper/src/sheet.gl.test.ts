@@ -890,3 +890,102 @@ describe('fix round 1 — the CPU-fallback field (findings 1, 2, 3, 4)', () => {
     sheet.dispose()
   })
 })
+
+/** `readPixels` reads `READ_FRAMEBUFFER`; `DrawScope.bindTarget` only ever binds `DRAW_FRAMEBUFFER`. */
+function readRect(
+  ctx: ReturnType<typeof open>,
+  texture: WebGLTexture,
+  x: number,
+  y: number,
+  w: number,
+  h: number,
+): Uint8Array {
+  const out = new Uint8Array(w * h * 4)
+  const probe = ctx.gl.createFramebuffer()
+  ctx.scope(() => {
+    ctx.gl.bindFramebuffer(ctx.gl.READ_FRAMEBUFFER, probe)
+    ctx.gl.framebufferTexture2D(
+      ctx.gl.READ_FRAMEBUFFER,
+      ctx.gl.COLOR_ATTACHMENT0,
+      ctx.gl.TEXTURE_2D,
+      texture,
+      0,
+    )
+    ctx.gl.readPixels(x, y, w, h, ctx.gl.RGBA, ctx.gl.UNSIGNED_BYTE, out)
+    ctx.gl.bindFramebuffer(ctx.gl.READ_FRAMEBUFFER, null)
+  })
+  ctx.gl.deleteFramebuffer(probe)
+  return out
+}
+
+describe('the hull polygon as a real paper field (design 2026-09-02, §2-§3)', () => {
+  /**
+   * The defect this fixes: `build()` hardcoded `paperField: null`, so the default `hull` mode
+   * always reached `uEdgeMode = 2` — "the sheet IS the artwork alpha" — and the paper was cut
+   * along the garment's own outline. Under `uEdgeMode = 1` the sheet follows the hull polygon,
+   * which sits `minDist`..`maxDist` OUTSIDE the silhouette, so a texel just beyond the artwork's
+   * own alpha is opaque paper. Mode 2 cannot produce that by construction: its coverage mask IS
+   * the alpha, so anything the alpha does not cover reads exactly (0,0,0,0).
+   */
+  it('draws paper outside the artwork silhouette at the factory defaults', async () => {
+    const ctx = open()
+    const sheet = paperSheet()
+    sheet.mount(ctx)
+    const bitmap = await compactSprite()
+    const handle = await sheet.source(bitmap, { maxSize: 128, exact: false })
+    bitmap.close()
+    expect(GlError.is(handle) || SheetError.is(handle) || isAborted(handle)).toBe(false)
+    if (GlError.is(handle) || SheetError.is(handle) || isAborted(handle)) return
+
+    const front = sheet.build(handle, { w: 128, h: 128 }, defaultsFor('hull') as never)
+    expect(front instanceof Error, String((front as Error)?.message)).toBe(false)
+    if (front instanceof Error) return
+
+    // The oracle is the artwork's own SILHOUETTE, not the artwork RECT. The rect cannot
+    // discriminate the two modes here and the difference is arithmetic, not taste: the reserve
+    // `source()` freezes is exactly the hull's own dilation radius (`maxDist` plus the edge slop),
+    // so the margin between the artwork rect and the front edge is exactly the distance the hull
+    // grows by — and a hull can only reach past that rect for a sprite whose alpha touches its own
+    // bounding box. Neither fixture in this file is such a sprite (`compactSprite`'s ellipse stops
+    // at half its box), and measured on this fixture, "opaque beyond the artwork rect" is 0 both
+    // before and after the fix. The silhouette is the honest line: the hull polygon sits
+    // `minDist`..`maxDist` OUTSIDE it by construction, while mode 2's coverage mask IS the alpha,
+    // so a texel clear of the silhouette is exactly (0,0,0,0) under mode 2. Measured on the same
+    // fixture: 0 such texels before this change, 382 after.
+    //
+    // `compactSprite`'s ellipse has radius `w / 4` at the centre of a square source, and `build()`
+    // centres the artwork in the front, so in front px it is a circle of `R` about the front's own
+    // centre. `+ 2` clears the upsample ramp and the shader's own ~1px antialias — the fixture's
+    // own geometry, not a hand-picked sample.
+    const got = readRect(ctx, front.texture, 0, 0, front.width, front.height)
+    const R = 16 * (handle.artwork.w / 64) + 2
+    const cx = front.width / 2
+    const cy = front.height / 2
+    const outside: number[] = []
+    for (let y = 0; y < front.height; y++) {
+      for (let x = 0; x < front.width; x++) {
+        const clearOfSilhouette = Math.hypot(x + 0.5 - cx, y + 0.5 - cy) > R
+        if (clearOfSilhouette && got[(y * front.width + x) * 4 + 3] > 200) {
+          outside.push(y * front.width + x)
+        }
+      }
+    }
+    // The assertion the defect fails: paper beyond the artwork's own alpha. Under
+    // `paperField: null` this list is empty — the coverage mask IS that alpha.
+    expect(outside.length).toBeGreaterThan(0)
+    // And it is paper, not a stray copy of the artwork: the default `paperColor` (#f7f4ed) reads
+    // high on all three channels, which this fixture's own colours (200,120,60) do not. Measured:
+    // zero opaque, paper-coloured texels anywhere in the front before this change, 712 after — so
+    // this is a second independent discriminator, not decoration on the first.
+    for (const t of outside.slice(0, 16)) {
+      expect(got[t * 4]).toBeGreaterThan(150)
+      expect(got[t * 4 + 1]).toBeGreaterThan(150)
+      expect(got[t * 4 + 2]).toBeGreaterThan(150)
+    }
+    // The front's own outer corner is still empty: the sheet grew to the polygon, not to the frame.
+    expect(got[3]).toBe(0)
+
+    sheet.releaseFront(front)
+    sheet.dispose()
+  })
+})

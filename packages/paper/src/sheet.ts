@@ -42,6 +42,7 @@ import {
   hullCacheKey,
   KNOB_REFERENCE_PX,
   overscanRadius,
+  uploadBytes,
 } from '@paper-crumple/core/unstable'
 import type { GlContext, ScratchPools, Texture } from '@paper-crumple/core/unstable'
 import { createResampler } from './artwork.js'
@@ -49,14 +50,14 @@ import type { Resampler } from './artwork.js'
 import { cpuSdfFromAlpha } from './field.js'
 import { growBox, scaleBox, sheetRectFromExtent, signedFieldExtent } from './extent.js'
 import type { AlphaBox } from './mask.js'
-import { createSdfBuilder, sigmaFor } from './gl-sdf.js'
+import { createSdfBuilder, sigmaFor, SDF_POOL_SLOTS } from './gl-sdf.js'
 import type { Field, LooseField, SdfBuilder } from './gl-sdf.js'
 import { checkReserve, freezeOverscan, handleBytesFor } from './handle.js'
 import type { PaperSheetHandle } from './handle.js'
 import { hullCache } from './hull-cache.js'
 import type { HullCache, HullCacheKey } from './hull-cache.js'
-import { DISTANCE_WAVELENGTH_PX, buildHull, toleranceFor } from './hull.js'
-import { hullExtent } from './hull-shape.js'
+import { DISTANCE_WAVELENGTH_PX, buildHull, fillHullMask, toleranceFor } from './hull.js'
+import { hullComponentCount, hullExtent } from './hull-shape.js'
 import type { HullShape } from './hull-shape.js'
 import { defaultsFor, descriptorsFor, edgeParamsFrom, resolveSdfRes } from './paper-knobs.js'
 import type { PaperEdgeMode } from './paper-knobs.js'
@@ -1136,6 +1137,74 @@ export function paperSheet(options?: PaperSheetOptions): PaperSheet {
       )
     }
 
+    // Step 6b (design §2, §3, §5): the hull polygon's own field, and the reason `uEdgeMode`
+    // becomes 1 rather than 2. The polygon lives in the texels of the field `source()` traced on,
+    // which keeps the SOURCE aspect (`source()`'s own `dimsForLongSide`); this build's field keeps
+    // the REQUESTED size's aspect. Both carry the artwork under the identical `artworkUv` map at
+    // the same frozen `p`, so a given artwork point has the same uv in both spaces and the two
+    // reconcile by a plain scale — no new handle state (design §5).
+    //
+    // The mask is a dedicated, non-pooled `RGBA8UI` allocation disposed inside this call (the
+    // pattern `artwork.ts:26-28` establishes), so §8.1's fixed Pool A budget is untouched; only
+    // the FIELD lands in a pool slot, and `SDF_POOL_SLOTS.hullField` is already declared for it.
+    // The bytes are transient: `field.w * field.h * 4`, i.e. 147 KB at `sdfRes` 192, freed here.
+    // Uploaded unflipped — `UNPACK_FLIP_Y_WEBGL` stays pinned false and the mask inherits the
+    // field's row order, exactly as the artwork does (§6; the p10 plan's `yUp` flag is superseded,
+    // see this file's own row-order note at lines 457-472).
+    const srcField = dimsForLongSide(handle.sdfRes, handle.srcW, handle.srcH, 2)
+    let paperField: Field | null = null
+    if (handle.hull.kind === 'polygons' && hullComponentCount(handle.hull) > 0) {
+      const bytes = fillHullMask(
+        handle.hull,
+        field.w,
+        field.h,
+        field.w / srcField.w,
+        field.h / srcField.h,
+      )
+      // `undefined` is "no drawable component", not a failure (design §7): the sheet stays on
+      // `uEdgeMode = 2` and renders exactly as it does today. A GL failure below is a different
+      // thing and is never swallowed into this branch.
+      if (bytes !== undefined) {
+        const mask = m.ctx.texture({
+          width: field.w,
+          height: field.h,
+          format: 'RGBA8UI',
+          filter: 'NEAREST',
+          label: `paper.hullMask:${handle.spriteKey}`,
+        })
+        if (GlError.is(mask)) {
+          return new SheetError(
+            `paperSheet: build() could not allocate the hull mask for sprite ${handle.spriteKey}`,
+            { cause: mask },
+          )
+        }
+        const uploaded = m.ctx.scope(() => uploadBytes(m.ctx.gl, mask, bytes))
+        if (GlError.is(uploaded)) {
+          mask.dispose()
+          return new SheetError(
+            `paperSheet: build() could not upload the hull mask for sprite ${handle.spriteKey}`,
+            { cause: uploaded },
+          )
+        }
+        const builtField = sdf.buildField({
+          artwork: mask,
+          artworkUv: [1, 1, 0, 0],
+          width: field.w,
+          height: field.h,
+          sourceLongSide: frontLongSide,
+          slot: SDF_POOL_SLOTS.hullField,
+        })
+        mask.dispose()
+        if (GlError.is(builtField)) {
+          return new SheetError(
+            `paperSheet: build() could not build the hull field for sprite ${handle.spriteKey}`,
+            { cause: builtField },
+          )
+        }
+        paperField = builtField
+      }
+    }
+
     // Step 7 (spec 8.7): RGBA8, no mipmaps, LINEAR, non-premultiplied — allocated through
     // `ctx.texture`, never a pool: a front is resident and the core's own LRU budgets it, not
     // this slot (spec 8.1's two pools are scratch, and a front-assembly cache would be a third).
@@ -1171,10 +1240,11 @@ export function paperSheet(options?: PaperSheetOptions): PaperSheet {
       artwork: artworkTexture,
       tight,
       loose,
-      // No hull-polygon field is rasterized inside build() (out of this task's nine steps) — this
-      // reuses the already-landed `uEdgeMode = 2` path (`paper-renderer.gl.test.ts`'s own "Ruling
-      // R28"), the hull's own tight SDF field standing in for a dedicated one.
-      paperField: null,
+      // The hull polygon's own field (design 2026-09-02 §3): non-null exactly when the handle
+      // carries a polygon hull with at least one drawable component, which is what makes
+      // `paper-renderer.ts:169` select `uEdgeMode = 1`. `use-alpha` and an all-dropped hull keep
+      // `null` and so keep mode 2, bit-identical to before this change.
+      paperField,
       edgeMode,
       values: knobValues,
       descriptors: knobDescriptors,
