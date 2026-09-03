@@ -1150,11 +1150,19 @@ describe('the hull polygon as a real paper field (design 2026-09-02, §2-§3)', 
 
   /**
    * Finding F1. `both` decorates the hull polygon's contour with the torn path, which draws
-   * OUTWARD from it by `thickness + 0.6*looseness*tearAmp + midAmp + 4*fiberLen` — the terms
-   * `overscanRadius` collects as `r_both - maxDist`. The extent took the polygon's own box and
-   * grew it by nothing, so the sheet window was sized for the polygon and the fringe was sliced
-   * flat at its edge. Compared against `hull` on the same sprite, because the polygon underneath
-   * the two is the same one and the difference is exactly the reach.
+   * OUTWARD from it by `thickness + [thickness + 0.6*looseness*tearAmp + midAmp]*edgeK
+   * + 4*fiberLen + slop` — every term `overscanRadius` collects as `r_both - maxDist`, which is
+   * ~111 reference px at this package's own knob defaults. The extent took the polygon's own box
+   * and grew it by nothing, so the sheet window was sized for the polygon and the fringe was
+   * sliced flat at its edge.
+   *
+   * Compared against `hull` on the same sprite. The two polygons are not literally the same one —
+   * `both` reserves a larger frozen overscan, so its artwork is inset further and its own traced
+   * polygon lands SMALLER in front px (measured: 59 wide against `hull`'s 72, before this fix).
+   * What makes the comparison sound is that each mode reserves the silhouette box plus its own
+   * `overscanRadius`, and `hull`'s polygon already sits `maxDist` out from the silhouette: so
+   * `hull`'s extent is the shared `maxDist` reach made visible, and what `both` must show on top
+   * of it is exactly the extra reach the torn path adds.
    */
   it("reserves the torn path's outward reach in both mode's sheet rect (F1)", async () => {
     const ctx = open()
@@ -1189,8 +1197,9 @@ describe('the hull polygon as a real paper field (design 2026-09-02, §2-§3)', 
     }
 
     const params = edgeParamsFrom('both', defaultsFor('both'))
-    // Reference px are a fraction of the front's long side (`KNOB_REFERENCE_PX` is 1000), and
-    // this sprite is square at maxSize 128, so the front's long side is 128.
+    // Reference px are a fraction of the front's HEIGHT, not its long side — `sheet.ts`'s own
+    // `pxScale = front.h / KNOB_REFERENCE_PX`, with `KNOB_REFERENCE_PX` at 1000. This sprite is
+    // square at maxSize 128, so the two readings coincide here at 128 either way.
     const reachFrontPx = ((overscanRadius(params) - params.maxDist) * 128) / 1000
     expect(reachFrontPx).toBeGreaterThan(1)
 
@@ -1203,6 +1212,22 @@ describe('the hull polygon as a real paper field (design 2026-09-02, §2-§3)', 
     )
     expect(bothHandle.frontRect.h).toBeGreaterThanOrEqual(
       hullHandle.frontRect.h + Math.floor(reachFrontPx),
+    )
+
+    // And an upper bound, because the lower bound alone cannot see the one mistake this fix is
+    // most likely to be rewritten into: growing by the FULL `overscanRadius` instead of
+    // subtracting `maxDist` first, double-counting a reach the polygon's own vertices already
+    // carry. The bound is the geometry, not a fudge factor: `both`'s ungrown polygon box is never
+    // wider than `hull`'s (its larger frozen reserve insets the artwork further — see the doc
+    // comment above), and the growth adds at most `reachFrontPx` per side, so `hull + 2*reach` is
+    // a ceiling the correct term cannot reach. Measured on this fixture: 91x93 against `hull`'s
+    // 72x75, comfortably under the 102x105 this allows — while the double-counting version lands
+    // at 111x113 and fails here, which is the whole point of the bound.
+    expect(bothHandle.frontRect.w).toBeLessThanOrEqual(
+      hullHandle.frontRect.w + 2 * Math.ceil(reachFrontPx),
+    )
+    expect(bothHandle.frontRect.h).toBeLessThanOrEqual(
+      hullHandle.frontRect.h + 2 * Math.ceil(reachFrontPx),
     )
 
     hullSheet.dispose()

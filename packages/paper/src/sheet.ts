@@ -956,9 +956,10 @@ export function paperSheet(options?: PaperSheetOptions): PaperSheet {
       // Finding F1. `extent.ts:5-7` says the polygon's vertices already sit `maxDist` past the
       // silhouette, so the polygon's own box is the sheet's extent. That holds for `hull` and
       // fails for `both`: there the torn path draws outward FROM the contour, by exactly the
-      // terms `overscanRadius` collects as `r_both - maxDist` (thickness, the tear bracket and
-      // four fibre lengths, plus the slop) — roughly 77 reference px at the defaults, against
-      // roughly 36 from `SHEET_MARGIN_FRAC`'s 4 %. Derived from the same function the frozen
+      // terms `overscanRadius` collects as `r_both - maxDist`: the leading `thickness`, the tear
+      // bracket `[thickness + 0.6*looseness*tearAmp + midAmp]*edgeK`, four fibre lengths and the
+      // slop — roughly 111 reference px at this package's own knob defaults (22 + 61.2 + 16 + 12),
+      // against roughly 36 from `SHEET_MARGIN_FRAC`'s 4 %. Derived from the same function the frozen
       // reserve is derived from, so the two can never drift apart. Until the hull polygon became
       // a real field this was invisible, because `both` never reached the polygon at all.
       box = growBox(box, (overscanRadius(edgeParams) - edgeParams.maxDist) * k, field.w, field.h)
