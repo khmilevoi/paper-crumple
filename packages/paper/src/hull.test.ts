@@ -3,6 +3,7 @@ import { cpuSdfFromAlpha } from './field.js'
 import {
   buildHull,
   DISTANCE_WAVELENGTH_PX,
+  fillHullMask,
   measureHull,
   rasterizeHull,
   toleranceFor,
@@ -290,5 +291,237 @@ describe('rasterizeHull', () => {
       [7, 3],
       [7, 9],
     ])
+  })
+})
+
+describe('fillHullMask', () => {
+  /** Alpha of one texel; the only channel the seed pass reads (`gl-sdf.ts:88`). */
+  function alphaAt(bytes: Uint8Array, w: number, x: number, y: number): number {
+    return bytes[(y * w + x) * 4 + 3]
+  }
+
+  function insideCount(bytes: Uint8Array): number {
+    let n = 0
+    for (let i = 3; i < bytes.length; i += 4) if (bytes[i] === 255) n++
+    return n
+  }
+
+  /**
+   * The independent oracle: the winding number about a texel centre, summed edge by edge, with no
+   * scanline, no sorting and no span arithmetic in common with the implementation. Coordinates in
+   * the fixture it judges are half-integers, so no edge ever passes through a texel centre and no
+   * tie-break is exercised — a tie is a convention rather than a property, and the convention is
+   * pinned by the square case below instead.
+   */
+  function windingAt(
+    loops: readonly (readonly (readonly [number, number])[])[],
+    x: number,
+    y: number,
+  ): number {
+    let w = 0
+    for (const loop of loops) {
+      for (let i = 0; i < loop.length; i++) {
+        const [ax, ay] = loop[i]
+        const [bx, by] = loop[(i + 1) % loop.length]
+        const side = (bx - ax) * (y - ay) - (x - ax) * (by - ay)
+        if (ay <= y && by > y && side > 0) w++
+        else if (by <= y && ay > y && side < 0) w--
+      }
+    }
+    return w
+  }
+
+  it('fills a square exactly, at texel centres and with no half-texel offset', () => {
+    const hull = packPolygons(
+      [
+        [
+          [2, 2],
+          [6, 2],
+          [6, 6],
+          [2, 6],
+        ],
+      ],
+      0,
+      1,
+    )
+    const bytes = fillHullMask(hull, 8, 8, 1, 1)
+    expect(bytes).toBeDefined()
+    if (bytes === undefined) return
+    // Half-open on both axes: rows 2..5 and columns 2..5, never row or column 6.
+    expect(insideCount(bytes)).toBe(16)
+    expect(alphaAt(bytes, 8, 2, 2)).toBe(255)
+    expect(alphaAt(bytes, 8, 5, 5)).toBe(255)
+    expect(alphaAt(bytes, 8, 6, 5)).toBe(0)
+    expect(alphaAt(bytes, 8, 5, 6)).toBe(0)
+    // RGB is set so a debug readback is legible; only alpha is ever read in anger.
+    expect(Array.from(bytes.subarray((2 * 8 + 2) * 4, (2 * 8 + 2) * 4 + 4))).toEqual([
+      255, 255, 255, 255,
+    ])
+    expect(Array.from(bytes.subarray(0, 4))).toEqual([0, 0, 0, 0])
+  })
+
+  it('fills a triangle to within its own boundary band of the true area', () => {
+    const hull = packPolygons(
+      [
+        [
+          [0, 0],
+          [64, 0],
+          [0, 64],
+        ],
+      ],
+      0,
+      1,
+    )
+    const bytes = fillHullMask(hull, 128, 128, 1, 1)
+    expect(bytes).toBeDefined()
+    if (bytes === undefined) return
+    // A centre-sampled fill can differ from the true area only by texels the boundary passes
+    // through, which is bounded by half the perimeter — the honest reading of "within a texel".
+    const trueArea = 0.5 * 64 * 64
+    const perimeter = 64 + 64 + Math.hypot(64, 64)
+    expect(Math.abs(insideCount(bytes) - trueArea)).toBeLessThanOrEqual(perimeter / 2)
+  })
+
+  it('unions two overlapping components rather than cancelling them (the non-zero rule)', () => {
+    const hull = packPolygons(
+      [
+        [
+          [0, 0],
+          [4, 0],
+          [4, 4],
+          [0, 4],
+        ],
+        [
+          [2, 2],
+          [6, 2],
+          [6, 6],
+          [2, 6],
+        ],
+      ],
+      0,
+      1,
+    )
+    const bytes = fillHullMask(hull, 8, 8, 1, 1)
+    expect(bytes).toBeDefined()
+    if (bytes === undefined) return
+    // 16 + 16 - 4 shared. Under an even-odd rule the shared 2x2 would read 0 — this is the
+    // assertion that tells the two rules apart, and the reason two sheets of paper overlap
+    // instead of punching a hole in each other.
+    expect(insideCount(bytes)).toBe(28)
+    expect(alphaAt(bytes, 8, 2, 2)).toBe(255)
+    expect(alphaAt(bytes, 8, 3, 3)).toBe(255)
+  })
+
+  it('fills both lobes of a self-crossing figure-eight ring', () => {
+    // One loop, crossing itself at (3,3): the case a triangulator gets wrong. Pinned even though
+    // the spec's probe (864 hulls, 888 components, 0 proper self-intersections) says this input
+    // does not arise in practice — it is the stated reason the non-zero fill was chosen over a
+    // triangulator, and a reason that lives only in a comment is not defended.
+    const hull = packPolygons(
+      [
+        [
+          [0, 0],
+          [0, 6],
+          [6, 0],
+          [6, 6],
+        ],
+      ],
+      0,
+      1,
+    )
+    const bytes = fillHullMask(hull, 8, 8, 1, 1)
+    expect(bytes).toBeDefined()
+    if (bytes === undefined) return
+    // Left lobe and right lobe both carry winding +-1, so both fill.
+    expect(alphaAt(bytes, 8, 1, 3)).toBe(255)
+    expect(alphaAt(bytes, 8, 4, 3)).toBe(255)
+    expect(insideCount(bytes)).toBeGreaterThan(8)
+  })
+
+  it('skips a degenerate component without corrupting its neighbours', () => {
+    const hull = packPolygons(
+      [
+        // Two vertices: nothing to fill, and `offsets` still has to stay in step.
+        [
+          [0, 0],
+          [1, 0],
+        ],
+        // Three vertices, all collinear: zero area.
+        [
+          [0, 7],
+          [3, 7],
+          [6, 7],
+        ],
+        [
+          [2, 2],
+          [6, 2],
+          [6, 6],
+          [2, 6],
+        ],
+      ],
+      0,
+      1,
+    )
+    const bytes = fillHullMask(hull, 8, 8, 1, 1)
+    expect(bytes).toBeDefined()
+    if (bytes === undefined) return
+    expect(insideCount(bytes)).toBe(16)
+    expect(alphaAt(bytes, 8, 0, 0)).toBe(0)
+    expect(alphaAt(bytes, 8, 3, 7)).toBe(0)
+  })
+
+  it('returns undefined when no component is drawable, rather than an empty mask', () => {
+    const nothing = packPolygons([], 0, 1)
+    expect(fillHullMask(nothing, 8, 8, 1, 1)).toBeUndefined()
+    const degenerate = packPolygons(
+      [
+        [
+          [0, 0],
+          [1, 0],
+        ],
+      ],
+      0,
+      1,
+    )
+    expect(fillHullMask(degenerate, 8, 8, 1, 1)).toBeUndefined()
+  })
+
+  it('agrees texel for texel with an independent winding-number reference, under scaling', () => {
+    // A comb with three fingers and gaps narrower than the fingers: concave, two reflex corners
+    // per finger. Every coordinate is a half-integer, so no edge passes through a texel centre
+    // and the two implementations cannot disagree merely on a tie-break.
+    // `Loop` is `Point[]` and `Point` is a mutable `[number, number]` (`point.ts:9-12`), so the
+    // fixture is typed as the tracer's own type rather than as a readonly tuple array.
+    const comb: [number, number][] = [
+      [1.5, 1.5],
+      [3.5, 1.5],
+      [3.5, 8.5],
+      [5.5, 8.5],
+      [5.5, 1.5],
+      [7.5, 1.5],
+      [7.5, 8.5],
+      [9.5, 8.5],
+      [9.5, 1.5],
+      [11.5, 1.5],
+      [11.5, 10.5],
+      [1.5, 10.5],
+    ]
+    const hull = packPolygons([comb], 0, 1)
+    const sx = 2
+    const sy = 1.5
+    const w = 32
+    const h = 24
+    const bytes = fillHullMask(hull, w, h, sx, sy)
+    expect(bytes).toBeDefined()
+    if (bytes === undefined) return
+    const scaled = comb.map(([x, y]) => [x * sx, y * sy] as const)
+    const wrong: string[] = []
+    for (let y = 0; y < h; y++) {
+      for (let x = 0; x < w; x++) {
+        const want = windingAt([scaled], x, y) !== 0 ? 255 : 0
+        if (alphaAt(bytes, w, x, y) !== want) wrong.push(`(${x},${y}): want ${want}`)
+      }
+    }
+    expect(wrong.slice(0, 8)).toEqual([])
   })
 })

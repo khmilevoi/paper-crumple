@@ -63,6 +63,7 @@ export type { HullShape, PackedHull, UseAlphaHull } from './hull-shape.js'
 export {
   buildHull,
   DISTANCE_WAVELENGTH_PX,
+  fillHullMask,
   measureHull,
   rasterizeHull,
   toleranceFor,

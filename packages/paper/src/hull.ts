@@ -341,3 +341,123 @@ export function rasterizeHull(
   c2d.fill('nonzero')
   return canvas
 }
+
+/**
+ * Fills the hull's components into `w * h` RGBA bytes by scanline, under the non-zero winding rule,
+ * all components in one pass — the CPU sibling of `rasterizeHull`, and the mask producer the
+ * hull-paper-field design specifies (`docs/superpowers/specs/2026-09-02-hull-paper-field-design.md`
+ * §1). The bytes go straight into an `RGBA8UI` texture for `buildField`, whose seed pass reads
+ * only `.a` (`gl-sdf.ts:88`); RGB is set as well, so a debug readback is legible.
+ *
+ * Two deliberate departures from `rasterizeHull`:
+ *
+ * - No `+0.5`. Hull coordinates are already texel centres (`hull-shape.ts:12`), so row `y` is
+ *   sampled at exactly `y`. The half-texel shift above is a canvas convention — canvas pixel
+ *   centres lie at half-integers — and carrying it here would slide the whole mask by half a texel.
+ * - No anti-aliasing. A texel is inside or it is not: `255, 255, 255, 255` inside, `0, 0, 0, 0`
+ *   outside. Canvas coverage is not deterministic across browsers and drivers, so the seed pass's
+ *   `>= 128` threshold could flip edge texels from one machine to the next; a centre-sampled fill
+ *   is byte-reproducible, in Node included.
+ *
+ * Crossings are half-open in `y` — for an edge `a -> b`, `a.y <= y < b.y` counts +1 and
+ * `b.y <= y < a.y` counts −1, so a horizontal edge counts nothing — and spans are half-open in `x`:
+ * over `[xa, xb)` the filled texels are `ceil(xa) .. ceil(xb) - 1`. That is what keeps a 4-wide
+ * square exactly 4 texels wide and two pieces of paper sharing an edge seamless. Components union
+ * rather than cancel: every outer loop is counter-clockwise (`contours.ts:79-82`), so overlapping
+ * pieces accumulate winding 2 and both fill; nothing is merged or deduplicated. `sx` / `sy` scale
+ * hull texels into this build's field dimensions (design §5).
+ *
+ * A component with fewer than three vertices is skipped, exactly as `rasterizeHull` skips it.
+ * Returns `undefined` when no texel was filled — an empty hull, one whose every component is
+ * degenerate, or one lying wholly outside the mask — and never an all-zero buffer. `undefined`
+ * and not an `Error`, for the reason `rasterizeHull` gives: level-1 modules in this package
+ * return no `Error` at all.
+ *
+ * The ancestor spike did the same job on a canvas: `odeja/spikes/paper-fold/src/engine.js:282-303`
+ * rasterised the hull, uploaded it and built the field from it. That is an external historical
+ * reference, not a path in this repository.
+ */
+export function fillHullMask(
+  hull: PackedHull,
+  w: number,
+  h: number,
+  sx: number,
+  sy: number,
+): Uint8Array | undefined {
+  // Gather the edges of every drawable component once, scaled, as `ax, ay, bx, by` quadruples.
+  let edgeCount = 0
+  for (let c = 0; c + 1 < hull.offsets.length; c++) {
+    const count = hull.offsets[c + 1] - hull.offsets[c]
+    if (count >= 3) edgeCount += count
+  }
+  if (edgeCount === 0) return undefined
+  const edges = new Float64Array(edgeCount * 4)
+  let yMin = Infinity
+  let yMax = -Infinity
+  let e = 0
+  for (let c = 0; c + 1 < hull.offsets.length; c++) {
+    const start = hull.offsets[c]
+    const end = hull.offsets[c + 1]
+    if (end - start < 3) continue
+    for (let v = start; v < end; v++) {
+      const u = v + 1 < end ? v + 1 : start
+      const ay = hull.points[v * 2 + 1] * sy
+      edges[e++] = hull.points[v * 2] * sx
+      edges[e++] = ay
+      edges[e++] = hull.points[u * 2] * sx
+      edges[e++] = hull.points[u * 2 + 1] * sy
+      if (ay < yMin) yMin = ay
+      if (ay > yMax) yMax = ay
+    }
+  }
+  // Only rows with `yMin <= y < yMax` can be crossed by any edge; clamp them to the mask.
+  const rowStart = Math.max(0, Math.ceil(yMin))
+  const rowEnd = Math.min(h, Math.ceil(yMax))
+  const bytes = new Uint8Array(w * h * 4)
+  const xs = new Float64Array(edgeCount)
+  const dirs = new Int8Array(edgeCount)
+  let filled = false
+  for (let y = rowStart; y < rowEnd; y++) {
+    // Collect this row's crossings, kept sorted by `x` as they arrive — a hull row crosses a
+    // handful of edges, so an insertion sort beats allocating an index array to hand to `sort`.
+    let n = 0
+    for (let i = 0; i < edgeCount; i++) {
+      const ax = edges[i * 4]
+      const ay = edges[i * 4 + 1]
+      const bx = edges[i * 4 + 2]
+      const by = edges[i * 4 + 3]
+      let dir: number
+      if (ay <= y && y < by) dir = 1
+      else if (by <= y && y < ay) dir = -1
+      else continue
+      const x = ax + ((y - ay) * (bx - ax)) / (by - ay)
+      let k = n
+      while (k > 0 && xs[k - 1] > x) {
+        xs[k] = xs[k - 1]
+        dirs[k] = dirs[k - 1]
+        k--
+      }
+      xs[k] = x
+      dirs[k] = dir
+      n++
+    }
+    // Walk the crossings left to right and fill every span where the winding number is non-zero.
+    let winding = 0
+    let spanStart = 0
+    for (let k = 0; k < n; k++) {
+      const was = winding
+      winding += dirs[k]
+      if (was === 0 && winding !== 0) {
+        spanStart = xs[k]
+      } else if (was !== 0 && winding === 0) {
+        const xa = Math.max(0, Math.ceil(spanStart))
+        const xb = Math.min(w, Math.ceil(xs[k]))
+        if (xa < xb) {
+          bytes.fill(255, (y * w + xa) * 4, (y * w + xb) * 4)
+          filled = true
+        }
+      }
+    }
+  }
+  return filled ? bytes : undefined
+}
