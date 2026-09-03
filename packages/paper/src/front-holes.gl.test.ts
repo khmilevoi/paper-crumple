@@ -36,29 +36,37 @@
  * 12x16 hole. Every coordinate below is derived from those constants rather than written out, so
  * the diagram cannot drift from the bytes.
  *
- * `GAP` is load-bearing and must not be shrunk. `buildHull` traces its contour at
- * `iso = -(minDist + maxDist) * 0.5` (`hull.ts:146`) — the *middle* of the band, 47 reference px at
- * the shipped hull defaults (`minDist: 22`, `maxDist: 72`) — and then slides every vertex out to
- * its own distance within `[minDist, maxDist]`, with the noise deliberately stretched and clamped
- * so that "the ends of the band are actually reached" (`hull.ts:172-181`). The mid-band figure is
- * therefore a *floor* on the polygon's reach, not the reach itself: stretches of the contour sit
- * all the way out at `maxDist`. Two offset curves whose offset exceeds half their separation merge
- * into a single contour; that is ordinary Minkowski-offset behaviour, not a tracer defect, and it
- * is the same reason a sheet of paper wrapped around two nearby garment pieces reads as one sheet.
+ * `GAP` is load-bearing and must not be shrunk. Whether the two squares trace as one loop or two is
+ * decided in one place: `extractContours(field, w, h, iso)` at `hull.ts:146-147`, run at the single
+ * fixed `iso = -(minDist + maxDist) * 0.5` — the *middle* of the band, 47 reference px at the
+ * shipped hull defaults (`minDist: 22`, `maxDist: 72`). Two offset curves whose offset exceeds half
+ * their separation merge into a single contour; that is ordinary Minkowski-offset behaviour, not a
+ * tracer defect, and it is the same reason a sheet of paper wrapped around two nearby garment
+ * pieces reads as one sheet.
  *
- * Converting that into the source pixels this fixture is painted in: `source()` scales reference px
- * by `pxScale = front.h / KNOB_REFERENCE_PX` (`sheet.ts:892`) off its OWN front, which under
- * `exact: true` is `exactFrontLongSide(160, p) = 193` (`sheet.ts:782`) — so 47 reference px is
- * `47 * 193 / 1000 ~= 9.07` **front** px, and converting back to source px (`x 160 / 193`) gives
- * `~7.5` **source** px per side. The front factor cancels, which is what makes `47 * S / 1000` the
- * correct shortcut; `47 * 193 / 1000` is a front-px figure and must not be compared against `GAP`,
- * which is quoted in source px. The same conversion puts the band's outer end, `maxDist = 72`, at
- * `72 * 160 / 1000 ~= 11.5` source px per side.
+ * The per-vertex sliding that follows (`hull.ts:168-181`, which stretches and clamps its noise so
+ * "the ends of the band are actually reached") does **not** enter into this. It runs *after*
+ * extraction, on a loop that is already either one or two, and moving a vertex along the band can
+ * neither split a loop nor fuse two — so the component count is a property of the mid-band `iso`
+ * alone. Do not reach for the band to explain the sweep below.
  *
- * So the fuse threshold is not a single number but a bracket, `2 * 7.5 = 15px` to
- * `2 * 11.5 = 23px`, depending on how far out the noise pushed the contour along the two facing
- * edges. The sweep below lands inside that bracket — merging at 16 and separating at 24 — which is
- * the behaviour the band's outer end predicts, not its middle.
+ * The units are the trap here, so they are spelled out. `source()` scales reference px by
+ * `pxScale = front.h / KNOB_REFERENCE_PX` (`sheet.ts:892`) off its own front, which under
+ * `exact: true` is `exactFrontLongSide(160, p) = 193` (`sheet.ts:782`). That front is **not** a
+ * magnified source: `aLongSide = sourceLongSide` under `exact: true` (`sheet.ts:783`), so the
+ * artwork is placed at 1:1 — 160 source px stay 160 artwork px — and the front is larger only
+ * because, in `exactFrontLongSide`'s own words, "the paper margin still has to fit". One front px
+ * is therefore one source px, and the per-side reach is `47 * 193 / 1000 ~= 9.07` px in the same
+ * units `GAP` is quoted in. **Do not** rescale that by `160 / 193` on the theory that front and
+ * source are different densities; they are not, and `47 * S / 1000` is not a valid shortcut. (The
+ * same fact is stated again further down this file, in the `ax`/`ay` note: on this fixture
+ * `handle.artwork` is 160x160.)
+ *
+ * So the merge threshold is a single number, `2 * 9.07 ~= 18.1` source px, and the sweep below is
+ * what pins it down — the cross-check is worth keeping in the comment because it is exactly what
+ * catches an arithmetic slip here. At `GAP = 16` each side reaches 9.07 across a half-gap of 8, so
+ * `8 < 9.07` and the contours fuse: measured, one component. At `GAP = 24` the half-gap is 12, so
+ * `12 > 9.07` and they stay apart: measured, two.
  *
  * Measured directly against this fixture, sweeping `GAP` at `S = 160` and reading the component
  * count off `handle.hull` plus the alpha at the gap's midpoint:
@@ -70,10 +78,10 @@
  * | 32    | 2               | 0                            |
  * | 40    | 2               | 0                            |
  *
- * 16px — this fixture's original gap — is inside the merge bracket, so the two squares traced as a
- * single loop spanning both. `GAP = 32` is chosen over the 24 that first works because 24 clears
- * the bracket's upper end (23px) by a single pixel: 32 clears it by ~1.4x, so the fixture does not
- * fuse again for a rounding change or for a different `seed` shifting the noise along the band.
+ * 16px — this fixture's original gap — is under the 18.1px threshold, so the two squares traced as
+ * a single loop spanning both. `GAP = 32` is chosen over the 24 that first works because it clears
+ * that threshold by ~1.77x rather than by a hair, so the fixture does not fuse again for a rounding
+ * change or a small shift in the shipped hull knobs.
  *
  * ## Canvas size — required by the guard-band check, not by the hole
  *
