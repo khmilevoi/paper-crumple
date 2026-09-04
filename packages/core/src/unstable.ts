@@ -119,3 +119,6 @@ export { EXACT_BYTE_FETCH_FS, FULLSCREEN_VS, RESAMPLE_FS, RESAMPLE_UNIFORMS } fr
 export { gradeAttributes } from './surface-grade.js'
 export type { AttributeGrade } from './surface-grade.js'
 export { batchBySortKey } from './draw-batch.js'
+
+// --- S1: the platform yield between two phases of the ingest lane (§8.10) ---
+export { nextTurn } from './next-turn.js'
