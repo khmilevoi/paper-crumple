@@ -53,8 +53,8 @@ type Err = InstanceType<typeof GlError>
 
 /**
  * The two halves of `GlContext` a pool needs: `texture` for every slot, and `target` for the
- * slots whose framebuffer the pool owns with the texture (`acquireSized`, `acquireSourceBytes`).
- * Everything else about the context is irrelevant here.
+ * size-keyed slots whose framebuffer the pool owns with the texture (`acquireSized`). Everything
+ * else about the context is irrelevant here.
  */
 export type TextureFactory = Pick<GlContext, 'texture' | 'target'>
 
@@ -103,9 +103,10 @@ export interface ArtworkPool {
 }
 
 /**
- * Pool B — source staging, one key, released after an idle interval. Two textures sized by the
- * same source live under that key: the `RGBA8` staging the bitmap uploads into, and the
- * `RGBA8UI` copy of its exact bytes that the resample reads (see `acquireSourceBytes`).
+ * Pool B — source staging, **one** resident source-sized slot, released after an idle interval.
+ * §8.1 prices Pool B as exactly that slot, and that figure is binding: the `RGBA8UI` copy of the
+ * source the resample reads (`artwork.ts`) lives for the one call that needs it and never in this
+ * pool, so `bytes()` never passes `budgetFor(source)`.
  */
 export interface StagingPool {
   bytes(): number
@@ -117,17 +118,6 @@ export interface StagingPool {
    * sources uploads into one texture instead of allocating one per sprite.
    */
   acquire(key: string, source: Size): Err | Texture
-  /**
-   * The `RGBA8UI` copy of the source's exact bytes, as a render target, under the same key, the
-   * same size and the same idle law as the staging. It used to be a dedicated allocation released
-   * synchronously at the end of every resample (`artwork.ts`'s header records why: the resample
-   * shader reads an integer sampler, and `acquire` hard-codes `RGBA8`), which cost one
-   * source-sized `texStorage2D`, one framebuffer and their status queries per `stage.add`. Held
-   * here it is allocated once per source size instead. The cost is a second source-sized texture
-   * resident for Pool B's idle window — `bytes()` counts it; `budgetFor` stays §8.1's staging
-   * figure, which never included the copy the resample was already allocating on every add.
-   */
-  acquireSourceBytes(key: string, source: Size): Err | Target
   /** Arm the idle release for `key`. A no-op while Pool A's artwork slot still holds `key`. */
   releaseIdle(key: string): void
   /** The sprite the staging slot holds, or `null`. */
@@ -161,12 +151,6 @@ interface SizedSlot {
   readonly target: Target
   /** `clock` at the last acquisition — the least-recently-used resident has the smallest. */
   stamp: number
-}
-
-/** A render target the pool owns, texture included. */
-interface OwnedTarget {
-  readonly target: Target
-  readonly desc: TextureDesc
 }
 
 /** The slot `holdArtwork` keeps the sprite in. Named once, because `release` must know it too. */
@@ -221,7 +205,6 @@ export function createScratchPools(o: ScratchPoolsOptions): ScratchPools {
   let artworkKey: string | null = null
 
   let staging: Slot | null = null
-  let sourceBytes: OwnedTarget | null = null
   let stagingKey: string | null = null
   let idleHandle: TimerHandle | null = null
   /** Set by `releaseIdle` while Pool A still holds the key; consumed when Pool A displaces it. */
@@ -277,8 +260,6 @@ export function createScratchPools(o: ScratchPoolsOptions): ScratchPools {
   function dropStaging(): void {
     staging?.texture.dispose()
     staging = null
-    if (sourceBytes !== null) disposeOwned(sourceBytes.target)
-    sourceBytes = null
     stagingKey = null
     idleDeferredFor = null
   }
@@ -392,34 +373,32 @@ export function createScratchPools(o: ScratchPoolsOptions): ScratchPools {
     artworkKey: () => artworkKey,
   }
 
-  /**
-   * The slot is `key`'s now: whatever idle interval or deferral the previous key had is void. A
-   * different sprite takes the slot at once, never on a timer — and takes the *textures* with it
-   * when the source size is unchanged, because a staging texture holds nothing worth keeping once
-   * the resample that read it has run (`artwork.ts`), so re-keying loses nothing.
-   */
-  function takeB(key: string, source: Size): void {
-    cancelIdle()
-    idleDeferredFor = null
-    stagingKey = key
-    // Both textures are sized by the one source; a different size drops both at once rather than
-    // leaving one of the previous size resident beside the other's replacement.
-    const resident = staging?.desc ?? sourceBytes?.desc
-    if (resident !== undefined && (resident.width !== source.w || resident.height !== source.h)) {
-      staging?.texture.dispose()
-      staging = null
-      if (sourceBytes !== null) disposeOwned(sourceBytes.target)
-      sourceBytes = null
-    }
-  }
-
   const poolB: StagingPool = {
-    bytes: () => (staging?.texture.bytes ?? 0) + (sourceBytes?.target.texture.bytes ?? 0),
+    bytes: () => staging?.texture.bytes ?? 0,
     budgetFor: (source) => poolBBytes(source),
 
     acquire(key, source) {
-      takeB(key, source)
-      if (staging !== null) return staging.texture
+      // Whatever idle interval or deferral the previous key had is void: a different sprite takes
+      // the slot at once, never on a timer — and takes the *texture* with it when the source size
+      // is unchanged, because a staging texture holds nothing worth keeping once the resample that
+      // read it has run (`artwork.ts`), so re-keying loses nothing.
+      cancelIdle()
+      idleDeferredFor = null
+      if (
+        staging !== null &&
+        (staging.desc.width !== source.w || staging.desc.height !== source.h)
+      ) {
+        staging.texture.dispose()
+        staging = null
+      }
+      // `stagingKey` names the sprite whose staging the pool HOLDS, so it moves only once there
+      // is a texture behind it: a refused allocation below leaves `key()` `null`, never the
+      // newcomer's name over nothing.
+      if (staging !== null) {
+        stagingKey = key
+        return staging.texture
+      }
+      stagingKey = null
       const d: TextureDesc = {
         width: source.w,
         height: source.h,
@@ -430,32 +409,12 @@ export function createScratchPools(o: ScratchPoolsOptions): ScratchPools {
       const texture = o.gl.texture(d)
       if (GlError.is(texture)) return texture
       staging = { texture, desc: d }
+      stagingKey = key
       return texture
     },
 
-    acquireSourceBytes(key, source) {
-      takeB(key, source)
-      if (sourceBytes !== null) return sourceBytes.target
-      const d: TextureDesc = {
-        width: source.w,
-        height: source.h,
-        format: 'RGBA8UI',
-        filter: 'NEAREST',
-        label: `staging.bytes:${source.w}x${source.h}`,
-      }
-      const texture = o.gl.texture(d)
-      if (GlError.is(texture)) return texture
-      const target = o.gl.target(texture)
-      if (GlError.is(target)) {
-        texture.dispose()
-        return target
-      }
-      sourceBytes = { target, desc: d }
-      return target
-    },
-
     releaseIdle(key) {
-      if (stagingKey !== key || (staging === null && sourceBytes === null)) return
+      if (stagingKey !== key || staging === null) return
       if (artworkKey === key) {
         // §8.1: the interval must be at least as long as the artwork slot's retention. It has
         // not ended yet, so the interval has not started.

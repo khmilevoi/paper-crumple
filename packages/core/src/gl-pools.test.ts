@@ -9,7 +9,7 @@ import { createFakeTimers, type FakeTimers } from './testing/fake-timers.js'
  * A texture factory with no GL behind it. The pools never touch a texture beyond its `bytes` and
  * its `dispose`, which is what makes the whole lifetime story a level-1 test.
  */
-function fakeFactory(): {
+function fakeFactory(refuse?: (d: TextureDesc) => boolean): {
   texture: (d: TextureDesc) => InstanceType<typeof GlError> | Texture
   target: (t: Texture) => InstanceType<typeof GlError> | Target
   live: () => number
@@ -19,6 +19,8 @@ function fakeFactory(): {
   let liveTargets = 0
   return {
     texture(d: TextureDesc) {
+      // A driver that refuses: the pool must be exactly as it was, and say so through `key()`.
+      if (refuse?.(d) === true) return new GlError(`fake factory refused ${d.width}x${d.height}`)
       live += 1
       return {
         handle: {} as WebGLTexture,
@@ -55,13 +57,13 @@ const ARTWORK = { w: 326, h: 326 }
 const SDF_RES = 192
 const SOURCE = { w: 998, h: 951 }
 
-function setup(): {
+function setup(refuse?: (d: TextureDesc) => boolean): {
   pools: ScratchPools
   timers: FakeTimers
   live: () => number
   liveTargets: () => number
 } {
-  const factory = fakeFactory()
+  const factory = fakeFactory(refuse)
   const timers = createFakeTimers(0)
   const pools = createScratchPools({
     gl: { texture: factory.texture, target: factory.target },
@@ -361,46 +363,52 @@ describe('Pool B is keyed by sprite but sized by the source (§8.1)', () => {
     expect(live()).toBe(1)
   })
 
-  it("keeps the source's RGBA8UI copy beside the staging, under the same idle law", () => {
-    const { pools, timers, live, liveTargets } = setup()
+  it('is one resident source-sized slot: never past budgetFor(source), across re-keys and idle (§8.1)', () => {
+    const { pools, timers, live } = setup()
     const staging = pools.poolB.acquire('shirt', SOURCE)
-    const bytes = pools.poolB.acquireSourceBytes('shirt', SOURCE)
-    expect(GlError.is(staging) || GlError.is(bytes)).toBe(false)
-    if (GlError.is(bytes)) return
-    expect(bytes.texture.format).toBe('RGBA8UI')
-    expect(bytes.width).toBe(SOURCE.w)
-    expect(bytes.height).toBe(SOURCE.h)
-    // Two source-sized textures: `bytes()` is honest about both, `budgetFor` stays §8.1's staging
-    // figure — the copy was a per-add transient the accounting never saw before.
-    expect(pools.poolB.bytes()).toBe(2 * poolBBytes(SOURCE))
-    expect(pools.poolB.budgetFor(SOURCE)).toBe(poolBBytes(SOURCE))
-    expect(pools.peak()).toBe(pools.poolA.bytes() + pools.poolB.bytes())
-    // A second resample of the same source size allocates neither.
-    expect(pools.poolB.acquireSourceBytes('coat', SOURCE)).toBe(bytes)
+    expect(GlError.is(staging)).toBe(false)
+    // §8.1 prices Pool B as the staging alone — one source-sized slot. The `RGBA8UI` copy the
+    // resample reads lives for the one call that needs it (`artwork.ts`), never in this pool.
+    expect(pools.poolB.bytes()).toBe(poolBBytes(SOURCE))
+    expect(pools.poolB.bytes()).toBeLessThanOrEqual(pools.poolB.budgetFor(SOURCE))
     expect(pools.poolB.acquire('coat', SOURCE)).toBe(staging)
-    expect(live()).toBe(2)
-    expect(liveTargets()).toBe(1)
+    expect(pools.poolB.bytes()).toBeLessThanOrEqual(pools.poolB.budgetFor(SOURCE))
+    expect(pools.peak()).toBe(pools.poolA.bytes() + pools.poolB.bytes())
+    expect(live()).toBe(1)
 
     pools.poolB.releaseIdle('coat')
     timers.advance(POOL_B_IDLE_MS - 1)
-    expect(pools.poolB.bytes()).toBe(2 * poolBBytes(SOURCE))
+    expect(pools.poolB.bytes()).toBe(poolBBytes(SOURCE))
     timers.advance(1)
     expect(pools.poolB.bytes()).toBe(0)
     expect(live()).toBe(0)
-    expect(liveTargets()).toBe(0)
     expect(pools.poolB.key()).toBeNull()
   })
 
-  it('drops both textures at once when the source size changes', () => {
-    const { pools, live, liveTargets } = setup()
+  it('reallocates the staging when the source size changes, and still holds one texture', () => {
+    const { pools, live } = setup()
     pools.poolB.acquire('shirt', SOURCE)
-    pools.poolB.acquireSourceBytes('shirt', SOURCE)
     const smaller = { w: 512, h: 512 }
-    const bytes = pools.poolB.acquireSourceBytes('coat', smaller)
-    expect(GlError.is(bytes)).toBe(false)
+    const staging = pools.poolB.acquire('coat', smaller)
+    expect(GlError.is(staging)).toBe(false)
     expect(pools.poolB.bytes()).toBe(poolBBytes(smaller))
     expect(live()).toBe(1)
-    expect(liveTargets()).toBe(1)
+    expect(pools.poolB.key()).toBe('coat')
+  })
+
+  it('names no key it holds nothing for: a refused allocation leaves key() null, not the newcomer', () => {
+    const { pools, live } = setup((d) => d.width === 4000)
+    const first = pools.poolB.acquire('shirt', SOURCE)
+    expect(GlError.is(first)).toBe(false)
+    const refused = pools.poolB.acquire('rogue', { w: 4000, h: 4000 })
+    expect(refused).toBeInstanceOf(GlError)
+    // The previous texture was the wrong size and is gone; nothing replaced it — so the pool
+    // holds nothing, and `key()` must say so rather than name a sprite with no staging behind it.
+    expect(pools.poolB.key()).toBeNull()
+    expect(pools.poolB.bytes()).toBe(0)
+    expect(live()).toBe(0)
+    // And the pool is usable again: the next sprite takes the slot normally.
+    expect(GlError.is(pools.poolB.acquire('coat', SOURCE))).toBe(false)
     expect(pools.poolB.key()).toBe('coat')
   })
 
