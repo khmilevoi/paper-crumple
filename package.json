@@ -24,7 +24,8 @@
     "verify:deps": "node tools/packaging/zero-dependencies.mjs",
     "verify:packaging": "node tools/packaging/verify-packaging.mjs",
     "changeset": "changeset",
-    "bench:gl": "playwright install --no-shell chromium && vitest run --config tools/bench/gl/vitest.bench.config.ts"
+    "bench:gl": "playwright install --no-shell chromium && vitest run --config tools/bench/gl/vitest.bench.config.ts",
+    "bench:smooth": "playwright install --no-shell chromium && node tools/bench/smooth/run.mjs"
   },
   "devDependencies": {
     "@arethetypeswrong/cli": "0.18.5",
