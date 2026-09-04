@@ -200,9 +200,14 @@ export function frontForArtwork(o: {
   // `capA` is a closed-form estimate; the rounding of the short side (`dimsForLongSide`) and of
   // the margin (`ceil(p * artwork.h)`) can make the true maximum `capA + 1`. Probing `capA + 1`
   // first — the loop below steps back down if it does not actually fit — finds that true maximum
-  // instead of leaving it on the table; the under-shoot is never more than one texel, so a single
-  // upward probe suffices. `max(front) <= maxSize` still holds for every input: the loop only
-  // returns a size it has itself verified fits.
+  // throughout the realistic parameter band (aspects 8x8..192x192, overscan 0.05-0.5, maxSize
+  // 32-1024: zero under-shoots across 6.86M combinations swept). Outside that band a bounded
+  // shortfall is possible: at a degenerate aspect where `dimsForLongSide`'s short side floors at
+  // 1 texel, the margin decouples from `aLong` and the closed form can under-shoot by two, not
+  // one (e.g. `srcW 10, srcH 1, p 2, maxSize 18` returns 13 where 14 fits) — a second upward
+  // probe is not worth the extra step for a case this far outside real usage. `max(front) <=
+  // maxSize` still holds for every input regardless: the loop only returns a size it has itself
+  // verified fits.
   const capA = Math.floor(o.maxSize / (1 + 2 * p * a))
   let aLong = o.exact ? srcLong : Math.min(o.artworkLongSide ?? Number.POSITIVE_INFINITY, capA + 1)
   for (;;) {

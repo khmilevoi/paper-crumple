@@ -195,11 +195,12 @@ destination. Pass `size: 'manual'` to own it yourself, and then `sprite.frontSiz
 and `view.idealSize` are the numbers your layout code needs.
 
 **To pin the picture rather than the paper**, build the stage with `artworkCssPx` instead of
-`cssPx` and read `view.frame`. `cssPx` sizes the front to the box the *paper* fits into, so the
-artwork inside it is AT LEAST `1 / (1 + 2 x sheet.overscan)` of that size — an equality for a
-portrait or square source, more for a landscape one (the margin is reserved against the artwork's
-HEIGHT, so a wider source pays a smaller share of it) — right for a grid tile, and a 1.3-5x upscale
-if you then stretch the artwork itself to `cssPx`. `artworkCssPx` is the CSS long side the
+`cssPx` and read `view.frame`. `cssPx` sizes the front to the box the *paper* fits into, and how
+much of that size the artwork holds depends on the source's aspect (the margin is reserved against
+the artwork's HEIGHT, so a wider source pays a smaller share of it): a portrait or square source
+sits near `1 / (1 + 2 x sheet.overscan)` of the front, and slightly under it, while a landscape one
+gets more — right for a grid tile, and a 1.3-5x upscale if you then stretch the artwork itself to
+`cssPx`. `artworkCssPx` is the CSS long side the
 *artwork* holds on screen: the stage asks the sheet for `ceil(artworkCssPx x dpr)` artwork texels
 and sizes its surface to hold them plus the paper margin for every aspect. `view.frame` is the
 authoritative per-sprite number under either option; do not derive a picture's on-screen size from

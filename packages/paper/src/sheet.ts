@@ -109,8 +109,11 @@ export interface PaperSheetOptions {
  * any sprite exists — and `source()` freezes exactly this number onto every handle. Spec 5.2
  * puts one readonly number on `SheetRenderer` because the core reads `sheet.overscan` to size
  * its surface before `add()` has produced a handle to ask instead, and with an aspect-free
- * reserve that number is exact: a front's long side is at most `artwork × (1 + 2·overscan)`
- * for every aspect (`frontForArtwork` in `handle.ts`).
+ * reserve that number is exact: the margin is `ceil(overscan × artwork.h)` texels on every side
+ * of the artwork, so a front's long side is exactly `artwork.long + 2 × ceil(overscan ×
+ * artwork.h)` for every aspect (`frontForArtwork` in `handle.ts`) — not, in general,
+ * `artwork.long × (1 + 2·overscan)`, which the two agree on only for a portrait or square
+ * source, where `artwork.h` is the long side.
  *
  * The reserve is applied as `ceil(overscan × artwork.h)` texels on every side of the artwork,
  * not as a uv fraction, so a tall sprite's x margin holds the paint radius without the radius
@@ -581,8 +584,9 @@ export function paperSheet(options?: PaperSheetOptions): PaperSheet {
    * Nothing else in `source()` may follow the live knobs — and that includes `maxDist`, which IS
    * in the hull tier this function lets through: the reserve is derived from `reserveParams`,
    * the defaults, and never from the values this returns. The reserve and the overscan `p` it
-   * derives — and with `p` the artwork's own resolution `A = maxSize / (1 + 2p)` — are frozen at
-   * add() for the sprite's life (§8.6): a re-source that read the live `tearAmp` or `looseness`
+   * derives — and with `p` the artwork's own resolution, the largest long side whose front still
+   * fits `maxSize` under `p` (`frontForArtwork` in `handle.ts`, §8.6) — are frozen at add() for
+   * the sprite's life: a re-source that read the live `tearAmp` or `looseness`
    * handed back a handle with another `p` than the fit was sized over, so `build()` placed a
    * smaller artwork in the same bucket, and on a portrait sprite the `h / w`-scaled reserve ran
    * off the reference plane and `source()` itself refused ("could not derive overscan") where

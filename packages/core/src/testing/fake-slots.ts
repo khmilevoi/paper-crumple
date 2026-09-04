@@ -163,13 +163,23 @@ export function fakeSheet(o: FakeSheetOptions = {}): FakeSheet {
       if (o.sourceFails !== undefined) return o.sourceFails
       const src = { w: bitmap.width, h: bitmap.height }
       // The paper's box in front texels. Under `artworkLongSide` the artwork is that many texels
-      // on its long side (capped so the front, `1 + 2 x overscan` of it, fits `maxSize`) and the
-      // fake keeps the paper equal to the artwork; otherwise the source box is scaled DOWN to
-      // `maxSize`, never up (spec 7.4.3's `cssPx` reading).
+      // on its long side, capped so the front fits `maxSize`, and the fake keeps the paper equal
+      // to the artwork; otherwise the source box is scaled DOWN to `maxSize`, never up (spec
+      // 7.4.3's `cssPx` reading).
+      //
+      // The cap mirrors `frontForArtwork`'s own closed-form estimate (`paper/src/handle.ts`):
+      // `maxSize / (1 + 2 x overscan x a)`, `a = min(1, srcH / srcW)` — the real per-axis reserve
+      // (`ceil(overscan x artwork.h)` per side), not the pre-F2 model that divided by
+      // `1 + 2 x overscan` uniformly regardless of aspect (equivalent to always assuming a square
+      // source). This is the closed-form estimate frontForArtwork itself starts from, not its
+      // maximal, off-by-one-corrected result (`capA + 1`, stepped down until the front fits) — a
+      // fake has no need for that last texel of precision.
       const long = Math.max(src.w, src.h)
+      const a = Math.min(1, src.h / src.w)
+      const p = o.overscan ?? 0.08
       const k =
         opts.artworkLongSide !== undefined
-          ? Math.min(opts.artworkLongSide, opts.maxSize / (1 + 2 * (o.overscan ?? 0.08))) / long
+          ? Math.min(opts.artworkLongSide, Math.floor(opts.maxSize / (1 + 2 * p * a))) / long
           : Math.min(1, opts.maxSize / long)
       const id = nextId++
       artworkKey = id

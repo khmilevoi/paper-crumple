@@ -84,13 +84,14 @@ export interface StageOptionsBase {
  *
  * `cssPx` is the CSS long side of the box the **paper** is fitted into: the front is
  * `sizeForDisplay({ cssPx, dpr: devicePixelRatio, cap: FRONT_LONG_SIDE_CAP })`, drawn 1:1 under
- * `fit: 'contain'` in a box of that size, and the artwork inside it is AT LEAST
- * `1 / (1 + 2 x sheet.overscan)` of that — an equality only for a portrait or square source. The
- * margin is reserved per axis against the artwork's HEIGHT (`ceil(overscan x artwork.h)` on
- * every side, `paper/src/handle.ts`'s `frontForArtwork`), so a landscape source's shorter margin
- * leaves it MORE artwork, not less: a 3:2 source gets noticeably more than a 2:3 one at the same
- * `cssPx`, and a very wide one more still. `View.frame.artwork` is the authoritative per-sprite
- * number; do not compute it from this formula. The grid's contract.
+ * `fit: 'contain'` in a box of that size. How much of that front is artwork depends on the
+ * source's aspect: the margin is reserved per axis against the artwork's HEIGHT
+ * (`ceil(overscan x artwork.h)` on every side, `paper/src/handle.ts`'s `frontForArtwork`), so a
+ * portrait or square source sits near `1 / (1 + 2 x sheet.overscan)` of the front — and, from the
+ * `ceil`, usually a little under it — while a landscape source's shorter margin leaves it MORE: a
+ * 3:2 source gets noticeably more than a 2:3 one at the same `cssPx`, and a very wide one more
+ * still. `View.frame.artwork` is the authoritative per-sprite number; do not compute it from this
+ * formula. The grid's contract.
  *
  * `artworkCssPx` is the CSS long side the **artwork** holds on screen: the stage asks the sheet
  * for `ceil(artworkCssPx x dpr)` artwork texels (`SourceOptions.artworkLongSide`) and sizes its

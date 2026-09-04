@@ -49,10 +49,10 @@ export type SourceOptions = {
   /**
    * The artwork's wanted long side, in texels — the stage's `ceil(artworkCssPx x dpr)`. A slot
    * gives the artwork this many texels when its front still fits `maxSize`, and the largest
-   * that does otherwise; absent, the artwork is what `maxSize` leaves after the margin (§8.6's
-   * `A = maxSize / (1 + 2p)`), which is the `cssPx` / `maxSize` stages' contract. Optional, so a
-   * slot that ignores it keeps compiling — and then `artworkCssPx` degrades to the `maxSize`
-   * reading for that slot.
+   * that does otherwise; absent, the artwork is the largest long side whose front — artwork
+   * plus the per-axis margin (§8.6's `frontForArtwork`) — still fits `maxSize`, which is the
+   * `cssPx` / `maxSize` stages' contract. Optional, so a slot that ignores it keeps compiling —
+   * and then `artworkCssPx` degrades to the `maxSize` reading for that slot.
    */
   artworkLongSide?: number
   signal?: AbortSignal
@@ -80,9 +80,16 @@ export type SourceOptions = {
 export interface SheetRenderer<K extends Knobs = Knobs, H extends SheetHandle = SheetHandle> {
   readonly knobs: readonly KnobDescriptor[]
   /**
-   * The margin reserved on every side of the artwork, as a fraction of the artwork's height, so
-   * that a front's long side is at most `artwork x (1 + 2 x overscan)` for every aspect — the
-   * number the stage sizes its surface from under `artworkCssPx`. See §8.6.
+   * The margin reserved on every side of the artwork, as a fraction of the artwork's height: for
+   * a real sprite (`artwork.w x artwork.h` known) each side gets `ceil(overscan x artwork.h)`
+   * texels, so its front's long side is exactly `artwork.long + 2 x ceil(overscan x artwork.h)`
+   * (`frontForArtwork` in `paper/src/handle.ts`), not `artwork.long x (1 + 2 x overscan)` in
+   * general — the two agree only for a portrait or square source. Before any sprite exists, the
+   * stage sizes its surface from `artworkLongSide` alone (no real height to reserve against yet):
+   * `frontCapFor` treats the long side as if it were the height too, giving the conservative cap
+   * `artworkLongSide + 2 x ceil(overscan x artworkLongSide)`, which is never smaller than either
+   * formula above, so every real aspect's front — and a slot that only honours the old
+   * `x (1 + 2 x overscan)` bound — still fits inside what the stage allocates. See §8.6.
    */
   readonly overscan: number
 

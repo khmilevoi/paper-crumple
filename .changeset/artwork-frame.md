@@ -1,7 +1,7 @@
 ---
 '@paper-crumple/core': major
 '@paper-crumple/paper': major
-'@paper-crumple/motion': minor
+'@paper-crumple/motion': major
 ---
 
 `View.frame`, `SheetFront.artwork`, and a reserve that is actually frozen.
