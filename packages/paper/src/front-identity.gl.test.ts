@@ -45,6 +45,10 @@ import { GlError, SheetError, isAborted } from '@paper-crumple/core'
 import { identityResample } from '@paper-crumple/core/unstable'
 import { defaultsFor } from './paper-knobs.js'
 import { paperSheet } from './sheet.js'
+import {
+  IDENTITY_SRC as SRC,
+  identitySourceBytes as sourceBytes,
+} from './testing/fixture-sources.js'
 import { createGlFixture, type PaperGlFixture } from './testing/gl-fixture.js'
 
 let fixture: PaperGlFixture | null = null
@@ -58,24 +62,6 @@ function open() {
   fixture = createGlFixture(8, 8)
   expect(fixture.gl, 'no WebGL2 context — check the SwiftShader launch flags (§11)').not.toBeNull()
   return fixture.ctx
-}
-
-const SRC = { w: 40, h: 40 }
-
-/** A deterministic source with a hard alpha edge and non-zero RGB under zero alpha. */
-function sourceBytes(): Uint8ClampedArray<ArrayBuffer> {
-  const out = new Uint8ClampedArray(SRC.w * SRC.h * 4)
-  for (let y = 0; y < SRC.h; y++) {
-    for (let x = 0; x < SRC.w; x++) {
-      const p = (y * SRC.w + x) * 4
-      out[p] = (x * 6 + 1) % 256
-      out[p + 1] = (y * 9 + 40) % 256
-      out[p + 2] = (x * y * 3 + 17) % 256
-      // Non-zero RGB survives under zero alpha only if nothing premultiplied on the way in.
-      out[p + 3] = x < 6 || x > 33 || y < 6 || y > 33 ? 0 : 255
-    }
-  }
-  return out
 }
 
 /**

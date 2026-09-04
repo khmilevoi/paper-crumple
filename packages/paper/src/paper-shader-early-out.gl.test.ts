@@ -1,5 +1,5 @@
 /**
- * # P6a — the front build's early-outs change no byte
+ * # P6a — the front build's early-outs change no byte, and the drop shadow is still there
  *
  * `PAPER_FS` (`paper-shader.ts`) answers two classes of fragment before `paperField` runs: an
  * opaque artwork texel the tear's floor already covers, and an empty texel further outside the
@@ -17,12 +17,19 @@
  * A third variant paints a sentinel colour where an early-out fires. It is what keeps the on/off
  * comparison from being vacuous: both branches are asserted to fire on the bench-style artwork
  * (soft edge, holes — `silhouetteBytes` in `tools/bench/gl/harness.ts`, with an antialiased edge
- * and two holes added) in both edge modes, and the fractions are printed for the report.
+ * and two holes added) in both edge modes.
  *
  * Three surfaces are covered: `renderFront` on explicit fields (the bench's own set-up), and the
- * two `paperSheet()` fixtures `front-identity.gl.test.ts` and `front-holes.gl.test.ts` build —
- * reproduced here rather than imported, since those files keep their sources private — in `hull`
- * and in `torn` mode.
+ * two `paperSheet()` fixtures `front-identity.gl.test.ts` and `front-holes.gl.test.ts` build
+ * (shared through `testing/fixture-sources.ts`), in `hull` and in `torn` mode.
+ *
+ * The last suite is about P6a's other edit, the drop-shadow base skipped at `uShadow == 0`: it
+ * forces `uShadow = 1` through the real `renderFront` (whose own write of 0 is neutralised by
+ * hiding the uniform's location from it) and pins that the shadow is still rendered, byte for byte
+ * as the unguarded shadow path renders it. A `float sa` re-declared inside the guard's block —
+ * which is what the first cut of P6a shipped — compiles, shadows the outer `sa`, and silently
+ * removes the drop shadow for every `uShadow != 0`; nothing else in the suite renders with a
+ * non-zero shadow, so this is the one test that sees it.
  */
 import { afterEach, describe, expect, it } from 'vitest'
 import { GlError, SheetError, isAborted } from '@paper-crumple/core'
@@ -33,6 +40,12 @@ import {
   uploadBytes,
 } from '@paper-crumple/core/unstable'
 import type { CoreGlContext, ScratchPools } from '@paper-crumple/core/unstable'
+import {
+  HOLES_FIXTURE,
+  IDENTITY_SRC,
+  identitySourceBytes,
+  twoComponentsWithAHole,
+} from './testing/fixture-sources.js'
 import { createGlFixture, type PaperGlFixture } from './testing/gl-fixture.js'
 import { createSdfBuilder, SDF_POOL_SLOTS, sigmaFor } from './gl-sdf.js'
 import { defaultsFor, descriptorsFor, type PaperEdgeMode } from './paper-knobs.js'
@@ -59,7 +72,7 @@ function open(): CoreGlContext {
   return fixture.ctx
 }
 
-// --- the three shader variants ------------------------------------------------------------------
+// --- the shader variants ------------------------------------------------------------------------
 
 const SWITCH_ON = '#define PAPER_EARLY_OUT 1'
 const SWITCH_OFF = '#define PAPER_EARLY_OUT 0'
@@ -67,6 +80,9 @@ const EARLY_OUT_A = 'outColor = vec4(img.rgb, 1.0); return; } // P6a early-out (
 const EARLY_OUT_B = 'outColor = vec4(0.0); return; } // P6a early-out (b)'
 const SENTINEL_A = 'outColor = vec4(1.0, 0.0, 1.0, 1.0); return; } // sentinel (a)'
 const SENTINEL_B = 'outColor = vec4(0.0, 1.0, 0.0, 1.0); return; } // sentinel (b)'
+/** The D2 guard; replaced by a bare block, the shadow base runs unconditionally, as before P6a. */
+const D2_GUARD = '  if (uShadow != 0.0 || uShadowBlur <= 0.0) {'
+const D2_GUARD_OFF = '  { // the D2 guard, removed by the test: the shadow base always runs'
 
 /** The sentinel bytes the two branches paint: magenta for (a), green for (b). */
 const SENTINEL_A_RGBA = [255, 0, 255, 255] as const
@@ -85,17 +101,39 @@ const PAPER_FS_SENTINEL = replaceExactlyOnce(
   EARLY_OUT_B,
   SENTINEL_B,
 )
+/** Early-outs off and the shadow base unconditional: the shader as it was before P6a. */
+const PAPER_FS_PRE_P6A = replaceExactlyOnce(PAPER_FS_OFF, D2_GUARD, D2_GUARD_OFF)
 
 /**
  * The same context, compiling `fs` wherever the renderer asks for `PAPER_FS`. `CoreGlContext` is
  * a bag of closures over the one `gl` (`gl-context.ts`'s `createGlContext`), so a spread with one
  * method replaced is the same context; every resource it creates is still tracked by, and released
  * with, the original.
+ *
+ * With `shadow` given, the program's `uShadow` is set to it up front and its location is hidden
+ * from the renderer (`uniformLocation('uShadow')` returns `null`, and `uniform1f(null, …)` is a
+ * no-op), so `renderFront`'s own `uniform1f(loc('shadow'), 0)` no longer wins: the real renderer
+ * path runs with a non-zero shadow, which no production caller can ask for.
  */
-function withPaperShader(ctx: CoreGlContext, fs: string): CoreGlContext {
+function withPaperShader(ctx: CoreGlContext, fs: string, shadow?: number): CoreGlContext {
   return {
     ...ctx,
-    program: (vs, source, label) => ctx.program(vs, source === PAPER_FS ? fs : source, label),
+    program: (vs, source, label) => {
+      if (source !== PAPER_FS) return ctx.program(vs, source, label)
+      const program = ctx.program(vs, fs, label)
+      if (GlError.is(program) || shadow === undefined) return program
+      const location = program.uniformLocation('uShadow')
+      expect(location).not.toBeNull()
+      ctx.scope(() => {
+        ctx.gl.useProgram(program.handle)
+        ctx.gl.uniform1f(location, shadow)
+        ctx.gl.useProgram(null)
+      })
+      return {
+        ...program,
+        uniformLocation: (name) => (name === 'uShadow' ? null : program.uniformLocation(name)),
+      }
+    },
   }
 }
 
@@ -137,18 +175,18 @@ function firstDifferences(a: Uint8Array, b: Uint8Array, stride: number, limit = 
   return out
 }
 
+function isTexel(bytes: Uint8Array, i: number, rgba: readonly [number, number, number, number]) {
+  return (
+    bytes[i] === rgba[0] &&
+    bytes[i + 1] === rgba[1] &&
+    bytes[i + 2] === rgba[2] &&
+    bytes[i + 3] === rgba[3]
+  )
+}
+
 function countTexels(bytes: Uint8Array, rgba: readonly [number, number, number, number]): number {
   let n = 0
-  for (let i = 0; i < bytes.length; i += 4) {
-    if (
-      bytes[i] === rgba[0] &&
-      bytes[i + 1] === rgba[1] &&
-      bytes[i + 2] === rgba[2] &&
-      bytes[i + 3] === rgba[3]
-    ) {
-      n++
-    }
-  }
+  for (let i = 0; i < bytes.length; i += 4) if (isTexel(bytes, i, rgba)) n++
   return n
 }
 
@@ -203,15 +241,19 @@ function softSilhouette(w: number, h: number): Uint8Array {
 interface FrontScene {
   readonly ctx: CoreGlContext
   readonly front: number
-  readonly render: (mode: PaperEdgeMode, fs: string | null) => Uint8Array
+  /**
+   * One `renderFront` and the whole front read back: through the shipped shader when `fs` is
+   * `null`, otherwise through a renderer whose context compiles `fs` in its place — and, with
+   * `shadow`, with `uShadow` forced to that value (see `withPaperShader`).
+   */
+  readonly render: (mode: PaperEdgeMode, fs: string | null, shadow?: number) => Uint8Array
   dispose(): void
 }
 
 /**
  * The bench's `gl.front.render.<N>` set-up (`tools/bench/gl/front.gl.bench.ts`): an N x N front,
  * the artwork centred at 72 % of it, the fields at `sdfResFor(N)`, the neutral tiles, and one
- * `renderFront` per call. `render(mode, fs)` renders through the shipped shader when `fs` is
- * `null`, otherwise through a renderer whose context compiles `fs` in its place.
+ * `renderFront` per call.
  */
 function frontScene(N: number): FrontScene | Error {
   const ctx = open()
@@ -274,12 +316,13 @@ function frontScene(N: number): FrontScene | Error {
   const tiles = mountNeutralTiles(ctx)
   if (GlError.is(tiles)) return tiles
 
-  const renderers = new Map<string | null, ReturnType<typeof createPaperRenderer>>()
-  const rendererFor = (fs: string | null) => {
-    let r = renderers.get(fs)
+  const renderers = new Map<string, ReturnType<typeof createPaperRenderer>>()
+  const rendererFor = (fs: string | null, shadow: number | undefined) => {
+    const key = `${shadow ?? ''}|${fs ?? ''}`
+    let r = renderers.get(key)
     if (r === undefined) {
-      r = createPaperRenderer(fs === null ? ctx : withPaperShader(ctx, fs))
-      renderers.set(fs, r)
+      r = createPaperRenderer(fs === null ? ctx : withPaperShader(ctx, fs, shadow))
+      renderers.set(key, r)
     }
     return r
   }
@@ -287,8 +330,8 @@ function frontScene(N: number): FrontScene | Error {
   return {
     ctx,
     front: N,
-    render(mode, fs) {
-      const renderer = rendererFor(fs)
+    render(mode, fs, shadow) {
+      const renderer = rendererFor(fs, shadow)
       expect(GlError.is(renderer), GlError.is(renderer) ? renderer.message : '').toBe(false)
       if (GlError.is(renderer)) return new Uint8Array(0)
       const err = renderer.renderFront(tiles, {
@@ -317,14 +360,16 @@ function frontScene(N: number): FrontScene | Error {
 }
 
 describe('PAPER_FS early-outs on the bench-style front (renderFront, explicit fields)', () => {
-  it('keeps the switch and the two marked early-outs a test can compile out', () => {
+  it('keeps the switch, the two marked early-outs and the D2 guard a test can compile out', () => {
     expect(PAPER_FS).toContain(SWITCH_ON)
     expect(PAPER_FS).not.toContain(SWITCH_OFF)
     expect(PAPER_FS).toContain(EARLY_OUT_A)
     expect(PAPER_FS).toContain(EARLY_OUT_B)
+    expect(PAPER_FS).toContain(D2_GUARD)
     expect(PAPER_FS_OFF).not.toContain(SWITCH_ON)
     expect(PAPER_FS_SENTINEL).toContain(SENTINEL_A)
     expect(PAPER_FS_SENTINEL).toContain(SENTINEL_B)
+    expect(PAPER_FS_PRE_P6A).not.toContain(D2_GUARD)
   })
 
   for (const mode of ['hull', 'torn'] as const satisfies readonly PaperEdgeMode[]) {
@@ -340,31 +385,20 @@ describe('PAPER_FS early-outs on the bench-style front (renderFront, explicit fi
 
       // Not vacuous: both branches fire on this artwork, and together they cover a substantial
       // share of the front (the bench silhouette is mostly margin and mostly opaque interior).
+      // Measured on SwiftShader: hull 13.4 % / 83.1 %, torn 15.3 % / 22.5 % (deep-inside /
+      // far-outside).
       const sentinel = scene.render(mode, PAPER_FS_SENTINEL)
       const texels = scene.front * scene.front
       const deepInside = countTexels(sentinel, SENTINEL_A_RGBA)
       const farOutside = countTexels(sentinel, SENTINEL_B_RGBA)
-      console.log(
-        `P6a ${mode} ${scene.front}²: deep-inside ${((100 * deepInside) / texels).toFixed(1)} %, ` +
-          `far-outside ${((100 * farOutside) / texels).toFixed(1)} %`,
-      )
-      expect(deepInside).toBeGreaterThan(0)
-      expect(farOutside).toBeGreaterThan(0)
+      expect(deepInside).toBeGreaterThan(texels * 0.1)
+      expect(farOutside).toBeGreaterThan(texels * 0.1)
       expect(deepInside + farOutside).toBeGreaterThan(texels * 0.3)
       // The sentinel render differs from the shipped one ONLY where a sentinel was painted, which
       // pins the two marked lines as the only writes the early-outs make.
       let elsewhere = 0
       for (let i = 0; i < on.length; i += 4) {
-        const painted =
-          (sentinel[i] === SENTINEL_A_RGBA[0] &&
-            sentinel[i + 1] === SENTINEL_A_RGBA[1] &&
-            sentinel[i + 2] === SENTINEL_A_RGBA[2] &&
-            sentinel[i + 3] === SENTINEL_A_RGBA[3]) ||
-          (sentinel[i] === SENTINEL_B_RGBA[0] &&
-            sentinel[i + 1] === SENTINEL_B_RGBA[1] &&
-            sentinel[i + 2] === SENTINEL_B_RGBA[2] &&
-            sentinel[i + 3] === SENTINEL_B_RGBA[3])
-        if (painted) continue
+        if (isTexel(sentinel, i, SENTINEL_A_RGBA) || isTexel(sentinel, i, SENTINEL_B_RGBA)) continue
         if (
           sentinel[i] !== on[i] ||
           sentinel[i + 1] !== on[i + 1] ||
@@ -377,56 +411,28 @@ describe('PAPER_FS early-outs on the bench-style front (renderFront, explicit fi
       expect(elsewhere).toBe(0)
 
       scene.dispose()
-    })
+      // Three 256² renders plus the field builds on SwiftShader, with sibling suites sharing
+      // the CPU, run past the default 15 s.
+    }, 120_000)
   }
 })
 
 // --- the two paperSheet() fixtures ----------------------------------------------------------------
 
+interface SourceBytes {
+  readonly bytes: Uint8ClampedArray<ArrayBuffer>
+  readonly w: number
+  readonly h: number
+}
+
 /** `front-identity.gl.test.ts`'s source: a hard alpha edge and non-zero RGB under zero alpha. */
-function identitySource(): { bytes: Uint8ClampedArray<ArrayBuffer>; w: number; h: number } {
-  const w = 40
-  const h = 40
-  const out = new Uint8ClampedArray(w * h * 4)
-  for (let y = 0; y < h; y++) {
-    for (let x = 0; x < w; x++) {
-      const p = (y * w + x) * 4
-      out[p] = (x * 6 + 1) % 256
-      out[p + 1] = (y * 9 + 40) % 256
-      out[p + 2] = (x * y * 3 + 17) % 256
-      out[p + 3] = x < 6 || x > 33 || y < 6 || y > 33 ? 0 : 255
-    }
-  }
-  return { bytes: out, w, h }
+function identitySource(): SourceBytes {
+  return { bytes: identitySourceBytes(), w: IDENTITY_SRC.w, h: IDENTITY_SRC.h }
 }
 
 /** `front-holes.gl.test.ts`'s source: two disjoint opaque squares, the left one with a hole. */
-function holesSource(): { bytes: Uint8ClampedArray<ArrayBuffer>; w: number; h: number } {
-  const S = 160
-  const COMP_W = 32
-  const COMP_H = 48
-  const GAP = 32
-  const CX = Math.round((S - (2 * COMP_W + GAP)) / 2)
-  const CY = Math.round((S - COMP_H) / 2)
-  const HOLE_X = CX + 10
-  const HOLE_Y = CY + 16
-  const HOLE_W = 12
-  const HOLE_H = 16
-  const out = new Uint8ClampedArray(S * S * 4)
-  for (let y = 0; y < S; y++) {
-    for (let x = 0; x < S; x++) {
-      const p = (y * S + x) * 4
-      const inY = y >= CY && y < CY + COMP_H
-      const left = x >= CX && x < CX + COMP_W && inY
-      const hole = x >= HOLE_X && x < HOLE_X + HOLE_W && y >= HOLE_Y && y < HOLE_Y + HOLE_H
-      const right = x >= CX + COMP_W + GAP && x < CX + 2 * COMP_W + GAP && inY
-      out[p] = 30
-      out[p + 1] = 160
-      out[p + 2] = 90
-      out[p + 3] = (left && !hole) || right ? 255 : 0
-    }
-  }
-  return { bytes: out, w: S, h: S }
+function holesSource(): SourceBytes {
+  return { bytes: twoComponentsWithAHole(), w: HOLES_FIXTURE.S, h: HOLES_FIXTURE.S }
 }
 
 /**
@@ -436,7 +442,7 @@ function holesSource(): { bytes: Uint8ClampedArray<ArrayBuffer>; w: number; h: n
 async function buildFront(
   ctx: CoreGlContext,
   mode: PaperEdgeMode,
-  source: { bytes: Uint8ClampedArray<ArrayBuffer>; w: number; h: number },
+  source: SourceBytes,
   size: number,
 ): Promise<{ bytes: Uint8Array; w: number; h: number } | Error> {
   const sheet = paperSheet({ edgeMode: mode })
@@ -487,16 +493,43 @@ describe('PAPER_FS early-outs through paperSheet() (the front-identity and front
         )
         expect(sentinel).not.toBeInstanceOf(Error)
         if (sentinel instanceof Error) return
-        const deepInside = countTexels(sentinel.bytes, SENTINEL_A_RGBA)
-        const farOutside = countTexels(sentinel.bytes, SENTINEL_B_RGBA)
-        console.log(
-          `P6a ${c.name} ${mode} ${on.w}x${on.h}: deep-inside ${deepInside}, far-outside ${farOutside}`,
-        )
         // The opaque interior of every fixture is deep inside; whether the margin reaches "far
         // outside" depends on the fixture's front, so only (a) is required to fire here.
-        expect(deepInside).toBeGreaterThan(0)
+        expect(countTexels(sentinel.bytes, SENTINEL_A_RGBA)).toBeGreaterThan(0)
         // Three `source()` + `build()` round trips on SwiftShader run well past the default 15 s.
       }, 120_000)
     }
+  }
+})
+
+// --- D2: the drop shadow at uShadow != 0 ----------------------------------------------------------
+
+describe('PAPER_FS drop shadow at uShadow != 0 (D2 skips the shadow base, it does not remove it)', () => {
+  for (const mode of ['hull', 'torn'] as const satisfies readonly PaperEdgeMode[]) {
+    it(`still renders the drop shadow, byte-identical to the unguarded path — ${mode}`, () => {
+      const scene = frontScene(256)
+      expect(scene).not.toBeInstanceOf(Error)
+      if (scene instanceof Error) return
+
+      // The shipped shader as the renderer drives it (uShadow = 0), the shipped shader with
+      // uShadow forced to 1, and the pre-P6a shader (early-outs off, shadow base unconditional)
+      // with the same forced shadow.
+      const noShadow = scene.render(mode, null)
+      const shadow = scene.render(mode, PAPER_FS, 1)
+      const reference = scene.render(mode, PAPER_FS_PRE_P6A, 1)
+
+      // The shadow is there: texels the sheet leaves clear (alpha 0) now carry the shadow's alpha.
+      // The default shadowBlur (13 reference px, 3.3 px on this front) and offset put a soft
+      // band of it just outside the scrap.
+      let shaded = 0
+      for (let i = 0; i < noShadow.length; i += 4) {
+        if (noShadow[i + 3] === 0 && shadow[i + 3]! > 0) shaded++
+      }
+      expect(shaded).toBeGreaterThan(0)
+      // And it is the shadow the unguarded path renders, byte for byte, over the whole front.
+      expect(firstDifferences(shadow, reference, scene.front)).toEqual([])
+
+      scene.dispose()
+    }, 120_000)
   }
 })

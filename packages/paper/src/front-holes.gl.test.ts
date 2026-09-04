@@ -108,6 +108,7 @@ import { GlError, SheetError, isAborted } from '@paper-crumple/core'
 import { hullComponentCount } from './hull-shape.js'
 import { defaultsFor } from './paper-knobs.js'
 import { paperSheet } from './sheet.js'
+import { HOLES_FIXTURE, twoComponentsWithAHole } from './testing/fixture-sources.js'
 import { createGlFixture, type PaperGlFixture } from './testing/gl-fixture.js'
 
 let fixture: PaperGlFixture | null = null
@@ -122,49 +123,12 @@ function open() {
   return fixture.ctx
 }
 
-/** The canvas the composite is centred in — see the file header's guard-band note. */
-const S = 160
-/** One component's box. */
-const COMP_W = 32
-const COMP_H = 48
-/** The space between them — see the file header. Do not shrink this below ~24. */
-const GAP = 32
-/** The composite's own origin, centred in the canvas. */
-const CX = Math.round((S - (2 * COMP_W + GAP)) / 2)
-const CY = Math.round((S - COMP_H) / 2)
-/** The hole, inside the left component. */
-const HOLE_X = CX + 10
-const HOLE_Y = CY + 16
-const HOLE_W = 12
-const HOLE_H = 16
-
 /**
- * Two disjoint opaque squares — the "pair of sneakers" — the left one carrying a square hole.
- * Raw bytes, never a PNG (§7.4.1). With the constants above this paints, in canvas coordinates:
- *
- *   x in [32, 64)    y in [56, 104)   left component, opaque
- *   x in [42, 54)    y in [72, 88)    the hole inside it, alpha 0
- *   x in [96, 128)   y in [56, 104)   right component, opaque
- *
- * leaving x in [64, 96) as the gap and a 32px margin on either side of the composite.
+ * The geometry, shared with `paper-shader-early-out.gl.test.ts` through `testing/fixture-sources.ts`:
+ * the canvas `S` (see the file header's guard-band note), one component's box, the gap (do not
+ * shrink it below ~24 — see the file header), the composite's origin and the hole.
  */
-function twoComponentsWithAHole(): Uint8ClampedArray<ArrayBuffer> {
-  const out = new Uint8ClampedArray(S * S * 4)
-  for (let y = 0; y < S; y++) {
-    for (let x = 0; x < S; x++) {
-      const p = (y * S + x) * 4
-      const inY = y >= CY && y < CY + COMP_H
-      const left = x >= CX && x < CX + COMP_W && inY
-      const hole = x >= HOLE_X && x < HOLE_X + HOLE_W && y >= HOLE_Y && y < HOLE_Y + HOLE_H
-      const right = x >= CX + COMP_W + GAP && x < CX + 2 * COMP_W + GAP && inY
-      out[p] = 30
-      out[p + 1] = 160
-      out[p + 2] = 90
-      out[p + 3] = (left && !hole) || right ? 255 : 0
-    }
-  }
-  return out
-}
+const { S, COMP_W, GAP, CX, CY, HOLE_X, HOLE_Y } = HOLES_FIXTURE
 
 function readTexel(
   ctx: ReturnType<typeof open>,

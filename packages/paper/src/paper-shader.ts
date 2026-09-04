@@ -29,9 +29,9 @@
  *    front build passes `uShadow = 0`) are kept whole. A line deleted now cannot be added back by
  *    a later plan without re-deriving it.
  *
- * The performance programme's P6a then made three more edits, each pixel-identical by derivation
- * (the block above `main()` carries the proof, `paper-shader-early-out.gl.test.ts` the byte-for-
- * byte evidence, `.superpowers/perf/report-P6a.md` the numbers):
+ * The performance programme's P6a then made three more edits, each identical at the RGBA8 byte
+ * level by derivation (the block above `main()` carries the proof,
+ * `paper-shader-early-out.gl.test.ts` the byte-for-byte evidence):
  *
  * 6. **Two early-outs at the top of `main()`**, under the front build's uniform guard
  *    (`frontFastPath()`): an opaque artwork texel the tear's floor already covers writes
@@ -1513,9 +1513,12 @@ vec3 fieldViz(float d) {
 // P6a — the front build's early-outs.
 //
 // Two classes of fragment have an answer before paperField runs, and this block proves it from
-// the code below rather than from the picture. Everything here is uniform-only arithmetic plus
-// the one or two field fetches a predicate needs. A fragment that fails a predicate simply takes
-// the full path, so every threshold errs towards the full path.
+// the code below rather than from the picture: the answer is identical to the full path's at the
+// RGBA8 byte level the front is written in (and bit-identical wherever a step says so; the two
+// places that are only ulp-identical under a lerp lowering of mix are called out). Everything
+// here is uniform-only arithmetic plus the one or two field fetches a predicate needs. A fragment
+// that fails a predicate simply takes the full path, so every threshold errs towards the full
+// path.
 //
 // THE GUARD, frontFastPath(): uShadow == 0.0 (with uShadowBlur > 0.0, so the shadow term the
 // full path multiplies by uShadow is a finite number — step 4 in main), uFoldCount == 0,
@@ -1530,20 +1533,26 @@ vec3 fieldViz(float d) {
 // back is finite (facetShade normalises (0, 0, 1); foldCreases returns 1.0 at uFoldCount 0);
 // 'a *= 1.0', 'premul *= 1.0'; sa = 0.0 (step 4); outA = sheetCov; rgb = premul / outA when
 // outA > 1e-4, else vec3(0.0); and uDebug == 0 writes vec4(rgb, outA).
+// At uShadowBlur == 0.0 — the shadowBlur knob's minimum — the guard is false and the early-outs
+// are disabled: a performance cliff on that one setting, not a correctness one.
 //
 // (a) DEEP INSIDE — img.a == 1.0 and deepInside(uv). With img.a == 1.0 (255 / 255.0 exactly):
 //   - sheetCov = max(paperMask, 1.0) = 1.0: paperMask = sheetA + fringe * (1.0 - sheetA) lies in
 //     [0, 1], because smoothstep's t*t*(3-2t) at t <= 1 rounds to at most 1.0 and fringeTerm is a
 //     product of coverages in [0, 1];
-//   - front = mix(sheet, img.rgb, 1.0) = sheet * 0.0 + img.rgb * 1.0 = img.rgb (sheet is finite:
-//     every noise is a fract/dot of finite inputs, relief normalises a vector with z = 1.0, and
-//     tearShade is an exp of a non-positive number);
+//   - front = mix(sheet, img.rgb, 1.0) = sheet * 0.0 + img.rgb * 1.0 = img.rgb under the spec's
+//     definition of mix, and within an ulp of it under a lerp lowering (x + (y - x) * 1.0); sheet
+//     is finite (every noise is a fract/dot of finite inputs, relief normalises a vector with
+//     z = 1.0, tearShade is an exp of a non-positive number). An ulp does not survive the RGBA8
+//     write: img.rgb is k / 255, and k / 255 within an ulp still quantises to the byte k;
 //   - the premultiplied re-blend is skipped ('sheetCov < 1.0' is false);
-//   - the deckle band's blend weight carries (1.0 - img.a) = 0.0, so front is unchanged whether
-//     or not that branch runs (core is finite: both smoothsteps in it have edge0 < edge1);
+//   - the deckle band's blend weight carries (1.0 - img.a) = 0.0, so front is unchanged (to the
+//     same ulp under a lerp lowering, i.e. at the byte level) whether or not that branch runs
+//     (core is finite: both smoothsteps in it have edge0 < edge1);
 //   - the hair blend is the ONLY remaining write to front, and it runs only if fringe > 0.0.
 //   So a = 1.0, premul = img.rgb, outA = 1.0, rgb = img.rgb / 1.0, and the full path writes
-//   vec4(img.rgb, 1.0) — this early-out — unless fringe > 0.0 and sheetA < 1.0. In hull mode
+//   vec4(img.rgb, 1.0) — this early-out, identical at the RGBA8 byte level — unless fringe > 0.0
+//   and sheetA < 1.0. In hull mode
 //   paperField sets fringe = 0.0 outright. In torn mode fringeTerm returns 0.0 whenever
 //   't < -uAaPx' with t = -chewed, i.e. whenever chewed > uAaPx, and tearOf's last line makes
 //   chewed = max(d, floorD) >= floorD = tearFloor(uv) exactly (max returns one of its operands).
@@ -1593,13 +1602,14 @@ vec3 fieldViz(float d) {
 //   5. sheetA == 0.0 needs field <= -aa. fringe == 0.0 holds whenever chewed < -1.05 * strandLen
 //      (fringeTerm's 't > strandLen * 1.05' return, strandLen = STRAND_MULT * uFiberLen * k),
 //      whether or not paperField's 'abs(shaped) < reach' block runs. Below k == 1 the field is
-//      mix(-max(aa, 0.5), chewed, k), a convex blend of two values at most -aa - slop, which the
-//      blend's rounding cannot lift above -aa when the margin is at least a texel.
+//      mix(-max(aa, 0.5), chewed, k), a convex blend of two values at most -aa - slop: at most
+//      -aa + 1 ulp after rounding, so sheetA is 0.0 or of the order of 1e-8, the alpha byte is 0
+//      either way, and the identity there is at the RGBA8 byte level.
 //   farOutside therefore asks u < -max(gateReach(), cell / sqrt(2) + slop + 2 * teeth
 //   + 1.05 * strandLen + aa): the first operand is step 1, the second steps 2-5 (a sum where a
-//   max would do, as report-investigate-gl.md §6 WP-D wrote it — the surplus is margin). The
-//   gate's reach is NOT added to the edge terms: past -gateReach() the octaves it gates are
-//   exactly zero, so the tear amplitudes cannot move the contour there at all.
+//   max would do — the surplus is margin). The gate's reach is NOT added to the edge terms: past
+//   -gateReach() the octaves it gates are exactly zero, so the tear amplitudes cannot move the
+//   contour there at all.
 //
 // CONTROL FLOW. Both early-outs 'return' under a per-fragment condition, which puts the rest of
 // main() in non-uniform control flow for the fragments that stay. The one derivative the front
@@ -2205,7 +2215,7 @@ void main() {
     // A flap can land outside the base scrap and past the fold lines that cut it — that is
     // exactly how the protruding points happen — so the alpha above is the union of what is left
     // of the sheet with the flaps lying over it, not the sheet alone.
-    float sa = shadowA * uShadow * (1.0 - a);
+    sa = shadowA * uShadow * (1.0 - a);
   }
   float outA = a + sa;
   vec3 rgb = (outA > 1e-4) ? premul / outA : vec3(0.0);
