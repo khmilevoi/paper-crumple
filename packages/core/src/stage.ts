@@ -325,7 +325,7 @@ export async function createStage(
   }
   if (signalAborted()) return abortNow()
 
-  const ctx = env.makeContext?.(host.gl) ?? createGlContext(host.gl)
+  const ctx = env.makeContext?.(host.gl) ?? createGlContext(host.gl, { owned: host.surface.owned })
   teardown.push(() => ctx.dispose())
 
   const sheetMounted = o.sheet.mount(ctx)

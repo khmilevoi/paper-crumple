@@ -90,7 +90,7 @@ export function openFixture(width = 8, height = 8): Fixture | Error {
     canvas.remove()
     return new Error('no WebGL2 context — check the launch flags')
   }
-  const ctx = createGlContext(gl)
+  const ctx = createGlContext(gl, { owned: true })
   describe(gl, ctx)
   return {
     canvas,
