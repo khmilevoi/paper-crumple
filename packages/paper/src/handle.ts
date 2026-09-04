@@ -31,9 +31,10 @@ export interface PaperSheetHandle extends SheetHandle {
    */
   readonly frontRect: Rect
   /**
-   * The front `source()` sized for its `maxSize` and traced the hull on, in texels. `frontRect`
-   * and the hull's own texels are relative to the artwork's centred, 1:1 placement in THIS front;
-   * `build()` needs it to carry both into a front of another size.
+   * The front `source()` sized — the artwork plus its per-axis margin, so not the source's
+   * aspect — bounded by `maxSize` on its long side, and traced the hull on, in texels.
+   * `frontRect` and the hull's own texels are relative to the artwork's centred, 1:1 placement in
+   * THIS front; `build()` needs it to carry both into a front of another size.
    */
   readonly front: Size
   /** `A`, the unpadded artwork the resample wrote (§8.5). */
@@ -89,29 +90,82 @@ export interface OverscanReserve {
  * distance and `p = r / (1000 - 2r)` is not linear in `r`: inflating `p` would reserve a margin
  * no knob value can actually reach.
  *
- * `heightOverWidth` is the front's `h / w`, and matters only above 1. The radius is quoted
- * against the front's HEIGHT (`paper-renderer.ts`'s own `uPxScale = front.h / KNOB_REFERENCE_PX`,
- * and `source()`'s `k`), but the margin `p` buys is the same uv FRACTION of each axis — so on a
- * front narrower than it is tall the x margin holds only `w / h` of the radius, and a silhouette
- * that comes within the difference of its own bitmap's side is sliced flat by the guard band on
- * axis x. That was every 2:3 demo sample at the demo's own defaults: `0.667 × 150 ≈ 100`
- * reference px of x margin against a paint radius of 150. Scaling the radius by `h / w` before it
- * becomes `p` makes the x margin exactly the radius (the y margin, already exact, grows with it);
- * below 1 the y margin is the exact one and the x margin already the larger, so nothing is
- * scaled. The RADIUS returned stays the paint radius, unscaled — `checkReserve` compares paint
- * radii, which know nothing of aspect.
+ * The reserve is aspect-free. The paint radius is quoted against the front's HEIGHT
+ * (`paper-renderer.ts`'s own `uPxScale = front.h / KNOB_REFERENCE_PX`), and `frontForArtwork`
+ * below applies `p` as a margin of `ceil(p * artwork.h)` TEXELS on every side of the artwork —
+ * the same number of texels on x as on y — so the x margin of a tall sprite holds the radius
+ * without scaling the reserve by `h / w`. (An earlier version scaled the radius by `h / w` for
+ * portrait fronts because the margin was one uv fraction of each axis; that made the y margin
+ * `h / w` times larger than needed and cost tall sprites up to a third of their artwork
+ * resolution.) The RADIUS returned stays the paint radius — `checkReserve` compares paint radii.
  */
 export function freezeOverscan(
   params: EdgeParams,
   headroom: number,
-  heightOverWidth = 1,
 ): InstanceType<typeof KnobError> | OverscanReserve {
   const room = Number.isFinite(headroom) && headroom > 0 ? headroom : 0
   const radius = overscanRadius(params) * (1 + room)
-  const scale = Number.isFinite(heightOverWidth) && heightOverWidth > 1 ? heightOverWidth : 1
-  const overscan = overscanFromRadius(radius * scale)
+  const overscan = overscanFromRadius(radius)
   if (KnobError.is(overscan)) return overscan
   return { overscan, radius }
+}
+
+/**
+ * §7.4.3's own rule, reused for `A`, for the front and for the field: the long axis takes
+ * `longSide` exactly, the short axis keeps the SOURCE's aspect ratio (step 3 of the brief's
+ * ten-step pipeline, applied wherever a size is derived from a long-side figure).
+ */
+export function dimsForLongSide(longSide: number, srcW: number, srcH: number, floor = 1): Size {
+  const long = Math.max(srcW, srcH)
+  const short = Math.min(srcW, srcH)
+  const shortSide = Math.max(floor, Math.round((longSide * short) / long))
+  return srcW >= srcH ? { w: longSide, h: shortSide } : { w: shortSide, h: longSide }
+}
+
+/** Everything `source()` sizes from the frozen reserve: the artwork, its margin, and the front. */
+export interface ArtworkFraming {
+  /** `A`, the unpadded artwork, source aspect kept. */
+  readonly artwork: Size
+  /** The margin on EVERY side of the artwork, in texels: `ceil(overscan * artwork.h)`. */
+  readonly margin: number
+  /** `artwork` plus `2 * margin` on each axis. Not the source's aspect. */
+  readonly front: Size
+}
+
+/**
+ * §8.6, per axis. The artwork's long side is `srcLong` under `exact`, else the largest value
+ * `<= artworkLongSide` (when given) whose front fits `maxSize` on its long side; the front is
+ * the artwork plus a `ceil(overscan * artwork.h)` texel margin on every side. The cap's closed
+ * form, `floor(maxSize / (1 + 2 * overscan * min(1, srcH / srcW)))`, can overshoot by the
+ * rounding of the short side and of the margin, so it is corrected by stepping the long side
+ * down until the front fits — at most a couple of steps.
+ */
+export function frontForArtwork(o: {
+  overscan: number
+  srcW: number
+  srcH: number
+  maxSize: number
+  exact: boolean
+  artworkLongSide?: number
+}): InstanceType<typeof SheetError> | ArtworkFraming {
+  const p = o.overscan
+  const srcLong = Math.max(o.srcW, o.srcH)
+  const a = Math.min(1, o.srcH / o.srcW)
+  const capA = Math.floor(o.maxSize / (1 + 2 * p * a))
+  let aLong = o.exact ? srcLong : Math.min(o.artworkLongSide ?? Number.POSITIVE_INFINITY, capA)
+  for (;;) {
+    if (aLong < 1) {
+      return new SheetError(
+        `paperSheet: maxSize ${o.maxSize} leaves no artwork inside the reserved margin ` +
+          `(overscan ${p.toFixed(3)}, spec 8.6)`,
+      )
+    }
+    const artwork = dimsForLongSide(aLong, o.srcW, o.srcH)
+    const margin = Math.ceil(p * artwork.h)
+    const front = { w: artwork.w + 2 * margin, h: artwork.h + 2 * margin }
+    if (o.exact || Math.max(front.w, front.h) <= o.maxSize) return { artwork, margin, front }
+    aLong -= 1
+  }
 }
 
 /**

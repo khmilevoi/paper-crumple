@@ -90,6 +90,8 @@ export function identityView(gl: WebGL2RenderingContext): IdentityView {
       width: IDENTITY_FRONT,
       height: IDENTITY_FRONT,
       rect: { x: IDENTITY_MARGIN, y: IDENTITY_MARGIN, w: IDENTITY_BOX, h: IDENTITY_BOX },
+      // The identity front carries no paper margin around a picture: the box IS the image.
+      artwork: { x: IDENTITY_MARGIN, y: IDENTITY_MARGIN, w: IDENTITY_BOX, h: IDENTITY_BOX },
       bytes: IDENTITY_FRONT * IDENTITY_FRONT * 4,
     },
     bbox: { x: IDENTITY_MARGIN, y: IDENTITY_MARGIN, w: IDENTITY_BOX, h: IDENTITY_BOX },

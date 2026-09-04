@@ -32,7 +32,8 @@ function makeFront(gl: WebGL2RenderingContext): SheetFront {
   gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR)
   gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.LINEAR)
   gl.bindTexture(gl.TEXTURE_2D, null)
-  return { texture, width: 4, height: 4, rect: { x: 0, y: 0, w: 4, h: 4 }, bytes: 64 }
+  const box = { x: 0, y: 0, w: 4, h: 4 }
+  return { texture, width: 4, height: 4, rect: box, artwork: box, bytes: 64 }
 }
 
 /**
@@ -47,7 +48,8 @@ function makeClearFront(gl: WebGL2RenderingContext): SheetFront {
   gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.NEAREST)
   gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.NEAREST)
   gl.bindTexture(gl.TEXTURE_2D, null)
-  return { texture, width: 4, height: 4, rect: { x: 0, y: 0, w: 4, h: 4 }, bytes: 64 }
+  const box = { x: 0, y: 0, w: 4, h: 4 }
+  return { texture, width: 4, height: 4, rect: box, artwork: box, bytes: 64 }
 }
 
 /**

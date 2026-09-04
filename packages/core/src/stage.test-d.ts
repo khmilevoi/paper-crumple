@@ -46,6 +46,17 @@ describe('the three overloads (amendment 8)', () => {
     ).toEqualTypeOf<BlitStage | ReadyError | Aborted>()
   })
 
+  it('accepts artworkCssPx as the third member of that union', async () => {
+    expectTypeOf(
+      await paperStage({
+        sheet: fakeSheet(),
+        motion: fakeMotion(),
+        artworkCssPx: 360,
+        present: 'blit',
+      }),
+    ).toEqualTypeOf<BlitStage | ReadyError | Aborted>()
+  })
+
   it('still infers when the options are built in a variable', async () => {
     // The `Stage<P>` shape this replaces collapsed to `Stage<Present>` here (D1). An overload set
     // resolves on the argument type, so a variable is as good as a literal.

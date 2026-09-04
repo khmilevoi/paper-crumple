@@ -1,9 +1,10 @@
 import { describe, expect, it } from 'vitest'
 import { KnobError, SheetError } from '@paper-crumple/core'
+import type { Size } from '@paper-crumple/core'
 import { handleBytes } from '@paper-crumple/core/unstable'
 import type { EdgeParams } from '@paper-crumple/core/unstable'
 import { packPolygons } from './hull-shape.js'
-import { checkReserve, freezeOverscan, handleFactsFor } from './handle.js'
+import { checkReserve, freezeOverscan, frontForArtwork, handleFactsFor } from './handle.js'
 import type { PaperSheetHandle } from './handle.js'
 
 const hullDefaults: EdgeParams = {
@@ -98,44 +99,116 @@ describe('freezeOverscan (spec 8.6)', () => {
   it('returns a KnobError rather than NaN when the radius cannot fit the reference plane', () => {
     expect(KnobError.is(freezeOverscan({ ...hullDefaults, maxDist: 600 }, 0))).toBe(true)
   })
+})
 
-  // The paint radius is quoted against the front's HEIGHT (`paper-renderer.ts`'s own
-  // `uPxScale = front.h / KNOB_REFERENCE_PX`), but the margin `p` buys is a uv fraction of each
-  // axis's own length — so on a front narrower than it is tall the x margin is only `w / h` of the
-  // radius. A 2:3 sprite at hull defaults reserved 0.667 × 84 ≈ 56 reference px on x for a paint
-  // radius of 84: the demo's every portrait sample tripped the guard band on axis x.
-  it('scales the reserve by h/w for a portrait front so the x margin still holds the paint radius', () => {
-    const plain = freezeOverscan(hullDefaults, 0)
-    const tall = freezeOverscan(hullDefaults, 0, 3 / 2)
-    expect(KnobError.is(plain)).toBe(false)
-    expect(KnobError.is(tall)).toBe(false)
-    if (KnobError.is(plain) || KnobError.is(tall)) return
-    // The x margin, as a fraction of the front's width, is `p / (1 + 2p)`; in the height's
-    // reference frame that is `p / (1 + 2p) × (w / h)` of 1000 — and it must cover the radius.
-    const xMarginRef = (tall.overscan / (1 + 2 * tall.overscan)) * (2 / 3) * 1000
-    expect(xMarginRef).toBeGreaterThanOrEqual(tall.radius - 1e-9)
-    // The plain reserve, applied to the same front, does not — this is the bug.
-    expect((plain.overscan / (1 + 2 * plain.overscan)) * (2 / 3) * 1000).toBeLessThan(plain.radius)
-    // The RADIUS is untouched: `checkReserve` compares paint radii, which know nothing of aspect.
-    expect(tall.radius).toBeCloseTo(plain.radius, 9)
+/** `freezeOverscan(hullDefaults, 0)`'s `overscan`, non-throwing (spec 10.8: no boundary throws). */
+function hullOverscan(): number {
+  const reserve = freezeOverscan(hullDefaults, 0)
+  return KnobError.is(reserve) ? Number.NaN : reserve.overscan
+}
+
+describe('frontForArtwork (spec 8.6, per axis)', () => {
+  const p = hullOverscan()
+
+  it('derives a finite reserve from the hull defaults (precondition for every case below)', () => {
+    expect(Number.isFinite(p)).toBe(true)
   })
 
-  it('leaves a landscape or square front at the plain reserve, whose y margin already equals the radius', () => {
-    const plain = freezeOverscan(hullDefaults, 0)
-    const wide = freezeOverscan(hullDefaults, 0, 2 / 3)
-    const square = freezeOverscan(hullDefaults, 0, 1)
-    expect(KnobError.is(plain)).toBe(false)
-    if (KnobError.is(plain) || KnobError.is(wide) || KnobError.is(square)) return
-    expect(wide.overscan).toBe(plain.overscan)
-    expect(square.overscan).toBe(plain.overscan)
-    expect(freezeOverscan(hullDefaults, 0, Number.NaN)).toEqual(plain)
+  it('reserves the same number of texels on every side, for portrait, square and landscape', () => {
+    const cases: Array<{ srcW: number; srcH: number; artwork: Size; margin: number; front: Size }> =
+      [
+        { srcW: 64, srcH: 96, artwork: { w: 71, h: 106 }, margin: 11, front: { w: 93, h: 128 } },
+        { srcW: 64, srcH: 64, artwork: { w: 106, h: 106 }, margin: 11, front: { w: 128, h: 128 } },
+        { srcW: 96, srcH: 64, artwork: { w: 112, h: 75 }, margin: 8, front: { w: 128, h: 91 } },
+      ]
+    for (const c of cases) {
+      const result = frontForArtwork({
+        overscan: p,
+        srcW: c.srcW,
+        srcH: c.srcH,
+        maxSize: 128,
+        exact: false,
+      })
+      expect(SheetError.is(result)).toBe(false)
+      if (SheetError.is(result)) continue
+      expect(Math.max(result.front.w, result.front.h)).toBeLessThanOrEqual(128)
+      expect(result.front.w - result.artwork.w).toBe(2 * result.margin)
+      expect(result.front.h - result.artwork.h).toBe(2 * result.margin)
+      expect(result.margin).toBe(Math.ceil(p * result.artwork.h))
+      expect(result.artwork).toEqual(c.artwork)
+      expect(result.margin).toBe(c.margin)
+      expect(result.front).toEqual(c.front)
+
+      // Maximality: one more texel on the long side would not fit `maxSize`.
+      const longer = frontForArtwork({
+        overscan: p,
+        srcW: c.srcW,
+        srcH: c.srcH,
+        maxSize: 128,
+        exact: false,
+        artworkLongSide: Math.max(c.artwork.w, c.artwork.h) + 1,
+      })
+      expect(SheetError.is(longer)).toBe(false)
+      if (SheetError.is(longer)) continue
+      expect(longer.artwork).toEqual(c.artwork)
+    }
   })
 
-  it('applies headroom and the h/w scale to the same radius, so the KnobError ceiling moves with both', () => {
-    // 84 × 1.5 × 4 = 504 reference px per side: past the plane for THIS sprite even though the
-    // factory (scale 1, 84 × 4 = 336) accepted the same headroom.
-    expect(KnobError.is(freezeOverscan(hullDefaults, 3, 1.5))).toBe(true)
-    expect(KnobError.is(freezeOverscan(hullDefaults, 3, 1))).toBe(false)
+  it('honours artworkLongSide and clamps it to what maxSize can hold', () => {
+    for (const { srcW, srcH, front } of [
+      { srcW: 64, srcH: 96, front: { w: 349, h: 482 } },
+      { srcW: 96, srcH: 64, front: { w: 454, h: 321 } },
+    ]) {
+      const result = frontForArtwork({
+        overscan: p,
+        srcW,
+        srcH,
+        maxSize: 640,
+        exact: false,
+        artworkLongSide: 400,
+      })
+      expect(SheetError.is(result)).toBe(false)
+      if (SheetError.is(result)) continue
+      expect(Math.max(result.artwork.w, result.artwork.h)).toBe(400)
+      expect(result.front).toEqual(front)
+    }
+
+    const clamped = frontForArtwork({
+      overscan: p,
+      srcW: 64,
+      srcH: 96,
+      maxSize: 256,
+      exact: false,
+      artworkLongSide: 400,
+    })
+    expect(SheetError.is(clamped)).toBe(false)
+    if (SheetError.is(clamped)) return
+    expect(Math.max(clamped.front.w, clamped.front.h)).toBeLessThanOrEqual(256)
+    expect(clamped.artwork).toEqual({ w: 141, h: 212 })
+    expect(clamped.margin).toBe(22)
+    expect(clamped.front).toEqual({ w: 185, h: 256 })
+  })
+
+  it('under exact keeps the source and ignores maxSize and artworkLongSide', () => {
+    const result = frontForArtwork({
+      overscan: p,
+      srcW: 40,
+      srcH: 40,
+      maxSize: 16,
+      exact: true,
+      artworkLongSide: 8,
+    })
+    expect(SheetError.is(result)).toBe(false)
+    if (SheetError.is(result)) return
+    expect(result.artwork).toEqual({ w: 40, h: 40 })
+    const margin = Math.ceil(p * 40)
+    expect(result.margin).toBe(margin)
+    expect(result.front).toEqual({ w: 40 + 2 * margin, h: 40 + 2 * margin })
+  })
+
+  it('returns a SheetError when nothing fits', () => {
+    const result = frontForArtwork({ overscan: 0.5, srcW: 10, srcH: 10, maxSize: 1, exact: false })
+    expect(SheetError.is(result)).toBe(true)
   })
 })
 

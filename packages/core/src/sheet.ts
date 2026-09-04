@@ -27,6 +27,15 @@ export interface SheetFront {
   readonly height: number
   /** The paper's box, in texture pixels. */
   readonly rect: Rect
+  /**
+   * The unpadded artwork's box in this front, in texture pixels — where `build()` copied the
+   * source 1:1 (§7.4.2), which is the one rectangle the paper is built *around* and the one a
+   * consumer laying out the picture rather than the paper has to know. The motion slot centres
+   * the sheet on `rect`, not on this, so the artwork's place on the screen is neither the
+   * front's centre nor `rect`'s; `View.frame` maps this box through that placement so nothing
+   * downstream has to reconstruct it.
+   */
+  readonly artwork: Rect
   readonly bytes: number
 }
 
@@ -37,6 +46,15 @@ export interface SheetFront {
 export type SourceOptions = {
   maxSize: number
   exact: boolean
+  /**
+   * The artwork's wanted long side, in texels — the stage's `ceil(artworkCssPx x dpr)`. A slot
+   * gives the artwork this many texels when its front still fits `maxSize`, and the largest
+   * that does otherwise; absent, the artwork is what `maxSize` leaves after the margin (§8.6's
+   * `A = maxSize / (1 + 2p)`), which is the `cssPx` / `maxSize` stages' contract. Optional, so a
+   * slot that ignores it keeps compiling — and then `artworkCssPx` degrades to the `maxSize`
+   * reading for that slot.
+   */
+  artworkLongSide?: number
   signal?: AbortSignal
   /**
    * The sheet's knob values for the sprite — §6.6's ladder projected onto the slot, the very bag
@@ -61,7 +79,11 @@ export type SourceOptions = {
  */
 export interface SheetRenderer<K extends Knobs = Knobs, H extends SheetHandle = SheetHandle> {
   readonly knobs: readonly KnobDescriptor[]
-  /** How much larger the sheet is than the artwork it carries, per side. See §8.6. */
+  /**
+   * The margin reserved on every side of the artwork, as a fraction of the artwork's height, so
+   * that a front's long side is at most `artwork x (1 + 2 x overscan)` for every aspect — the
+   * number the stage sizes its surface from under `artworkCssPx`. See §8.6.
+   */
   readonly overscan: number
 
   mount(ctx: GlContext): InstanceType<typeof GlError> | undefined

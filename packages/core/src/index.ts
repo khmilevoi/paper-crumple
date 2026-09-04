@@ -114,8 +114,8 @@ export type { ViewState } from './view-state.js'
 
 // P5 — resolution (spec 7.4). `sizeForDisplay` is the one name that takes the number of places
 // `devicePixelRatio` is thought about from N to one.
-export { sizeForDisplay } from './resolution.js'
-export type { DisplaySizeRequest } from './resolution.js'
+export { FRONT_LONG_SIDE_CAP, frontCapFor, sizeForDisplay } from './resolution.js'
+export type { DisplaySizeRequest, FrontCapRequest } from './resolution.js'
 
 // --- P15: the sprite source path (§4.1, §8.5.1, §8.5.4, amendments 9 and 10) ---
 // Four type-only names, and no machinery. `SpriteSource` is the type of `add`'s first parameter,
@@ -130,5 +130,5 @@ export type { BitmapSupplier, PinFor, PinnedSource, SpriteSource } from './sourc
 export { paperStage } from './stage.js'
 export type { AddOptions, BlitStage, DirectStage, Fit, HostedStage, StageCommon } from './stage.js'
 export type { Sprite } from './sprite.js'
-export type { SwapOptions } from './view.js'
+export type { SwapOptions, ViewFrame } from './view.js'
 export { presetForImageId } from './preset.js'

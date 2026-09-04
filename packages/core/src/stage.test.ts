@@ -4,6 +4,7 @@ import { GlError } from './errors.js'
 import { createStage, type StageEnv } from './stage.js'
 import type { StageOptions } from './stage-types.js'
 import { createFakeTimers } from './testing/fake-timers.js'
+import { asBitmap, fakeBitmap } from './testing/fake-source.js'
 import { fakeGlContext, fakeMotion, fakeSheet } from './testing/fake-slots.js'
 
 function env(over: Partial<StageEnv> = {}): StageEnv {
@@ -70,8 +71,66 @@ describe('paperStage(), the factory', () => {
       e,
     )
     if (stage instanceof Error || isAborted(stage)) return expect.fail('stage refused')
-    // sizeForDisplay({ cssPx: 192, dpr: 2, cap: 512 }) === 384
+    // sizeForDisplay({ cssPx: 192, dpr: 2, cap: 2048 }) === 384
     expect(stage.surface.width).toBe(384)
+    stage.dispose()
+  })
+
+  it('derives the surface and the artwork request from artworkCssPx', async () => {
+    const e = env({ dpr: 1.5 })
+    const sheet = fakeSheet()
+    const stage = await createStage(
+      { sheet, motion: fakeMotion(), artworkCssPx: 360, present: 'blit' },
+      e,
+    )
+    if (stage instanceof Error || isAborted(stage)) return expect.fail('stage refused')
+    // frontCapFor({ artworkLongSide: 540, overscan: 0.08, cap: 2048 }): 540 * 1.16 = 626.4 -> 627
+    // -> sizeForDisplay rounds up to the next multiple of 64 -> 640.
+    expect(stage.surface.width).toBe(640)
+    const sprite = await stage.add(asBitmap(fakeBitmap({ width: 64, height: 64 })), {
+      key: 'a',
+      pin: true,
+    })
+    if (sprite instanceof Error || isAborted(sprite)) return expect.fail('add refused')
+    expect(sheet.calls.source[0]?.o.artworkLongSide).toBe(540)
+    expect(sheet.calls.source[0]?.o.maxSize).toBe(640)
+    stage.dispose()
+  })
+
+  it('threads artworkLongSide through the re-source path too', async () => {
+    const e = env({ dpr: 1.5 })
+    const sheet = fakeSheet()
+    const stage = await createStage(
+      { sheet, motion: fakeMotion(), artworkCssPx: 360, present: 'blit' },
+      e,
+    )
+    if (stage instanceof Error || isAborted(stage)) return expect.fail('stage refused')
+    const a = await stage.add(asBitmap(fakeBitmap({ width: 64, height: 64 })), {
+      key: 'a',
+      pin: true,
+    })
+    if (a instanceof Error || isAborted(a)) return expect.fail('add refused')
+    const sources = sheet.calls.source.length
+    // A hull-tier knob write re-sources the sprite (stage-knobs.test.ts's own device).
+    a.set({ sheetHull: 0.9 } as never)
+    await vi.waitFor(() => expect(sheet.calls.source.length).toBe(sources + 1))
+    expect(sheet.calls.source.at(-1)?.o.artworkLongSide).toBe(540)
+    stage.dispose()
+  })
+
+  it('cssPx stages pass no artworkLongSide and are capped at 2048', async () => {
+    const e = env({ dpr: 3 })
+    const sheet = fakeSheet()
+    const stage = await createStage({ sheet, motion: fakeMotion(), cssPx: 400, present: 'blit' }, e)
+    if (stage instanceof Error || isAborted(stage)) return expect.fail('stage refused')
+    // sizeForDisplay({ cssPx: 400, dpr: 3, cap: 2048 }): 1200 -> next multiple of 64 -> 1216.
+    expect(stage.surface.width).toBe(1216)
+    const sprite = await stage.add(asBitmap(fakeBitmap({ width: 64, height: 64 })), {
+      key: 'a',
+      pin: true,
+    })
+    if (sprite instanceof Error || isAborted(sprite)) return expect.fail('add refused')
+    expect(sheet.calls.source[0]?.o.artworkLongSide).toBeUndefined()
     stage.dispose()
   })
 

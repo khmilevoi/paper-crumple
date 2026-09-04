@@ -50,7 +50,7 @@ import {
   type RunHost,
   type StagePlayOptions,
 } from './runner.js'
-import { sdfResFor, sizeForDisplay } from './resolution.js'
+import { FRONT_LONG_SIDE_CAP, frontCapFor, sdfResFor, sizeForDisplay } from './resolution.js'
 import {
   normalizeSource,
   type NormalizedSource,
@@ -221,9 +221,6 @@ type AnyStageOptions = StageOptions & {
   gl?: WebGL2RenderingContext
 }
 
-/** §4.0's cap on `cssPx`, stated once. */
-const CSS_PX_CAP = 512
-
 /**
  * The stage's own event payload map, per `emitter.ts`'s documented convention: the stage's bus
  * adds `view` to every payload, where a view's own bus does not.
@@ -285,7 +282,16 @@ export async function createStage(
   if (o.onError !== undefined) bus.on('error', o.onError)
 
   const dpr = readDpr(env)
-  const maxSize = o.maxSize ?? sizeForDisplay({ cssPx: o.cssPx ?? 0, dpr, cap: CSS_PX_CAP })
+  // §7.4 / §8.6: the front cap, which is also the owned surface's side. `artworkCssPx` states the
+  // ARTWORK's display footprint and the sheet's reserve says how much front that needs; `cssPx`
+  // states the PAPER's, so the front is the footprint itself.
+  const artworkLongSide =
+    o.artworkCssPx !== undefined ? Math.ceil(Math.max(0, o.artworkCssPx * dpr) || 0) : undefined
+  const maxSize =
+    o.maxSize ??
+    (artworkLongSide !== undefined
+      ? frontCapFor({ artworkLongSide, overscan: o.sheet.overscan, cap: FRONT_LONG_SIDE_CAP })
+      : sizeForDisplay({ cssPx: o.cssPx ?? 0, dpr, cap: FRONT_LONG_SIDE_CAP }))
 
   const host =
     o.gl !== undefined
@@ -382,6 +388,7 @@ export async function createStage(
     policy,
     timers,
     dpr,
+    artworkLongSide,
     warnings,
     isLost: () => lost,
     isDisposed: () => disposed,
@@ -433,6 +440,9 @@ interface StageParts {
   policy: ErrorPolicy
   timers: Timers
   dpr: number
+  /** `SourceOptions.artworkLongSide` for every `source()` call this stage makes — `undefined`
+   *  unless the stage was built with `artworkCssPx`. */
+  artworkLongSide: number | undefined
   warnings: Error[]
   isLost: () => boolean
   isDisposed: () => boolean
@@ -576,6 +586,7 @@ function buildStage(p: StageParts): BuiltStage {
     }
     const handle = await p.o.sheet.source(got.bitmap, {
       maxSize: p.host.surface.width,
+      artworkLongSide: p.artworkLongSide,
       exact: record.exact,
       // §6.3 — the hull is traced at the sprite's current values, hull tier included. A knob that
       // moves again while this decode is out shows up as drift on the rebuild below, which
@@ -1113,6 +1124,32 @@ function buildStage(p: StageParts): BuiltStage {
       get idealSize() {
         return record?.fit.frontSize ?? { w: 0, h: 0 }
       },
+      // Where the artwork lands in the box this view draws into. The placement rule is the motion
+      // slot's (`packages/motion/src/source.ts`): the sheet window is centred on the PAPER's box
+      // (`front.rect`) and the front is scaled into `dest` by one uniform factor — the same rule
+      // `resolveTarget` already relies on to make a blit view's dest the front's own box. The
+      // artwork sits at `front.artwork` in the front, so its distance from the paper's centre,
+      // scaled by that factor, is its distance from the box's centre. Box pixels, top-left
+      // origin, y down: the front is y-down and the sheet shader shows it unflipped, so a front
+      // row offset is a screen row offset. `null` without a resident front — nothing is drawn
+      // then, so there is nothing to frame.
+      get frame() {
+        const front = record?.front ?? null
+        if (front === null) return null
+        const { dest } = targetFor({ w: front.width, h: front.height })
+        const k = Math.min(dest.w / front.width, dest.h / front.height)
+        const paperCx = front.rect.x + front.rect.w / 2
+        const paperCy = front.rect.y + front.rect.h / 2
+        return {
+          box: { w: dest.w, h: dest.h },
+          artwork: {
+            x: dest.w / 2 + (front.artwork.x - paperCx) * k,
+            y: dest.h / 2 + (front.artwork.y - paperCy) * k,
+            w: front.artwork.w * k,
+            h: front.artwork.h * k,
+          },
+        }
+      },
 
       show(sprite) {
         if (p.isDisposed()) return undefined // React runs cleanups child-first (§4.6)
@@ -1232,6 +1269,7 @@ function buildStage(p: StageParts): BuiltStage {
     const sheetKnobs = p.registry.projector('sheet')(at)
     const handle = await p.o.sheet.source(acquired.bitmap, {
       maxSize: p.host.surface.width,
+      artworkLongSide: p.artworkLongSide,
       exact: opts.exact === true,
       signal: opts.signal,
       // §6.3 — the hull is traced at the stage's current values, hull tier included, and the

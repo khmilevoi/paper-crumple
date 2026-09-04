@@ -121,6 +121,10 @@ export function overscanFor(p: EdgeParams): InstanceType<typeof KnobError> | num
  * `maxSize` here is the front's long side, not the stage-level `maxSize` knob - spec 8.6's bucket
  * scheme makes the two coincide, but a caller reaching for this outside that scheme should pass the
  * sprite's front, the same value `sdfResFor` (spec 7.4.3) is based on.
+ *
+ * `paperSheet()` no longer uses this: it reserves the margin per axis in texels
+ * (`paper/src/handle.ts`'s `frontForArtwork`), for which this uniform-fraction form is the
+ * portrait/square case.
  */
 export function artworkLongSide(maxSize: number, overscan: number): number {
   return Math.ceil(maxSize / (1 + 2 * overscan))
@@ -129,6 +133,10 @@ export function artworkLongSide(maxSize: number, overscan: number): number {
 /**
  * The front's long side under `exact: true`: `ceil(source x (1 + 2p))` (spec 7.4.3) - larger than
  * the source, because the paper margin still has to fit.
+ *
+ * `paperSheet()` no longer uses this: it reserves the margin per axis in texels
+ * (`paper/src/handle.ts`'s `frontForArtwork`), for which this uniform-fraction form is the
+ * portrait/square case.
  */
 export function exactFrontLongSide(sourceLongSide: number, overscan: number): number {
   return Math.ceil(sourceLongSide * (1 + 2 * overscan))

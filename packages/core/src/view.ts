@@ -1,7 +1,7 @@
 import type { Aborted } from './abort.js'
 import type { SheetError } from './errors.js'
 import type { KnobDescriptor } from './forward.js'
-import type { Size } from './geometry.js'
+import type { Rect, Size } from './geometry.js'
 import type { EventName, Events } from './events.js'
 import type { KnobSetter, ViewKnobPatch } from './knob-patch.js'
 import type { PoseRef } from './pose.js'
@@ -18,6 +18,29 @@ type AnySlot = readonly KnobDescriptor[]
 export interface SwapOptions extends PlayOptions {
   /** Named because a `crumpleTo` chained by hand does not reproduce the ball hold (§7.2). */
   duration?: number
+}
+
+/**
+ * Where the shown sprite's **artwork** lands in the box the view draws into.
+ *
+ * `box` is the destination the sheet is drawn into, in its own pixels: the front's box for a
+ * `{ canvas }` view (what the blit copies out), the rect itself for a `{ rect }` view, the
+ * framebuffer's rect for a `{ framebuffer }` one. `artwork` is the unpadded source inside that
+ * box — the picture, without the paper around it — at pose 0. Both are in the box's pixels;
+ * `artwork` is measured from the box's top-left corner, y down, the way the box appears on the
+ * screen (a `{ rect }` view's rect is placed in GL coordinates, and its screen position is the
+ * consumer's to know). A consumer pinning the picture at a fixed on-screen rectangle and letting
+ * the paper overflow past it sizes and offsets its element from these two boxes and nothing else:
+ * one scale, `cssPx / max(artwork.w, artwork.h)`, applied to both.
+ *
+ * The motion slot centres the sheet on the *paper's* box (`SheetFront.rect`), which the hull
+ * grows asymmetrically around the picture, so the artwork is neither centred in `box` nor a
+ * constant fraction of it — and a hull-tier knob moves it. Read it again after the re-source
+ * such a knob triggers has landed (`stage.prepare(key)` joins it), and after every swap.
+ */
+export interface ViewFrame {
+  readonly box: Size
+  readonly artwork: Rect
 }
 
 /**
@@ -44,6 +67,11 @@ export interface View {
   readonly tag: string | undefined
   /** What the motion slot asked the front be rendered at (amendment 13). */
   readonly idealSize: Size
+  /**
+   * Where the shown sprite's artwork lands in the box this view draws into — `null` while no
+   * sprite is shown or its front is not resident (evicted, or a re-source still in flight).
+   */
+  readonly frame: ViewFrame | null
 
   // --- drawing ---
   show(sprite: Sprite | null): InstanceType<typeof SheetError> | undefined

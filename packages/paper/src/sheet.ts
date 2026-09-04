@@ -34,11 +34,9 @@ import type {
   SourceOptions,
 } from '@paper-crumple/core'
 import {
-  artworkLongSide,
   checkGuardBand,
   createScratchPools,
   drawTargetFor,
-  exactFrontLongSide,
   hullCacheKey,
   KNOB_REFERENCE_PX,
   overscanRadius,
@@ -52,7 +50,13 @@ import { growBox, scaleBox, sheetRectFromExtent, signedFieldExtent } from './ext
 import type { AlphaBox } from './mask.js'
 import { createSdfBuilder, sigmaFor, SDF_POOL_SLOTS } from './gl-sdf.js'
 import type { Field, LooseField, SdfBuilder } from './gl-sdf.js'
-import { checkReserve, freezeOverscan, handleBytesFor } from './handle.js'
+import {
+  checkReserve,
+  dimsForLongSide,
+  freezeOverscan,
+  frontForArtwork,
+  handleBytesFor,
+} from './handle.js'
 import type { PaperSheetHandle } from './handle.js'
 import { hullCache } from './hull-cache.js'
 import type { HullCache, HullCacheKey } from './hull-cache.js'
@@ -99,20 +103,27 @@ export interface PaperSheetOptions {
 /**
  * `paperSheet()`'s own contract: `SheetRenderer` plus the two names this slot adds.
  *
- * **`overscan` here is the FACTORY-level figure, and it is a different number from a sprite's
- * own reserve the moment a consumer touches a margin knob.** It is computed once, synchronously,
- * as `freezeOverscan(edgeParamsFrom(edgeMode, defaultsFor(edgeMode)), overscanHeadroom).overscan`
- * — this factory's *default* knob values, before any sprite exists. Spec 5.2 puts one readonly
- * number on `SheetRenderer` because the core reads `sheet.overscan` before `add()` has produced a
- * handle to ask instead. Spec 8.6, by contrast, derives overscan *per sprite* from that sprite's
- * own edge-knob values and freezes it at `add()` (`handle.ts`'s `PaperSheetHandle.overscan` /
- * `freezeOverscan`). The two coincide only while a sprite's edge knobs still sit at this
- * factory's defaults; the instant a consumer sets, say, a larger `maxDist` on one sprite,
- * `sheet.overscan` keeps reporting the factory baseline and that sprite's own handle carries the
- * sprite's real, larger reserve. A sprite taller than it is wide carries a larger reserve even
- * at the defaults — `freezeOverscan` scales the radius by the front's `h / w` so the x margin
- * holds it (its own doc comment says why), and this baseline is a square sprite's. Neither
- * number is wrong; they answer different questions asked at different times.
+ * **`overscan` is THE reserve: every sprite's, not only a square one's.** It is computed once,
+ * synchronously, as `freezeOverscan(edgeParamsFrom(edgeMode, defaultsFor(edgeMode)),
+ * overscanHeadroom).overscan` — this factory's *default* knob values plus the headroom, before
+ * any sprite exists — and `source()` freezes exactly this number onto every handle. Spec 5.2
+ * puts one readonly number on `SheetRenderer` because the core reads `sheet.overscan` to size
+ * its surface before `add()` has produced a handle to ask instead, and with an aspect-free
+ * reserve that number is exact: a front's long side is at most `artwork × (1 + 2·overscan)`
+ * for every aspect (`frontForArtwork` in `handle.ts`).
+ *
+ * The reserve is applied as `ceil(overscan × artwork.h)` texels on every side of the artwork,
+ * not as a uv fraction, so a tall sprite's x margin holds the paint radius without the radius
+ * being scaled by `h / w`. Spec 8.6's "derived per sprite from its edge parameters and frozen at
+ * `add()`" is read here as: derived from THIS FACTORY'S edge parameters — its defaults and its
+ * headroom — and frozen for the sprite's life. It is deliberately NOT
+ * read as "from whatever the knobs held when the sprite was added": `maxDist` is a hull-tier
+ * knob, every hull-tier write re-runs `source()` (spec 6.3), and `source()` has no memory of an
+ * earlier handle — a reserve taken from the live values would be re-frozen on every re-source,
+ * which is exactly the silent artwork rescale the frozen reserve exists to forbid. The one
+ * consistent reading is the one `build()`'s step-4 `checkReserve` already implements: the
+ * factory's reserve is the ceiling, a knob past it is "re-add required", and `overscanHeadroom`
+ * is the way to buy room before any sprite exists.
  */
 export interface PaperSheet extends SheetRenderer<Knobs, PaperSheetHandle> {
   readonly edgeMode: PaperEdgeMode
@@ -258,18 +269,6 @@ interface Mounted {
      */
     readonly paperField: Field | null
   } | null
-}
-
-/**
- * §7.4.3's own rule, reused for `A`, for the front and for the field: the long axis takes
- * `longSide` exactly, the short axis keeps the SOURCE's aspect ratio (step 3 of the brief's
- * ten-step pipeline, applied wherever a size is derived from a long-side figure).
- */
-function dimsForLongSide(longSide: number, srcW: number, srcH: number, floor = 1): Size {
-  const long = Math.max(srcW, srcH)
-  const short = Math.min(srcW, srcH)
-  const shortSide = Math.max(floor, Math.round((longSide * short) / long))
-  return srcW >= srcH ? { w: longSide, h: shortSide } : { w: shortSide, h: longSide }
 }
 
 /**
@@ -579,7 +578,9 @@ export function paperSheet(options?: PaperSheetOptions): PaperSheet {
    * keys only, so a torn sheet handed `minDist` keeps ignoring it, exactly as `build()` does. No
    * projection traces at the defaults.
    *
-   * Nothing else in `source()` may follow the live knobs. The reserve and the overscan `p` it
+   * Nothing else in `source()` may follow the live knobs — and that includes `maxDist`, which IS
+   * in the hull tier this function lets through: the reserve is derived from `reserveParams`,
+   * the defaults, and never from the values this returns. The reserve and the overscan `p` it
    * derives — and with `p` the artwork's own resolution `A = maxSize / (1 + 2p)` — are frozen at
    * add() for the sprite's life (§8.6): a re-source that read the live `tearAmp` or `looseness`
    * handed back a handle with another `p` than the fit was sized over, so `build()` placed a
@@ -608,9 +609,12 @@ export function paperSheet(options?: PaperSheetOptions): PaperSheet {
     return out
   }
 
-  // §6.5/§8.6: the factory-level baseline. See `PaperSheet.overscan`'s doc comment for why this
-  // is not the same number `add()` later freezes onto a sprite's own handle.
-  const reserve = freezeOverscan(edgeParamsFrom(edgeMode, defaultsFor(edgeMode)), overscanHeadroom)
+  // §6.5/§8.6: the edge parameters every reserve in this factory is derived from — the mode's
+  // defaults, never a sprite's live values (`source()`'s step 1 says why) — and the factory-level
+  // baseline itself. See `PaperSheet.overscan`'s doc comment: a sprite's own handle carries this
+  // same number.
+  const reserveParams = edgeParamsFrom(edgeMode, defaultsFor(edgeMode))
+  const reserve = freezeOverscan(reserveParams, overscanHeadroom)
   // Every mode's own *default* knob values alone reserve well under the 500 reference-px ceiling
   // `overscanFromRadius` guards — but `overscanHeadroom` is a user-supplied factory option with no
   // upper bound (`freezeOverscan` scales the radius by `1 + headroom`), so this branch genuinely IS
@@ -817,38 +821,32 @@ export function paperSheet(options?: PaperSheetOptions): PaperSheet {
     const srcW = info.srcW
     const srcH = info.srcH
 
-    // Step 1: handle-level overscan. The front keeps the source's aspect (`dimsForLongSide`,
-    // below), so `srcH / srcW` IS the front's `h / w` that `freezeOverscan` scales a portrait
-    // sprite's reserve by — its own doc comment says why the x margin needs it.
-    const sourceReserve = freezeOverscan(edgeParams, overscanHeadroom, srcH / srcW)
-    if (KnobError.is(sourceReserve)) {
-      // `KnobError` is not a member of `SourceError` (only `SheetError | GlError` are, per
-      // amendment 1's `results.ts`), so it is wrapped rather than returned "as is" at the type
-      // level; the cause is preserved. Reachable, unlike the factory-level branch `paperSheet()`
-      // refuses `mount()` on: the `h / w` scale applies on top of `overscanHeadroom`, so a
-      // headroom the factory accepted for a square sprite can still push a tall sprite's reserve
-      // past the reference plane.
-      return new SheetError(
-        `paperSheet: source() could not derive overscan for a ${srcW}x${srcH} source — its h/w ` +
-          'scales the reserve (spec 8.6); pass a smaller overscanHeadroom or smaller edge knobs',
-        { cause: sourceReserve },
-      )
-    }
-    const p = sourceReserve.overscan
+    // Step 1: the frozen reserve — this factory's DEFAULTS plus `overscanHeadroom`, never the
+    // live hull tier (`maxDist` is both a hull-tier knob and the whole of `r_hull`, so a reserve
+    // taken from `edgeParams` would be re-frozen on every hull-tier re-source: `p` grew, `A`
+    // shrank, and the artwork visibly rescaled inside a bucket `fit` had sized once). Aspect-free
+    // (`handle.ts`'s `freezeOverscan`), so it IS `overscan` above; `mount()` already refused when
+    // that derivation failed, and `source()` returns before this line without a mount.
+    const p = overscan
 
-    // Steps 2-3: frontLongSide, A_long, and A itself (source aspect kept).
-    const sourceLongSide = Math.max(srcW, srcH)
-    const frontLongSide = o.exact ? exactFrontLongSide(sourceLongSide, p) : o.maxSize
-    const aLongSide = o.exact ? sourceLongSide : artworkLongSide(o.maxSize, p)
-    const artwork = dimsForLongSide(aLongSide, srcW, srcH)
+    // Steps 2-3: the artwork, its per-axis margin and the front it sits in (§8.6, `handle.ts`).
+    // `artworkLongSide` (optional on `SourceOptions`) is `artworkCssPx`'s own channel from the
+    // stage; absent, the artwork is what `maxSize` leaves after the margin, as it always was.
+    const framing = frontForArtwork({
+      overscan: p,
+      srcW,
+      srcH,
+      maxSize: o.maxSize,
+      exact: o.exact,
+      artworkLongSide: o.artworkLongSide,
+    })
+    if (SheetError.is(framing)) return framing
+    const { artwork, front } = framing
+    const frontLongSide = Math.max(front.w, front.h)
 
     // Step 4: sdfRes, off the front's long side (§7.4.3).
     const sdfRes = resolveSdfRes(numKnob(values, 'sdfRes', 0), frontLongSide)
 
-    // The front's own size (never materialised as a texture here — task 12's `build()` does
-    // that) and the field's size, both keeping the source aspect at their own long side; and
-    // where the artwork sits in that front, which every framing below is taken from.
-    const front = dimsForLongSide(frontLongSide, srcW, srcH)
     const field = fieldDimsFor(sdfRes, front)
     const placement = artworkPlacement(front, artwork)
 
@@ -1128,13 +1126,14 @@ export function paperSheet(options?: PaperSheetOptions): PaperSheet {
     }
 
     // Step 4 (spec 8.6): checkReserve catches a front-class slider dragged past the frozen
-    // margin. `reserve` (this factory's own closure variable, above) is the same
-    // `freezeOverscan(edgeParamsFrom(edgeMode, defaultsFor(edgeMode)), overscanHeadroom)` that
-    // `source()` freezes onto every handle it hands out — deterministic in those three inputs,
-    // none of which vary per sprite or over a sheet's life, so re-reading it here is exactly
-    // "the handle's own frozen reserve" without a field added to the handle for it. `KnobError`
-    // is unreachable here (mount() above already refused whenever `reserve` is one), kept
-    // because §10.8 forbids unwrapping an `Error | T` unchecked even on a branch believed dead.
+    // margin. `reserve` (this factory's own closure variable, above) carries the same RADIUS
+    // `source()` freezes onto every handle: both are `freezeOverscan(reserveParams,
+    // overscanHeadroom)`, which is aspect-free, so the radius is
+    // deterministic in (mode, defaults, headroom), none of which vary per sprite or over a sheet's
+    // life, and re-reading it here is exactly "the handle's own frozen reserve" without a field
+    // added to the handle for it. `KnobError` is unreachable here (mount() above already refused
+    // whenever `reserve` is one), kept because §10.8 forbids unwrapping an `Error | T` unchecked
+    // even on a branch believed dead.
     if (KnobError.is(reserve)) {
       return new SheetError('paperSheet: build() could not derive the frozen overscan reserve', {
         cause: reserve,
@@ -1392,6 +1391,9 @@ export function paperSheet(options?: PaperSheetOptions): PaperSheet {
       width: size.w,
       height: size.h,
       rect,
+      // The one box the paper was built around, reported so a consumer can lay the picture out
+      // without re-deriving the placement rule; `View.frame` maps it through the motion slot's.
+      artwork: placement,
       bytes: front.bytes,
     }
     m.liveFronts.add(front)

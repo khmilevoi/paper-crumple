@@ -12,6 +12,14 @@ export const SDF_RES_MIN = 128
 /** Ceiling of `sdfResFor` (spec 7.4.3). */
 export const SDF_RES_MAX = 512
 
+/**
+ * The cap on a front's long side, in texels — and therefore on the owned surface's side. 2048 is
+ * WebGL2's guaranteed `MAX_TEXTURE_SIZE` floor, so no `caps` check is needed for a front the
+ * stage derives; a consumer passing `maxSize` above it must consult `stage.caps.maxTextureSize`.
+ * This is NOT a cap on CSS pixels: `sizeForDisplay` applies it after `cssPx x dpr`.
+ */
+export const FRONT_LONG_SIDE_CAP = 2048
+
 export interface DisplaySizeRequest {
   /** The sprite's CSS-pixel footprint on the long side. */
   readonly cssPx: number
@@ -37,6 +45,28 @@ export function sizeForDisplay(o: DisplaySizeRequest): number {
   const capped = Math.max(SIZE_QUANTUM, Math.floor((o.cap || 0) / SIZE_QUANTUM) * SIZE_QUANTUM)
   const wanted = SIZE_QUANTUM * Math.ceil((Math.max(0, o.cssPx * o.dpr) || 0) / SIZE_QUANTUM)
   return Math.min(capped, Math.max(SIZE_QUANTUM, wanted))
+}
+
+export interface FrontCapRequest {
+  /** The artwork's wanted long side, in texels — `ceil(artworkCssPx x dpr)`. */
+  readonly artworkLongSide: number
+  /** The sheet's reserve, `SheetRenderer.overscan`: a front's long side is at most
+   *  `artworkLongSide x (1 + 2 x overscan)` for every aspect. */
+  readonly overscan: number
+  readonly cap: number
+}
+
+/**
+ * The front cap — the owned surface's side — that lets every sprite carry `artworkLongSide`
+ * artwork texels: `artworkLongSide x (1 + 2 x overscan)`, rounded up to a multiple of 64 and
+ * clamped to `cap`, through `sizeForDisplay` at `dpr` 1 so the two share one quantisation. A
+ * non-finite `overscan` (a sheet whose reserve could not be derived; its `mount()` refuses) is
+ * read as "reserve everything" and lands on `cap`, never on the floor.
+ */
+export function frontCapFor(o: FrontCapRequest): number {
+  const p = Number.isFinite(o.overscan) ? Math.max(0, o.overscan) : Number.POSITIVE_INFINITY
+  const wanted = Math.ceil(Math.max(0, o.artworkLongSide) * (1 + 2 * p))
+  return sizeForDisplay({ cssPx: wanted, dpr: 1, cap: o.cap })
 }
 
 /**

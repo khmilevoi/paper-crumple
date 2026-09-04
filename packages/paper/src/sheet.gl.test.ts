@@ -171,7 +171,7 @@ describe('source() (spec 5.2, 8.5, 8.6)', () => {
     sheet.dispose()
   })
 
-  it('sizes the artwork at A = maxSize / (1 + 2p), unpadded', async () => {
+  it('sizes the artwork so that it plus its per-axis margin fills maxSize', async () => {
     const ctx = open()
     const sheet = paperSheet()
     sheet.mount(ctx)
@@ -180,7 +180,11 @@ describe('source() (spec 5.2, 8.5, 8.6)', () => {
     bitmap.close()
     expect(handle instanceof Error || isAborted(handle)).toBe(false)
     if (handle instanceof Error || isAborted(handle)) return
-    expect(handle.artwork.w).toBe(Math.ceil(128 / (1 + 2 * handle.overscan)))
+    expect(Math.max(handle.front.w, handle.front.h)).toBeLessThanOrEqual(128)
+    expect(handle.front.w - handle.artwork.w).toBe(
+      2 * Math.ceil(handle.overscan * handle.artwork.h),
+    )
+    expect(handle.artwork.w).toBeGreaterThanOrEqual(Math.floor(128 / (1 + 2 * handle.overscan)) - 1)
     sheet.dispose()
   })
 
@@ -195,6 +199,97 @@ describe('source() (spec 5.2, 8.5, 8.6)', () => {
     if (handle instanceof Error || isAborted(handle)) return
     expect(handle.exact).toBe(true)
     expect(handle.artwork).toEqual({ w: 40, h: 40 })
+    expect(handle.front.w).toBe(40 + 2 * Math.ceil(handle.overscan * 40))
+    sheet.dispose()
+  })
+
+  it('freezes one overscan for every aspect and reserves it per axis', async () => {
+    const ctx = open()
+    const sheet = paperSheet()
+    sheet.mount(ctx)
+    const portrait = await sprite(64, 96)
+    const square = await sprite(64, 64)
+    const landscape = await sprite(96, 64)
+    const handles = await Promise.all(
+      [portrait, square, landscape].map((bitmap) =>
+        sheet.source(bitmap, { maxSize: 128, exact: false }),
+      ),
+    )
+    portrait.close()
+    square.close()
+    landscape.close()
+    for (const handle of handles) {
+      expect(handle instanceof Error || isAborted(handle)).toBe(false)
+      if (handle instanceof Error || isAborted(handle)) continue
+      expect(handle.overscan).toBe(sheet.overscan)
+      expect(handle.front.w - handle.artwork.w).toBe(handle.front.h - handle.artwork.h)
+      expect(handle.front.w - handle.artwork.w).toBe(
+        2 * Math.ceil(handle.overscan * handle.artwork.h),
+      )
+      expect(Math.max(handle.front.w, handle.front.h)).toBeLessThanOrEqual(128)
+    }
+    sheet.dispose()
+  })
+
+  it('gives a landscape and a portrait sprite the same artwork long side under artworkLongSide', async () => {
+    const ctx = open()
+    const sheet = paperSheet()
+    sheet.mount(ctx)
+    const landscape = await sprite(96, 64)
+    const landscapeHandle = await sheet.source(landscape, {
+      maxSize: 640,
+      exact: false,
+      artworkLongSide: 400,
+    })
+    landscape.close()
+    const portrait = await sprite(64, 96)
+    const portraitHandle = await sheet.source(portrait, {
+      maxSize: 640,
+      exact: false,
+      artworkLongSide: 400,
+    })
+    portrait.close()
+    expect(landscapeHandle instanceof Error || isAborted(landscapeHandle)).toBe(false)
+    expect(portraitHandle instanceof Error || isAborted(portraitHandle)).toBe(false)
+    if (landscapeHandle instanceof Error || isAborted(landscapeHandle)) {
+      sheet.dispose()
+      return
+    }
+    if (portraitHandle instanceof Error || isAborted(portraitHandle)) {
+      sheet.dispose()
+      return
+    }
+    expect(Math.max(landscapeHandle.artwork.w, landscapeHandle.artwork.h)).toBe(400)
+    expect(Math.max(landscapeHandle.front.w, landscapeHandle.front.h)).toBeLessThanOrEqual(640)
+    expect(Math.max(portraitHandle.artwork.w, portraitHandle.artwork.h)).toBe(400)
+    expect(Math.max(portraitHandle.front.w, portraitHandle.front.h)).toBeLessThanOrEqual(640)
+
+    const built = sheet.build(portraitHandle, portraitHandle.front, defaultsFor('hull') as never)
+    expect(built instanceof Error, String((built as Error)?.message)).toBe(false)
+    if (!(built instanceof Error)) {
+      expect(built.artwork).toEqual({
+        x: Math.round((portraitHandle.front.w - portraitHandle.artwork.w) / 2),
+        y: Math.round((portraitHandle.front.h - portraitHandle.artwork.h) / 2),
+        w: portraitHandle.artwork.w,
+        h: portraitHandle.artwork.h,
+      })
+      sheet.releaseFront(built)
+    }
+    sheet.dispose()
+  })
+
+  it('clamps artworkLongSide to what maxSize can hold', async () => {
+    const ctx = open()
+    const sheet = paperSheet()
+    sheet.mount(ctx)
+    const bitmap = await sprite(64, 96)
+    const handle = await sheet.source(bitmap, { maxSize: 256, exact: false, artworkLongSide: 400 })
+    bitmap.close()
+    expect(handle instanceof Error || isAborted(handle)).toBe(false)
+    if (handle instanceof Error || isAborted(handle)) return
+    expect(Math.max(handle.front.w, handle.front.h)).toBeLessThanOrEqual(256)
+    expect(Math.max(handle.artwork.w, handle.artwork.h)).toBeLessThan(400)
+    expect(Math.max(handle.artwork.w, handle.artwork.h)).toBe(212)
     sheet.dispose()
   })
 
@@ -341,14 +436,15 @@ async function boxSprite(w: number, h: number, inset: number): Promise<ImageBitm
 }
 
 /**
- * The paint radius is quoted against the front's HEIGHT (`paper-renderer.ts`'s `uPxScale`), while
- * `artworkUv`'s `[-p, -p]` buys the same uv FRACTION on both axes — so on a portrait front the x
- * margin is only `w / h` of the reserve, and every 2:3 demo sample (trench, jeans, avatar, camel
- * coat) was refused with "the hull reaches 0.5000 of the front on axis x" while the landscape
- * ones (sweater, sneakers) sailed through. The reserve must be scaled by `h / w` for such a
- * sprite (`freezeOverscan`'s third argument), and the guard band must read the sheet's real,
- * unrounded reach rather than §8.3's rect — whose 4 % margin is bucket-decision safety, not paint,
- * and whose clamp to the plane can never report more than 0.5000.
+ * The paint radius is quoted against the front's HEIGHT (`paper-renderer.ts`'s `uPxScale`).
+ * Before the §8.6 per-axis amendment, the reserve was a single uv FRACTION applied to both axes,
+ * so on a portrait front the x margin held only `w / h` of it and every 2:3 demo sample (trench,
+ * jeans, avatar, camel coat) was refused with "the hull reaches 0.5000 of the front on axis x"
+ * while the landscape ones (sweater, sneakers) sailed through. Now the margin is `ceil(p * A.h)`
+ * TEXELS on every side of the artwork, so the x margin holds the same number of texels as the y
+ * margin and nothing needs scaling by `h / w`; the guard band still reads the sheet's real,
+ * unrounded reach rather than §8.3's rect — whose 4 % margin is bucket-decision safety, not
+ * paint, and whose clamp to the plane can never report more than 0.5000.
  */
 describe('portrait sprites and the guard band (spec 8.6)', () => {
   function refused(handle: unknown): handle is Error {
@@ -364,9 +460,9 @@ describe('portrait sprites and the guard band (spec 8.6)', () => {
     bitmap.close()
     expect(refused(handle), String((handle as Error)?.message)).toBe(false)
     if (GlError.is(handle) || SheetError.is(handle) || isAborted(handle)) return
-    // The x margin now holds the paint radius: the reserve is larger than the factory's baseline,
-    // which is a square sprite's.
-    expect(handle.overscan).toBeGreaterThan(sheet.overscan)
+    // §8.6 amendment (2026-09-04): the reserve is per axis, in texels, so it is the SAME number
+    // for every aspect — no longer scaled up for a portrait sprite.
+    expect(handle.overscan).toBe(sheet.overscan)
     sheet.dispose()
   })
 
@@ -537,6 +633,44 @@ describe('build() (spec 5.2, 8.1, 8.5, 8.7)', () => {
     const again = sheet.build(second, { w: 128, h: 96 }, defaultsFor('hull') as never)
     expect(again instanceof Error, String((again as Error)?.message)).toBe(false)
     if (!(again instanceof Error)) sheet.releaseFront(again)
+    sheet.dispose()
+  })
+
+  // Spec 8.6 freezes the reserve for the sprite's life, and `maxDist` is both a hull-tier knob and
+  // the whole of `r_hull` — so a reserve derived from the live values was re-frozen on every
+  // hull-tier re-source, and the artwork `A = maxSize / (1 + 2p)` shrank inside a bucket `fit`
+  // had sized once. Two `source()` calls at different `maxDist` must agree on everything the fit
+  // and the artwork slot were sized over, and differ in the trace alone.
+  it('freezes the reserve at the factory defaults: a re-source at another maxDist keeps p and A (spec 8.6)', async () => {
+    const ctx = open()
+    const sheet = paperSheet({ overscanHeadroom: 0.25 })
+    sheet.mount(ctx)
+    const bitmap = await sprite()
+    const atDefaults = await sheet.source(bitmap, { maxSize: 128, exact: false })
+    expect(GlError.is(atDefaults) || SheetError.is(atDefaults) || isAborted(atDefaults)).toBe(false)
+    if (GlError.is(atDefaults) || SheetError.is(atDefaults) || isAborted(atDefaults)) return
+    const lower = { ...defaultsFor('hull'), maxDist: 40 }
+    const atLower = await sheet.source(bitmap, { maxSize: 128, exact: false, knobs: lower })
+    bitmap.close()
+    expect(GlError.is(atLower) || SheetError.is(atLower) || isAborted(atLower)).toBe(false)
+    if (GlError.is(atLower) || SheetError.is(atLower) || isAborted(atLower)) return
+    expect(atLower.hullKnobs['maxDist']).toBe(40)
+    expect(atLower.overscan).toBe(atDefaults.overscan)
+    expect(atLower.artwork).toEqual(atDefaults.artwork)
+    expect(atLower.front).toEqual(atDefaults.front)
+    // …and the front `build()` makes reports the artwork exactly where `source()` placed it:
+    // centred, 1:1, in whatever size the bucket fit asked for.
+    const size = { w: 128, h: 96 }
+    const front = sheet.build(atLower, size, lower as never)
+    expect(front instanceof Error, String((front as Error)?.message)).toBe(false)
+    if (front instanceof Error) return
+    expect(front.artwork).toEqual({
+      x: Math.round((size.w - atLower.artwork.w) / 2),
+      y: Math.round((size.h - atLower.artwork.h) / 2),
+      w: atLower.artwork.w,
+      h: atLower.artwork.h,
+    })
+    sheet.releaseFront(front)
     sheet.dispose()
   })
 
@@ -920,7 +1054,9 @@ describe("task 12 fix round 2 (build()'s rect conversion)", () => {
     const srcW = handle.srcW
     const srcH = handle.srcH
     expect(handle.overscan).toBeGreaterThan(0.15) // torn's own headline figure; a real margin to move
-    expect(handle.front).toEqual({ w: 128, h: 128 })
+    // The front is the artwork plus its per-axis margin (§8.6 amendment), so it need not hit
+    // `maxSize` exactly the way the old uniform-front scheme always did — only fit inside it.
+    expect(Math.max(handle.front.w, handle.front.h)).toBeLessThanOrEqual(128)
     // `build()`'s own `artworkPlacement`: centred, 1:1, origin rounded to whole texels.
     const placementIn = (front: { w: number; h: number }) => ({
       x: Math.round((front.w - handle.artwork.w) / 2),
@@ -1116,13 +1252,14 @@ describe('fix round 1 — the CPU-fallback field (findings 1, 2, 3, 4)', () => {
       return
     }
 
-    // `exact: false` makes `frontLongSide === maxSize` exactly (no `dimsForLongSide` rounding),
-    // and a square 64x64 source keeps both axes at that same figure.
-    const front = { w: 128, h: 128 }
+    // The front is the artwork plus its per-axis margin (§8.6 amendment): a square 64x64 source
+    // keeps both axes at the same figure, but it need not hit `maxSize` exactly — read it off
+    // the handle rather than hard-coding the old uniform-front value.
+    const front = handle.front
     const srcW = 64
     const srcH = 64
     expect(handle.overscan).toBeGreaterThan(0.15) // torn's own headline figure; a real margin
-    expect(handle.front).toEqual(front)
+    expect(Math.max(front.w, front.h)).toBeLessThanOrEqual(128)
     // `source()`'s own `artworkPlacement`, then `src / artwork` per axis — the resample maps the
     // full source onto the full artwork, so that is the whole of the scale.
     const placement = {
@@ -1412,11 +1549,12 @@ describe('the hull polygon as a real paper field (design 2026-09-02, §2-§3)', 
     if (GlError.is(handle) || SheetError.is(handle) || isAborted(handle)) return
     expect(handle.hull.kind).toBe('use-alpha')
 
-    // The first build at source()'s own size consumes source()'s field work outright, so a mask
-    // build would be the only thing left to count.
+    // The first build at source()'s own size (`handle.front` — the per-axis reserve makes it not
+    // necessarily `maxSize` itself, §8.6 amendment) consumes source()'s field work outright, so a
+    // mask build would be the only thing left to count.
     const drawArrays = vi.spyOn(ctx.gl, 'drawArrays')
     drawArrays.mockClear()
-    const front = sheet.build(handle, { w: 128, h: 128 }, defaultsFor('torn') as never)
+    const front = sheet.build(handle, handle.front, defaultsFor('torn') as never)
     const draws = drawArrays.mock.calls.length
     drawArrays.mockRestore()
     expect(front instanceof Error, String((front as Error)?.message)).toBe(false)

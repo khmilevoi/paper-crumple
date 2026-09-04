@@ -1,5 +1,13 @@
 import { describe, expect, it } from 'vitest'
-import { SDF_RES_MAX, SDF_RES_MIN, SIZE_QUANTUM, sdfResFor, sizeForDisplay } from './resolution.js'
+import {
+  FRONT_LONG_SIDE_CAP,
+  SDF_RES_MAX,
+  SDF_RES_MIN,
+  SIZE_QUANTUM,
+  frontCapFor,
+  sdfResFor,
+  sizeForDisplay,
+} from './resolution.js'
 
 describe('sizeForDisplay', () => {
   it('rounds cssPx x dpr up to the next multiple of 64', () => {
@@ -80,5 +88,22 @@ describe('sdfResFor', () => {
   it('never returns NaN, because a NaN front byte count would silently disable the front LRU eviction loop', () => {
     expect(sdfResFor(NaN)).toBe(SDF_RES_MIN)
     expect(sdfResFor(Infinity)).toBe(SDF_RES_MAX)
+  })
+})
+
+describe('FRONT_LONG_SIDE_CAP and frontCapFor', () => {
+  it('is 2048 texels — WebGL2s guaranteed MAX_TEXTURE_SIZE floor', () => {
+    expect(FRONT_LONG_SIDE_CAP).toBe(2048)
+  })
+
+  it('sizes the front so artworkLongSide artwork texels fit for every aspect, rounded to 64', () => {
+    expect(frontCapFor({ artworkLongSide: 540, overscan: 0.13291, cap: 2048 })).toBe(704)
+    expect(frontCapFor({ artworkLongSide: 540, overscan: 0.08, cap: 2048 })).toBe(640)
+    expect(frontCapFor({ artworkLongSide: 2000, overscan: 0.1, cap: 2048 })).toBe(2048)
+  })
+
+  it('lands on cap, not the floor, for a non-finite overscan (a sheet whose reserve failed to derive)', () => {
+    expect(frontCapFor({ artworkLongSide: 100, overscan: Infinity, cap: 2048 })).toBe(2048)
+    expect(frontCapFor({ artworkLongSide: 100, overscan: Number.NaN, cap: 2048 })).toBe(2048)
   })
 })

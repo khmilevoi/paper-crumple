@@ -77,16 +77,27 @@ export interface StageOptionsBase {
 }
 
 /**
- * Exactly one of `maxSize` / `cssPx` is required (§4.0, amendment 12) — §7.4 keeps the number
- * required *somewhere*, and `cssPx` is the form that states it without making every consumer
- * spell out `sizeForDisplay` and `devicePixelRatio` at the call site. A two-member union with
- * `?: never` on the absent one is how "exactly one" is said in a type; it distributes correctly
- * through P9's `StageOptions & { present: 'blit' }`.
+ * Exactly one of `maxSize` / `cssPx` / `artworkCssPx` is required (§4.0, amendment 12) — §7.4
+ * keeps the number required *somewhere*. Members with `?: never` on the absent ones is how
+ * "exactly one" is said in a type; it distributes correctly through P9's
+ * `StageOptions & { present: 'blit' }`.
  *
- * `cssPx` feeds `sizeForDisplay({ cssPx, dpr: devicePixelRatio, cap: 512 })`, which is P5's.
+ * `cssPx` is the CSS long side of the box the **paper** is fitted into: the front is
+ * `sizeForDisplay({ cssPx, dpr: devicePixelRatio, cap: FRONT_LONG_SIDE_CAP })` and the artwork
+ * inside it is `1 / (1 + 2 x sheet.overscan)` of that — drawn 1:1 under `fit: 'contain'` in a box
+ * of that size. The grid's contract.
+ *
+ * `artworkCssPx` is the CSS long side the **artwork** holds on screen: the stage asks the sheet
+ * for `ceil(artworkCssPx x dpr)` artwork texels (`SourceOptions.artworkLongSide`) and sizes its
+ * surface to `frontCapFor({ artworkLongSide, overscan: sheet.overscan, cap: FRONT_LONG_SIDE_CAP })`,
+ * so `View.frame.artwork` scaled by `artworkCssPx / max(artwork.w, artwork.h)` is 1:1 at
+ * `devicePixelRatio`. The hero's contract; the paper overflows the picture by the edge knobs'
+ * reach and costs `(1 + 2 x overscan)²` more front than `cssPx` would for the same number.
+ *
  * A `paperStage` whose `signal` aborts mid-flight disposes what it built and returns `ABORTED`,
  * which is P9's.
  */
 export type StageOptions =
-  | (StageOptionsBase & { maxSize: number; cssPx?: never })
-  | (StageOptionsBase & { cssPx: number; maxSize?: never })
+  | (StageOptionsBase & { maxSize: number; cssPx?: never; artworkCssPx?: never })
+  | (StageOptionsBase & { cssPx: number; maxSize?: never; artworkCssPx?: never })
+  | (StageOptionsBase & { artworkCssPx: number; maxSize?: never; cssPx?: never })

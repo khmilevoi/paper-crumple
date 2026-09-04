@@ -119,6 +119,8 @@ export function stubSheet(
         width: f.size.w,
         height: f.size.h,
         rect: f.rect,
+        // A synthetic front has no separate picture inside its paper box; the box stands in.
+        artwork: f.rect,
         bytes: f.size.w * f.size.h * 4,
       }
     },

@@ -8,18 +8,26 @@ import type { BlitTarget, StageOptions, ViewTarget } from './stage-types.js'
 declare const sheet: SheetRenderer
 declare const motion: MotionSource
 
-test('exactly one of maxSize and cssPx is required (amendment 12)', () => {
+test('exactly one of maxSize, cssPx and artworkCssPx is required', () => {
   const withMax: StageOptions = { sheet, motion, maxSize: 384 }
   const withCss: StageOptions = { sheet, motion, cssPx: 192 }
+  const withArtworkCss: StageOptions = { sheet, motion, artworkCssPx: 360 }
   void withMax
   void withCss
+  void withArtworkCss
 
   // @ts-expect-error - neither given
   const neither: StageOptions = { sheet, motion }
   // @ts-expect-error - both given
   const both: StageOptions = { sheet, motion, maxSize: 384, cssPx: 192 }
+  // @ts-expect-error - artworkCssPx and cssPx both given
+  const artworkAndCss: StageOptions = { sheet, motion, artworkCssPx: 360, cssPx: 192 }
+  // @ts-expect-error - artworkCssPx and maxSize both given
+  const artworkAndMax: StageOptions = { sheet, motion, artworkCssPx: 360, maxSize: 384 }
   void neither
   void both
+  void artworkAndCss
+  void artworkAndMax
 })
 
 test('the blit destination carries size and tag (amendment 13)', () => {

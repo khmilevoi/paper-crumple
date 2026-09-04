@@ -91,6 +91,14 @@ export interface FakeSheetOptions {
   readonly gate?: () => Promise<void>
   readonly knobs?: readonly KnobDescriptor[]
   readonly overscan?: number
+  /**
+   * The paper's box `build()` reports for a front of `size`, in front texels; the whole front
+   * when absent. A test of `View.frame` moves it off-centre to prove the artwork follows the
+   * motion slot's rule — centred on the PAPER — rather than sitting at the box's centre.
+   */
+  readonly paperRect?: (size: Size) => Rect
+  /** The artwork's box `build()` reports; the front's central quarter when absent. */
+  readonly artworkRect?: (size: Size) => Rect
 }
 
 export interface FakeSheet extends SheetRenderer<Knobs, FakeSheetHandle> {
@@ -154,9 +162,15 @@ export function fakeSheet(o: FakeSheetOptions = {}): FakeSheet {
       if (aborted(opts.signal)) return ABORTED
       if (o.sourceFails !== undefined) return o.sourceFails
       const src = { w: bitmap.width, h: bitmap.height }
-      // The paper's box in front texels: the front keeps the source aspect at a long side of
-      // `maxSize` (spec 7.4.3), so this is the source box scaled down to it, never up.
-      const k = Math.min(1, opts.maxSize / Math.max(src.w, src.h))
+      // The paper's box in front texels. Under `artworkLongSide` the artwork is that many texels
+      // on its long side (capped so the front, `1 + 2 x overscan` of it, fits `maxSize`) and the
+      // fake keeps the paper equal to the artwork; otherwise the source box is scaled DOWN to
+      // `maxSize`, never up (spec 7.4.3's `cssPx` reading).
+      const long = Math.max(src.w, src.h)
+      const k =
+        opts.artworkLongSide !== undefined
+          ? Math.min(opts.artworkLongSide, opts.maxSize / (1 + 2 * (o.overscan ?? 0.08))) / long
+          : Math.min(1, opts.maxSize / long)
       const id = nextId++
       artworkKey = id
       return {
@@ -201,7 +215,13 @@ export function fakeSheet(o: FakeSheetOptions = {}): FakeSheet {
         texture: {} as WebGLTexture,
         width: size.w,
         height: size.h,
-        rect: { x: 0, y: 0, w: size.w, h: size.h },
+        rect: o.paperRect?.(size) ?? { x: 0, y: 0, w: size.w, h: size.h },
+        artwork: o.artworkRect?.(size) ?? {
+          x: Math.round(size.w / 4),
+          y: Math.round(size.h / 4),
+          w: Math.round(size.w / 2),
+          h: Math.round(size.h / 2),
+        },
         bytes: size.w * size.h * 4,
       }
     },
