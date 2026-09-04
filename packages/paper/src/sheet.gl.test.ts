@@ -1934,3 +1934,103 @@ describe('build() at a bucket-shaped size (spec 5.4, 8.6)', () => {
     })
   }
 })
+
+/**
+ * FNV-1a (32-bit) over a packed hull's `points` bytes — the `Float32Array` read as its own bytes,
+ * so an ulp in any coordinate changes the hash — or `'use-alpha'` for a hull with no polygon.
+ */
+function hullDigest(hull: { readonly kind: string; readonly points?: Float32Array }): string {
+  if (hull.kind !== 'polygons' || hull.points === undefined) return hull.kind
+  const bytes = new Uint8Array(hull.points.buffer, hull.points.byteOffset, hull.points.byteLength)
+  let h = 0x811c9dc5
+  for (const b of bytes) {
+    h ^= b
+    h = Math.imul(h, 0x01000193) >>> 0
+  }
+  return h.toString(16).padStart(8, '0')
+}
+
+type ReadbackGolden = {
+  readonly hull: string
+  readonly frontRect: { x: number; y: number; w: number; h: number }
+  readonly rect: { x: number; y: number; w: number; h: number }
+}
+
+/**
+ * What `source()` answered for three fixtures in both edge modes at perf/2x @ 653d394 — the
+ * synchronous `readBackField` path, on the level-2 suite's own SwiftShader — right before the
+ * field readback became asynchronous (`PIXEL_PACK_BUFFER` + `fenceSync`, spec §8.10). The pin is
+ * that the decode, the hull traced off it and the two rects it feeds did not move by a byte: the
+ * hull digest is over the polygon's raw `Float32Array`, and `frontRect` / `rect` are the exact
+ * integers. Regenerate only for a deliberate change to pass A or the decode, by running this test
+ * at the commit being pinned and copying what the failures print.
+ */
+const READBACK_GOLDEN: Record<string, ReadbackGolden> = {
+  'ellipse/hull': {
+    hull: '2bbbd370',
+    frontRect: { x: 22, y: 14, w: 89, h: 63 },
+    rect: { x: 6, y: 3, w: 38, h: 27 },
+  },
+  'ellipse/torn': {
+    hull: 'use-alpha',
+    frontRect: { x: 10, y: 6, w: 108, h: 82 },
+    rect: { x: -2, y: -4, w: 53, h: 40 },
+  },
+  'top/hull': {
+    hull: '9e56b7ea',
+    frontRect: { x: 27, y: 11, w: 81, h: 73 },
+    rect: { x: 10, y: 0, w: 49, h: 44 },
+  },
+  'top/torn': {
+    hull: 'use-alpha',
+    frontRect: { x: 13, y: 2, w: 102, h: 91 },
+    rect: { x: -4, y: -12, w: 74, h: 66 },
+  },
+  'square/hull': {
+    hull: '639f583f',
+    frontRect: { x: 16, y: 13, w: 95, h: 101 },
+    rect: { x: 3, y: 1, w: 57, h: 61 },
+  },
+  'square/torn': {
+    hull: 'use-alpha',
+    frontRect: { x: 5, y: 5, w: 116, h: 116 },
+    rect: { x: -10, y: -10, w: 84, h: 84 },
+  },
+}
+
+describe('async field readback (spec §8.10)', () => {
+  const fixtures = [
+    ['ellipse', () => sprite()],
+    ['top', () => topSprite()],
+    ['square', () => boxSprite(64, 64, 8)],
+  ] as const
+
+  it('answers the hull, frontRect and rect the synchronous readback answered (golden from 653d394)', async () => {
+    const ctx = open()
+    for (const [name, make] of fixtures) {
+      for (const edgeMode of ['hull', 'torn'] as const) {
+        const sheet = paperSheet({ edgeMode })
+        sheet.mount(ctx)
+        const bitmap = await make()
+        const handle = await sheet.source(bitmap, { maxSize: 128, exact: false })
+        bitmap.close()
+        expect(
+          GlError.is(handle) || SheetError.is(handle) || isAborted(handle),
+          `${name}/${edgeMode}: ${String((handle as Error)?.message)}`,
+        ).toBe(false)
+        if (GlError.is(handle) || SheetError.is(handle) || isAborted(handle)) {
+          sheet.dispose()
+          continue
+        }
+        const actual: ReadbackGolden = {
+          hull: hullDigest(handle.hull),
+          frontRect: { ...handle.frontRect },
+          rect: { ...handle.rect },
+        }
+        // `soft`, so a regeneration run prints every fixture's values at once.
+        expect.soft(actual, `${name}/${edgeMode}`).toEqual(READBACK_GOLDEN[`${name}/${edgeMode}`])
+        sheet.dispose()
+      }
+    }
+  })
+})
