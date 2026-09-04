@@ -242,6 +242,9 @@ describe('an owned context restores the pinned baseline without a query (§4.0, 
     if (GlError.is(target)) return
     const vao = gl.createVertexArray()
     const sampler: WebGLSampler | null = gl.createSampler()
+    const tex2dArray: WebGLTexture | null = gl.createTexture()
+    const tex3d: WebGLTexture | null = gl.createTexture()
+    const texCube: WebGLTexture | null = gl.createTexture()
 
     // Allocating outside any scope: only the library has written, and it put its binding back.
     expectSameState(captureGlState(gl), baseline)
@@ -251,17 +254,25 @@ describe('an owned context restores the pinned baseline without a query (§4.0, 
       // source.ts draw, paper gl-sdf.ts / paper-renderer.ts / artwork.ts), plus the ones only
       // the enumeration names, so a restore that forgot an item shows up below.
       s.bindTarget(drawTargetFor(target))
+      // bindTarget's scissor box is the whole 8x8 target, which is the baseline's; move it.
+      gl.scissor(1, 1, 2, 2)
       s.enable('SCISSOR_TEST', true)
       s.enable('DEPTH_TEST', true)
       s.enable('BLEND', true)
       s.enable('CULL_FACE', true)
       gl.useProgram(program.handle)
       gl.bindVertexArray(vao)
-      gl.activeTexture(gl.TEXTURE1)
-      gl.bindTexture(gl.TEXTURE_2D, tex.handle)
+      // Unit 0 — the baseline's active unit — gets a binding on every target §5.1 restores and a
+      // sampler; the active unit is then left on TEXTURE1, so the restore has to move back to
+      // unit 0 before it rebinds, and every one of its five binding entries is exercised.
       gl.activeTexture(gl.TEXTURE0)
       gl.bindTexture(gl.TEXTURE_2D, tex.handle)
+      if (tex2dArray) gl.bindTexture(gl.TEXTURE_2D_ARRAY, tex2dArray)
+      if (tex3d) gl.bindTexture(gl.TEXTURE_3D, tex3d)
+      if (texCube) gl.bindTexture(gl.TEXTURE_CUBE_MAP, texCube)
       if (sampler) gl.bindSampler(0, sampler)
+      gl.activeTexture(gl.TEXTURE1)
+      gl.bindTexture(gl.TEXTURE_2D, tex.handle)
       gl.bindFramebuffer(gl.READ_FRAMEBUFFER, target.framebuffer)
       gl.enable(gl.STENCIL_TEST)
       gl.stencilMask(0x0f)
@@ -293,6 +304,9 @@ describe('an owned context restores the pinned baseline without a query (§4.0, 
 
     gl.deleteVertexArray(vao)
     gl.deleteSampler(sampler)
+    gl.deleteTexture(tex2dArray)
+    gl.deleteTexture(tex3d)
+    gl.deleteTexture(texCube)
     ctx.dispose()
   })
 })
