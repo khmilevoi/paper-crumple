@@ -185,6 +185,8 @@ export function createGlContext(gl: WebGL2RenderingContext): CoreGlContext {
 
   const owned = new Set<() => void>()
   let disposed = false
+  /** How many `scope()` bodies are live. Only the outermost one saves and restores. */
+  let depth = 0
 
   /**
    * Register one resource's release so `dispose()` can run it, and hand back a `dispose` that
@@ -291,10 +293,26 @@ export function createGlContext(gl: WebGL2RenderingContext): CoreGlContext {
     },
 
     scope<T>(fn: (s: DrawScope) => T): T {
+      // Re-entrant: a scope entered while another is live on this context neither saves nor
+      // restores, the way §7.3 says a nested `stage.batch` is a no-op rather than a double save.
+      // The outermost scope's restore covers every write a nested one made, because the saved
+      // set is the same enumeration at every depth. This is what lets a batch of draws — or a
+      // draw whose slot opens a scope of its own inside the stage's — pay one capture, not one
+      // per level.
+      if (depth > 0) {
+        depth += 1
+        try {
+          return fn(drawScope)
+        } finally {
+          depth -= 1
+        }
+      }
       const saved = captureGlState(gl)
+      depth = 1
       try {
         return fn(drawScope)
       } finally {
+        depth = 0
         restoreGlState(gl, saved)
       }
     },

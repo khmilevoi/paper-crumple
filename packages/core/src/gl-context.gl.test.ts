@@ -187,21 +187,49 @@ describe('scope (§5.1)', () => {
     expect(captureGlState(gl)).toEqual(before)
   })
 
-  it('saves and restores again when nested, because §5.1 scopes and §7.3 batches', () => {
+  it('neither saves nor restores when nested: the outermost scope is the one save/restore (§7.3)', () => {
     const { ctx, gl } = open()
     const outer = captureGlState(gl)
     ctx.scope(() => {
       ctx.gl.viewport(0, 0, 3, 3)
-      const inner = captureGlState(gl)
-      ctx.scope(() => {
+      ctx.scope((s) => {
         ctx.gl.viewport(0, 0, 5, 5)
+        s.enable('BLEND', true)
       })
-      // The inner scope restored the outer scope's viewport, not the context's original one.
-      expect(captureGlState(gl)).toEqual(inner)
+      // The nested scope left its writes in place: a nested scope is a no-op around its body,
+      // the way §7.3 says a nested `stage.batch` is, so a batch of draws pays one capture.
+      expect(Array.from(gl.getParameter(gl.VIEWPORT) as Int32Array)).toEqual([0, 0, 5, 5])
+      expect(gl.isEnabled(gl.BLEND)).toBe(true)
     })
+    // The outermost scope's restore covers everything the nested one wrote.
     expect(captureGlState(gl)).toEqual(outer)
-    // stage.batch(fn)'s "a nested batch is a no-op rather than a double save" is P9's, built on
-    // top of this. scope() itself always saves.
+  })
+
+  it('unwinds the nesting when a nested body fails, so the next scope saves again', () => {
+    const { ctx, gl } = open()
+    const boom = (): never => JSON.parse('{') as never
+    ctx.scope(() => {
+      expect(() =>
+        ctx.scope(() => {
+          ctx.gl.viewport(1, 1, 2, 2)
+          return boom()
+        }),
+      ).toThrow()
+      // Still inside the outer scope: the failed nested scope restored nothing.
+      expect(Array.from(gl.getParameter(gl.VIEWPORT) as Int32Array)).toEqual([1, 1, 2, 2])
+    })
+    // A failure that escapes the outermost scope must not leave the context believing a scope is
+    // still live, or every later scope would skip its save and restore.
+    expect(() =>
+      ctx.scope(() => {
+        ctx.scope(() => boom())
+      }),
+    ).toThrow()
+    ctx.gl.viewport(2, 2, 3, 3)
+    ctx.scope(() => {
+      ctx.gl.viewport(0, 0, 7, 7)
+    })
+    expect(Array.from(gl.getParameter(gl.VIEWPORT) as Int32Array)).toEqual([2, 2, 3, 3])
   })
 
   it('restores even when the body fails, so one bad slot cannot poison the next', () => {
