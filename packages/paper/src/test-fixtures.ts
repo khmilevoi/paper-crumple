@@ -65,7 +65,10 @@ function sdCircle(px: number, py: number, r: number): number {
  * The CPU bench's `logoArtwork` silhouette (`tools/bench/cpu/artworks.mjs`), as alpha alone: a
  * wobbly rounded body with a ring welded onto its top edge, a detached disc, two round holes and a
  * slot, so a tracer sees several outer loops, inner loops and a long non-primitive boundary.
- * Ported rather than imported — the bench lives outside this package's `tsconfig` project.
+ *
+ * Ported rather than imported: the bench lives outside this package's `tsconfig` project. Keep it
+ * in step with `logoArtwork` — if the bench's shape moves and this one does not, `contours.test.ts`
+ * stops pinning the field `cpu.contours.*` and `cpu.ingest.1024` are actually measured on.
  */
 export function logoAlpha(size: number, seed = 7, inset = 0.12): Float32Array {
   const rand = makeRandom(seed)
@@ -98,10 +101,15 @@ export function logoAlpha(size: number, seed = 7, inset = 0.12): Float32Array {
 }
 
 /**
- * A true analytic signed distance field — exact Euclidean distance to the boundary of a union of
- * three discs, so 1-Lipschitz by construction — plus up to half a texel of seeded noise per texel.
- * That is the error budget the GPU jump flood carries (`gl-sdf.ts`), and it is the fixture the
- * contour row skip's one texel of slack exists for. Positive inside, like `signedDistanceField`.
+ * The pointwise **minimum of three analytic disc distance functions**, negated so inside is
+ * positive like `signedDistanceField`, plus up to half a texel of seeded noise per texel.
+ *
+ * Deliberately not the exact SDF of the discs' union: a pointwise minimum of exact distances is
+ * the union's true distance only *outside* it, and inside the overlaps it under-estimates. That
+ * does not matter here, because the property the row skip rests on is 1-Lipschitz-ness and a
+ * pointwise minimum of 1-Lipschitz functions is 1-Lipschitz — which is exactly what makes this a
+ * clean stand-in for the GPU jump flood (`gl-sdf.ts`): a 1-Lipschitz field carrying the ±0.5
+ * texel of error the flood carries, i.e. the fixture the skip's one texel of slack exists for.
  */
 export function noisySdf(w: number, h: number, seed = 11): Float32Array {
   const rand = makeRandom(seed)

@@ -462,6 +462,11 @@ function byteReadbackScratch(n: number): Uint8Array {
  *
  * `READ_FRAMEBUFFER` is bound explicitly: `DrawScope.bindTarget` only ever binds
  * `DRAW_FRAMEBUFFER`, so a caller that skipped this would silently read the canvas backbuffer.
+ *
+ * **Replica:** `tools/bench/cpu/scenarios.mjs`'s `readbackDecode` (and its `decodeScratch`) is a
+ * copy of the decode loop and its buffer below, standing in for the GL read so `cpu.ingest.1024`
+ * and `cpu.readback.decode.512` can be measured in node. Keep the two in step — a change here
+ * that is not mirrored there leaves the benchmark measuring code that no longer ships.
  */
 function readBackField(ctx: GlContext, field: Field, texelPx: number): Float32Array | null {
   const { gl } = ctx
@@ -476,11 +481,18 @@ function readBackField(ctx: GlContext, field: Field, texelPx: number): Float32Ar
   const d1 = decode[1]
   return ctx.scope((): Float32Array | null => {
     gl.bindFramebuffer(gl.READ_FRAMEBUFFER, field.target.framebuffer)
-    // Stale-error drain, from engine.js: a prior call's error must not be misread as this
-    // readback's own failure. ONE read rather than a `while` loop — a WebGL2 context surfaces at
-    // most one recorded error at a time, and the loop's second call was a synchronous round trip
-    // (0.1-0.4 ms in the trace) that never had anything to return.
-    gl.getError()
+    // Stale-error drain, verbatim from engine.js: a prior call's error must not be misread as
+    // this readback's own failure. The LOOP is load-bearing and a single read would not do:
+    // GL ES 3.0 §2.5 lets an implementation keep several error flags at once, `getError` returns
+    // and clears an arbitrary one of them, and the spec's own instruction is to call it repeatedly
+    // until it reports `NO_ERROR` — Blink adds to that by queueing its own synthesised errors
+    // ahead of the driver's. With two flags pending, one would survive a single read and the
+    // post-`readPixels` check below would blame `readPixels` for it, dropping the add into the CPU
+    // fallback for no reason. When nothing is pending — the case that actually runs — the loop
+    // costs exactly one `getError`, which is why the ingest call counts are unchanged either way.
+    while (gl.getError() !== gl.NO_ERROR) {
+      // drain
+    }
     let out: Float32Array | null = null
     if (ctx.caps.floatRT) {
       const single =
@@ -489,8 +501,9 @@ function readBackField(ctx: GlContext, field: Field, texelPx: number): Float32Ar
       const channels = single ? 1 : 4
       const buf = floatReadbackScratch(w * h * channels)
       gl.readPixels(0, 0, w, h, single ? gl.RED : gl.RGBA, gl.FLOAT, buf)
-      // Kept: this is the CPU-fallback decision itself (`sheet.gl.test.ts` forces exactly this
-      // read non-zero to reach `cpuFieldFallback`), not a drain.
+      // Not a drain: this read IS the CPU-fallback decision, and it is only trustworthy because
+      // the loop above emptied every flag first. `sheet.gl.test.ts` forces exactly this read
+      // non-zero to reach `cpuFieldFallback`.
       if (gl.getError() === gl.NO_ERROR) {
         out = decodeScratch(w * h)
         // Split rather than strided: on the RED/FLOAT path (`channels === 1`) `p` IS `i`, and one

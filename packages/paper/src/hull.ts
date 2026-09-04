@@ -453,7 +453,7 @@ export function fillHullMask(
     heads[r] = acc
     acc += c
   }
-  const cursor = Int32Array.from(heads)
+  const cursor = heads.slice()
   const order = new Int32Array(liveEdges)
   for (let i = 0; i < edgeCount; i++) {
     if (firstRow[i] < 0) continue

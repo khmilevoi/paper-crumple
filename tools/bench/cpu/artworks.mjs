@@ -12,6 +12,11 @@
  *
  * `inset` is the fraction of the frame left empty on every side, standing in for the front's
  * reserved margin around the artwork (spec 8.6): the hull band must fit inside the field.
+ *
+ * Replica: `logoArtwork`'s silhouette is ported into `packages/paper/src/test-fixtures.ts` as
+ * `logoAlpha`, where `contours.test.ts` traces it — this package sits outside paper's `tsconfig`
+ * project, so the tests cannot import it. Keep the two shapes in step, or the identity tests stop
+ * covering the field the benchmark actually runs on.
  */
 import { makeRandom } from '@paper-crumple/paper'
 
