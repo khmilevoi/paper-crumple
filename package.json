@@ -20,6 +20,7 @@
     "test:gl": "playwright install --no-shell chromium && vitest run --project gl",
     "check": "turbo run build --filter=@paper-crumple/core --filter=@paper-crumple/paper --filter=@paper-crumple/motion && pnpm lint && pnpm format:check && pnpm typecheck && pnpm --filter @paper-crumple/playground typecheck && pnpm test && pnpm test:gl",
     "build": "turbo run build",
+    "bench:cpu": "node --import ./tools/bench/cpu/loader.mjs --expose-gc tools/bench/cpu/run.mjs",
     "verify:deps": "node tools/packaging/zero-dependencies.mjs",
     "verify:packaging": "node tools/packaging/verify-packaging.mjs",
     "changeset": "changeset",
