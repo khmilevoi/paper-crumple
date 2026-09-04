@@ -1,3 +1,4 @@
+import react from '@vitejs/plugin-react'
 import { defineConfig } from 'vite'
 
 // The three packages resolve their own assets with `new URL('./x', import.meta.url)` from
@@ -7,6 +8,7 @@ import { defineConfig } from 'vite'
 // can report as anything but a fetch failure. Excluding the packages keeps the modules where
 // their assets are.
 export default defineConfig({
+  plugins: [react()],
   optimizeDeps: {
     exclude: ['@paper-crumple/core', '@paper-crumple/paper', '@paper-crumple/motion'],
   },

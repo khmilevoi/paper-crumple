@@ -13,10 +13,15 @@
   "dependencies": {
     "@paper-crumple/core": "workspace:*",
     "@paper-crumple/motion": "workspace:*",
-    "@paper-crumple/paper": "workspace:*"
+    "@paper-crumple/paper": "workspace:*",
+    "react": "^19.2.8",
+    "react-dom": "^19.2.8"
   },
   "devDependencies": {
     "@paper-crumple/tsconfig": "workspace:*",
+    "@types/react": "^19.2.18",
+    "@types/react-dom": "^19.2.7",
+    "@vitejs/plugin-react": "^6.1.1",
     "typescript": "catalog:",
     "vite": "^8.2.2"
   }

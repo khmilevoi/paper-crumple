@@ -1,6 +1,6 @@
 import type { BucketName, DemoConfig, PresentMode } from './config'
 import { BUCKET_NAMES, DEFAULT_CONFIG } from './config'
-import type { KnobValues } from './panel'
+import type { KnobValues } from './knobs'
 
 /**
  * Every knob param is `k.<type>.<key>`. `<type>` is a one-character tag (`b`/`n`/`s`) so
@@ -55,7 +55,7 @@ function parseKnobs(params: URLSearchParams): KnobValues | Error {
 function parseEdgeMode(params: URLSearchParams): DemoConfig['edgeMode'] | Error {
   const raw = params.get('edgeMode')
   if (raw === null) return DEFAULT_CONFIG.edgeMode
-  if (raw === 'torn' || raw === 'hull') return raw
+  if (raw === 'torn' || raw === 'hull' || raw === 'both') return raw
   return fieldError('edgeMode', raw)
 }
 
@@ -108,7 +108,7 @@ export function encodeState(config: DemoConfig, changed: KnobValues): string {
   params.set('tiles', config.tiles ? '1' : '0')
   params.set('packs', config.packs.join(','))
   params.set('present', config.present)
-  params.set('cssPx', String(config.cssPx))
+  params.set('artworkCssPx', String(config.artworkCssPx))
   params.set('budgetMb', String(config.budgetMb))
   params.set('overscanHeadroom', String(config.overscanHeadroom))
 
@@ -137,8 +137,8 @@ export function decodeState(hash: string): { config: DemoConfig; knobs: KnobValu
   if (packs instanceof Error) return packs
   const present = parsePresent(params)
   if (present instanceof Error) return present
-  const cssPx = parseNumberField(params, 'cssPx', DEFAULT_CONFIG.cssPx)
-  if (cssPx instanceof Error) return cssPx
+  const artworkCssPx = parseNumberField(params, 'artworkCssPx', DEFAULT_CONFIG.artworkCssPx)
+  if (artworkCssPx instanceof Error) return artworkCssPx
   const budgetMb = parseNumberField(params, 'budgetMb', DEFAULT_CONFIG.budgetMb)
   if (budgetMb instanceof Error) return budgetMb
   const overscanHeadroom = parseNumberField(
@@ -151,80 +151,14 @@ export function decodeState(hash: string): { config: DemoConfig; knobs: KnobValu
   const knobs = parseKnobs(params)
   if (knobs instanceof Error) return knobs
 
-  const config: DemoConfig = { edgeMode, tiles, packs, present, cssPx, budgetMb, overscanHeadroom }
+  const config: DemoConfig = {
+    edgeMode,
+    tiles,
+    packs,
+    present,
+    artworkCssPx,
+    budgetMb,
+    overscanHeadroom,
+  }
   return { config, knobs }
-}
-
-const PACK_IMPORT: Readonly<
-  Record<BucketName, { readonly varName: string; readonly path: string }>
-> = {
-  '1x1': { varName: 'pack1x1', path: '@paper-crumple/motion/packs/1x1' },
-  '2x3': { varName: 'pack2x3', path: '@paper-crumple/motion/packs/2x3' },
-  '3x2': { varName: 'pack3x2', path: '@paper-crumple/motion/packs/3x2' },
-}
-
-const IDENTIFIER = /^[A-Za-z_$][A-Za-z0-9_$]*$/
-
-function renderKey(key: string): string {
-  return IDENTIFIER.test(key) ? key : `'${key.replace(/\\/g, '\\\\').replace(/'/g, "\\'")}'`
-}
-
-function renderStringLiteral(value: string): string {
-  return `'${value.replace(/\\/g, '\\\\').replace(/'/g, "\\'")}'`
-}
-
-function renderValue(value: string | number | boolean): string {
-  if (typeof value === 'string') return renderStringLiteral(value)
-  return String(value)
-}
-
-/**
- * The pasteable source a reader can drop straight into a scratch file. `tiles` is imported only
- * when `config.tiles` is on — `paperSheet`'s own `tiles` option defaults to `null`, so it is
- * simply omitted otherwise, exactly the way `overscanHeadroom` (default `0`) is omitted below —
- * and each pack import matches one selected bucket, so nothing here imports a module the emitted
- * call never references. The guard pair after `paperStage` is deliberately in the documented
- * order: `=== pc.ABORTED` first, then `instanceof Error`.
- */
-export function emitCode(config: DemoConfig, changed: KnobValues): string {
-  const lines: string[] = []
-  lines.push("import * as pc from '@paper-crumple/core'")
-  lines.push("import { paperSheet } from '@paper-crumple/paper'")
-  if (config.tiles) lines.push("import { tiles } from '@paper-crumple/paper/tiles'")
-  lines.push("import { bakedMotion } from '@paper-crumple/motion'")
-  for (const bucket of config.packs) {
-    const pack = PACK_IMPORT[bucket]
-    lines.push(`import ${pack.varName} from '${pack.path}'`)
-  }
-  lines.push('')
-
-  const sheetFields = [`edgeMode: '${config.edgeMode}'`]
-  if (config.tiles) sheetFields.push('tiles')
-  if (config.overscanHeadroom !== 0) {
-    sheetFields.push(`overscanHeadroom: ${String(config.overscanHeadroom)}`)
-  }
-
-  const packVars = config.packs.map((b) => PACK_IMPORT[b].varName)
-
-  lines.push('const stage = await pc.paperStage({')
-  lines.push(`  sheet: paperSheet({ ${sheetFields.join(', ')} }),`)
-  lines.push(`  motion: bakedMotion({ packs: [${packVars.join(', ')}] }),`)
-  lines.push(`  cssPx: ${String(config.cssPx)},`)
-  lines.push(`  budget: ${String(config.budgetMb * 1024 * 1024)},`)
-  lines.push(`  present: '${config.present}',`)
-  lines.push('})')
-  lines.push('if (stage === pc.ABORTED) return')
-  lines.push('if (stage instanceof Error) return stage')
-
-  const changedEntries = Object.entries(changed)
-  if (changedEntries.length > 0) {
-    lines.push('')
-    lines.push('stage.set({')
-    for (const [key, value] of changedEntries) {
-      lines.push(`  ${renderKey(key)}: ${renderValue(value)},`)
-    }
-    lines.push('})')
-  }
-
-  return lines.join('\n')
 }

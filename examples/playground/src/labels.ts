@@ -1,4 +1,8 @@
 /**
+ * The demo owns its labels, and `ui/LibrarySections.tsx` groups the leftover knobs by the `group`
+ * below — the design's own curated sections carry their labels literally instead, so only the
+ * knobs the mockup leaves out are ever rendered from this table.
+ *
  * The demo owns its labels. Paper declares no `ui` on any descriptor and motion declares one on
  * all six — §6.1's rule that a consumer's bundle does not carry English strings for a UI the
  * library does not own. A descriptor absent from this table is still rendered, under its raw
@@ -96,25 +100,4 @@ export const LABELS: ReadonlyMap<string, KnobLabel> = new Map([
 
 export function labelFor(patchKey: string): KnobLabel | undefined {
   return LABELS.get(patchKey)
-}
-
-/**
- * Several of the groups above are one facet of the same concern from a reader's perspective —
- * `Paper`/`Silhouette — hull`/`Silhouette — torn` are all "what the edge and surface look like",
- * `Motion`/`Debug` are both "look & debug" — so the panel folds them into fewer tabs than groups,
- * the same structural idea the reference spike's redesigned control panel used for its Edge tab
- * (`Paper Crumple Control Panel.dc.html`'s "Hull knobs"/"Torn knobs"/"Shared" sub-cards), while
- * keeping every group in `GROUP_ORDER` intact as its own visually distinct sub-card underneath.
- * A group absent from this map is one tab on its own, same as before this table existed.
- */
-const GROUP_TO_TAB: ReadonlyMap<string, string> = new Map([
-  ['Paper', 'Edge'],
-  ['Silhouette — hull', 'Edge'],
-  ['Silhouette — torn', 'Edge'],
-  ['Motion', 'Look & debug'],
-  ['Debug', 'Look & debug'],
-])
-
-export function tabFor(group: string): string {
-  return GROUP_TO_TAB.get(group) ?? group
 }

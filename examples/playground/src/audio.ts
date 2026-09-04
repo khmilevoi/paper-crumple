@@ -44,21 +44,15 @@ export const ASSETS_ORIGIN =
 
 export const NO_CLIP = 'none'
 
-/** A crumple, for a crumple animation — the spike's own default, once a reader opts in. */
-const DEFAULT_CLIP = 'mixkit-quick-paper-crumple-sound-2996'
+export type SyncMode = 'scale' | 'fixed'
 
-type SyncMode = 'scale' | 'fixed'
-
-// `short` is what the button shows — the sidebar is only 396px wide, and the full `label` wraps
-// onto two lines there. `label` is not lost: it goes on the button's `title` (a hover tooltip)
-// and still describes the mode everywhere else (the inspector's `rows()`, for one).
-const SYNC_MODES: ReadonlyArray<{ id: SyncMode; short: string; label: string }> = [
-  { id: 'scale', short: 'scale to clip', label: 'scale the run to the clip' },
-  { id: 'fixed', short: 'fixed', label: 'fixed run, clip plays over it' },
+/** `label` is the design's own segment text; `title` is what the mode actually does. */
+export const SYNC_MODES: ReadonlyArray<{ id: SyncMode; label: string; title: string }> = [
+  { id: 'scale', label: 'Scale to sound', title: 'scale the run to the clip' },
+  { id: 'fixed', label: 'Fixed', title: 'fixed run, clip plays over it' },
 ]
 
 const FLAT_POSE = 0
-const BALL_POSE = pc.DWELL_MS.length - 1
 
 // --- manifest ---------------------------------------------------------------------------------
 
@@ -245,9 +239,46 @@ function savePrefs(prefs: Prefs): void {
 
 // --- the controller -------------------------------------------------------------------------------
 
+/** One row of the design's `clip` picker. */
+export interface ClipOption {
+  readonly id: string
+  /** Already in the design's own shape: `"<name> — <n> ms"`. */
+  readonly label: string
+  readonly ms: number
+}
+
+/** Everything "04 Sound" renders. Recomputed on every change and handed to React whole. */
+export interface AudioSnapshot {
+  readonly clips: readonly ClipOption[]
+  readonly clipId: string
+  readonly volume: number
+  readonly sync: SyncMode
+  /** The one-line summary beside the section's chevron. */
+  readonly summary: string
+}
+
 export interface AudioHandle {
-  /** The control strip. The transport appends it into its own row stack. */
-  readonly element: HTMLElement
+  /** The current state. Stable between changes, so it can back a `useSyncExternalStore`. */
+  snapshot(): AudioSnapshot
+  subscribe(onChange: () => void): () => void
+
+  setClip(id: string): void
+  setVolume(volume: number): void
+  setSync(mode: SyncMode): void
+
+  /**
+   * Fetch and decode the manifest. Called when "04 Sound" is first opened rather than at boot:
+   * `public/audio/` is gitignored, and a page should make no request for audio that this visit
+   * did not ask for.
+   */
+  probe(): void
+
+  /**
+   * The design's three-line readout box, for the fold this transport would run next. `folds` is
+   * the stored-frame line the pose schedule produces, which lives in the stage, not here.
+   */
+  lines(spec: SequenceSpec, folds: string): readonly string[]
+
   /**
    * Starts the clip and returns the `duration` the run should be given, or `undefined` to keep
    * the caller's own. Call it *synchronously* from the click handler: that is what lets
@@ -256,22 +287,26 @@ export interface AudioHandle {
   beginSequence(spec: SequenceSpec): number | undefined
   /** Called when the run settles, so the readout can print measured against requested. */
   endSequence(): void
-  /** Stop the clip — the transport's Stop button, and every rebind. */
+  /** Stop the clip — every rebuild, and every abandoned run. */
   cancel(): void
-  /** The numbers the inspector prints. A sound cannot be seen in a screenshot. */
-  rows(): ReadonlyArray<readonly [string, string]>
 }
 
 const ms = (v: number): string => `${v.toFixed(1)} ms`
 
-export function createAudio(
-  observed: (where: string, error: Error) => void,
-  onChange: () => void,
-): AudioHandle {
+export function createAudio(observed: (where: string, error: Error) => void): AudioHandle {
+  const listeners = new Set<() => void>()
+  let snap: AudioSnapshot | null = null
+
+  /** Invalidate the memoised snapshot and wake every subscriber. */
+  function onChange(): void {
+    snap = null
+    for (const fn of listeners) fn()
+  }
+
   const stored = loadPrefs()
   const state = {
-    enabled: false,
-    clipId: typeof stored.clipId === 'string' ? stored.clipId : DEFAULT_CLIP,
+    /** The design has no on/off switch: `none — silent` in the clip picker IS off. */
+    clipId: typeof stored.clipId === 'string' ? stored.clipId : NO_CLIP,
     volume:
       typeof stored.volume === 'number' && Number.isFinite(stored.volume)
         ? Math.min(1, Math.max(0, stored.volume))
@@ -292,96 +327,9 @@ export function createAudio(
   let source: AudioBufferSourceNode | null = null
   let loading = false
   let loadError: Error | null = null
-  let lastRun: string = '—'
+  /** Measured minus clip length for the run that just settled — the design's `drift`. */
+  let lastDrift: number | null = null
   let pending: { spec: SequenceSpec; duration: number | undefined; startedAt: number } | null = null
-
-  // --- DOM ---------------------------------------------------------------------------------
-
-  const element = document.createElement('div')
-  element.className = 'transport-audio'
-
-  const row = document.createElement('div')
-  row.className = 'transport-row'
-
-  const enableLabel = document.createElement('label')
-  enableLabel.className = 'transport-audio-enable'
-  const enableInput = document.createElement('input')
-  enableInput.type = 'checkbox'
-  const enableText = document.createElement('span')
-  enableText.textContent = 'sound'
-  enableLabel.append(enableInput, enableText)
-
-  const clipSelect = document.createElement('select')
-  clipSelect.className = 'transport-input'
-  clipSelect.disabled = true
-
-  // The sync mode is a two-way choice ("scale the run to the clip" vs. "fixed run, clip plays
-  // over it"), so in the v2 design it is a `.segmented` control rather than a `<select>` — same
-  // `SYNC_MODES` list and the same `state.sync`/`persist`/`paint` wiring underneath, just a
-  // different widget on top of it.
-  const syncGroup = document.createElement('div')
-  syncGroup.className = 'segmented'
-  const syncButtons = new Map<SyncMode, HTMLButtonElement>()
-  for (const mode of SYNC_MODES) {
-    const button = document.createElement('button')
-    button.type = 'button'
-    button.className = 'segmented-btn'
-    button.textContent = mode.short
-    button.title = mode.label
-    button.disabled = true
-    button.addEventListener('click', () => {
-      if (state.sync === mode.id) return
-      state.sync = mode.id
-      persist()
-      paint()
-      onChange()
-      updateSyncButtons()
-    })
-    syncGroup.append(button)
-    syncButtons.set(mode.id, button)
-  }
-
-  function updateSyncButtons(): void {
-    for (const [id, button] of syncButtons) {
-      button.classList.toggle('segmented-btn--active', id === state.sync)
-    }
-  }
-
-  const volumeInput = document.createElement('input')
-  volumeInput.type = 'range'
-  volumeInput.className = 'transport-input transport-audio-volume'
-  volumeInput.min = '0'
-  volumeInput.max = '1'
-  volumeInput.step = '0.01'
-  volumeInput.value = String(state.volume)
-  volumeInput.disabled = true
-  const volumeOut = document.createElement('span')
-  volumeOut.className = 'transport-readout'
-  volumeOut.textContent = `vol ${state.volume.toFixed(2)}`
-
-  // Mirrors `poseInput`'s treatment in transport.ts: `--fill-pct` (styles.css) paints the track up
-  // to the thumb and has to be recomputed on init and on every `input` event.
-  function refreshVolumeFill(): void {
-    const min = Number(volumeInput.min)
-    const max = Number(volumeInput.max)
-    const value = Number(volumeInput.value)
-    const pct = max > min ? ((value - min) / (max - min)) * 100 : 0
-    volumeInput.style.setProperty('--fill-pct', `${String(pct)}%`)
-  }
-  refreshVolumeFill()
-
-  row.append(enableLabel, clipSelect, syncGroup, volumeInput, volumeOut)
-
-  const readout = document.createElement('p')
-  readout.className = 'transport-readout transport-audio-readout'
-
-  // The one line requirement (2) asks for: where the assets come from, always visible, and what
-  // actually happened to them once a probe has run.
-  const note = document.createElement('p')
-  note.className = 'transport-audio-note'
-  note.textContent = `sound is off until you tick it — ${ASSETS_ORIGIN}`
-
-  element.append(row, readout, note)
 
   // --- clip data ------------------------------------------------------------------------------
 
@@ -410,15 +358,14 @@ export function createAudio(
     if (loading || clips.length > 0) return
     loading = true
     loadError = null
-    paint()
+    onChange()
 
     const res = await fetchOr(MANIFEST_URL)
     if (res instanceof Error) {
       loading = false
       loadError = res
       observed('audio manifest', res)
-      fillClipSelect()
-      paint()
+      onChange()
       onChange()
       return
     }
@@ -442,8 +389,7 @@ export function createAudio(
       loading = false
       loadError = parsed
       observed('audio manifest', parsed)
-      fillClipSelect()
-      paint()
+      onChange()
       onChange()
       return
     }
@@ -472,10 +418,8 @@ export function createAudio(
       }),
     )
     loading = false
-    fillClipSelect()
-    await decodeAll()
-    paint()
     onChange()
+    await decodeAll()
   }
 
   // --- context ----------------------------------------------------------------------------------
@@ -526,7 +470,6 @@ export function createAudio(
         decoded.set(clip.id, buffer)
       }),
     )
-    paint()
     onChange()
   }
 
@@ -557,7 +500,7 @@ export function createAudio(
   // gesture, so by the time the button is released the context is running and every clip is
   // decoded — which is what makes the FIRST fold as tightly synced as the tenth.
   function warm(): void {
-    if (!state.enabled || activeClipId() === NO_CLIP) return
+    if (activeClipId() === NO_CLIP) return
     if (decoded.size >= clips.length && ctx?.state === 'running') return
     if (ensureContext() === null) return
     resumeContext()
@@ -581,8 +524,8 @@ export function createAudio(
     stop()
     pending = null
     const clipId = activeClipId()
-    if (!state.enabled || clipId === NO_CLIP) {
-      paint(spec)
+    if (clipId === NO_CLIP) {
+      onChange()
       return undefined
     }
 
@@ -605,7 +548,6 @@ export function createAudio(
     const length = clipMs(clipId)
     const duration = state.sync === 'scale' && length > 0 && spec.authored > 0 ? length : undefined
     pending = { spec, duration, startedAt: performance.now() }
-    paint(spec)
     onChange()
     return duration
   }
@@ -614,16 +556,8 @@ export function createAudio(
     if (pending === null) return
     const measured = performance.now() - pending.startedAt
     const length = clipMs(activeClipId())
-    const requested = pending.duration
-    lastRun =
-      `${pending.spec.label}: requested ${requested === undefined ? 'authored/fixed' : ms(requested)}` +
-      ` · measured ${ms(measured)}` +
-      (state.enabled && activeClipId() !== NO_CLIP && length > 0
-        ? ` · clip ${ms(length)} · ${measured - length >= 0 ? '+' : ''}${(measured - length).toFixed(1)} ms vs clip`
-        : '')
-    const spec = pending.spec
+    lastDrift = activeClipId() !== NO_CLIP && length > 0 ? measured - length : null
     pending = null
-    paint(spec)
     onChange()
   }
 
@@ -632,190 +566,161 @@ export function createAudio(
     pending = null
   }
 
-  // --- readout ---------------------------------------------------------------------------------
-
-  /** The run the readout describes when nothing has run yet: the transport's own Fold button. */
-  const DEFAULT_SPEC = playSpec(FLAT_POSE, BALL_POSE)
-
-  function scheduleText(spec: SequenceSpec): string {
-    const length = clipMs(activeClipId())
-    if (!state.enabled || activeClipId() === NO_CLIP || length <= 0 || state.sync !== 'scale') {
-      return (
-        `${spec.label}: authored ${spec.dwells.map((d) => String(Math.round(d))).join('/')}` +
-        ` = ${ms(spec.authored)} (the run keeps the transport's own duration)`
-      )
-    }
-    const gaps = scaledGaps(spec, length)
-    const total = gaps.reduce((a, b) => a + b, 0)
-    return (
-      `${spec.label}: ${gaps.map((g) => String(Math.round(g))).join('/')} = ${ms(total)}` +
-      ` · ×${(length / spec.authored).toFixed(3)} from ${ms(spec.authored)}`
-    )
-  }
+  // --- readout ---------------------------------------------------------------------------
 
   function assetsText(): string {
     if (loading) return 'loading…'
     if (loadError !== null) return `absent — ${loadError.message}`
-    if (clips.length === 0) return 'not probed yet (tick "sound")'
+    if (clips.length === 0) return 'not probed yet'
     return (
       `${String(clips.length)} clips, ${String(clips.length - missing.size)} loaded, ` +
       `${String(decoded.size)} decoded`
     )
   }
 
-  // The sidebar's "04 Sound" header carries a short mono summary, same as every `panel.ts`-
-  // generated section's own `.accordion-summary` — mirrors `stage-bg.ts`'s own direct
-  // `document.getElementById` for its slot, since `main.ts` is off-limits for this change.
-  function updateSummary(): void {
-    const el = document.getElementById('sound-summary')
-    if (el === null) return
-    if (!state.enabled) {
-      el.textContent = 'off'
-      return
+  // --- what "04 Sound" renders ---------------------------------------------------------------
+
+  /**
+   * The design's clip picker, in its own shape: `none — silent` first, then one option per
+   * manifest entry labelled `"<name> — <n> ms"`. A clip the manifest names but the folder does
+   * not hold stays selectable and says so — its schedule still works, because the length came
+   * from the manifest, and only the sound is missing.
+   */
+  function clipOptions(): ClipOption[] {
+    const out: ClipOption[] = [
+      {
+        id: NO_CLIP,
+        label: clips.length === 0 ? 'none — silent (no clips)' : 'none — silent',
+        ms: 0,
+      },
+    ]
+    for (const clip of clips) {
+      out.push({
+        id: clip.id,
+        label:
+          `${clip.label} — ${String(Math.round(clip.durationSec * 1000))} ms` +
+          (missing.has(clip.id) ? ' (missing file)' : ''),
+        ms: Math.round(clip.durationSec * 1000),
+      })
     }
-    const clipId = activeClipId()
-    el.textContent = clipId === NO_CLIP ? 'on · silent' : (clipById(clipId)?.label ?? clipId)
+    return out
   }
 
-  function paint(spec: SequenceSpec = DEFAULT_SPEC): void {
+  function summaryText(): string {
+    if (loading) return 'loading…'
+    if (loadError !== null) return 'absent'
     const clipId = activeClipId()
-    const length = clipMs(clipId)
-    if (!state.enabled || clipId === NO_CLIP) {
-      readout.textContent =
-        `sound off — ${scheduleText(spec)}. ` +
-        `pc.DWELL_MS is read, never copied; the rescale is one duration for the whole run.`
-    } else {
-      const clip = clipById(clipId)
-      const lengthFrom = decoded.has(clipId) ? 'decoded' : 'manifest'
-      const format =
-        clip === null || clip.channels === null
-          ? ''
-          : ` · ${String(clip.channels)} ch ${String(clip.sampleRate ?? 0)} Hz`
-      const missingWhy = missing.get(clipId)
-      readout.textContent =
-        `clip ${ms(length)} (${lengthFrom})${format} · ${scheduleText(spec)}` +
-        (missingWhy === undefined ? '' : ` · SILENT: ${missingWhy}`)
-    }
-
-    if (loadError !== null) {
-      note.textContent = `audio assets absent (${loadError.message}) — ${ASSETS_ORIGIN}`
-    } else if (missing.size > 0) {
-      note.textContent = `${String(missing.size)} clip(s) in the manifest did not load — ${ASSETS_ORIGIN}`
-    } else if (!state.enabled) {
-      note.textContent = `sound is off until you tick it — ${ASSETS_ORIGIN}`
-    } else {
-      note.textContent = `audio assets present (${assetsText()}) — ${ASSETS_ORIGIN}`
-    }
-
-    updateSummary()
+    if (clipId === NO_CLIP) return 'none'
+    return clipById(clipId)?.label ?? clipId
   }
 
-  function rows(): ReadonlyArray<readonly [string, string]> {
-    const spec = DEFAULT_SPEC
-    const unfold = playSpec(BALL_POSE, FLAT_POSE)
-    const swap = swapSpec(FLAT_POSE)
+  function snapshot(): AudioSnapshot {
+    snap ??= {
+      clips: clipOptions(),
+      clipId: activeClipId(),
+      volume: state.volume,
+      sync: state.sync,
+      summary: summaryText(),
+    }
+    return snap
+  }
+
+  /**
+   * The three lines of the design's readout box, in its order: what the clip is, what the next
+   * fold will be asked to fit into, and which stored frames that fold walks (`folds`, which the
+   * pose schedule owns and this module never sees).
+   *
+   * With no clip the box says so and prints the authored cadence unscaled, which is exactly what
+   * the run then uses — the design's own "sound off" branch.
+   */
+  function lines(spec: SequenceSpec, folds: string): readonly string[] {
     const clipId = activeClipId()
     const length = clipMs(clipId)
-    const scaling = state.enabled && clipId !== NO_CLIP && state.sync === 'scale' && length > 0
 
-    const durationFor = (s: SequenceSpec): string =>
-      scaling
-        ? `authored ${ms(s.authored)} → duration ${ms(length)} (×${(length / s.authored).toFixed(3)})`
-        : `authored ${ms(s.authored)} → the transport's fixed duration`
+    if (clipId === NO_CLIP) {
+      return [
+        loadError === null
+          ? 'sound off — fold runs the authored schedule'
+          : `sound off — ${assetsText()} · ${ASSETS_ORIGIN}`,
+        `${spec.dwells.map((d) => String(Math.round(d))).join(' / ')} = ${String(Math.round(spec.authored))} ms`,
+        folds,
+      ]
+    }
+
+    const clip = clipById(clipId)
+    const format =
+      clip === null || clip.channels === null
+        ? ms(length)
+        : `${ms(length)} · ${String(clip.channels)} ch · ${String(clip.sampleRate ?? 0)} Hz`
+    const why = missing.get(clipId)
 
     return [
-      ['audio assets', `${AUDIO_DIR} — ${assetsText()}`],
-      ['audio origin', ASSETS_ORIGIN],
-      ['audio enabled', String(state.enabled)],
-      [
-        'audio clip',
-        clipId === NO_CLIP
-          ? `none — silent${clips.length > 0 && state.clipId !== NO_CLIP ? ` (asked for "${state.clipId}", which this manifest does not name)` : ''}`
-          : `${clipId} · ${ms(length)} (${decoded.has(clipId) ? 'decoded' : 'manifest'})`,
-      ],
-      ['audio sync', SYNC_MODES.find((m) => m.id === state.sync)?.label ?? state.sync],
-      ['audio volume', state.volume.toFixed(2)],
-      [
-        'AudioContext',
-        ctx === null
-          ? 'not created (no gesture yet)'
-          : `${ctx.state} · currentTime ${ctx.currentTime.toFixed(3)} s · ${String(ctx.sampleRate)} Hz`,
-      ],
-      [spec.label, durationFor(spec)],
-      [unfold.label, durationFor(unfold)],
-      [swap.label, durationFor(swap)],
-      ['next fold steps', scheduleText(spec)],
-      ['last run', lastRun],
+      why === undefined ? format : `${format} · SILENT: ${why}`,
+      state.sync === 'scale'
+        ? `${spec.label}: scaled from ${ms(spec.authored)} to ${ms(length)}` +
+          ` · drift ${lastDrift === null ? '—' : ms(lastDrift)}`
+        : `${spec.label}: fixed ${ms(spec.authored)} · clip ${ms(length)}`,
+      folds,
     ]
   }
 
-  // --- ui ---------------------------------------------------------------------------------------
-
-  function fillClipSelect(): void {
-    clipSelect.replaceChildren()
-    const none = document.createElement('option')
-    none.value = NO_CLIP
-    none.textContent = clips.length === 0 ? 'none — silent (no clips)' : 'none — silent'
-    clipSelect.append(none)
-    for (const clip of clips) {
-      const option = document.createElement('option')
-      option.value = clip.id
-      option.textContent =
-        `${clip.label} — ${String(Math.round(clip.durationSec * 1000))} ms` +
-        (missing.has(clip.id) ? ' (missing file)' : '')
-      clipSelect.append(option)
-    }
-    // A stored id can outlive the file it names — a renamed clip must not leave the `<select>`
-    // pointing at nothing. `activeClipId` keeps the preference itself intact.
-    clipSelect.value = activeClipId()
-  }
+  // --- the setters "04 Sound" drives --------------------------------------------------------
 
   const persist = (): void =>
     savePrefs({ clipId: state.clipId, volume: state.volume, sync: state.sync })
 
-  function setControlsEnabled(): void {
-    clipSelect.disabled = !state.enabled
-    for (const button of syncButtons.values()) button.disabled = !state.enabled
-    volumeInput.disabled = !state.enabled
+  function probe(): void {
+    // Both are gestures the autoplay policy accepts, and both are why this is not called at boot:
+    // opening the section is the opt-in, and the context created here starts `running`.
+    ensureContext()
+    resumeContext()
+    void loadManifest()
   }
 
-  enableInput.addEventListener('change', () => {
-    state.enabled = enableInput.checked
-    setControlsEnabled()
-    if (state.enabled) {
-      // This handler runs inside a real click, which is the gesture the autoplay policy wants —
-      // so the context created here starts `running` rather than `suspended`.
+  function setClip(id: string): void {
+    if (state.clipId === id) return
+    state.clipId = id
+    persist()
+    if (id === NO_CLIP) cancel()
+    else {
       ensureContext()
       resumeContext()
-      void loadManifest()
-    } else {
-      cancel()
+      void decodeAll()
     }
-    paint()
     onChange()
-  })
+  }
 
-  clipSelect.addEventListener('change', () => {
-    state.clipId = clipSelect.value
-    persist()
-    if (state.clipId !== NO_CLIP) void decodeAll()
-    paint()
-    onChange()
-  })
-
-  volumeInput.addEventListener('input', () => {
-    state.volume = Number(volumeInput.value)
-    volumeOut.textContent = `vol ${state.volume.toFixed(2)}`
-    refreshVolumeFill()
-    if (gain !== null) gain.gain.value = state.volume
+  function setVolume(volume: number): void {
+    const next = Math.min(1, Math.max(0, volume))
+    if (state.volume === next) return
+    state.volume = next
+    if (gain !== null) gain.gain.value = next
     persist()
     onChange()
-  })
+  }
 
-  fillClipSelect()
-  setControlsEnabled()
-  updateSyncButtons()
-  paint()
+  function setSync(mode: SyncMode): void {
+    if (state.sync === mode) return
+    state.sync = mode
+    persist()
+    onChange()
+  }
 
-  return { element, beginSequence, endSequence, cancel, rows }
+  function subscribe(fn: () => void): () => void {
+    listeners.add(fn)
+    return () => listeners.delete(fn)
+  }
+
+  return {
+    snapshot,
+    subscribe,
+    setClip,
+    setVolume,
+    setSync,
+    probe,
+    lines,
+    beginSequence,
+    endSequence,
+    cancel,
+  }
 }

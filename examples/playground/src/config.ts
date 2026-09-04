@@ -1,6 +1,6 @@
 import * as pc from '@paper-crumple/core'
 import { paperSheet } from '@paper-crumple/paper'
-import type { PaperSheet } from '@paper-crumple/paper'
+import type { PaperEdgeMode, PaperSheet } from '@paper-crumple/paper'
 import { tiles } from '@paper-crumple/paper/tiles'
 import { bakedMotion } from '@paper-crumple/motion'
 import pack1x1 from '@paper-crumple/motion/packs/1x1'
@@ -25,21 +25,29 @@ export const BUCKET_NAMES: readonly BucketName[] = ['1x1', '2x3', '3x2']
  * by contrast, are live and cost one draw.
  */
 export interface DemoConfig {
-  readonly edgeMode: 'torn' | 'hull'
+  readonly edgeMode: PaperEdgeMode
   readonly tiles: boolean
   readonly packs: readonly BucketName[]
   readonly present: PresentMode
-  readonly cssPx: number
+  readonly artworkCssPx: number
   readonly budgetMb: number
   readonly overscanHeadroom: number
 }
 
 export const DEFAULT_CONFIG: DemoConfig = {
-  edgeMode: 'torn',
+  // `hull` because that is what the control panel this demo is built to
+  // (`Paper Crumple Control Panel v2.dc.html`) boots into — its own `DEFAULTS.edgeMode`. `torn`
+  // and `both` are one segment away in "02 Edge" and rebuild the stage the same way; `both`
+  // carries `HULL_KNOBS` and `TORN_KNOBS` at once (`descriptorsFor()`), so the section grows
+  // from three sliders to seven.
+  edgeMode: 'hull',
   tiles: true,
   packs: ['1x1', '2x3', '3x2'],
   present: 'blit',
-  cssPx: 320,
+  // The ARTWORK's on-screen long side — the picture is laid out like a 360-px `<img>` and the
+  // paper overflows it (`framing.ts`). Matches the width the control panel's own stage gives its
+  // sheet (`width: min(360px, 74%)`).
+  artworkCssPx: 360,
   budgetMb: 64,
   // The library reserves exactly the paint radius (spec 8.6's `p = r / (1000 - 2r)`), which
   // leaves a silhouette that fills its own bitmap — `camel-coat`, "a photo that still carries
@@ -69,9 +77,9 @@ export type BuiltStage =
       /**
        * Carried through so `scene.ts` can give the `blit` hero canvas a display size that does
        * NOT follow its own backing store — see `heroCanvas`. It is the same number that fed
-       * `sizeForDisplay` above, so the two cannot drift apart.
+       * `paperStage({ artworkCssPx })` above, so the two cannot drift apart.
        */
-      readonly cssPx: number
+      readonly artworkCssPx: number
     }
   | {
       readonly present: 'direct'
@@ -82,9 +90,9 @@ export type BuiltStage =
       /**
        * Carried through so `scene.ts` can give the `blit` hero canvas a display size that does
        * NOT follow its own backing store — see `heroCanvas`. It is the same number that fed
-       * `sizeForDisplay` above, so the two cannot drift apart.
+       * `paperStage({ artworkCssPx })` above, so the two cannot drift apart.
        */
-      readonly cssPx: number
+      readonly artworkCssPx: number
     }
 
 /**
@@ -109,7 +117,7 @@ export async function buildStage(
   const base = {
     sheet,
     motion,
-    cssPx: config.cssPx,
+    artworkCssPx: config.artworkCssPx,
     budget: config.budgetMb * 1024 * 1024,
     onError,
     signal,
@@ -129,7 +137,7 @@ export async function buildStage(
       motion,
       present: 'direct',
       buildMs: performance.now() - started,
-      cssPx: config.cssPx,
+      artworkCssPx: config.artworkCssPx,
     }
   }
 
@@ -142,6 +150,6 @@ export async function buildStage(
     motion,
     present: 'blit',
     buildMs: performance.now() - started,
-    cssPx: config.cssPx,
+    artworkCssPx: config.artworkCssPx,
   }
 }

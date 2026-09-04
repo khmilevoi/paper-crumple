@@ -1,91 +1,60 @@
 /*
- * The playground is an instrument panel, not a showcase: dense rows, a monospace column for
- * every value a control reports, badges legible at a glance, and — above everything else — a
- * stage column that never loses its space to the controls flanking it. The layout is two columns
- * (stage + one merged `#sidebar`) as part of the "Control Panel v2" redesign — the old
- * `#config-column`/`#panel-column` split is gone; both now live inside `#sidebar` as
- * `.sidebar-card` sections. Below 1100px everything collapses to one column, with the stage
- * reordered first so a reader never has to scroll past a wall of controls to see it.
+ * A one-to-one translation of `Paper Crumple Control Panel v2.dc.html` into classes.
+ *
+ * The mockup styles every node inline; this file is that same set of declarations, moved onto a
+ * class per node so the React tree in `src/ui/` can stay readable. Every value below — colour,
+ * radius, padding, font size, gap — is copied verbatim from the corresponding inline `style`
+ * attribute in the design file. Where a number here disagrees with the design, this file is
+ * wrong; the design is the source of truth.
+ *
+ * Three things in the running playground have no counterpart in the mockup and are marked as
+ * such where they appear: the canvas-background switcher (`.bg-*`, inside "05 Look & debug") and
+ * the extra numbered sections carrying the library knobs the design's curated subset leaves out
+ * ("06 Fold" onward). Both are deliberate, and both reuse the design's own row primitives rather
+ * than introducing a second visual language.
  */
 
 :root {
   color-scheme: dark;
+
   --bg: #0c0d0b;
-  --panel-bg: #14150f;
-  --panel-bg-raised: #1a1b14;
-  --well-bg: #101109;
-  --input-bg: #1a1b14;
-  --input-border: #34362c;
+  --card: #14150f;
+  --raised: #1a1b14;
+  --well: #101109;
+  --tile: #131410;
+
   --border: #23241d;
   --border-soft: #1f2019;
+  --border-input: #34362c;
+  --border-stage: #2a2c22;
+  --track: #2a2c22;
+
   --fg: #f0eee2;
+  --fg-strong: #e6e4d8;
   --fg-dim: #9b9b8b;
   --fg-faint: #6e6e62;
   --fg-faintest: #57574e;
+
   --accent: #d9ff62;
   --accent-hover: #eaffa0;
-  --accent-dim: rgba(217, 255, 98, 0.45);
   --accent-ink: #16180a;
+
   --ok: #86e2a6;
-  --ok-bg: rgba(134, 226, 166, 0.09);
-  --ok-border: rgba(134, 226, 166, 0.32);
-  --warn: #e0a94a;
   --bad: #ff7a6b;
-  --bad-bg: rgba(255, 122, 107, 0.1);
-  --bad-border: rgba(255, 122, 107, 0.4);
-  --dev: #b98af0;
-  --mono: 'JetBrains Mono', ui-monospace, 'SFMono-Regular', Consolas, monospace;
-  --sans: 'Space Grotesk', ui-sans-serif, system-ui, -apple-system, 'Segoe UI', sans-serif;
-  --radius: 12px;
-  --radius-sm: 8px;
-  --radius-pill: 999px;
+
+  --mono: 'JetBrains Mono', ui-monospace, monospace;
+  --sans: 'Space Grotesk', ui-sans-serif, system-ui, sans-serif;
 }
 
 * {
   box-sizing: border-box;
 }
 
-/* Native WebKit spin-arrows on every `input[type="number"]` (`.range-number`, `.config-input`,
-   and any other number field) sit right against the digits and read as a stray glyph rather than
-   a control — e.g. "0.035" misreads as "0,03!" with the arrow overlapping the last digit — which
-   fights the compact mono readout the rest of the panel relies on. Hidden globally, not scoped to
-   one class, since no number field in this design wants them. */
-input[type='number']::-webkit-outer-spin-button,
-input[type='number']::-webkit-inner-spin-button {
-  -webkit-appearance: none;
-  margin: 0;
-}
-
-input[type='number'] {
-  -moz-appearance: textfield;
-}
-
 body {
   margin: 0;
-  /* Two faint radial accents anchored top-left and top-right, over the near-black ground —
-     the page reads as lit rather than flat without either one calling attention to itself. */
-  background:
-    radial-gradient(1100px 520px at 12% -8%, rgba(217, 255, 98, 0.05), transparent 62%),
-    radial-gradient(900px 460px at 100% 0%, rgba(255, 255, 255, 0.028), transparent 58%), var(--bg);
+  background: var(--bg);
   color: var(--fg);
-  font-family: var(--sans);
-  font-size: 14px;
-  line-height: 1.5;
-}
-
-h1,
-h2,
-h3,
-h4 {
-  font-weight: 600;
-}
-
-h2 {
-  margin: 0 0 0.5rem;
-  font-size: 0.78rem;
-  letter-spacing: 0.06em;
-  text-transform: uppercase;
-  color: var(--fg-dim);
+  -webkit-font-smoothing: antialiased;
 }
 
 a {
@@ -97,712 +66,15 @@ a:hover {
   color: var(--accent-hover);
 }
 
-button {
-  font: inherit;
-  color: inherit;
-  background: var(--panel-bg-raised);
-  border: 1px solid var(--border);
-  border-radius: var(--radius-sm);
-  padding: 0.3rem 0.6rem;
-  cursor: pointer;
-}
-
-button:hover {
-  border-color: var(--accent);
-  color: var(--accent);
-}
-
-/* Raw text/number inputs and selects get the "well" treatment (a shade lighter than the panel
-   they sit in) everywhere by default; a range input is excluded because its native track is what
-   `--accent` (via `accent-color` below) already styles, and boxing it up would fight that. */
-input:not([type='range']),
-select {
-  background: var(--input-bg);
-  border: 1px solid var(--input-border);
-  border-radius: var(--radius-sm);
-  padding: 0.2rem 0.45rem;
-}
-
-input,
-select {
-  font: inherit;
-  color: inherit;
-  accent-color: var(--accent);
-}
-
-/* Custom range slider skin — every `input[type=range]` in the playground (`.knob-input`,
-   `.transport-input`, anything future) gets the same flat 4px track and a bordered accent thumb,
-   cross-browser via the vendor pseudo-elements (`accent-color` above stays as a fallback for
-   anything that supports neither). `--fill-pct` is an optional custom property a caller can set
-   inline (`style="--fill-pct: 42%"`) to paint the already-covered part of the track in accent
-   colour up to the thumb without a second DOM node; it defaults to 0% so a slider that never sets
-   it just shows the flat track. Firefox has no fill-by-percentage equivalent of the WebKit
-   gradient trick, so it gets the built-in `::-moz-range-progress` instead. */
-input[type='range'] {
-  --fill-pct: 0%;
-  appearance: none;
+/* The design hides the native spinners on every number field it draws; so does this. */
+input[type='number']::-webkit-outer-spin-button,
+input[type='number']::-webkit-inner-spin-button {
   -webkit-appearance: none;
-  width: 100%;
-  height: 14px;
-  background: transparent;
-  cursor: pointer;
-}
-
-input[type='range']::-webkit-slider-runnable-track {
-  height: 4px;
-  border-radius: 3px;
-  background: linear-gradient(to right, var(--accent) var(--fill-pct), #2a2c22 var(--fill-pct));
-}
-
-input[type='range']::-moz-range-track {
-  height: 4px;
-  border-radius: 3px;
-  background: #2a2c22;
-}
-
-input[type='range']::-moz-range-progress {
-  height: 4px;
-  border-radius: 3px;
-  background: var(--accent);
-}
-
-input[type='range']::-webkit-slider-thumb {
-  -webkit-appearance: none;
-  appearance: none;
-  width: 14px;
-  height: 14px;
-  margin-top: -5px;
-  border-radius: 50%;
-  background: var(--fg);
-  border: 2px solid var(--accent);
-  box-shadow: 0 2px 6px rgba(0, 0, 0, 0.55);
-}
-
-input[type='range']::-moz-range-thumb {
-  width: 14px;
-  height: 14px;
-  border-radius: 50%;
-  background: var(--fg);
-  border: 2px solid var(--accent);
-  box-shadow: 0 2px 6px rgba(0, 0, 0, 0.55);
-}
-
-input[type='range']:focus-visible {
-  outline: none;
-}
-
-input[type='range']:focus-visible::-webkit-slider-thumb {
-  outline: 2px solid var(--accent);
-  outline-offset: 2px;
-}
-
-input[type='range']:focus-visible::-moz-range-thumb {
-  outline: 2px solid var(--accent);
-  outline-offset: 2px;
-}
-
-/* ---------------------------------------------------------------------------------------------
- * Masthead
- * ------------------------------------------------------------------------------------------- */
-
-/* One line, always — matching the design's fixed-height sticky header. Every child that can grow
-   (`.masthead-status-text`, `#version-line`, `#header-chip`) is hard-truncated with an ellipsis
-   (below) rather than allowed to wrap the row onto a second line. */
-#masthead {
-  position: sticky;
-  top: 0;
-  z-index: 10;
-  display: flex;
-  align-items: center;
-  gap: 18px;
-  padding: 13px 24px;
-  border-bottom: 1px solid var(--border);
-  background: rgba(12, 13, 11, 0.92);
-  backdrop-filter: blur(8px);
-  -webkit-backdrop-filter: blur(8px);
-}
-
-.masthead-brand {
-  display: flex;
-  align-items: center;
-  gap: 11px;
-  min-width: 0;
-  flex-shrink: 0;
-}
-
-.masthead-titles {
-  min-width: 0;
-}
-
-#masthead h1 {
-  margin: 0;
-  font-size: 13px;
-  font-weight: 700;
-  letter-spacing: 0.15em;
-  text-transform: uppercase;
-}
-
-.masthead-subtitle {
-  font-size: 10.5px;
-  letter-spacing: 0.12em;
-  text-transform: uppercase;
-  color: var(--fg-faint);
-}
-
-/* Truncated like `.accordion-summary`/`#header-chip` — this chip has no design counterpart (see
-   index.html's comment on it), so it must never be the reason the header grows past one line. */
-#version-line {
-  max-width: 260px;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
-/* Pinned to the far right, same as the design's own trailing `margin-left:auto` wrapper around
-   its header chip + Reset — everything in normal flow before this (brand, status pill) stays put. */
-.masthead-actions {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  margin-left: auto;
-  min-width: 0;
-  flex-shrink: 0;
-}
-
-/* ---------------------------------------------------------------------------------------------
- * The layout — a hero stage and one 396px `#sidebar`, merging what used to be the separate
- * `#config-column`/`#panel-column` grid cells into one scrolling column. Below 1100px everything
- * collapses to one column, with the stage reordered first.
- * ------------------------------------------------------------------------------------------- */
-
-main {
-  display: grid;
-  grid-template-columns: minmax(0, 1fr) 396px;
-  max-width: 1720px;
-  margin: 0 auto;
-  padding: 20px 24px 56px;
-  gap: 20px;
-  align-items: start;
-}
-
-@media (max-width: 1100px) {
-  main {
-    grid-template-columns: 1fr;
-  }
-
-  #stage-column {
-    order: -1;
-  }
-}
-
-#stage-column {
-  background: var(--panel-bg);
-  border: 1px solid var(--border);
-  border-radius: var(--radius);
-  padding: 0.65rem;
-  min-width: 0;
-  min-height: 420px;
-  display: flex;
-  flex-direction: column;
-  gap: 0.6rem;
-}
-
-/* `#sidebar` is the single merged column: `.sidebar-card` sections (factory options, knobs,
-   share) stack inside it, each its own bordered card, the whole thing sticky and independently
-   scrollable so a tall knob list never pushes the stage or the page footer around. */
-#sidebar {
-  display: flex;
-  flex-direction: column;
-  gap: 14px;
-  min-width: 0;
-  position: sticky;
-  top: 0.75rem;
-  max-height: calc(100vh - 1.5rem);
-  overflow-y: auto;
-}
-
-@media (max-width: 1100px) {
-  #sidebar {
-    position: static;
-    max-height: none;
-  }
-}
-
-/* `#panel` is `panel.ts`'s single mount point, holding several `.accordion-section`s it
-   generates as one contiguous block. `display: contents` drops `#panel` itself out of the flex
-   formatting context — it stops being a box and its children become flex items of `#sidebar`
-   directly — so each child's `order` (set inline by `panel.ts` via `TAB_NUMBER`, and by
-   `index.html`'s static sections) is compared across the whole sidebar instead of being trapped
-   inside this wrapper. `#panel` carries no visual styles of its own, so nothing is lost by
-   removing it from the box tree. `.knob-accordion` (`panel.ts`'s own inner wrapper around every
-   generated `.accordion-section`, itself styled nowhere in this file) needs the same treatment —
-   `order` only affects direct flex items, so without this second `display: contents` the
-   sections would still be trapped one level down, inside a single unordered flex item, and the
-   fix above would set their `order` with no visible effect. */
-#panel,
-.knob-accordion {
-  display: contents;
-}
-
-.sidebar-card {
-  background: var(--panel-bg);
-  border: 1px solid var(--border);
-  border-radius: var(--radius);
-  padding: 0.75rem;
-  min-width: 0;
-}
-
-/* ---------------------------------------------------------------------------------------------
- * Shared dense-row primitives — factory options (config-*) and knobs (knob-*) both use a
- * one-line head, a control body, and a small note underneath. A monospace readout is always
- * right-aligned in its own column so a reader scanning the panel reads values, not prose.
- * ------------------------------------------------------------------------------------------- */
-
-#knob-count {
-  font-family: var(--mono);
-  font-size: 0.72rem;
-  color: var(--fg-dim);
-  background: var(--well-bg);
-  border: 1px solid var(--border-soft);
-  border-radius: var(--radius-sm);
-  padding: 0.4rem 0.5rem;
-  line-height: 1.4;
-}
-
-.config-row,
-.knob-row {
-  border-bottom: 1px solid var(--border-soft);
-  padding: 0.4rem 0;
-}
-
-.config-row:last-of-type,
-.knob-row:last-of-type {
-  border-bottom: none;
-}
-
-.config-head,
-.knob-head {
-  display: flex;
-  align-items: center;
-  flex-wrap: wrap;
-  gap: 0.35rem;
-  font-family: var(--mono);
-  font-size: 0.78rem;
-  color: var(--fg);
-}
-
-.knob-label {
-  overflow-wrap: anywhere;
-}
-
-.config-body,
-.knob-body {
-  display: flex;
-  align-items: center;
-  gap: 0.5rem;
-  margin-top: 0.3rem;
-}
-
-.knob-body {
-  font-family: var(--mono);
-}
-
-.config-input,
-.knob-input[type='number'] {
-  width: 6rem;
-}
-
-.knob-input[type='range'] {
-  flex: 1;
-  min-width: 0;
-}
-
-.knob-readout {
-  font-family: var(--mono);
-  font-size: 0.76rem;
-  color: var(--accent);
-  min-width: 3.6rem;
-  text-align: right;
-  flex-shrink: 0;
-}
-
-.config-note,
-.inspector-note {
-  margin: 0.3rem 0 0;
-  font-size: 0.74rem;
-  color: var(--fg-faint);
-  line-height: 1.4;
-}
-
-.config-status {
-  font-family: var(--mono);
-  font-size: 0.72rem;
-  color: var(--fg-dim);
   margin: 0;
 }
 
-.knob-error {
-  margin-top: 0.3rem;
-  padding: 0.3rem 0.45rem;
-  border: 1px solid var(--bad);
-  border-radius: var(--radius-sm);
-  background: var(--bad-bg);
-  color: var(--bad);
-  font-family: var(--mono);
-  font-size: 0.74rem;
-}
-
-/* ---------------------------------------------------------------------------------------------
- * Badges — legible at a glance means a fixed shape and a colour per kind, not per invalidation
- * level (the demo emits one CSS class for every `invalidates` value; the badge text itself is
- * `draw` / `front` / `hull` / `field`). The other three kinds — a `sprite-px` reference, `dev`,
- * and a `no label` gap in the demo's own table — each get their own colour so the three read as
- * different *kinds* of note, not different severities of the same one.
- * ------------------------------------------------------------------------------------------- */
-
-.knob-badges {
-  display: inline-flex;
-  gap: 0.3rem;
-  flex-wrap: wrap;
-}
-
-.knob-badge {
-  font-family: var(--mono);
-  font-size: 0.58rem;
-  letter-spacing: 0.03em;
-  text-transform: uppercase;
-  padding: 0.05rem 0.35rem;
-  border-radius: var(--radius-pill);
-  border: 1px solid transparent;
-  white-space: nowrap;
-}
-
-/* On the row's own grid these sit beside the label in a fixed-width first column, on every knob
- * row (`.knob-badge--level` alone is on ALL of them) — halved alpha vs. the badge colours used
- * elsewhere (e.g. `--ok-bg`/`--ok-border` on `.masthead-status--ok`) so they read as a quiet
- * annotation next to the slider rather than competing with it for attention. */
-.knob-badge--level {
-  background: rgba(217, 255, 98, 0.06);
-  border-color: rgba(217, 255, 98, 0.18);
-  color: var(--accent);
-}
-
-.knob-badge--reference {
-  background: rgba(134, 226, 166, 0.045);
-  border-color: rgba(134, 226, 166, 0.16);
-  color: var(--ok);
-  cursor: help;
-}
-
-.knob-badge--warning {
-  background: rgba(224, 169, 74, 0.07);
-  border-color: rgba(224, 169, 74, 0.2);
-  color: var(--warn);
-}
-
-.knob-badge--dev {
-  background: rgba(185, 138, 240, 0.07);
-  border-color: rgba(185, 138, 240, 0.2);
-  color: var(--dev);
-}
-
-/* ---------------------------------------------------------------------------------------------
- * The knob panel's controls strip and its tabbed groups. Tabs replace what used to be one long
- * stack of always-open `<details>` sections — the exact shape that clipped/overflowed at normal
- * viewport widths in the reference spike's panel. `.knob-tabs` wraps onto multiple rows rather
- * than scrolling horizontally, since the sidebar this sits in is only ~300px at the 3-column
- * breakpoint and up to eight groups (`labels.ts`'s `GROUP_ORDER`) never fit one row there.
- * ------------------------------------------------------------------------------------------- */
-
-.knob-controls {
-  display: flex;
-  flex-wrap: wrap;
-  align-items: center;
-  gap: 0.75rem;
-  padding-bottom: 0.5rem;
-  margin-bottom: 0.4rem;
-  border-bottom: 1px solid var(--border);
-  font-size: 0.78rem;
-}
-
-.knob-target {
-  display: flex;
-  align-items: center;
-  gap: 0.4rem;
-  border: 1px solid var(--border-soft);
-  border-radius: var(--radius-sm);
-  padding: 0.2rem 0.5rem;
-  margin: 0;
-}
-
-.knob-target legend {
-  padding: 0 0.3rem;
-  font-size: 0.68rem;
-  text-transform: uppercase;
-  letter-spacing: 0.05em;
-  color: var(--fg-faint);
-}
-
-.knob-target label {
-  display: inline-flex;
-  align-items: center;
-  gap: 0.2rem;
-  color: var(--fg-dim);
-}
-
-.knob-dev-toggle {
-  display: inline-flex;
-  align-items: center;
-  gap: 0.3rem;
-  color: var(--fg-dim);
-}
-
-.knob-tabs {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 0.3rem;
-  padding-bottom: 0.5rem;
-  margin-bottom: 0.4rem;
-  border-bottom: 1px solid var(--border);
-}
-
-.knob-tab {
-  font: inherit;
-  color: var(--fg-dim);
-  background: var(--panel-bg-raised);
-  border: 1px solid var(--border-soft);
-  border-radius: var(--radius-sm);
-  padding: 0.3rem 0.55rem;
-  font-size: 0.72rem;
-  font-weight: 600;
-  letter-spacing: 0.02em;
-  cursor: pointer;
-  white-space: nowrap;
-}
-
-.knob-tab:hover {
-  color: var(--fg);
-  border-color: var(--accent-dim);
-}
-
-.knob-tab[aria-selected='true'] {
-  color: var(--accent);
-  border-color: var(--accent-dim);
-  background: rgba(217, 255, 98, 0.14);
-}
-
-.knob-tab:focus-visible {
-  outline: 2px solid var(--accent);
-  outline-offset: 1px;
-}
-
-.knob-tabpanel[hidden] {
-  display: none;
-}
-
-/* A tab spanning more than one `labels.ts` group (`panel.ts`'s `tabFor`) renders each group as
-   its own bordered sub-card instead of one undifferentiated list — the design's "Hull knobs" /
-   "Torn knobs" / "Shared" sub-cards on the Edge tab, generalised to whichever groups actually
-   share a tab (also Motion / Debug under "Look & Debug"). A tab with only one member group never
-   gets a sub-card wrapper, so it stays exactly as flat as it was before this existed. */
-.knob-subcard {
-  border: 1px solid var(--border-soft);
-  border-radius: var(--radius-sm);
-  background: var(--panel-bg-raised);
-  padding: 0.5rem 0.6rem;
-  margin-bottom: 0.5rem;
-}
-
-.knob-subcard:last-child {
-  margin-bottom: 0;
-}
-
-.knob-subcard .knob-row:first-of-type {
-  padding-top: 0;
-}
-
-.knob-subcard .knob-row:last-of-type {
-  border-bottom: none;
-  padding-bottom: 0;
-}
-
-.knob-subcard-head {
-  display: flex;
-  align-items: center;
-  gap: 0.4rem;
-  margin-bottom: 0.3rem;
-  font-size: 0.72rem;
-  font-weight: 600;
-  letter-spacing: 0.04em;
-  text-transform: uppercase;
-  color: var(--fg-dim);
-}
-
-.knob-subcard-head::before {
-  content: '';
-  flex-shrink: 0;
-  width: 6px;
-  height: 6px;
-  border-radius: 50%;
-  background: var(--accent);
-}
-
-/* NEW: a muted marker for a subcard whose knobs are shared across siblings rather than owned by
-   one of them (the design's "Shared" subcard under Hull/Torn) — same head, dimmer dot. Not wired
-   into panel.ts's tabFor yet; that decision belongs to whichever agent reworks the subcard split. */
-.knob-subcard-head--muted::before {
-  background: var(--fg-dim);
-}
-
-/* ---------------------------------------------------------------------------------------------
- * Share block — a `.sidebar-card` like its siblings now, so it needs none of its own border/
- * spacing overrides; only the emitted-code well below is specific to it.
- * ------------------------------------------------------------------------------------------- */
-
-#emitted-code {
-  margin: 0.5rem 0 0;
-  padding: 0.5rem;
-  background: var(--well-bg);
-  border: 1px solid var(--border-soft);
-  border-radius: var(--radius-sm);
-  font-family: var(--mono);
-  font-size: 0.72rem;
-  line-height: 1.4;
-  white-space: pre-wrap;
-  overflow-wrap: anywhere;
-  max-height: 220px;
-  overflow-y: auto;
-}
-
-/* ---------------------------------------------------------------------------------------------
- * Stage — the hero, the transport, and the grid. This block keeps its width at every breakpoint;
- * only its own contents wrap.
- * ------------------------------------------------------------------------------------------- */
-
-#hero-slot {
-  position: relative;
-  display: flex;
-  justify-content: center;
-  align-items: center;
-  min-height: 260px;
-  background: var(--well-bg);
-  border: 1px solid var(--border-soft);
-  border-radius: var(--radius-sm);
-  overflow: hidden;
-}
-
-/* ---------------------------------------------------------------------------------------------
- * Stage background presets — a pure visual dev aid, not part of the crumple config. The preset
- * class lives on `#stage-column`, the nearest shared ancestor of `#hero-slot` and every
- * `.grid-tile-canvas`, so one click changes the backdrop behind the hero and every grid tile at
- * once. `stage-bg-dark` restates the default `--well-bg` explicitly (rather than leaving it as
- * "no class") so all three presets are one flat, equally-specific set of overrides.
- * ------------------------------------------------------------------------------------------- */
-
-.stage-bg-controls {
-  display: flex;
-  align-items: center;
-  flex-wrap: wrap;
-  gap: 0.4rem;
-  font-size: 0.76rem;
-}
-
-.stage-bg-label {
-  color: var(--fg-dim);
-  margin-right: 0.2rem;
-}
-
-.stage-bg-controls button {
-  font-size: 0.74rem;
-  padding: 0.25rem 0.5rem;
-}
-
-.stage-bg-controls button[aria-pressed='true'] {
-  border-color: var(--accent-dim);
-  color: var(--accent);
-}
-
-.stage-bg-dark #hero-slot,
-.stage-bg-dark .grid-tile-canvas {
-  background: var(--well-bg);
-}
-
-.stage-bg-light #hero-slot,
-.stage-bg-light .grid-tile-canvas {
-  background: #f2ede1;
-}
-
-/* The classic alpha checkerboard — 8px squares, two greys — because it is the one backdrop a
-   truly transparent canvas can never blend into, unlike a solid colour that might coincidentally
-   match the paper or the page. */
-.stage-bg-checker #hero-slot,
-.stage-bg-checker .grid-tile-canvas {
-  background-image:
-    linear-gradient(45deg, #808080 25%, transparent 25%),
-    linear-gradient(-45deg, #808080 25%, transparent 25%),
-    linear-gradient(45deg, transparent 75%, #808080 75%),
-    linear-gradient(-45deg, transparent 75%, #808080 75%);
-  background-size: 16px 16px;
-  background-position:
-    0 0,
-    0 8px,
-    8px -8px,
-    -8px 0;
-  background-color: #b3b3b3;
-}
-
-/* `direct` present hands `#hero-slot` the stage's own surface canvas (unclassed — it is one
-   canvas for the hero rect and the grid rects together, not `.hero-canvas`), so this targets
-   that one specifically. `height: auto` is safe here and ONLY here: a direct surface is sized
-   once by `stage.resize()` and `blitOut` never touches it. */
-#hero-slot canvas:not(.hero-canvas) {
-  display: block;
-  max-width: 100%;
-  height: auto;
-}
-
-/* The `blit` hero. Its `width`/`height` are set inline from `cssPx` (`scene.ts`'s `heroCanvas`,
-   which carries the reasoning); what matters here is that neither is `auto` and nothing else
-   derives its layout size from its backing store, or `blitOut`'s managed sizing feeds back into
-   itself once per draw. */
-.hero-canvas {
-  display: block;
-}
-
-/* NEW: a small absolutely-positioned badge meant to float over `#hero-slot` (pose name, frame
-   count, whatever a future stage overlay wants to surface without stealing layout space). The
-   host is responsible for `position: relative`, already true of `#hero-slot` above. */
-.stage-chip {
-  position: absolute;
-  padding: 5px 10px;
-  border-radius: 7px;
-  font-family: var(--mono);
-  font-size: 11.5px;
-  background: rgba(255, 255, 255, 0.04);
-  border: 1px solid #2a2c22;
-  color: var(--fg-dim);
-}
-
-.stage-chip--accent {
-  background: rgba(217, 255, 98, 0.12);
-  border-color: rgba(217, 255, 98, 0.4);
-  color: var(--accent);
-}
-
-/* NEW: the drag-and-drop-a-file-onto-the-stage affordance. Sits absolutely over whichever element
-   hosts it (`#hero-slot`, most likely) and is toggled with `[hidden]`/a visibility class from JS,
-   not with this stylesheet — this only defines what "active" looks like. */
-.stage-drop-overlay {
-  position: absolute;
-  inset: 0;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  background: rgba(217, 255, 98, 0.06);
-  box-shadow: inset 0 0 0 2px var(--accent);
-  border-radius: var(--radius-sm);
-  animation: dropPulse 1.1s ease-in-out infinite;
-  pointer-events: none;
+input[type='number'] {
+  -moz-appearance: textfield;
 }
 
 @keyframes dropPulse {
@@ -815,533 +87,696 @@ main {
   }
 }
 
-.stage-drop-overlay-label {
-  background: var(--accent);
-  color: var(--accent-ink);
-  padding: 9px 16px;
-  border-radius: 9px;
-  font-weight: 700;
-  text-transform: uppercase;
-  letter-spacing: 0.06em;
-  font-size: 12.5px;
-}
-
-#transport {
-  padding: 0.6rem 0.7rem;
-  border: 1px solid var(--border-soft);
-  border-radius: var(--radius-sm);
-  background: var(--panel-bg-raised);
-  font-family: var(--mono);
-  font-size: 0.78rem;
-}
-
-.transport-summary {
-  margin: 0 0 0.4rem;
-  color: var(--fg);
-}
-
-.transport-status {
-  margin: 0 0 0.5rem;
-  color: var(--fg-dim);
-  min-height: 1em;
-}
-
-.transport-row {
-  display: flex;
-  align-items: center;
-  flex-wrap: wrap;
-  gap: 0.5rem;
-  margin: 0.4rem 0;
-}
-
-.transport-row button {
-  font-size: 0.76rem;
-}
-
-.transport-input[type='range'] {
-  flex: 1;
-  min-width: 8rem;
-}
-
-.transport-readout,
-.transport-cadence {
-  color: var(--fg-dim);
-  font-size: 0.74rem;
-}
-
-.transport-cadence {
-  margin: 0.5rem 0 0;
-  padding-top: 0.4rem;
-  border-top: 1px solid var(--border-soft);
-}
-
-/* Sound. Separated by a rule from the run controls above it, because it is the one block on the
-   page that does nothing until it is opted into. */
-.transport-audio {
-  margin-top: 0.5rem;
-  padding-top: 0.4rem;
-  border-top: 1px solid var(--border-soft);
-}
-
-.transport-audio-enable {
-  display: inline-flex;
-  align-items: center;
-  gap: 0.3rem;
-  color: var(--fg);
-  cursor: pointer;
-}
-
-.transport-audio-volume {
-  max-width: 7rem;
-}
-
-.transport-audio-readout {
-  margin: 0.3rem 0 0;
-  overflow-wrap: anywhere;
-}
-
-.transport-audio-note {
-  margin: 0.25rem 0 0;
-  font-size: 0.72rem;
-  color: var(--fg-faintest);
-  line-height: 1.4;
-  overflow-wrap: anywhere;
-}
-
-.transport-report {
-  white-space: pre-wrap;
-  overflow-wrap: anywhere;
-  color: var(--fg-dim);
-  font-size: 0.72rem;
-  margin: 0.3rem 0 0;
-}
-
-#grid {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 0.5rem;
-  padding-top: 0.4rem;
-  border-top: 1px solid var(--border-soft);
-}
-
-.grid-tile {
-  display: flex;
-  flex-direction: column;
-  align-items: center;
-  gap: 0.25rem;
-}
-
-.grid-tile-canvas {
-  width: 88px;
-  height: 88px;
-  background: var(--well-bg);
-  border: 1px solid var(--border-soft);
-  border-radius: var(--radius-sm);
-}
-
-.grid-tile-label {
-  font-family: var(--mono);
-  font-size: 0.66rem;
-  color: var(--fg-faintest);
-  max-width: 100px;
-  text-align: center;
-  overflow-wrap: anywhere;
-}
-
 /* ---------------------------------------------------------------------------------------------
- * Inspector — full width, four sub-panels plus the two error columns side by side.
+ * The page shell — the design's outermost `<div>`.
  * ------------------------------------------------------------------------------------------- */
 
-#inspector {
-  margin: 0 0.75rem 0.75rem;
-  border: 1px solid var(--border);
-  border-radius: var(--radius);
-  padding: 0.75rem;
-  background: var(--panel-bg);
-  font-family: var(--mono);
-  font-size: 0.78rem;
-  display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(240px, 1fr));
-  gap: 0.75rem;
-  align-items: start;
-}
-
-.inspector-section {
-  min-width: 0;
-}
-
-.inspector-section h3,
-.inspector-section h4 {
-  margin: 0 0 0.4rem;
-  font-size: 0.72rem;
-  letter-spacing: 0.04em;
-  text-transform: uppercase;
-  color: var(--fg-dim);
-  font-weight: 600;
-}
-
-.inspector-facts,
-.inspector-usage {
-  display: grid;
-  grid-template-columns: max-content 1fr;
-  gap: 0.15rem 0.75rem;
-  margin: 0;
-}
-
-.inspector-facts dt,
-.inspector-usage dt {
-  color: var(--fg-faint);
-}
-
-.inspector-facts dd,
-.inspector-usage dd {
-  margin: 0;
-  text-align: right;
-  color: var(--fg);
-  overflow-wrap: anywhere;
-}
-
-.inspector-warnings,
-.inspector-channel ul {
-  margin: 0;
-  padding-left: 1.1rem;
-  color: var(--fg-dim);
-  font-size: 0.74rem;
-}
-
-.inspector-warnings li,
-.inspector-channel li {
-  margin-bottom: 0.2rem;
-  overflow-wrap: anywhere;
-}
-
-.inspector-events {
-  max-height: 220px;
-  overflow-y: auto;
-  margin: 0;
-  padding: 0.5rem;
-  background: var(--well-bg);
-  border: 1px solid var(--border-soft);
-  border-radius: var(--radius-sm);
-  white-space: pre-wrap;
-  overflow-wrap: anywhere;
-  font-size: 0.72rem;
-  color: var(--fg-dim);
-}
-
-/* The two error channels span the full inspector width and sit side by side within it — the
-   only sub-panel that spans, since a reader comparing observed against orphaned failures needs
-   both columns in the same glance, not stacked across a scroll. */
-.inspector-section:has(.inspector-channels) {
-  grid-column: 1 / -1;
-}
-
-.inspector-channels {
-  display: grid;
-  grid-template-columns: 1fr 1fr;
-  gap: 1rem;
-}
-
-.inspector-channel {
-  min-width: 0;
-  background: var(--well-bg);
-  border: 1px solid var(--border-soft);
-  border-radius: var(--radius-sm);
-  padding: 0.5rem;
-}
-
-@media (max-width: 640px) {
-  .inspector-channels {
-    grid-template-columns: 1fr;
-  }
-}
-
-/* ---------------------------------------------------------------------------------------------
- * NEW — "Control Panel v2" primitives. Nothing below this line is referenced by the current
- * markup yet; these classes exist so the agents reworking index.html/panel.ts/transport.ts/
- * config-panel.ts have a finished visual vocabulary to build against instead of inventing one
- * mid-refactor. Each block below corresponds to one numbered pattern in that redesign's spec.
- * ------------------------------------------------------------------------------------------- */
-
-/* 1 — header status pill (ok/bad), with a small dot indicator. */
-.masthead-status {
-  display: inline-flex;
-  align-items: center;
-  gap: 8px;
-  padding: 6px 13px;
-  border-radius: var(--radius-pill);
-  font-family: var(--mono);
-  font-size: 12px;
-  flex-shrink: 1;
-  min-width: 0;
-}
-
-.masthead-status-text {
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
-.masthead-status-dot {
-  width: 6px;
-  height: 6px;
-  border-radius: 50%;
-  flex-shrink: 0;
-  background: currentColor;
-}
-
-.masthead-status--ok {
-  color: var(--ok);
-  background: var(--ok-bg);
-  border: 1px solid var(--ok-border);
-}
-
-.masthead-status--bad {
-  color: var(--bad);
-  background: var(--bad-bg);
-  border: 1px solid var(--bad-border);
-}
-
-/* 2 — the generic chip primitive: a small mono-text pill, neutral by default, with an accent
-   variant for a value worth calling out (a pose name, a sample count, an edge mode). `.chip` is
-   the base any one-off badge should reach for; `.masthead-chip` is a header-specific alias kept
-   for the header row's own chip so it isn't renamed out from under it. */
-.chip {
-  display: inline-flex;
-  align-items: center;
-  gap: 5px;
-  font-family: var(--mono);
-  font-size: 11.5px;
-  padding: 5px 10px;
-  border-radius: var(--radius-sm);
-  background: rgba(255, 255, 255, 0.03);
-  border: 1px solid var(--border);
-  color: var(--fg-dim);
-  white-space: nowrap;
-}
-
-.chip--neutral {
-  background: rgba(255, 255, 255, 0.03);
-  border-color: var(--border);
-  color: var(--fg-dim);
-}
-
-.chip--accent {
-  background: rgba(217, 255, 98, 0.12);
-  border-color: rgba(217, 255, 98, 0.4);
-  color: var(--accent);
-}
-
-.masthead-chip {
-  font-family: var(--mono);
-  font-size: 11.5px;
-  padding: 6px 11px;
-  border-radius: var(--radius-sm);
-  background: var(--panel-bg);
-  border: 1px solid var(--border);
-  color: var(--fg-dim);
-}
-
-/* 3 — the header's Reset action: quiet until hovered, then it reads as the accent it's about to
-   act with. */
-.masthead-reset {
-  background: transparent;
-  border: 1px solid var(--input-border);
-  color: var(--fg-dim);
+.page {
+  min-height: 100vh;
+  background:
+    radial-gradient(1100px 520px at 12% -8%, rgba(217, 255, 98, 0.05), transparent 62%),
+    radial-gradient(900px 460px at 100% 0%, rgba(255, 255, 255, 0.028), transparent 58%), var(--bg);
   font-family: var(--sans);
-  font-size: 12px;
-  font-weight: 600;
-  padding: 6px 12px;
-  border-radius: var(--radius-sm);
-  cursor: pointer;
+  font-size: 14px;
+  line-height: 1.5;
+  color: var(--fg);
 }
 
-.masthead-reset:hover {
-  border-color: var(--accent);
-  color: var(--accent);
+/* ---------------------------------------------------------------------------------------------
+ * Header
+ * ------------------------------------------------------------------------------------------- */
+
+.header {
+  position: sticky;
+  top: 0;
+  z-index: 6;
+  display: flex;
+  align-items: center;
+  gap: 18px;
+  flex-wrap: wrap;
+  padding: 13px 24px;
+  border-bottom: 1px solid var(--border);
+  background: rgba(12, 13, 11, 0.92);
+  backdrop-filter: blur(8px);
 }
 
-/* 4 — the small lime mark to the left of the wordmark in the header. */
-.masthead-mark {
-  display: inline-block;
+.brand {
+  display: flex;
+  align-items: center;
+  gap: 11px;
+}
+
+.brand-mark {
   width: 9px;
   height: 20px;
   border-radius: 2px;
   background: var(--accent);
 }
 
-/* 7 — accordion sidebar section: a numbered, collapsible card replacing the always-open stack
-   of `<details>`-like blocks the current sidebar uses. */
-.accordion-section {
-  background: var(--panel-bg);
-  border: 1px solid var(--border);
-  border-radius: var(--radius);
+.brand-titles {
+  display: flex;
+  flex-direction: column;
+  line-height: 1.2;
 }
 
-.accordion-header {
-  width: 100%;
+.brand-name {
+  margin: 0;
+  font-size: 13px;
+  font-weight: 700;
+  letter-spacing: 0.15em;
+  text-transform: uppercase;
+}
+
+.brand-sub {
+  font-size: 10.5px;
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+  color: var(--fg-faint);
+}
+
+.status {
   display: flex;
   align-items: center;
   gap: 8px;
+  padding: 6px 13px;
+  border-radius: 999px;
+  font-family: var(--mono);
+  font-size: 12px;
+  white-space: nowrap;
+  flex: 0 0 auto;
+}
+
+.status--ok {
+  background: rgba(134, 226, 166, 0.09);
+  border: 1px solid rgba(134, 226, 166, 0.32);
+  color: var(--ok);
+}
+
+.status--bad {
+  background: rgba(255, 122, 107, 0.1);
+  border: 1px solid rgba(255, 122, 107, 0.4);
+  color: var(--bad);
+}
+
+.status-dot {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: currentcolor;
+}
+
+.header-actions {
+  margin-left: auto;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.header-chip {
+  padding: 6px 11px;
+  border-radius: 8px;
+  border: 1px solid var(--border);
+  background: var(--card);
+  font-family: var(--mono);
+  font-size: 11.5px;
+  color: var(--fg-dim);
+  white-space: nowrap;
+  flex: 0 0 auto;
+}
+
+.header-reset {
+  padding: 6px 12px;
+  border-radius: 8px;
+  border: 1px solid var(--border-input);
+  background: transparent;
+  color: var(--fg-dim);
+  font-family: inherit;
+  font-size: 12px;
+  font-weight: 600;
+  cursor: pointer;
+}
+
+.header-reset:hover {
+  border-color: var(--accent);
+  color: var(--accent);
+}
+
+/* ---------------------------------------------------------------------------------------------
+ * Layout
+ * ------------------------------------------------------------------------------------------- */
+
+.main {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 396px;
+  gap: 20px;
+  align-items: start;
+  padding: 20px 24px 56px;
+  max-width: 1720px;
+  margin: 0 auto;
+}
+
+.stage-column {
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+  min-width: 0;
+}
+
+.sidebar {
+  position: sticky;
+  top: 82px;
+  max-height: calc(100vh - 104px);
+  overflow: auto;
+  display: flex;
+  flex-direction: column;
+  gap: 9px;
+  min-width: 0;
+  padding-right: 2px;
+}
+
+/* One column below the point where a 396px sidebar plus a usable stage no longer fit. The stage
+   comes first so a reader never scrolls past a wall of controls to reach it, and the sidebar
+   drops its sticky viewport-height cap — in one column there is nothing beside it to stick to. */
+@media (max-width: 1100px) {
+  .main {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .sidebar {
+    position: static;
+    max-height: none;
+    overflow: visible;
+  }
+}
+
+/* ---------------------------------------------------------------------------------------------
+ * Stage
+ * ------------------------------------------------------------------------------------------- */
+
+.stage {
+  position: relative;
+  min-height: 520px;
+  display: grid;
+  place-items: center;
+  padding: 24px;
+  border: 1px solid var(--border-stage);
+  border-radius: 14px;
+  overflow: hidden;
+  background: radial-gradient(70% 70% at 50% 42%, #111310 0%, #08090a 72%);
+}
+
+/* The artwork's own box, and the only thing the stage's grid centres. Its size is written from
+   `stage.ts` and depends on the source and `cssPx` alone, so the picture holds still under every
+   knob, mode and bucket the panel can move. */
+.stage-frame {
+  position: relative;
+}
+
+/* The hero canvas the library paints into. Absolute, because it is *not* the picture's box: it
+   covers the paper as well, reaches past the frame on all four sides, and grows and shrinks with
+   the edge parameters. Out of flow, that growth moves nothing. `filter` matches the design's own
+   drop shadow under its placeholder sheet so a mounted sprite sits in the same light. */
+.stage-canvas {
+  position: absolute;
+  display: block;
+  filter: drop-shadow(0 22px 34px rgba(0, 0, 0, 0.6));
+}
+
+.stage-chips {
+  position: absolute;
+  top: 14px;
+  left: 16px;
+  display: flex;
+  gap: 7px;
+  align-items: center;
+}
+
+.stage-chip {
+  padding: 5px 10px;
+  border-radius: 7px;
+  background: rgba(255, 255, 255, 0.04);
+  border: 1px solid var(--border-stage);
+  font-family: var(--mono);
+  font-size: 11.5px;
+  color: var(--fg-dim);
+  white-space: nowrap;
+}
+
+.stage-chip--accent {
+  background: rgba(217, 255, 98, 0.12);
+  border: 1px solid rgba(217, 255, 98, 0.4);
+  color: var(--accent);
+}
+
+.stage-chip--edge {
+  position: absolute;
+  top: 14px;
+  right: 16px;
+}
+
+.stage-hint {
+  position: absolute;
+  bottom: 14px;
+  left: 0;
+  right: 0;
+  text-align: center;
+  font-family: var(--mono);
+  font-size: 11px;
+  color: var(--fg-faintest);
+  pointer-events: none;
+}
+
+.stage-drop {
+  position: absolute;
+  inset: 0;
+  display: grid;
+  place-items: center;
+  background: rgba(217, 255, 98, 0.06);
+  box-shadow: inset 0 0 0 2px var(--accent);
+  border-radius: 14px;
+  animation: dropPulse 1.1s ease-in-out infinite;
+  pointer-events: none;
+}
+
+.stage-drop-badge {
+  padding: 9px 16px;
+  border-radius: 9px;
+  background: var(--accent);
+  color: var(--accent-ink);
+  font-size: 12.5px;
+  font-weight: 700;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+}
+
+/* ---------------------------------------------------------------------------------------------
+ * Transport
+ * ------------------------------------------------------------------------------------------- */
+
+.transport {
+  background: var(--card);
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  padding: 13px 14px;
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.transport-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.btn-primary {
+  padding: 9px 18px;
+  border-radius: 8px;
+  border: 1px solid var(--accent);
+  background: var(--accent);
+  color: var(--accent-ink);
+  font-family: inherit;
+  font-size: 13px;
+  font-weight: 700;
+  cursor: pointer;
+}
+
+.btn-primary:hover:not(:disabled) {
+  filter: brightness(1.08);
+}
+
+.btn-large {
+  padding: 9px 18px;
+  border-radius: 8px;
+  border: 1px solid var(--border-input);
+  background: var(--raised);
+  color: var(--fg);
+  font-family: inherit;
+  font-size: 13px;
+  font-weight: 600;
+  cursor: pointer;
+}
+
+.btn-large:hover:not(:disabled) {
+  border-color: var(--accent);
+  color: var(--accent);
+}
+
+.transport-steps {
+  display: flex;
+  gap: 5px;
+  margin-left: 6px;
+}
+
+.btn-step {
+  width: 34px;
+  height: 34px;
+  border-radius: 8px;
+  border: 1px solid var(--border);
+  background: var(--well);
+  color: var(--fg-dim);
+  font-family: inherit;
+  font-size: 12px;
+  cursor: pointer;
+}
+
+.btn-step:hover:not(:disabled) {
+  border-color: var(--border-input);
+  color: var(--fg);
+}
+
+.transport-readout {
+  margin-left: auto;
+  font-family: var(--mono);
+  font-size: 12px;
+  color: var(--fg-dim);
+}
+
+.pose-strip {
+  display: flex;
+  gap: 5px;
+}
+
+.pose-step {
+  flex: 1 1 0;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 1px;
+  padding: 7px 2px;
+  border-radius: 8px;
+  cursor: pointer;
+  font-family: inherit;
+  border: 1px solid var(--border);
+  background: var(--well);
+  color: var(--fg-dim);
+}
+
+.pose-step--active {
+  border-color: var(--accent);
+  background: rgba(217, 255, 98, 0.14);
+  color: var(--accent);
+}
+
+.pose-step-top {
+  font-family: var(--mono);
+  font-size: 12.5px;
+  font-weight: 500;
+}
+
+.pose-step-bottom {
+  font-size: 9.5px;
+  letter-spacing: 0.09em;
+  text-transform: uppercase;
+  opacity: 0.55;
+}
+
+.transport-hint {
+  font-size: 11.5px;
+  color: var(--fg-faintest);
+}
+
+/* ---------------------------------------------------------------------------------------------
+ * Diagnostics
+ * ------------------------------------------------------------------------------------------- */
+
+.diagnostics {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.metrics {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
+  gap: 8px;
+}
+
+.metric {
+  background: var(--tile);
+  border: 1px solid var(--border-soft);
+  border-radius: 10px;
+  padding: 10px 12px;
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+}
+
+.metric-label {
+  font-size: 10px;
+  letter-spacing: 0.11em;
+  text-transform: uppercase;
+  color: var(--fg-faint);
+}
+
+.metric-value {
+  font-family: var(--mono);
+  font-size: 13px;
+  color: var(--fg-strong);
+}
+
+.diagnostics-foot {
+  display: flex;
+  gap: 14px;
+  flex-wrap: wrap;
+  font-family: var(--mono);
+  font-size: 11.5px;
+  color: var(--fg-faintest);
+}
+
+.diagnostics-foot-right {
+  margin-left: auto;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  max-width: 60%;
+}
+
+/* ---------------------------------------------------------------------------------------------
+ * Accordion sections
+ * ------------------------------------------------------------------------------------------- */
+
+.section {
+  background: var(--card);
+  border: 1px solid var(--border);
+  border-radius: 12px;
+}
+
+.section-header {
+  width: 100%;
+  display: flex;
+  align-items: center;
+  gap: 10px;
   padding: 13px 15px;
   background: transparent;
-  border: none;
+  border: 0;
   color: var(--fg);
+  font-family: inherit;
   cursor: pointer;
   text-align: left;
 }
 
-.accordion-number {
+.section-number {
   font-family: var(--mono);
   font-size: 10.5px;
   color: var(--fg-faint);
-  flex-shrink: 0;
 }
 
-.accordion-title {
+.section-title {
   font-size: 12px;
   font-weight: 600;
   letter-spacing: 0.1em;
   text-transform: uppercase;
 }
 
-.accordion-summary {
+.section-summary {
   margin-left: auto;
   font-family: var(--mono);
   font-size: 11.5px;
   color: var(--fg-faint);
-  max-width: 150px;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+  max-width: 150px;
 }
 
-.accordion-chevron {
-  flex-shrink: 0;
+.section-chevron {
   font-size: 9px;
   color: var(--fg-faint);
-  transition: transform 0.15s ease;
 }
 
-/* Collapsed state, toggled by main.ts's accordion click handler. `.accordion-body[hidden]` above
-   already hides the body; this only rotates the chevron to match. */
-.accordion-header--collapsed .accordion-chevron {
-  transform: rotate(-90deg);
-}
-
-.accordion-body {
+.section-body {
   padding: 0 15px 14px;
 }
 
-.accordion-body[hidden] {
-  display: none;
-}
+/* ---------------------------------------------------------------------------------------------
+ * Rows
+ * ------------------------------------------------------------------------------------------- */
 
-/* One row inside an accordion body — a thin top rule separates it from the row above, and the
-   first row in a body has nothing above it to separate from. */
-.accordion-row {
-  border-top: 1px solid var(--border-soft);
+.row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
   padding: 9px 0;
+  border-top: 1px solid var(--border-soft);
 }
 
-.accordion-row:first-child {
-  border-top: none;
-  padding-top: 0;
+.row--tight {
+  justify-content: flex-start;
+  gap: 8px;
 }
 
-/* 8 — segmented control: an off/on set of buttons in one pill-cornered track, for a mode choice
-   that used to be a `<select>` or a radio `<fieldset>` (e.g. `.knob-target`). */
-.segmented {
-  display: inline-flex;
-  gap: 3px;
-  padding: 3px;
-  background: var(--well-bg);
-  border: 1px solid var(--border);
-  border-radius: var(--radius-sm);
+.row-label {
+  font-size: 13px;
+  color: var(--fg-strong);
+  flex: 0 0 auto;
 }
 
-.segmented-btn {
-  font-family: var(--sans);
-  font-size: 12px;
-  font-weight: 600;
-  background: transparent;
-  border: none;
-  color: var(--fg-dim);
-  padding: 6px 11px;
+.select {
+  flex: 1 1 auto;
+  min-width: 0;
+  background: var(--raised);
+  border: 1px solid var(--border-input);
   border-radius: 7px;
+  padding: 7px 9px;
+  color: var(--fg);
+  font-family: inherit;
+  font-size: 12.5px;
+}
+
+.btn-inline {
+  flex: 0 0 auto;
+  padding: 7px 13px;
+  border-radius: 7px;
+  border: 1px solid var(--border-input);
+  background: var(--raised);
+  color: var(--fg);
+  font-family: inherit;
+  font-size: 12.5px;
+  font-weight: 600;
   cursor: pointer;
 }
 
-.segmented-btn--active {
+.btn-inline:hover:not(:disabled) {
+  border-color: var(--accent);
+  color: var(--accent);
+}
+
+.note {
+  margin: 10px 0 0;
+  font-size: 11.5px;
+  line-height: 1.55;
+  color: var(--fg-faint);
+}
+
+/* ---------------------------------------------------------------------------------------------
+ * Segmented control
+ * ------------------------------------------------------------------------------------------- */
+
+.segmented {
+  display: flex;
+  gap: 3px;
+  padding: 3px;
+  background: var(--well);
+  border: 1px solid var(--border);
+  border-radius: 9px;
+}
+
+.segmented--fill {
+  margin-top: 4px;
+}
+
+.segmented--fill .segment {
+  flex: 1 1 0;
+}
+
+.segment {
+  padding: 6px 11px;
+  border-radius: 7px;
+  border: 0;
+  background: transparent;
+  color: var(--fg-dim);
+  font-family: inherit;
+  font-size: 12px;
+  font-weight: 600;
+  cursor: pointer;
+  white-space: nowrap;
+}
+
+.segment--active {
   background: var(--accent);
   color: var(--accent-ink);
   font-weight: 700;
 }
 
-/* 9 — a custom slider: track, fill, and thumb positioned by JS (as percentages) instead of a
-   native `<input type="range">`, plus a small number readout that doubles as a direct-entry
-   field. Meant to replace `.knob-input[type='range']` + `.knob-readout` pairs one knob at a time,
-   not all at once — both are left exactly as they are above. */
-.range-row {
-  display: grid;
-  grid-template-columns: 1fr auto;
-  align-items: center;
-  gap: 10px;
+/* ---------------------------------------------------------------------------------------------
+ * Sub-cards
+ * ------------------------------------------------------------------------------------------- */
+
+.subcard {
+  margin-top: 12px;
+  border: 1px solid var(--border-soft);
+  border-radius: 10px;
+  padding: 11px 12px 6px;
 }
 
-.range-track-wrap {
-  position: relative;
-  grid-column: 1 / -1;
-  height: 20px;
+.subcard--padded {
+  padding: 11px 12px 12px;
+}
+
+.subcard-head {
   display: flex;
   align-items: center;
-  cursor: pointer;
+  gap: 7px;
+  font-size: 10.5px;
+  font-weight: 600;
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+  color: var(--fg-dim);
+  margin-bottom: 2px;
 }
 
-/* The real `<input type="range">` `numberControl()` (panel.ts) overlays on top of this hand-drawn
-   track: full-size, fully transparent, so it still owns every pointer/keyboard interaction while
-   `.range-fill`/`.range-thumb` do the painting. */
-.range-track-wrap input[type='range'] {
-  position: absolute;
-  inset: 0;
-  width: 100%;
-  height: 100%;
-  margin: 0;
-  opacity: 0;
-}
-
-.range-track {
-  position: relative;
-  width: 100%;
-  height: 4px;
-  border-radius: 3px;
-  background: #2a2c22;
-}
-
-.range-fill {
-  position: absolute;
-  left: 0;
-  top: 0;
-  bottom: 0;
-  border-radius: 3px;
+.subcard-dot {
+  width: 5px;
+  height: 5px;
+  border-radius: 50%;
   background: var(--accent);
 }
 
-.range-thumb {
-  position: absolute;
-  top: 50%;
-  width: 14px;
-  height: 14px;
-  border-radius: 50%;
-  background: var(--fg);
-  border: 2px solid var(--accent);
-  box-shadow: 0 2px 6px rgba(0, 0, 0, 0.55);
-  transform: translate(-50%, -50%);
+.subcard-dot--muted {
+  background: var(--fg-dim);
 }
 
-.range-number {
+/* ---------------------------------------------------------------------------------------------
+ * Slider (number field + hand-drawn track), the design's own composite control
+ * ------------------------------------------------------------------------------------------- */
+
+.slider {
+  display: grid;
+  grid-template-columns: 1fr auto;
+  align-items: center;
+  row-gap: 1px;
+  padding: 7px 0;
+}
+
+.slider-label {
+  font-size: 12.5px;
+  color: var(--fg-strong);
+}
+
+.slider-value {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  justify-self: end;
+}
+
+.slider-number {
   width: 62px;
-  background: var(--well-bg);
+  background: var(--well);
   border: 1px solid var(--border);
   border-radius: 6px;
   padding: 3px 7px;
@@ -1351,80 +786,308 @@ main {
   text-align: right;
 }
 
-/* 11 — diagnostics metric tiles, laid out as a small grid (auto-fit so the grid works whether
-   the sidebar ends up with three tiles or eight). */
-.metric-grid {
-  display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(110px, 1fr));
-  gap: 8px;
-}
-
-.metric-tile {
-  background: #131410;
-  border: 1px solid var(--border-soft);
-  border-radius: 10px;
-  padding: 10px 12px;
-}
-
-.metric-label {
-  font-size: 10px;
-  text-transform: uppercase;
-  letter-spacing: 0.11em;
-  color: var(--fg-faint);
-}
-
-.metric-value {
+.slider-unit {
+  width: 16px;
   font-family: var(--mono);
-  font-size: 13px;
-  color: #e6e4d8;
+  font-size: 10.5px;
+  color: var(--fg-faintest);
 }
 
-/* 12 — the transport's pose strip: a row of equal-width steps, one per named pose, with the
-   current one picked out in accent. */
-.pose-strip {
+.slider-track-wrap {
+  grid-column: 1 / -1;
+  height: 20px;
   display: flex;
-  gap: 6px;
-}
-
-.pose-step {
-  flex: 1 1 0;
-  display: flex;
-  flex-direction: column;
   align-items: center;
-  gap: 1px;
-  padding: 7px 2px;
-  border-radius: var(--radius-sm);
+  cursor: pointer;
+  touch-action: none;
+  outline: none;
+}
+
+.slider-track-wrap:focus-visible .slider-thumb {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+}
+
+.slider-track {
+  position: relative;
+  width: 100%;
+  height: 4px;
+  border-radius: 3px;
+  background: var(--track);
+}
+
+.slider-fill {
+  position: absolute;
+  left: 0;
+  top: 0;
+  bottom: 0;
+  border-radius: 3px;
+  background: var(--accent);
+}
+
+.slider-thumb {
+  position: absolute;
+  top: 50%;
+  transform: translate(-50%, -50%);
+  width: 14px;
+  height: 14px;
+  border-radius: 50%;
+  background: var(--fg);
+  border: 2px solid var(--accent);
+  box-shadow: 0 2px 6px rgba(0, 0, 0, 0.55);
+}
+
+/* ---------------------------------------------------------------------------------------------
+ * Seed / colour / stepper rows
+ * ------------------------------------------------------------------------------------------- */
+
+.seed-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 0;
+  border-top: 1px solid var(--border-soft);
+}
+
+.seed-label {
+  font-size: 12.5px;
+  color: var(--fg-strong);
+  flex: 0 0 auto;
+}
+
+.seed-number {
+  width: 70px;
+  background: var(--well);
   border: 1px solid var(--border);
-  background: var(--well-bg);
-  color: var(--fg-dim);
+  border-radius: 6px;
+  padding: 5px 8px;
+  color: var(--fg);
+  font-family: var(--mono);
+  font-size: 12px;
+  text-align: right;
+}
+
+.btn-small {
+  padding: 6px 12px;
+  border-radius: 7px;
+  border: 1px solid var(--border-input);
+  background: var(--raised);
+  color: var(--fg);
+  font-family: inherit;
+  font-size: 12.5px;
+  font-weight: 600;
   cursor: pointer;
 }
 
-.pose-step--active {
+.btn-small:hover:not(:disabled) {
   border-color: var(--accent);
-  background: rgba(217, 255, 98, 0.14);
   color: var(--accent);
 }
 
-.pose-step-value {
+.btn-small--push {
+  margin-left: auto;
+}
+
+.color-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 8px 0 0;
+  border-top: 1px solid var(--border-soft);
+}
+
+.color-row--joined {
+  border-top: 0;
+}
+
+.color-value {
+  margin-left: auto;
+  display: flex;
+  align-items: center;
+  gap: 7px;
+}
+
+.color-hex {
   font-family: var(--mono);
-  font-size: 12.5px;
-  font-weight: 500;
+  font-size: 11.5px;
+  color: var(--fg-faint);
 }
 
-.pose-step-label {
-  font-size: 9.5px;
+.color-input {
+  width: 42px;
+  height: 28px;
+  padding: 2px;
+  border-radius: 7px;
+  border: 1px solid var(--border-input);
+  background: var(--raised);
+  cursor: pointer;
+}
+
+.stepper {
+  margin-left: auto;
+  display: flex;
+  align-items: center;
+  gap: 4px;
+}
+
+.btn-stepper {
+  width: 30px;
+  height: 30px;
+  border-radius: 7px;
+  border: 1px solid var(--border-input);
+  background: var(--raised);
+  color: var(--fg);
+  font-family: inherit;
+  font-size: 14px;
+  cursor: pointer;
+}
+
+.btn-stepper:hover:not(:disabled) {
+  border-color: var(--accent);
+  color: var(--accent);
+}
+
+.stepper-value {
+  width: 38px;
+  text-align: center;
+  font-family: var(--mono);
+  font-size: 13px;
+  color: var(--accent);
+}
+
+/* ---------------------------------------------------------------------------------------------
+ * Key frames
+ * ------------------------------------------------------------------------------------------- */
+
+.keyframes {
+  padding: 4px 0 0;
+}
+
+.keyframes-head {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  margin-bottom: 7px;
+}
+
+.keyframes-title {
+  font-size: 10.5px;
+  font-weight: 600;
+  letter-spacing: 0.1em;
   text-transform: uppercase;
-  letter-spacing: 0.09em;
-  opacity: 0.55;
+  color: var(--fg-dim);
 }
 
-/* 13 — debug channel toggles: a grid of small chips, each with a colour swatch (set inline per
-   channel by JS) and a label, replacing `.knob-dev-toggle`'s plain checkbox-and-text pairing. */
-.debug-chip-grid {
+.keyframes-hint {
+  font-size: 11px;
+  color: var(--fg-faintest);
+}
+
+.keyframes-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(56px, 1fr));
+  gap: 7px;
+}
+
+.keyframe {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.keyframe-label {
+  font-family: var(--mono);
+  font-size: 9.5px;
+  text-align: center;
+  color: var(--fg-faintest);
+}
+
+.keyframe-select {
+  width: 100%;
+  background: var(--well);
+  border: 1px solid var(--border-input);
+  border-radius: 7px;
+  padding: 6px 2px;
+  color: var(--fg);
+  font-family: var(--mono);
+  font-size: 11.5px;
+  text-align: center;
+}
+
+.keyframes-buttons {
+  display: flex;
+  gap: 7px;
+  margin-top: 11px;
+}
+
+.btn-preset {
+  padding: 7px 12px;
+  border-radius: 7px;
+  border: 1px solid var(--border-input);
+  background: var(--raised);
+  color: var(--fg);
+  font-family: inherit;
+  font-size: 12px;
+  font-weight: 600;
+  cursor: pointer;
+}
+
+.btn-preset:hover:not(:disabled) {
+  border-color: var(--accent);
+  color: var(--accent);
+}
+
+.note--wide {
+  margin: 11px 0 0;
+}
+
+/* ---------------------------------------------------------------------------------------------
+ * Sound readout
+ * ------------------------------------------------------------------------------------------- */
+
+.sound-lines {
+  margin-top: 6px;
+  background: var(--well);
+  border: 1px solid var(--border-soft);
+  border-radius: 10px;
+  padding: 11px 12px;
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+}
+
+.sound-line {
+  font-family: var(--mono);
+  font-size: 11.5px;
+  color: var(--fg-dim);
+}
+
+/* ---------------------------------------------------------------------------------------------
+ * Look & debug
+ * ------------------------------------------------------------------------------------------- */
+
+.look-sliders {
+  border-top: 1px solid var(--border-soft);
+  padding-top: 2px;
+}
+
+.debug-block {
+  margin-top: 10px;
+}
+
+.debug-title {
+  font-size: 10.5px;
+  font-weight: 600;
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+  color: var(--fg-dim);
+}
+
+.debug-grid {
   display: grid;
   grid-template-columns: repeat(3, 1fr);
   gap: 6px;
+  margin-top: 8px;
 }
 
 .debug-chip {
@@ -1432,10 +1095,12 @@ main {
   align-items: center;
   gap: 6px;
   padding: 7px 9px;
-  border-radius: var(--radius-sm);
+  border-radius: 8px;
   border: 1px solid var(--border);
-  background: var(--well-bg);
+  background: var(--well);
   color: var(--fg-dim);
+  font-family: inherit;
+  font-size: 11px;
   cursor: pointer;
 }
 
@@ -1445,62 +1110,100 @@ main {
   color: var(--fg);
 }
 
-.debug-chip-swatch {
+.debug-swatch {
   width: 8px;
   height: 8px;
   border-radius: 2px;
-  flex-shrink: 0;
-  background: var(--fg-dim);
+  flex: 0 0 auto;
 }
 
-/* 14 — button variants: primary (Fold), secondary (Unfold and friends), and the small square
-   icon buttons the transport's step controls use. */
-.btn-primary {
-  font: inherit;
-  background: var(--accent);
-  border: 1px solid var(--accent);
-  color: var(--accent-ink);
-  font-weight: 700;
-  padding: 9px 18px;
-  border-radius: var(--radius-sm);
-  cursor: pointer;
+/* ---------------------------------------------------------------------------------------------
+ * Canvas background switcher — NO counterpart in the mockup.
+ *
+ * A pure visual dev aid: it says whether the canvas itself is transparent rather than asking a
+ * reader to take it on faith. It lives at the bottom of "05 Look & debug", the section that
+ * already owns every other seeing-what-the-renderer-did control, and is drawn with the design's
+ * own `.row` + `.segmented` primitives so it reads as part of the same panel.
+ * ------------------------------------------------------------------------------------------- */
+
+.stage--bg-light {
+  background: #cfcabb;
 }
 
-.btn-primary:hover {
-  filter: brightness(1.08);
+.stage--bg-checker {
+  background-color: #8a8a80;
+  background-image:
+    linear-gradient(45deg, #6e6e66 25%, transparent 25%, transparent 75%, #6e6e66 75%),
+    linear-gradient(45deg, #6e6e66 25%, transparent 25%, transparent 75%, #6e6e66 75%);
+  background-size: 24px 24px;
+  background-position:
+    0 0,
+    12px 12px;
 }
 
-.btn-secondary {
-  font: inherit;
-  background: var(--input-bg);
-  border: 1px solid var(--input-border);
-  color: var(--fg);
-  font-weight: 600;
-  padding: 9px 18px;
-  border-radius: var(--radius-sm);
-  cursor: pointer;
-}
+/* ---------------------------------------------------------------------------------------------
+ * Extra library knobs — NO counterpart in the mockup.
+ *
+ * The design curates roughly twenty controls out of the engine's forty. The rest keep a home in
+ * the numbered sections after "05", rendered from the runtime descriptors with the same row
+ * primitives the curated sections use.
+ * ------------------------------------------------------------------------------------------- */
 
-.btn-secondary:hover {
-  border-color: var(--accent);
-  color: var(--accent);
-}
-
-.btn-icon {
-  width: 34px;
-  height: 34px;
-  display: inline-flex;
+.knob-bool {
+  display: flex;
   align-items: center;
-  justify-content: center;
-  border-radius: var(--radius-sm);
-  border: 1px solid var(--border);
-  background: var(--well-bg);
-  color: var(--fg-dim);
-  cursor: pointer;
-  padding: 0;
+  gap: 8px;
+  padding: 8px 0;
+  font-size: 12.5px;
+  color: var(--fg-strong);
 }
 
-.btn-icon:hover {
-  border-color: var(--input-border);
-  color: var(--fg);
+.knob-bool input {
+  accent-color: var(--accent);
+}
+
+.knob-error {
+  margin: 2px 0 0;
+  font-family: var(--mono);
+  font-size: 11px;
+  color: var(--bad);
+}
+
+.knob-dev {
+  margin-left: 6px;
+  padding: 1px 5px;
+  border-radius: 4px;
+  border: 1px solid var(--border-input);
+  font-family: var(--mono);
+  font-size: 9px;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--fg-faint);
+}
+
+.empty-note {
+  margin: 9px 0 0;
+  font-size: 11.5px;
+  line-height: 1.55;
+  color: var(--fg-faint);
+}
+
+/* The design puts a hairline above the volume slider and above the factory-option block; a
+   slider's own row has no border of its own, so the divider is a wrapper. */
+.slider-divider {
+  border-top: 1px solid var(--border-soft);
+}
+
+/* A grid item's `min-width` is `auto`, so one long value ("239.20 / 1587.90 ms") widens its own
+   track and drops the strip from the design's six columns to four. Pinning it to 0 lets the
+   tracks stay at the design's 150px floor; a value too long for its tile is then elided, with the
+   whole of it on the tile's `title`. */
+.metric {
+  min-width: 0;
+}
+
+.metric-value {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }

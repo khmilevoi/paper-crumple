@@ -21,121 +21,12 @@
     <link rel="stylesheet" href="/src/styles.css" />
   </head>
   <body>
-    <header id="masthead">
-      <div class="masthead-brand">
-        <span class="masthead-mark" aria-hidden="true"></span>
-        <div class="masthead-titles">
-          <h1>Paper Crumple</h1>
-          <span class="masthead-subtitle">3D bake · baked cloth sheet</span>
-        </div>
-      </div>
-      <!--
-        Ordered and grouped exactly as the design's header: brand, then the live status pill, both
-        in normal flow; `.masthead-actions` alone carries `margin-left: auto` (styles.css) to pin
-        everything after it to the far right, same as the design's own trailing
-        `margin-left:auto` wrapper around its header chip + Reset. `#version-line` has no
-        counterpart in the design (its facts — core version, build time, warnings, max texture —
-        are already duplicated in the inspector's "Facts" panel below); it stays here, styled and
-        truncated exactly like `#header-chip`, as the one deliberate addition beyond the mockup.
-      -->
-      <span id="status-pill" class="masthead-status" hidden>
-        <span class="masthead-status-dot"></span>
-        <span class="masthead-status-text"></span>
-      </span>
-      <div class="masthead-actions">
-        <span id="version-line" class="masthead-chip">booting…</span>
-        <span id="header-chip" class="masthead-chip" hidden></span>
-        <button type="button" id="reset-btn" class="masthead-reset" hidden>Reset</button>
-      </div>
-    </header>
-    <main>
-      <section id="stage-column">
-        <div id="stage-bg"></div>
-        <div id="hero-slot"></div>
-        <div id="transport"></div>
-        <div id="grid"></div>
-      </section>
-      <aside id="sidebar">
-        <!-- Measured knob counts (`main.ts`'s `onCount`) — a small standing note, not an
-             accordion section of its own; kept as the sidebar's first static element so it
-             survives regardless of which numbered section is open or closed. -->
-        <div id="knob-count"></div>
-
-        <!-- 01 Source: `config-panel.ts` renders the factory-option controls into `#config`;
-             this wrapper only supplies the numbered accordion chrome around it. -->
-        <section class="accordion-section" style="order: 1">
-          <button type="button" class="accordion-header">
-            <span class="accordion-number">01</span>
-            <span class="accordion-title">Source</span>
-            <span class="accordion-summary" id="source-summary"></span>
-            <span class="accordion-chevron" aria-hidden="true">⌄</span>
-          </button>
-          <div class="accordion-body" id="config"></div>
-        </section>
-
-        <!--
-          `panel.ts` mounts its OWN numbered accordion sections directly into `#panel` — one per
-          generated knob tab ("02 Edge", "05 Look & debug", "06 Fold", "07 Ball", "08
-          Resolution"; numbering from `panel.ts`'s `TAB_NUMBER` map). `#panel` is therefore a
-          plain, unwrapped mount point here, a direct sibling of every other sidebar section
-          rather than nested inside one shared "Knobs" accordion wrapper.
-
-          `panel.ts` renders every one of its tabs into this single DOM node, so in the markup
-          they still land as one contiguous block — "05 Look & debug" physically follows "02
-          Edge" rather than following "04 Sound" below. The VISUAL order is nonetheless
-          01..09 top to bottom: `#panel { display: contents }` (styles.css) drops this div out of
-          `#sidebar`'s flex box, promoting its children to flex items of `#sidebar` directly, and
-          each generated section sets its own `order` (from `TAB_NUMBER`) which is then compared
-          against the `order` inline on every static section below.
-        -->
-        <div id="panel"></div>
-
-        <!-- 03 Poses: reserved for `poses.ts`'s `createPoseEditor(...)`, mounted by `main.ts`
-             once that module exists. Left empty otherwise — nothing else mounts here. -->
-        <section class="accordion-section" style="order: 3">
-          <button type="button" class="accordion-header">
-            <span class="accordion-number">03</span>
-            <span class="accordion-title">Poses</span>
-            <span class="accordion-chevron" aria-hidden="true">⌄</span>
-          </button>
-          <div class="accordion-body">
-            <div id="poses-editor"></div>
-          </div>
-        </section>
-
-        <!-- 04 Sound: `main.ts` moves `audio.element` (mounted first by `transport.ts` into
-             `#transport`) into `#sound-section` right after `createTransport(...)` runs. -->
-        <section class="accordion-section" style="order: 4">
-          <button type="button" class="accordion-header">
-            <span class="accordion-number">04</span>
-            <span class="accordion-title">Sound</span>
-            <span class="accordion-summary" id="sound-summary"></span>
-            <span class="accordion-chevron" aria-hidden="true">⌄</span>
-          </button>
-          <div class="accordion-body" id="sound-section"></div>
-        </section>
-
-        <!-- 09 Share: real functionality with no equivalent in the target design — continues the
-             numbering after 05 Look & debug / 06 Fold / 07 Ball / 08 Resolution (`panel.ts`'s
-             `TAB_NUMBER`), same rule as those. -->
-        <section id="share" class="accordion-section" style="order: 9">
-          <button type="button" class="accordion-header">
-            <span class="accordion-number">09</span>
-            <span class="accordion-title">Share</span>
-            <span class="accordion-chevron" aria-hidden="true">⌄</span>
-          </button>
-          <div class="accordion-body">
-            <p class="config-note">
-              The URL hash always mirrors the live config and every knob that differs from its
-              default — copy the address bar to share this exact picture.
-            </p>
-            <button type="button" id="copy-code-btn" class="btn-secondary">Copy as code</button>
-            <pre id="emitted-code"></pre>
-          </div>
-        </section>
-      </aside>
-    </main>
-    <section id="inspector"></section>
-    <script type="module" src="/src/main.ts"></script>
+    <!--
+      The whole page is one React tree (`src/main.tsx` → `src/ui/App.tsx`), mirroring
+      `Paper Crumple Control Panel v2.dc.html` node for node. Nothing is pre-rendered here:
+      the design's own markup begins at the `.page` wrapper `App` returns.
+    -->
+    <div id="root"></div>
+    <script type="module" src="/src/main.tsx"></script>
   </body>
 </html>
