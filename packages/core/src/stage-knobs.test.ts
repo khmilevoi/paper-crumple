@@ -642,4 +642,43 @@ describe('the view index by sprite key', () => {
     expect(drawnSince(s.motion, mark)).toEqual([2])
     s.stage.dispose()
   })
+
+  /**
+   * The index is a live `Set`, and a `show()` moves its view to the end of it (`attachRecord`:
+   * `indexHide` then `indexShow`). A JS `Set` iterator visits entries appended during iteration,
+   * so a fan-out that walks the live set while a handler under one of its draws re-shows a view
+   * onto the same sprite revisits that view, re-draws it, and never runs out. The draw hook here
+   * is that handler — the shape a consumer's `on('error')` / orphan handler (§10.6) can take from
+   * inside a synchronous `refresh()` — and it gives up after 64 draws so the failure is a count,
+   * not a worker that never returns.
+   */
+  it('terminates a draw-class set() when a draw re-shows the current views onto the same sprite', async () => {
+    const s = await scene()
+    const second = s.stage.view({ canvas: destCanvas() })
+    if (second instanceof Error) return expect.fail('second view refused')
+    second.show(s.sprite)
+
+    let draws = 0
+    let reShowing = false
+    const inner = s.motion.draw
+    s.motion.draw = (args) => {
+      draws += 1
+      // Once per draw and never from inside its own re-show, so the only path back into the
+      // fan-out loop is the index itself.
+      if (!reShowing && draws <= 64) {
+        reShowing = true
+        s.view.show(s.sprite)
+        second.show(s.sprite)
+        reShowing = false
+      }
+      return inner(args)
+    }
+
+    expect(s.stage.set({ sheetTint: 0.5 } as never)).toBeUndefined()
+    // Two views refreshed once each, and each refresh's hook re-shows both (one nested draw
+    // apiece): six draws. A count anywhere near the hook's cap means the loop was fed by the
+    // re-shows rather than by the two views that were showing when set() was called.
+    expect(draws).toBeLessThanOrEqual(6)
+    s.stage.dispose()
+  })
 })
