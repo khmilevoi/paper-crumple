@@ -413,6 +413,46 @@ function ensurePools(
 }
 
 /**
+ * `readBackField`'s three per-call buffers, held across calls instead of allocated per add: the
+ * `readPixels` destination (float or byte flavour) and the decoded field. At `sdfRes` 192 that is
+ * 147 KB for the decoded field plus 147 KB (RED/FLOAT) or 590 KB (RGBA/FLOAT) for the destination,
+ * per add; at the bench's 512² it is a megabyte each.
+ *
+ * Safe only because every one of them is **consumed before the next call can start**. The decoded
+ * field goes to `buildHull` (which reads it and returns a `PackedHull` of its own points) or to
+ * `signedFieldExtent` (which returns four numbers), both synchronous, both on the same statement as
+ * the `acquireCpuField` call that produced it; `cpuFieldFallback`'s field is a fresh array and is
+ * never one of these. The `readPixels` buffers never leave this function. Nothing retains them, so
+ * nothing can observe the reuse.
+ *
+ * Grow-only, handed out as a `subarray` of the exact length asked for, so a smaller field after a
+ * larger one reuses the same storage rather than reallocating (and never sees stale tail texels:
+ * both the `readPixels` fill and the decode loop write every element of the view they are given).
+ * Module-level and bounded by the largest field ever read back, so the standing cost is of the same
+ * order as the three scratch slots `contours.ts` already holds. Deliberately not tied to a sheet's
+ * `dispose()`: the buffers belong to the decode, not to any one renderer, and two mounted sheets
+ * would otherwise drop each other's.
+ */
+let decodeBuf = new Float32Array(0)
+let floatReadBuf = new Float32Array(0)
+let byteReadBuf = new Uint8Array(0)
+
+function decodeScratch(n: number): Float32Array {
+  if (decodeBuf.length < n) decodeBuf = new Float32Array(n)
+  return decodeBuf.length === n ? decodeBuf : decodeBuf.subarray(0, n)
+}
+
+function floatReadbackScratch(n: number): Float32Array {
+  if (floatReadBuf.length < n) floatReadBuf = new Float32Array(n)
+  return floatReadBuf.length === n ? floatReadBuf : floatReadBuf.subarray(0, n)
+}
+
+function byteReadbackScratch(n: number): Uint8Array {
+  if (byteReadBuf.length < n) byteReadBuf = new Uint8Array(n)
+  return byteReadBuf.length === n ? byteReadBuf : byteReadBuf.subarray(0, n)
+}
+
+/**
  * Ports `engine.js:#readBackField` whole (task 11 brief): reads pass A's own output back to the
  * CPU, in field TEXELS — a field-sized `readPixels`, 147 456 B at `sdfRes` 192, which §8.1 budgets
  * explicitly. Float targets read as RED/FLOAT when the driver reports that as its implementation
@@ -428,34 +468,48 @@ function readBackField(ctx: GlContext, field: Field, texelPx: number): Float32Ar
   const w = field.width
   const h = field.height
   const decode = field.decode
+  // Hoisted out of the decode loop: `field.decode` is a tuple, so `decode[0]` inside the loop is an
+  // element load per texel. Same two doubles, same `* d0 + d1` then `/ texelPx` — the division is
+  // deliberately NOT folded into the multiply, which would change the result by an ulp and an ulp
+  // is a behaviour change here (hull vertices land on texel boundaries).
+  const d0 = decode[0]
+  const d1 = decode[1]
   return ctx.scope((): Float32Array | null => {
     gl.bindFramebuffer(gl.READ_FRAMEBUFFER, field.target.framebuffer)
-    // Stale-error drain, verbatim from engine.js: a prior call's error must not be misread as
-    // this readback's own failure.
-    while (gl.getError() !== gl.NO_ERROR) {
-      // drain
-    }
+    // Stale-error drain, from engine.js: a prior call's error must not be misread as this
+    // readback's own failure. ONE read rather than a `while` loop — a WebGL2 context surfaces at
+    // most one recorded error at a time, and the loop's second call was a synchronous round trip
+    // (0.1-0.4 ms in the trace) that never had anything to return.
+    gl.getError()
     let out: Float32Array | null = null
     if (ctx.caps.floatRT) {
       const single =
         gl.getParameter(gl.IMPLEMENTATION_COLOR_READ_FORMAT) === gl.RED &&
         gl.getParameter(gl.IMPLEMENTATION_COLOR_READ_TYPE) === gl.FLOAT
       const channels = single ? 1 : 4
-      const buf = new Float32Array(w * h * channels)
+      const buf = floatReadbackScratch(w * h * channels)
       gl.readPixels(0, 0, w, h, single ? gl.RED : gl.RGBA, gl.FLOAT, buf)
+      // Kept: this is the CPU-fallback decision itself (`sheet.gl.test.ts` forces exactly this
+      // read non-zero to reach `cpuFieldFallback`), not a drain.
       if (gl.getError() === gl.NO_ERROR) {
-        out = new Float32Array(w * h)
-        for (let i = 0, p = 0; i < out.length; i++, p += channels) {
-          out[i] = (buf[p] * decode[0] + decode[1]) / texelPx
+        out = decodeScratch(w * h)
+        // Split rather than strided: on the RED/FLOAT path (`channels === 1`) `p` IS `i`, and one
+        // induction variable is measurably cheaper than two. Same expression, same order.
+        if (channels === 1) {
+          for (let i = 0; i < out.length; i++) out[i] = (buf[i] * d0 + d1) / texelPx
+        } else {
+          for (let i = 0, p = 0; i < out.length; i++, p += channels) {
+            out[i] = (buf[p] * d0 + d1) / texelPx
+          }
         }
       }
     } else {
-      const buf = new Uint8Array(w * h * 4)
+      const buf = byteReadbackScratch(w * h * 4)
       gl.readPixels(0, 0, w, h, gl.RGBA, gl.UNSIGNED_BYTE, buf)
       if (gl.getError() === gl.NO_ERROR) {
-        out = new Float32Array(w * h)
+        out = decodeScratch(w * h)
         for (let i = 0, p = 0; i < out.length; i++, p += 4) {
-          out[i] = ((buf[p] / 255) * decode[0] + decode[1]) / texelPx
+          out[i] = ((buf[p] / 255) * d0 + d1) / texelPx
         }
       }
     }
