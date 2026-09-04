@@ -192,12 +192,21 @@ function resampleScenario(name, art, note) {
 
 /**
  * `readBackField`'s CPU half (`sheet.ts`): the decode loop over the field-sized `readPixels`
- * buffer, RED/FLOAT flavour. The GL read itself is the stand-in: `buf` is prepared in setup.
+ * buffer, RED/FLOAT flavour, including its grow-only output scratch. The GL read itself is the
+ * stand-in: `buf` is prepared in setup. Kept in step with `sheet.ts`'s own `decodeScratch` and
+ * decode loop — the caveat in `report-investigate-cpu.md` §6 is about exactly this replica.
  */
+let decodeBuf = new Float32Array(0)
+function decodeScratch(n) {
+  if (decodeBuf.length < n) decodeBuf = new Float32Array(n)
+  return decodeBuf.length === n ? decodeBuf : decodeBuf.subarray(0, n)
+}
 function readbackDecode(buf, w, h, decode, texelPx) {
-  const out = new Float32Array(w * h)
-  for (let i = 0, p = 0; i < out.length; i++, p += 1) {
-    out[i] = (buf[p] * decode[0] + decode[1]) / texelPx
+  const d0 = decode[0]
+  const d1 = decode[1]
+  const out = decodeScratch(w * h)
+  for (let i = 0; i < out.length; i++) {
+    out[i] = (buf[i] * d0 + d1) / texelPx
   }
   return out
 }

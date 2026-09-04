@@ -418,15 +418,69 @@ export function fillHullMask(
   // Only rows with `yMin <= y < yMax` can be crossed by any edge; clamp them to the mask.
   const rowStart = Math.max(0, Math.ceil(yMin))
   const rowEnd = Math.min(h, Math.ceil(yMax))
+  const rowCount = Math.max(0, rowEnd - rowStart)
+  // An active-edge list. The crossing rule is half-open in `y`, so an edge is live over exactly the
+  // rows `ceil(min(ay, by)) .. ceil(max(ay, by)) - 1` — a contiguous run. Bucketing every edge by
+  // the first mask row of its run (a counting sort into `order`) and retiring it when its run ends
+  // turns the `rows x edges` scan into `rows x edges-that-span-this-row`, which for a hull is a
+  // handful. Nothing else moves: a row's crossings still go through the same insertion sort and the
+  // same winding walk. The order edges arrive in a row *does* change, but only among crossings at
+  // an identical `x` — and there the walk can only open and close zero-width spans, so the union
+  // the row fills, and with it every byte of the mask, is the same either way.
+  const firstRow = new Int32Array(edgeCount)
+  const lastRow = new Int32Array(edgeCount)
+  const heads = new Int32Array(rowCount + 1)
+  let liveEdges = 0
+  for (let i = 0; i < edgeCount; i++) {
+    const ay = edges[i * 4 + 1]
+    const by = edges[i * 4 + 3]
+    const r0 = Math.max(rowStart, Math.ceil(ay < by ? ay : by))
+    const r1 = Math.min(rowEnd, Math.ceil(ay < by ? by : ay))
+    // `false` for a horizontal edge, an edge off the mask, and any NaN coordinate — all of which
+    // the crossing test below would have rejected on every row anyway.
+    if (!(r0 < r1)) {
+      firstRow[i] = -1
+      continue
+    }
+    firstRow[i] = r0
+    lastRow[i] = r1
+    heads[r0 - rowStart]++
+    liveEdges++
+  }
+  let acc = 0
+  for (let r = 0; r <= rowCount; r++) {
+    const c = heads[r]
+    heads[r] = acc
+    acc += c
+  }
+  const cursor = heads.slice()
+  const order = new Int32Array(liveEdges)
+  for (let i = 0; i < edgeCount; i++) {
+    if (firstRow[i] < 0) continue
+    order[cursor[firstRow[i] - rowStart]++] = i
+  }
+  const active = new Int32Array(liveEdges)
+  let activeCount = 0
+
   const bytes = new Uint8Array(w * h * 4)
   const xs = new Float64Array(edgeCount)
   const dirs = new Int8Array(edgeCount)
   let filled = false
   for (let y = rowStart; y < rowEnd; y++) {
+    const r = y - rowStart
+    // Retire the edges whose run ended above this row, then admit the ones whose run starts here.
+    let keep = 0
+    for (let a = 0; a < activeCount; a++) {
+      const i = active[a]
+      if (lastRow[i] > y) active[keep++] = i
+    }
+    activeCount = keep
+    for (let b = heads[r]; b < heads[r + 1]; b++) active[activeCount++] = order[b]
     // Collect this row's crossings, kept sorted by `x` as they arrive — a hull row crosses a
     // handful of edges, so an insertion sort beats allocating an index array to hand to `sort`.
     let n = 0
-    for (let i = 0; i < edgeCount; i++) {
+    for (let a = 0; a < activeCount; a++) {
+      const i = active[a]
       const ax = edges[i * 4]
       const ay = edges[i * 4 + 1]
       const bx = edges[i * 4 + 2]
