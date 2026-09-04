@@ -170,6 +170,44 @@ describe('target (§5.1)', () => {
   })
 })
 
+describe('allocating inside a scope (§5.1)', () => {
+  it('leaves the slot’s bindings on the active unit and the draw framebuffer as they were', () => {
+    const { ctx, gl } = open()
+    const bound = ctx.texture({ width: 4, height: 4, format: 'RGBA8', label: 'bound' })
+    expect(bound).not.toBeInstanceOf(GlError)
+    if (GlError.is(bound)) return
+    const fbo = ctx.target(bound)
+    expect(fbo).not.toBeInstanceOf(GlError)
+    if (GlError.is(fbo)) return
+
+    ctx.scope(() => {
+      // A slot mid-draw: unit 1 active with a texture on it, an offscreen draw target bound, a
+      // viewport of its own. An allocation in the middle of this must not move any of it.
+      gl.activeTexture(gl.TEXTURE1)
+      gl.bindTexture(gl.TEXTURE_2D, bound.handle)
+      gl.bindFramebuffer(gl.DRAW_FRAMEBUFFER, fbo.framebuffer)
+      gl.viewport(1, 2, 3, 4)
+      const before = captureGlState(gl)
+
+      const fresh = ctx.texture({ width: 8, height: 8, format: 'R8', label: 'fresh' })
+      expect(fresh).not.toBeInstanceOf(GlError)
+      if (GlError.is(fresh)) return
+      const target = ctx.target(fresh)
+      expect(target).not.toBeInstanceOf(GlError)
+      if (GlError.is(target)) return
+
+      expect(gl.getParameter(gl.ACTIVE_TEXTURE)).toBe(gl.TEXTURE1)
+      expect(gl.getParameter(gl.TEXTURE_BINDING_2D)).toBe(bound.handle)
+      expect(gl.getParameter(gl.DRAW_FRAMEBUFFER_BINDING)).toBe(fbo.framebuffer)
+      expect(captureGlState(gl)).toEqual(before)
+      target.dispose()
+      fresh.dispose()
+    })
+    fbo.dispose()
+    bound.dispose()
+  })
+})
+
 describe('scope (§5.1)', () => {
   it('restores the enumerated set after a slot has churned it, and passes the value through', () => {
     const { ctx, gl } = open()

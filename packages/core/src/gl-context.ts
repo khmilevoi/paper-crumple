@@ -138,7 +138,9 @@ function createTarget(
   const framebuffer: WebGLFramebuffer | null = gl.createFramebuffer()
   if (framebuffer === null) return new GlError(`${texture.label}: createFramebuffer returned null`)
 
-  const saved = captureGlState(gl)
+  // The only item of §5.1's set this disturbs is the draw framebuffer binding, so that is all it
+  // saves: one query the browser answers from its own bookkeeping, not a 36-query capture.
+  const previous = gl.getParameter(gl.DRAW_FRAMEBUFFER_BINDING) as WebGLFramebuffer | null
   gl.bindFramebuffer(gl.DRAW_FRAMEBUFFER, framebuffer)
   gl.framebufferTexture2D(
     gl.DRAW_FRAMEBUFFER,
@@ -148,7 +150,7 @@ function createTarget(
     0,
   )
   const status = gl.checkFramebufferStatus(gl.DRAW_FRAMEBUFFER)
-  restoreGlState(gl, saved)
+  gl.bindFramebuffer(gl.DRAW_FRAMEBUFFER, previous)
 
   if (status !== gl.FRAMEBUFFER_COMPLETE) {
     gl.deleteFramebuffer(framebuffer)
@@ -256,7 +258,10 @@ export function createGlContext(gl: WebGL2RenderingContext): CoreGlContext {
 
       const names = TEXTURE_FORMAT_GL[d.format]
       const wrap = d.wrap ?? 'CLAMP_TO_EDGE'
-      const saved = captureGlState(gl)
+      // The only item of §5.1's set this disturbs is the 2D binding on the active unit, so that
+      // is all it saves: one query the browser answers from its own bookkeeping, not a 36-query
+      // capture. A slot that allocates mid-draw keeps the texture it had bound.
+      const previous = gl.getParameter(gl.TEXTURE_BINDING_2D) as WebGLTexture | null
       gl.bindTexture(gl.TEXTURE_2D, handle)
       // Immutable storage, one level, no mipmaps (§8.7).
       gl.texStorage2D(gl.TEXTURE_2D, 1, gl[names.internalFormat], d.width, d.height)
@@ -265,7 +270,7 @@ export function createGlContext(gl: WebGL2RenderingContext): CoreGlContext {
       gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl[wrap])
       gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl[wrap])
       const error = gl.getError()
-      restoreGlState(gl, saved)
+      gl.bindTexture(gl.TEXTURE_2D, previous)
 
       if (error !== gl.NO_ERROR) {
         gl.deleteTexture(handle)
