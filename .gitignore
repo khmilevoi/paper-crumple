@@ -21,3 +21,4 @@ examples/playground/public/audio/
 
 # The GL bench writes its JSON and CPU profiles here (`pnpm bench:gl`, BENCH_OUT).
 tools/bench/out/
+.superpowers
