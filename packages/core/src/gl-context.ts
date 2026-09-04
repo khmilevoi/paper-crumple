@@ -21,7 +21,7 @@ import {
   type TextureDesc,
 } from './gl-resources.js'
 import { probeExactByteFetch } from './gl-probe.js'
-import { captureGlState, pinAmbientState, restoreGlState } from './gl-state.js'
+import { captureGlState, pinAmbientState, restoreGlState, type GlState } from './gl-state.js'
 import type { DrawScope, DrawTarget, GlCaps, GlContext } from './gl.js'
 
 /**
@@ -46,6 +46,23 @@ export const GL_ATTRIBUTES: Readonly<WebGLContextAttributes> = Object.freeze({
 export interface CoreGlContext extends GlContext {
   /** Release every program, texture and target this context created. Idempotent. */
   dispose(): void
+}
+
+/** How `createGlContext` is to treat the context it is handed. */
+export interface GlContextOptions {
+  /**
+   * The stage created this context on a canvas of its own and nothing but the library writes to
+   * it (§4.0). After `pinAmbientState` (§7.4.1) every library write happens inside a `scope()`
+   * that restores at exit — or is an allocation that puts back the one binding it moved — so
+   * the state at every outermost scope entry is one known constant: the pinned baseline. It is
+   * captured once here and every restore writes it back; no scope pays a query.
+   *
+   * Default `false`: an injected context (§7.3) may carry any state between two library calls,
+   * so every outermost scope captures for real, as it always has. A write through the `gl`
+   * escape hatch outside any scope is honoured on an injected context and undone at the next
+   * scope exit on an owned one, where there is no consumer whose state it could be.
+   */
+  readonly owned?: boolean
 }
 
 type Err = InstanceType<typeof GlError>
@@ -128,6 +145,7 @@ function createTarget(
   gl: WebGL2RenderingContext,
   texture: Texture,
   floatRT: boolean,
+  boundDrawFramebuffer: () => WebGLFramebuffer | null,
 ): Err | Target {
   if (FLOAT_FORMATS.has(texture.format) && !floatRT) {
     return new GlError(
@@ -139,8 +157,8 @@ function createTarget(
   if (framebuffer === null) return new GlError(`${texture.label}: createFramebuffer returned null`)
 
   // The only item of §5.1's set this disturbs is the draw framebuffer binding, so that is all it
-  // saves: one query the browser answers from its own bookkeeping, not a 36-query capture.
-  const previous = gl.getParameter(gl.DRAW_FRAMEBUFFER_BINDING) as WebGLFramebuffer | null
+  // saves — and asks for only when the context cannot already know it.
+  const previous = boundDrawFramebuffer()
   gl.bindFramebuffer(gl.DRAW_FRAMEBUFFER, framebuffer)
   gl.framebufferTexture2D(
     gl.DRAW_FRAMEBUFFER,
@@ -173,8 +191,16 @@ function createTarget(
  *
  * The context is pinned (§7.4.1), its capabilities are read once, and §8.5.3's probe runs once —
  * inside a save/restore, so a stage that probes is indistinguishable from one that did not.
+ *
+ * With `owned: true` the pinned state is then captured once, and that capture is what every
+ * outermost `scope()` restores: the contract of §5.1 — every enumerated item equals its value at
+ * scope entry — holds without a query, because on a context nothing else writes to, the value at
+ * every scope entry *is* that capture. Without it every outermost scope captures for real.
  */
-export function createGlContext(gl: WebGL2RenderingContext): CoreGlContext {
+export function createGlContext(
+  gl: WebGL2RenderingContext,
+  o: GlContextOptions = {},
+): CoreGlContext {
   pinAmbientState(gl)
 
   const caps: GlCaps = Object.freeze({
@@ -185,10 +211,33 @@ export function createGlContext(gl: WebGL2RenderingContext): CoreGlContext {
 
   const exactByteFetch = probeExactByteFetch(gl)
 
+  /**
+   * The state every outermost scope on an owned context restores to. Read after the pins and
+   * after the probe, which restores what it found — so this is the pinned state and nothing the
+   * probe touched. `null` on an injected context, which has no constant to offer.
+   */
+  const baseline: GlState | null = o.owned === true ? captureGlState(gl) : null
+
   const owned = new Set<() => void>()
   let disposed = false
   /** How many `scope()` bodies are live. Only the outermost one saves and restores. */
   let depth = 0
+
+  /**
+   * The two bindings an allocation moves, as it must put them back. Outside every scope on an
+   * owned context nothing but the library has written since the last restore, so they are the
+   * baseline's; inside a scope a slot may have bound anything through the escape hatch, and on
+   * an injected context the consumer may have, so the driver is asked. Both are queries Blink
+   * answers from its own bookkeeping, not GPU-process round trips.
+   */
+  function boundTexture2d(): WebGLTexture | null {
+    if (baseline !== null && depth === 0) return baseline.texture2d
+    return gl.getParameter(gl.TEXTURE_BINDING_2D) as WebGLTexture | null
+  }
+  function boundDrawFramebuffer(): WebGLFramebuffer | null {
+    if (baseline !== null && depth === 0) return baseline.drawFramebuffer
+    return gl.getParameter(gl.DRAW_FRAMEBUFFER_BINDING) as WebGLFramebuffer | null
+  }
 
   /**
    * Register one resource's release so `dispose()` can run it, and hand back a `dispose` that
@@ -259,9 +308,9 @@ export function createGlContext(gl: WebGL2RenderingContext): CoreGlContext {
       const names = TEXTURE_FORMAT_GL[d.format]
       const wrap = d.wrap ?? 'CLAMP_TO_EDGE'
       // The only item of §5.1's set this disturbs is the 2D binding on the active unit, so that
-      // is all it saves: one query the browser answers from its own bookkeeping, not a 36-query
-      // capture. A slot that allocates mid-draw keeps the texture it had bound.
-      const previous = gl.getParameter(gl.TEXTURE_BINDING_2D) as WebGLTexture | null
+      // is all it saves, and asks for only when the context cannot already know it. A slot that
+      // allocates mid-draw keeps the texture it had bound.
+      const previous = boundTexture2d()
       gl.bindTexture(gl.TEXTURE_2D, handle)
       // Immutable storage, one level, no mipmaps (§8.7).
       gl.texStorage2D(gl.TEXTURE_2D, 1, gl[names.internalFormat], d.width, d.height)
@@ -292,7 +341,7 @@ export function createGlContext(gl: WebGL2RenderingContext): CoreGlContext {
     },
 
     target(t: Texture) {
-      const target = createTarget(gl, t, caps.floatRT)
+      const target = createTarget(gl, t, caps.floatRT, boundDrawFramebuffer)
       if (GlError.is(target)) return target
       return { ...target, dispose: tracked(() => target.dispose()) }
     },
@@ -312,7 +361,8 @@ export function createGlContext(gl: WebGL2RenderingContext): CoreGlContext {
           depth -= 1
         }
       }
-      const saved = captureGlState(gl)
+      // Owned: the baseline, no query. Injected: the consumer's state, read for real.
+      const saved = baseline ?? captureGlState(gl)
       depth = 1
       try {
         return fn(drawScope)

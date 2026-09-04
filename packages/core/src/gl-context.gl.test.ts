@@ -1,10 +1,10 @@
 import { afterEach, describe, expect, it } from 'vitest'
 import { GlError } from './errors.js'
-import { GL_ATTRIBUTES } from './gl-context.js'
+import { createGlContext, GL_ATTRIBUTES } from './gl-context.js'
 import { drawTargetFor } from './gl-resources.js'
 import { captureGlState } from './gl-state.js'
 import { FULLSCREEN_VS } from './gl-shaders.js'
-import { createGlFixture, type GlFixture } from './testing/gl-fixture.js'
+import { createGlFixture, createRawGl, type GlFixture } from './testing/gl-fixture.js'
 
 let fixture: GlFixture | null = null
 
@@ -17,6 +17,23 @@ afterEach(() => {
 function open(): GlFixture {
   fixture = createGlFixture(8, 8)
   expect(fixture.gl, 'no WebGL2 context — check the SwiftShader launch flags (§11)').not.toBeNull()
+  return fixture
+}
+
+/** The stage's normal case (§4.0): a context nothing but the library writes to. */
+function openOwned(): GlFixture {
+  const raw = createRawGl(8, 8)
+  expect(raw.gl, 'no WebGL2 context — check the SwiftShader launch flags (§11)').not.toBeNull()
+  const ctx = createGlContext(raw.gl, { owned: true })
+  fixture = {
+    canvas: raw.canvas,
+    gl: raw.gl,
+    ctx,
+    dispose() {
+      ctx.dispose()
+      raw.dispose()
+    },
+  }
   return fixture
 }
 
@@ -354,5 +371,33 @@ describe('dispose', () => {
     const { ctx, gl } = open()
     ctx.dispose()
     expect(gl.isContextLost()).toBe(false)
+  })
+})
+
+describe('an owned context (§4.0)', () => {
+  it('restores the pinned baseline at every scope exit, without asking the driver what it holds', () => {
+    const { ctx, gl } = openOwned()
+    const baseline = captureGlState(gl)
+    ctx.scope((s) => {
+      s.enable('BLEND', true)
+      ctx.gl.viewport(1, 1, 2, 2)
+      ctx.gl.depthFunc(gl.GREATER)
+    })
+    expect(captureGlState(gl)).toEqual(baseline)
+  })
+
+  it('undoes a write made outside any scope at the next scope exit, because nothing but the library writes to it', () => {
+    const { ctx, gl } = openOwned()
+    const baseline = captureGlState(gl)
+    // On an injected context this write would be honoured (see "the escape hatch" above); on an
+    // owned one there is no consumer whose state could be there, so the baseline is what comes
+    // back. This is the semantics, pinned so that it is a decision and not an accident.
+    ctx.gl.viewport(1, 1, 2, 2)
+    ctx.scope(() => {
+      ctx.gl.viewport(3, 3, 4, 4)
+    })
+    expect(Array.from(gl.getParameter(gl.VIEWPORT) as Int32Array)).toEqual(
+      Array.from(baseline.viewport),
+    )
   })
 })

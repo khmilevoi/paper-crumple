@@ -78,7 +78,7 @@ export type { CountedBuffer, HandleFacts, ScratchBytes, ScratchRequest } from '.
 // are already exported above by P2 and are not re-exported here; P6 gave the last four their
 // members in `./gl-resources.ts` and `./forward.ts` re-exports them from there.
 export { createGlContext, GL_ATTRIBUTES } from './gl-context.js'
-export type { CoreGlContext } from './gl-context.js'
+export type { CoreGlContext, GlContextOptions } from './gl-context.js'
 
 // The resource tables §8.7 decides, so a slot prices a texture the way the budget does.
 export {

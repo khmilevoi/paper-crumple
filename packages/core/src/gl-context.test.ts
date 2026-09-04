@@ -139,3 +139,41 @@ describe('texture() and target() save only the binding they disturb', () => {
     expect(f.calls('isEnabled')).toBe(0)
   })
 })
+
+describe('scope() on an owned context (§4.0): the pinned baseline, no query at all', () => {
+  it('captures the baseline once at creation and never queries again, restoring as before', () => {
+    const f = fakeGl()
+    const ctx = createGlContext(f.gl, { owned: true })
+    f.reset()
+    ctx.scope(() => {
+      ctx.scope(() => undefined)
+    })
+    ctx.scope(() => undefined)
+    expect(f.calls('getParameter')).toBe(0)
+    expect(f.calls('isEnabled')).toBe(0)
+    // The writes are the same writes: one full restore per outermost scope.
+    expect(f.calls('useProgram')).toBe(2)
+    expect(f.calls('bindVertexArray')).toBe(2)
+    expect(f.calls('blendFuncSeparate')).toBe(2)
+    expect(f.calls('pixelStorei')).toBe(2 * 9)
+  })
+
+  it('allocates without a query outside a scope, and with the one binding query inside one', () => {
+    const f = fakeGl()
+    const ctx = createGlContext(f.gl, { owned: true })
+    f.reset()
+    const texture = ctx.texture({ width: 8, height: 8, format: 'RGBA8' })
+    if (GlError.is(texture)) return
+    ctx.target(texture)
+    // Outside a scope nothing but the library has written, so both bindings are the baseline's.
+    expect(f.parameters()).toEqual([])
+    ctx.scope(() => {
+      f.reset()
+      // Inside a scope a slot may have bound anything through the escape hatch; ask.
+      const inner = ctx.texture({ width: 8, height: 8, format: 'R8' })
+      if (GlError.is(inner)) return
+      ctx.target(inner)
+      expect(f.parameters()).toEqual(['TEXTURE_BINDING_2D', 'DRAW_FRAMEBUFFER_BINDING'])
+    })
+  })
+})
