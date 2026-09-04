@@ -87,6 +87,12 @@ export interface ResampleOptions {
 
 export interface Resampler {
   resample(o: ResampleOptions): Err | ArtworkSlot
+  /**
+   * Resolves once both programs have linked — `undefined`, or the first link failure (P7,
+   * `Program.ready()`). `source()` awaits it before the first `resample`, so a resample never
+   * blocks on a pending link and a failed one is that `source()`'s error.
+   */
+  ready(): Promise<Err | undefined>
   dispose(): void
 }
 
@@ -298,6 +304,10 @@ export function createResampler(ctx: GlContext): Err | Resampler {
 
   return {
     resample,
+    async ready() {
+      const outcomes = await Promise.all([byteFetch.ready(), resampleProgram.ready()])
+      return outcomes.find((o) => o !== undefined)
+    },
     dispose() {
       byteFetch.dispose()
       resampleProgram.dispose()

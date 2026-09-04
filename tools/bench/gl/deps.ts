@@ -42,6 +42,7 @@ export {
   createSdfBuilder,
   defaultsFor,
   descriptorsFor,
+  PAPER_FS,
   paperSheet,
   SDF_POOL_SLOTS,
   sigmaFor,

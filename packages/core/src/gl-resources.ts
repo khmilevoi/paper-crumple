@@ -95,12 +95,31 @@ export interface Target {
   dispose(): void
 }
 
-/** A compiled program handle, returned by `GlContext.program`. */
+/**
+ * A program handle, returned by `GlContext.program`.
+ *
+ * Its link may still be pending (§5.2 amendment, P7): on a driver that offers
+ * `KHR_parallel_shader_compile` the context issues the compile and link and returns without
+ * waiting, so a slot's `mount()` does not freeze the page for the driver's compile (42–48 s cold
+ * on ANGLE/D3D11 for the paper shader before P7). `ready()` is where the link's outcome lives;
+ * `uniformLocation()` and any draw with the program before `ready()` resolves block on the
+ * driver exactly as the old synchronous link did — legal, and never done on the library's own
+ * paths, which await `ready()` at the start of `source()`.
+ */
 export interface Program {
   readonly handle: WebGLProgram
   readonly label: string
   /** Memoised. `null` when the uniform is absent or was optimised out. */
   uniformLocation(name: string): WebGLUniformLocation | null
+  /**
+   * Resolves once the link has completed: `undefined` when it succeeded, the `GlError` a
+   * synchronous `program()` used to return when a shader did not compile or the program did not
+   * link (same messages), or a `GlError` when `dispose()` ran first. Never rejects (§10.8). The
+   * wait polls `COMPLETION_STATUS_KHR` once per `nextTurn()`, so the main thread stays free; on
+   * a driver without the extension the link was already checked synchronously and this resolves
+   * on the next microtask. Calling it more than once shares one wait.
+   */
+  ready(): Promise<InstanceType<typeof GlError> | undefined>
   dispose(): void
 }
 

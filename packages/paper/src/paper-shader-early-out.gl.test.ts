@@ -23,6 +23,12 @@
  * two `paperSheet()` fixtures `front-identity.gl.test.ts` and `front-holes.gl.test.ts` build
  * (shared through `testing/fixture-sources.ts`), in `hull` and in `torn` mode.
  *
+ * P7 added one more comparison to the first two suites: the shipped text compiles the fold,
+ * flap-shadow, crumple, drop-shadow-cut and debug paths out (`#define PAPER_FRONT_BUILD 1`,
+ * which is what took ANGLE/D3D11's HLSL compile from 42–48 s to seconds), and every front it
+ * renders is compared byte for byte with the whole program (`PAPER_FRONT_BUILD 0`) — through
+ * `renderFront` in hull, torn and both modes, and through `paperSheet()` on the two fixtures.
+ *
  * The last suite is about P6a's other edit, the drop-shadow base skipped at `uShadow == 0`: it
  * forces `uShadow = 1` through the real `renderFront` (whose own write of 0 is neutralised by
  * hiding the uniform's location from it) and pins that the shadow is still rendered, byte for byte
@@ -83,6 +89,14 @@ const SENTINEL_B = 'outColor = vec4(0.0, 1.0, 0.0, 1.0); return; } // sentinel (
 /** The D2 guard; replaced by a bare block, the shadow base runs unconditionally, as before P6a. */
 const D2_GUARD = '  if (uShadow != 0.0 || uShadowBlur <= 0.0) {'
 const D2_GUARD_OFF = '  { // the D2 guard, removed by the test: the shadow base always runs'
+/**
+ * P7: the front build compiles the fold, flap-shadow, crumple, drop-shadow-cut and debug paths
+ * out (`PAPER_FRONT_BUILD 1`, the shipped text); 0 is the whole program of edits 1–8, the one
+ * every P6a comparison above ran against before P7, and what the front build must match byte
+ * for byte for the uniforms `renderFront` fixes (the P7 block above `main()` is the proof).
+ */
+const FRONT_ON = '#define PAPER_FRONT_BUILD 1'
+const FRONT_OFF = '#define PAPER_FRONT_BUILD 0'
 
 /** The sentinel bytes the two branches paint: magenta for (a), green for (b). */
 const SENTINEL_A_RGBA = [255, 0, 255, 255] as const
@@ -103,6 +117,8 @@ const PAPER_FS_SENTINEL = replaceExactlyOnce(
 )
 /** Early-outs off and the shadow base unconditional: the shader as it was before P6a. */
 const PAPER_FS_PRE_P6A = replaceExactlyOnce(PAPER_FS_OFF, D2_GUARD, D2_GUARD_OFF)
+/** The whole program: every path compiled in, as it shipped before P7. */
+const PAPER_FS_FULL = replaceExactlyOnce(PAPER_FS, FRONT_ON, FRONT_OFF)
 
 /**
  * The same context, compiling `fs` wherever the renderer asks for `PAPER_FS`. `CoreGlContext` is
@@ -370,7 +386,32 @@ describe('PAPER_FS early-outs on the bench-style front (renderFront, explicit fi
     expect(PAPER_FS_SENTINEL).toContain(SENTINEL_A)
     expect(PAPER_FS_SENTINEL).toContain(SENTINEL_B)
     expect(PAPER_FS_PRE_P6A).not.toContain(D2_GUARD)
+    expect(PAPER_FS).toContain(FRONT_ON)
+    expect(PAPER_FS_FULL).not.toContain(FRONT_ON)
+    // The whole program still carries every path the front build compiles out (spec 15: the
+    // text is kept whole; P7 only guards it).
+    for (const kept of [
+      'flapCoverage(p,',
+      'flapShadowAt(p, top)',
+      'crumpleShade(p, q, b, mosaicK)',
+      'uDebug == 7',
+    ]) {
+      expect(PAPER_FS_FULL).toContain(kept)
+    }
   })
+
+  for (const mode of ['hull', 'torn', 'both'] as const satisfies readonly PaperEdgeMode[]) {
+    it(`renders byte-identical fronts through the front build and the whole program (P7) — ${mode}`, () => {
+      const scene = frontScene(256)
+      expect(scene).not.toBeInstanceOf(Error)
+      if (scene instanceof Error) return
+      const front = scene.render(mode, null)
+      const whole = scene.render(mode, PAPER_FS_FULL)
+      expect(front.length).toBe(scene.front * scene.front * 4)
+      expect(firstDifferences(front, whole, scene.front)).toEqual([])
+      scene.dispose()
+    }, 120_000)
+  }
 
   for (const mode of ['hull', 'torn'] as const satisfies readonly PaperEdgeMode[]) {
     it(`renders byte-identical fronts with the early-outs on and off — ${mode}`, () => {
@@ -497,6 +538,23 @@ describe('PAPER_FS early-outs through paperSheet() (the front-identity and front
         // outside" depends on the fixture's front, so only (a) is required to fire here.
         expect(countTexels(sentinel.bytes, SENTINEL_A_RGBA)).toBeGreaterThan(0)
         // Three `source()` + `build()` round trips on SwiftShader run well past the default 15 s.
+      }, 120_000)
+
+      it(`builds a byte-identical front through the front build and the whole program (P7) — ${c.name}, ${mode}`, async () => {
+        const ctx = open()
+        const front = await buildFront(ctx, mode, c.source(), c.size)
+        expect(front).not.toBeInstanceOf(Error)
+        if (front instanceof Error) return
+        const whole = await buildFront(
+          withPaperShader(ctx, PAPER_FS_FULL),
+          mode,
+          c.source(),
+          c.size,
+        )
+        expect(whole).not.toBeInstanceOf(Error)
+        if (whole instanceof Error) return
+        expect([front.w, front.h]).toEqual([whole.w, whole.h])
+        expect(firstDifferences(front.bytes, whole.bytes, front.w)).toEqual([])
       }, 120_000)
     }
   }

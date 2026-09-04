@@ -306,6 +306,13 @@ export interface SdfBuilder {
   fieldTargetDesc(w: number, h: number): TextureDesc
   buildField(o: BuildFieldOptions): InstanceType<typeof GlError> | Field
   blurField(o: BlurFieldOptions): InstanceType<typeof GlError> | LooseField
+  /**
+   * Resolves once the four programs have linked — `undefined`, or the first link failure (P7,
+   * `Program.ready()`). `source()` awaits it right after the builder is created, before the
+   * first `buildField`, so no pass blocks on a pending link and a failed one is that
+   * `source()`'s error.
+   */
+  ready(): Promise<InstanceType<typeof GlError> | undefined>
   dispose(): void
 }
 
@@ -625,6 +632,15 @@ export function createSdfBuilder(ctx: GlContext, pool: ArtworkPool): Err | SdfBu
     fieldTargetDesc,
     buildField,
     blurField,
+    async ready() {
+      const outcomes = await Promise.all([
+        seed.ready(),
+        step.ready(),
+        resolve.ready(),
+        blur.ready(),
+      ])
+      return outcomes.find((o) => o !== undefined)
+    },
     dispose() {
       seed.dispose()
       step.dispose()

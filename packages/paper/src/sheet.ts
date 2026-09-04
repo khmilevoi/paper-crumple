@@ -899,6 +899,24 @@ export function paperSheet(options?: PaperSheetOptions): PaperSheet {
     // Abort check point 1 (§10.5): on entry, before any GPU work is spent.
     if (signalAborted(o.signal)) return ABORTED
 
+    // P7 (spec 5.2 amendment): `mount()` issued the programs' compile and link without waiting
+    // for the driver, so this is where the paper shader's link — 42–48 s cold on ANGLE/D3D11
+    // before P7, seconds after — is waited for, off the main thread, and where a failed link
+    // surfaces: as this call's error, observed (§10.6), on the ingest path §7.1's ban on deferral
+    // does not cover. Every `build()` needs a handle from a `source()` that passed this point,
+    // so `build()` never meets a pending program. Two `source()` calls issued during one link
+    // resume here in call order (one promise, listeners in registration order). The abort check
+    // is repeated after the wait: still before any GPU work, and a scroll-away that happened
+    // during the link is honoured rather than spent.
+    const rendererReady = await m.renderer.ready()
+    if (rendererReady !== undefined) return rendererReady
+    const resamplerReady = await m.resampler.ready()
+    if (resamplerReady !== undefined) return resamplerReady
+    if (mounted !== m) {
+      return new SheetError('paperSheet: dispose() ran while source() waited for the program link')
+    }
+    if (signalAborted(o.signal)) return ABORTED
+
     // §6.3 — the hull cache key is "every knob at or above 'hull'", so the trace runs at the
     // hull-tier values the caller projected for the sprite, over this factory's defaults. The
     // reserve, `p` and the artwork size derived below stay at the defaults (`valuesFor`'s own doc
@@ -942,8 +960,33 @@ export function paperSheet(options?: PaperSheetOptions): PaperSheet {
 
     // Step 5: pools, sized at { artwork, sdfRes } — created lazily here, reused across sprites,
     // re-created (with disposal) when a later sprite needs a bigger Pool A.
-    const ensured = ensurePools(m, artwork, sdfRes)
+    let ensured = ensurePools(m, artwork, sdfRes)
     if (GlError.is(ensured)) return ensured
+    // The builder's four programs may have been linked just now (P7): waited for here, before
+    // the first pass reads a uniform location and would block on them. Milliseconds on D3D11,
+    // and only on the first source() into a mount or after a pool re-size. The wait is a window
+    // another source() can re-size the pools in — the same window check point 2's microtask
+    // already opened for the fields — so the pools are sized for this sprite again if that
+    // happened, a bounded number of times; a `dispose()` or an abort in the window is honoured.
+    for (let attempt = 0; ; attempt++) {
+      const sdfReady = await ensured.sdf.ready()
+      if (sdfReady !== undefined) return sdfReady
+      if (mounted !== m) {
+        return new SheetError(
+          'paperSheet: dispose() ran while source() waited for the field programs',
+        )
+      }
+      if (signalAborted(o.signal)) return ABORTED
+      if (m.sdf === ensured.sdf) break
+      if (attempt >= 3) {
+        return new SheetError(
+          'paperSheet: source() could not settle the scratch pools — concurrent source() calls ' +
+            'of different sizes keep re-sizing them',
+        )
+      }
+      ensured = ensurePools(m, artwork, sdfRes)
+      if (GlError.is(ensured)) return ensured
+    }
     const { pools, sdf } = ensured
 
     // Step 6: resample into the Pool A artwork slot — unless it is already sitting there. A

@@ -99,6 +99,10 @@ export { probeExactByteFetch } from './gl-probe.js'
 export { createGpuTimer } from './gl-timer.js'
 export type { GpuTimer } from './gl-timer.js'
 
+// The platform yield the deferred program link polls on (P7; `Program.ready()`), for a slot
+// author who needs the same "later, off the current task" without a second definition of it.
+export { nextTurn } from './next-turn.js'
+
 // §8.1's two pools. Their sizing laws are P5's (`poolABytes`, `poolBBytes`, already above);
 // the pools themselves, their slots, their lifetimes and Pool B's idle interval are P6's.
 export { createScratchPools, POOL_B_IDLE_MS } from './gl-pools.js'
