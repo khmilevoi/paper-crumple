@@ -167,7 +167,7 @@ export interface PaperSheet extends SheetRenderer<Knobs, PaperSheetHandle> {
   /**
    * **Test-only**, and never assigned by production code. The level-2 suite installs this to
    * drive `source()`'s SECOND abort check point (§10.5) deterministically: `source()` calls it
-   * synchronously right after the two field passes (`buildField`/`blurField`) succeed and BEFORE
+   * synchronously right after pass A (`buildField`) succeeds and BEFORE
    * the `await` that check point 2 sits behind — the only way to make an abort land inside that
    * window without a race, since nothing else in this call ever yields before it (fix round 1,
    * finding 2: the level-2 suite had no way to reach this check point at all before this hook
@@ -260,10 +260,25 @@ interface Mounted {
    */
   lastFieldBuild: {
     readonly spriteKey: string
+    /**
+     * The front the fields are framed on. `source()` records its own reserve-sized `front`;
+     * `build()` records the `size` it was asked for. Framing is everything about a field except
+     * the artwork — the texel grid (`fieldDimsFor`), the artwork's placement and `pxScale` — so
+     * the record is reusable exactly when the two agree, and a `build()` at any other `size`
+     * (the ordinary case: the stage builds at the bucket-shaped `fit.frontSize`, which equals
+     * `handle.front` only for a sprite whose reserve-sized front is itself bucket-shaped) starts
+     * from pass A again.
+     */
     readonly size: Size
     readonly tight: Field
     readonly looseness: number
-    readonly loose: LooseField
+    /**
+     * `null` after `source()`, which builds no loose field: nothing reads one before `build()`
+     * — `acquireCpuField` reads `tight` — and the first `build()` blurs at its own framing, so a
+     * source-time blur was two draws and two Pool A slots spent on a field nobody sampled.
+     * `build()` fills it, and a later `build()` at the same framing and `looseness` reuses it.
+     */
+    readonly loose: LooseField | null
     /**
      * The hull polygon's own field (design §4), cached under the same `spriteKey` + requested
      * `size` key as `tight`, and sound under it for the same reason: a hull-tier knob cannot move
@@ -975,31 +990,29 @@ export function paperSheet(options?: PaperSheetOptions): PaperSheet {
     })
     if (GlError.is(tight)) return tight
 
-    // Step 8: blurField — sigma off `looseness`, which a `hull`-only sheet does not even declare
-    // as a knob (`numKnob` falls back to 0, the field's own no-blur floor).
+    // Step 8 — no blur here. Pass B (`blurField`) used to run at this point, sigma off the
+    // `looseness` knob, and nothing ever sampled its result: `acquireCpuField` below reads
+    // `tight`, and `build()` blurs at its own framing (below). It was two draws and two Pool A
+    // slots per add for a field nobody read. `looseness` is still recorded so a `build()` that
+    // asks for exactly this framing at the same knob can tell it has no loose field yet — a
+    // `hull`-only sheet does not even declare the knob (`numKnob` falls back to 0).
     const looseness = numKnob(values, 'looseness', 0)
-    const blurred = sdf.blurField({
-      field: tight,
-      sigmaPx: sigmaFor(looseness, frontLongSide),
-      frontLongSide,
-    })
-    if (GlError.is(blurred)) return blurred
 
-    // Fix round 1, finding 3 (the doubled pass B): `m.lastFieldBuild` used to start `null` and
-    // stay that way until `build()`'s own first call — so the very passes just run above were
-    // thrown away and `build()`'s first call for this sprite always redid both, unconditionally,
-    // even though its own `size` is `front` (this call's own front dims) on the ordinary path
-    // (source() then build() at the size just sourced). Recording them here means that first
-    // `build()` call sees a cache hit instead: `tightReusable` requires the SAME spriteKey and the
-    // SAME `size` (§8.1's shared-slot rule this record exists to serve), which a `build()` call
-    // for a DIFFERENT requested size, or a different sprite having taken the slot since, correctly
-    // fails — falling through to a fresh `buildField`/`blurField`, exactly as before this change.
+    // Recorded so the first `build()` can reuse pass A — but only when it asks for exactly this
+    // framing: `tightReusable` requires the SAME spriteKey and the SAME `size`. That holds when
+    // `build()` is called at `handle.front` (the level-2 suite's own path), and it does NOT hold
+    // on the stage's ordinary path, which builds at the bucket-shaped `fit.frontSize` (§8.6): a
+    // bucket pads any sprite whose reserve-sized front is not itself bucket-shaped, the field's
+    // texel grid, placement and `pxScale` all move with the front, and `build()` correctly starts
+    // from pass A again. (An earlier comment here claimed the first `build()` always saw a cache
+    // hit; it did so only for `fit.frontSize === handle.front`.) The stage cannot supply the
+    // bucket size to `source()`, because `fit` is derived from the hull rect `source()` returns.
     m.lastFieldBuild = {
       spriteKey,
       size: { w: front.w, h: front.h },
       tight,
       looseness,
-      loose: blurred,
+      loose: null,
       paperField: null,
     }
 
@@ -1010,7 +1023,7 @@ export function paperSheet(options?: PaperSheetOptions): PaperSheet {
     // stack frame.
     afterFieldForTest?.()
 
-    // Abort check point 2 (§10.5): after the resample and the two field passes, before the CPU
+    // Abort check point 2 (§10.5): after the resample and pass A, before the CPU
     // hull trace — the boundary between work already paid for and the one genuinely
     // interruptible step. The `await` is what makes this point (and the third one, below)
     // observable from outside a synchronous call: without it nothing here would ever yield.
@@ -1269,7 +1282,10 @@ export function paperSheet(options?: PaperSheetOptions): PaperSheet {
 
     const looseness = numKnob(knobValues, 'looseness', 0)
     let loose: LooseField
-    if (tightReusable && cachedField.looseness === looseness) {
+    // `cachedField.loose` is `null` after `source()`, which builds none: this is where the first
+    // loose field for a framing is made, from the very tight field `source()` left (same inputs
+    // as the blur `source()` used to run, so the same bytes).
+    if (tightReusable && cachedField.loose !== null && cachedField.looseness === looseness) {
       loose = cachedField.loose
     } else {
       const blurred = sdf.blurField({

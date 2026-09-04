@@ -9,6 +9,7 @@ import {
 } from '@paper-crumple/core/unstable'
 import type { GlContext } from '@paper-crumple/core/unstable'
 import { createGlFixture, type PaperGlFixture } from './testing/gl-fixture.js'
+import { dimsForLongSide } from './handle.js'
 import { defaultsFor, edgeParamsFrom } from './paper-knobs.js'
 import { paperSheet } from './sheet.js'
 
@@ -885,6 +886,75 @@ describe('build() (spec 5.2, 8.1, 8.5, 8.7)', () => {
   })
 })
 
+describe('source() spends pass A alone; the first build() at its framing reuses it (spec 8.1)', () => {
+  /** Pass A's draw count at `field`: two seeds, two schedules of `log2 + 1` steps, one resolve. */
+  function passesFor(field: { w: number; h: number }): number {
+    const steps = Math.ceil(Math.log2(Math.max(field.w, field.h))) + 1
+    return 2 * (steps + 1) + 1
+  }
+
+  it('runs no blur in source(): nothing reads a loose field before build()', async () => {
+    const ctx = open()
+    const sheet = paperSheet()
+    sheet.mount(ctx)
+    const bitmap = await compactSprite()
+    const drawArrays = vi.spyOn(ctx.gl, 'drawArrays')
+    const handle = await sheet.source(bitmap, { maxSize: 128, exact: false })
+    const sourceDraws = drawArrays.mock.calls.length
+    drawArrays.mockRestore()
+    bitmap.close()
+    expect(GlError.is(handle) || SheetError.is(handle) || isAborted(handle)).toBe(false)
+    if (GlError.is(handle) || SheetError.is(handle) || isAborted(handle)) return
+
+    // The resample (the exact-byte fetch and the resample proper on the probe-green branch, the
+    // resample alone on the canvas branch), then pass A over the field `source()` frames on its
+    // own front — and nothing else. The two blur draws that used to follow were never sampled:
+    // `acquireCpuField` reads the tight field, and the first `build()` blurs at its own framing.
+    const field = dimsForLongSide(handle.sdfRes, handle.front.w, handle.front.h, 2)
+    const resampleDraws = ctx.exactByteFetch ? 2 : 1
+    expect(sourceDraws).toBe(resampleDraws + passesFor(field))
+    sheet.dispose()
+  })
+
+  it('reuses the tight field in a build() at handle.front, and blurs there instead', async () => {
+    const ctx = open()
+    const sheet = paperSheet()
+    sheet.mount(ctx)
+    const bitmap = await compactSprite()
+    const handle = await sheet.source(bitmap, { maxSize: 128, exact: false })
+    bitmap.close()
+    expect(GlError.is(handle) || SheetError.is(handle) || isAborted(handle)).toBe(false)
+    if (GlError.is(handle) || SheetError.is(handle) || isAborted(handle)) return
+    expect(handle.hull.kind).toBe('polygons')
+
+    const field = dimsForLongSide(handle.sdfRes, handle.front.w, handle.front.h, 2)
+    const drawArrays = vi.spyOn(ctx.gl, 'drawArrays')
+    const first = sheet.build(handle, handle.front, defaultsFor('hull') as never)
+    const firstDraws = drawArrays.mock.calls.length
+    drawArrays.mockClear()
+    const second = sheet.build(handle, handle.front, defaultsFor('hull') as never)
+    const secondDraws = drawArrays.mock.calls.length
+    drawArrays.mockRestore()
+    expect(first instanceof Error || second instanceof Error).toBe(false)
+    if (first instanceof Error || second instanceof Error) return
+
+    // Pass A is served from `lastFieldBuild` (same sprite, same front): pass B's two draws, the
+    // hull polygon's own field (pass A over the mask, at the same field dims), renderFront's one.
+    expect(firstDraws).toBe(2 + passesFor(field) + 1)
+    // And the second build at the same knobs draws the front alone.
+    expect(secondDraws).toBe(1)
+    // The loose field `build()` made is the one every later build reads: two fronts built from
+    // it are byte-identical, so building it in `build()` rather than `source()` changed no pixel.
+    expect(Array.from(readRect(ctx, first.texture, 0, 0, first.width, first.height))).toEqual(
+      Array.from(readRect(ctx, second.texture, 0, 0, second.width, second.height)),
+    )
+
+    sheet.releaseFront(first)
+    sheet.releaseFront(second)
+    sheet.dispose()
+  })
+})
+
 describe('task 12 fix round 1 (findings 1, 2, 3)', () => {
   // Finding 1's own premise ("build(A) after source(B) at the same bucket size reuses stale
   // cachedField.tight/loose and silently renders B's field into A's front") does NOT hold for
@@ -1552,8 +1622,10 @@ describe('the hull polygon as a real paper field (design 2026-09-02, §2-§3)', 
     expect(handle.hull.kind).toBe('use-alpha')
 
     // The first build at source()'s own size (`handle.front` — the per-axis reserve makes it not
-    // necessarily `maxSize` itself, §8.6 amendment) consumes source()'s field work outright, so a
-    // mask build would be the only thing left to count.
+    // necessarily `maxSize` itself, §8.6 amendment) reuses source()'s tight field outright and
+    // runs pass B's two draws (source() no longer blurs — nothing reads a loose field until
+    // build(); see `lastFieldBuild`'s doc comment), so with renderFront's own one draw a mask
+    // build's jump-flood schedule would be the only other thing left to count.
     const drawArrays = vi.spyOn(ctx.gl, 'drawArrays')
     drawArrays.mockClear()
     const front = sheet.build(handle, handle.front, defaultsFor('torn') as never)
@@ -1561,7 +1633,7 @@ describe('the hull polygon as a real paper field (design 2026-09-02, §2-§3)', 
     drawArrays.mockRestore()
     expect(front instanceof Error, String((front as Error)?.message)).toBe(false)
     if (front instanceof Error) return
-    expect(draws).toBe(1)
+    expect(draws).toBe(3)
 
     sheet.releaseFront(front)
     sheet.dispose()
