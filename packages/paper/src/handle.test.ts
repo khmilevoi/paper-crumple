@@ -164,7 +164,7 @@ describe('frontForArtwork (spec 8.6, per axis)', () => {
     }
   })
 
-  it('is maximal: capA + 1 is tried before stepping down, so the loop never leaves a spare texel on the table', () => {
+  it('is maximal at these realistic parameters: capA + 1 is tried before stepping down, finding the texel the closed form alone would leave on the table', () => {
     // Regression for the closed-form estimate under-shooting by exactly one texel: at the hull
     // overscan (p = 84/832), a 96x64 source's front cap `floor(maxSize / (1 + 2p·(64/96)))` is
     // one texel below the true maximum for these four `maxSize` values. Confirmed by hand:
@@ -245,8 +245,11 @@ describe('frontForArtwork (spec 8.6, per axis)', () => {
 
   // F7: a non-finite input used to reach `aLong -= 1` as NaN, and `NaN < 1` is false, so the
   // `for (;;)` loop spins forever, synchronously — not reachable through `paperSheet()` today
-  // (whose overscan is either finite or +Infinity, and +Infinity already returns a clean
-  // SheetError above `frontForArtwork`), but this function is exported, so a guard is required
+  // (whose overscan is either finite and non-negative or +Infinity, and +Infinity already
+  // returns a clean SheetError above `frontForArtwork`; `srcW`/`srcH`/`maxSize` are always
+  // finite and positive), but `frontForArtwork` itself is reachable by anyone importing it
+  // directly from the package's internals (it is not part of `index.ts`'s public surface — that
+  // is `SourceOptions.artworkLongSide`, guarded separately below), so a guard is required
   // regardless. Every case here must return promptly rather than hang.
   it('fails cleanly, rather than looping forever, on a non-finite overscan/srcW/srcH/maxSize', () => {
     expect(
@@ -272,6 +275,27 @@ describe('frontForArtwork (spec 8.6, per axis)', () => {
     expect(
       SheetError.is(
         frontForArtwork({ overscan: Infinity, srcW: 10, srcH: 10, maxSize: 20, exact: false }),
+      ),
+    ).toBe(true)
+  })
+
+  // The finiteness guard alone left two more hangs reachable, both reproduced under `timeout`
+  // (exit 124) before this guard existed:
+  //   - `srcW: 0, srcH: 0` — finite, but `a = Math.min(1, 0 / 0)` is `NaN`, so `capA` and every
+  //     `aLong` are `NaN` too, and `NaN < 1` is false.
+  //   - `overscan: -0.5` on a square source — finite, but `1 + 2 x overscan x a === 0`, so
+  //     `capA === Infinity`, `margin === -Infinity`, `artwork`/`front` are `NaN`, and
+  //     `Infinity - 1 === Infinity` never reaches `aLong < 1`.
+  // Both must return a `SheetError` promptly, exactly like the non-finite cases above — this
+  // test cannot itself contain an input that hangs: vitest cannot interrupt a synchronous
+  // infinite loop, so a hanging case here would hang the whole runner instead of failing it.
+  it('fails cleanly, rather than looping forever, on a zero srcW/srcH or a negative overscan', () => {
+    expect(
+      SheetError.is(frontForArtwork({ overscan: p, srcW: 0, srcH: 0, maxSize: 128, exact: false })),
+    ).toBe(true)
+    expect(
+      SheetError.is(
+        frontForArtwork({ overscan: -0.5, srcW: 10, srcH: 10, maxSize: 20, exact: false }),
       ),
     ).toBe(true)
   })

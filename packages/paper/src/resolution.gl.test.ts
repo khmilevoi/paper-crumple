@@ -92,4 +92,45 @@ describe('artworkCssPx, end to end', () => {
     expect(view.frame).not.toBeNull()
     expect(Math.max(view.frame!.artwork.w, view.frame!.artwork.h)).toBe(expected)
   })
+
+  it('reaches the full artwork resolution even where the pre-fix frontCapFor under-sized the surface (A=159, hull overscan 84/832)', async () => {
+    // `artworkCssPx: 120` above (dpr 1) lands on A = 120, which the OLD `frontCapFor` formula
+    // (`Math.ceil(A * (1 + 2 * p))`, verbatim what shipped in 3b57589 before the per-axis fix in
+    // eaddcfd) also sized correctly — it is not a regression fixture. At the hull default reserve
+    // (`overscanHeadroom: 0`, p = 84/832 = 0.10096153846153846), A = 159 is one, checked by
+    // running both formulas directly (not just asserted here):
+    //   - OLD `frontCapFor({ artworkLongSide: 159, overscan: 84/832, cap: 2048 })` -> 192
+    //     (`ceil(159 * 1.2019...) = 192`, already a multiple of 64).
+    //   - NEW (this codebase) -> 256 (`159 + 2 * ceil(84/832 * 159) = 193`, rounds up to 256).
+    //   - Feeding the OLD, too-small 192 into `frontForArtwork` (unchanged by this fix) for a
+    //     1:1 source returns only 158 artwork texels, one short of the 159 requested — the OLD
+    //     surface genuinely could not deliver what `artworkCssPx` asked for. The 256-texel
+    //     surface this fixed code builds returns the full 159.
+    const sheet = paperSheet({ edgeMode: 'hull', overscanHeadroom: 0 })
+    const stage = await paperStage({
+      sheet,
+      motion: stubMotion(),
+      artworkCssPx: 159,
+      present: 'blit',
+    })
+    if (stage instanceof Error || isAborted(stage)) return expect.fail(String(stage))
+    live.push(stage)
+
+    const dpr = globalThis.devicePixelRatio
+    const expected = Math.ceil(159 * dpr)
+    expect(stage.surface.width).toBe(
+      frontCapFor({ artworkLongSide: expected, overscan: sheet.overscan, cap: 2048 }),
+    )
+
+    const square = await bitmapAt(96, 96)
+    const a = await stage.add(square, { key: 'square', pin: true })
+    if (a instanceof Error || isAborted(a)) return expect.fail(String(a))
+
+    const view = stage.view({ canvas: document.createElement('canvas') })
+    if (view instanceof Error) return expect.fail(String(view))
+
+    expect(view.show(a)).toBeUndefined()
+    expect(view.frame).not.toBeNull()
+    expect(Math.max(view.frame!.artwork.w, view.frame!.artwork.h)).toBe(expected)
+  })
 })

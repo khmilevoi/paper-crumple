@@ -282,6 +282,18 @@ export async function createStage(
   if (o.onError !== undefined) bus.on('error', o.onError)
 
   const dpr = readDpr(env)
+  // `Math.ceil(Math.max(0, o.artworkCssPx * dpr) || 0)` below silently reads a zero, negative or
+  // non-finite `artworkCssPx` as `0` texels, so every `add()` afterwards would fail with a
+  // `SheetError` naming `SourceOptions.artworkLongSide` — an internal channel the consumer never
+  // set, for a mistake in an option they did set. Refuse it here instead, by its own name.
+  if (o.artworkCssPx !== undefined && (!Number.isFinite(o.artworkCssPx) || o.artworkCssPx <= 0)) {
+    return policy.returned(
+      new GlError(
+        `paperStage: artworkCssPx must be a finite, positive number, got ${o.artworkCssPx}`,
+      ),
+      null,
+    )
+  }
   // §7.4 / §8.6: the front cap, which is also the owned surface's side. `artworkCssPx` states the
   // ARTWORK's display footprint and the sheet's reserve says how much front that needs; `cssPx`
   // states the PAPER's, so the front is the footprint itself.

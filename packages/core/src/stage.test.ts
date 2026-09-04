@@ -97,6 +97,19 @@ describe('paperStage(), the factory', () => {
     stage.dispose()
   })
 
+  it('refuses a zero, negative or non-finite artworkCssPx by its own name, rather than degrading to a 0-texel artworkLongSide add() would later fail on', async () => {
+    const e = env({ dpr: 1 })
+    for (const artworkCssPx of [0, -10, NaN, Infinity]) {
+      const stage = await createStage(
+        { sheet: fakeSheet(), motion: fakeMotion(), artworkCssPx, present: 'blit' },
+        e,
+      )
+      expect(stage).toBeInstanceOf(GlError)
+      if (!(stage instanceof GlError)) continue
+      expect(stage.message).toContain('artworkCssPx')
+    }
+  })
+
   it('threads artworkLongSide through the re-source path too', async () => {
     const e = env({ dpr: 1.5 })
     const sheet = fakeSheet()

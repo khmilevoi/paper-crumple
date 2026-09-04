@@ -150,23 +150,37 @@ export function frontForArtwork(o: {
   exact: boolean
   artworkLongSide?: number
 }): InstanceType<typeof SheetError> | ArtworkFraming {
-  // Every non-finite input below reaches `aLong -= 1` as `NaN`, and `NaN < 1` is false — the
-  // `for (;;)` loop then spins forever, synchronously, blocking the thread with no way for a
-  // caller to recover. `paperSheet()` itself cannot reach a non-finite `overscan` (`mount()`
-  // already refused if `freezeOverscan` failed) or a non-finite `maxSize`/`srcW`/`srcH`, but this
-  // function is exported and `SourceOptions.artworkLongSide` is public and unvalidated, so a
-  // fractional or non-finite value here would silently yield fractional artwork/front sizes
-  // without this guard. Fail cleanly instead — an infinite synchronous loop is not an acceptable
-  // failure mode for a public entry point, reachable or not.
+  // Every non-finite, zero, or negative input below reaches `aLong -= 1` as `NaN` — or as a
+  // value that never shrinks below 1 — and the `for (;;)` loop then spins forever, synchronously,
+  // blocking the thread with no way for a caller to recover:
+  //   - `srcW: 0, srcH: 0` makes `a = Math.min(1, 0 / 0)` (`NaN`), so `capA` and every `aLong`
+  //     the loop computes is `NaN`, and `NaN < 1` is false.
+  //   - `overscan: -0.5` on a square source makes `1 + 2 x overscan x a === 0`, so `capA` is
+  //     `Infinity`, `margin` is `-Infinity`, `artwork`/`front` are `NaN`, and
+  //     `Infinity - 1 === Infinity` never reaches `aLong < 1` either.
+  // `paperSheet()` itself cannot reach any of these (`mount()` already refused if
+  // `freezeOverscan` failed, which is the only route to a non-positive `overscan`, and its own
+  // `srcW`/`srcH`/`maxSize` are always finite and positive), but this function is not itself the
+  // public surface that matters here: `frontForArtwork` is not exported from `index.ts` (only
+  // `checkReserve`, `freezeOverscan`, `handleBytesFor` and `handleFactsFor` are). The genuinely
+  // public, unvalidated vector into this arithmetic is `SourceOptions.artworkLongSide` — guarded
+  // separately below, and already complete — but this function's own inputs are reachable by
+  // anyone importing it directly from the package's internals, and an infinite synchronous loop
+  // is not an acceptable failure mode regardless of how it is reached. Fail cleanly instead.
   if (
     !Number.isFinite(o.overscan) ||
     !Number.isFinite(o.srcW) ||
     !Number.isFinite(o.srcH) ||
-    !Number.isFinite(o.maxSize)
+    !Number.isFinite(o.maxSize) ||
+    o.overscan < 0 ||
+    o.srcW <= 0 ||
+    o.srcH <= 0 ||
+    o.maxSize <= 0
   ) {
     return new SheetError(
-      `paperSheet: frontForArtwork needs finite overscan, srcW, srcH and maxSize (got overscan ` +
-        `${o.overscan}, srcW ${o.srcW}, srcH ${o.srcH}, maxSize ${o.maxSize}, spec 8.6)`,
+      `paperSheet: frontForArtwork needs a finite overscan >= 0 and finite, positive srcW, srcH ` +
+        `and maxSize (got overscan ${o.overscan}, srcW ${o.srcW}, srcH ${o.srcH}, maxSize ` +
+        `${o.maxSize}, spec 8.6)`,
     )
   }
   if (
