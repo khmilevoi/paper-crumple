@@ -208,59 +208,30 @@ describe('status queries off the hot path', () => {
     expect(f.calls('checkFramebufferStatus')).toBe(3)
   })
 
-  it('validates the first allocation of each (format, size) and skips getError for the rest', () => {
+  it('reads getError after every allocation, so a failure surfaces on the allocation that caused it', () => {
     const f = fakeGl()
     const ctx = createGlContext(f.gl)
     f.reset()
     expect(ctx.texture(desc)).not.toBeInstanceOf(GlError)
-    expect(f.calls('getError')).toBe(1)
     expect(ctx.texture(desc)).not.toBeInstanceOf(GlError)
     expect(ctx.texture({ ...desc, label: 'another' })).not.toBeInstanceOf(GlError)
-    expect(f.calls('getError')).toBe(1)
-    // A never-proven combination is validated, and its failure surfaces with the same message
-    // (plus the note about the two unvalidated allocations above; the next test pins that).
-    f.answers.error = 'OUT_OF_MEMORY'
-    const bad = ctx.texture({ ...desc, format: 'R8', label: 'mask' })
-    expect(f.calls('getError')).toBe(2)
-    expect(bad).toBeInstanceOf(GlError)
-    expect((bad as InstanceType<typeof GlError>).message).toMatch(
-      /^mask: texStorage2D 8x8 R8 failed, GL error 0x[0-9a-f]+/,
-    )
-    // A failure proves nothing either.
-    f.answers.error = 'NO_ERROR'
-    expect(ctx.texture({ ...desc, format: 'R8' })).not.toBeInstanceOf(GlError)
+    // One per allocation, proven combination or not: an error left on the flag would be read
+    // and discarded by the next reader, and a texture without storage would pass as a success.
     expect(f.calls('getError')).toBe(3)
-  })
-
-  it('names the unvalidated allocations when a later check may be reporting one of them', () => {
-    const f = fakeGl()
-    const ctx = createGlContext(f.gl)
-    expect(ctx.texture(desc)).not.toBeInstanceOf(GlError)
-    expect(ctx.texture(desc)).not.toBeInstanceOf(GlError)
-    expect(ctx.texture(desc)).not.toBeInstanceOf(GlError)
     f.answers.error = 'OUT_OF_MEMORY'
-    const bad = ctx.texture({ ...desc, format: 'R8', label: 'mask' })
+    const bad = ctx.texture({ ...desc, label: 'mask' })
+    expect(f.calls('getError')).toBe(4)
     expect(bad).toBeInstanceOf(GlError)
-    // GL errors are sticky until read: the flag may belong to one of the two allocations that
-    // went unvalidated since the last getError, and the message says so instead of guessing.
     expect((bad as InstanceType<typeof GlError>).message).toMatch(
-      /^mask: texStorage2D 8x8 R8 failed, GL error 0x[0-9a-f]+ \(2 allocations since the last check were not validated; the error may be theirs\)$/,
+      /^mask: texStorage2D 8x8 RGBA8 failed, GL error 0x[0-9a-f]+$/,
     )
-  })
-
-  it('validates every allocation when asked to, for the tests and a debug option', () => {
-    const f = fakeGl()
-    const ctx = createGlContext(f.gl, { validateAllocations: true })
+    // The failed allocation returned before any target could be built over it, so the
+    // completeness cache never sees it: the next target of that combination still asks.
+    f.answers.error = 'NO_ERROR'
+    const good = ctx.texture(desc)
+    if (GlError.is(good)) return
     f.reset()
-    expect(ctx.texture(desc)).not.toBeInstanceOf(GlError)
-    expect(ctx.texture(desc)).not.toBeInstanceOf(GlError)
-    expect(f.calls('getError')).toBe(2)
-    const a = ctx.texture(desc)
-    const b = ctx.texture(desc)
-    if (GlError.is(a) || GlError.is(b)) return
-    f.reset()
-    ctx.target(a)
-    ctx.target(b)
-    expect(f.calls('checkFramebufferStatus')).toBe(2)
+    expect(ctx.target(good)).not.toBeInstanceOf(GlError)
+    expect(f.calls('checkFramebufferStatus')).toBe(1)
   })
 })

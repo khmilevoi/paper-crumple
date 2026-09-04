@@ -63,18 +63,6 @@ export interface GlContextOptions {
    * scope exit on an owned one, where there is no consumer whose state it could be.
    */
   readonly owned?: boolean
-  /**
-   * Ask the driver after every allocation. By default the first `texture()` of each (format,
-   * width, height) pays a `getError` and the first `target()` over each a
-   * `checkFramebufferStatus`; a combination that succeeded once is trusted after that, because
-   * what those two queries catch — a format or size the driver rejects, an attachment it cannot
-   * render into — is a property of the combination, not of the allocation. What they would also
-   * catch is an `OUT_OF_MEMORY` on a later allocation of a proven combination; §8.1's pool
-   * budgets are what keep that from happening, and a GL error is sticky until read, so the next
-   * validated allocation reports it (saying how many went unvalidated in between). Set this for
-   * a test that wants the failure on the allocation that caused it, or as a debug option.
-   */
-  readonly validateAllocations?: boolean
 }
 
 type Err = InstanceType<typeof GlError>
@@ -181,7 +169,7 @@ function createTarget(
     0,
   )
   // Completeness is a property of (format, size, attachment shape), so the caller asks for the
-  // round trip only for a combination this context has not proven yet (`validateAllocations`).
+  // round trip only for a combination this context has not proven complete yet.
   const status = checkStatus
     ? gl.checkFramebufferStatus(gl.DRAW_FRAMEBUFFER)
     : (gl.FRAMEBUFFER_COMPLETE as number)
@@ -257,15 +245,13 @@ export function createGlContext(
   }
 
   /**
-   * The (format, width, height) combinations this context has allocated and attached without
-   * error, so the status queries run once per combination (`validateAllocations`). A failure
-   * proves nothing and leaves the combination unproven.
+   * The (format, width, height) combinations this context has attached and found complete, so
+   * `checkFramebufferStatus` runs once per combination: completeness is a property of the
+   * attachment's format and size, and `texture()` returns an Error on any allocation failure
+   * before a target can be built over it. A failure proves nothing and leaves the combination
+   * unproven.
    */
-  const validateAll = o.validateAllocations === true
-  const provenTextures = new Set<string>()
   const provenTargets = new Set<string>()
-  /** Allocations whose `getError` was skipped since the last one that ran. */
-  let unvalidated = 0
   const combination = (t: Pick<TextureDesc, 'format' | 'width' | 'height'>): string =>
     `${t.format}:${t.width}x${t.height}`
 
@@ -348,31 +334,20 @@ export function createGlContext(
       gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl[filter])
       gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl[wrap])
       gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl[wrap])
-      const key = combination(d)
-      const validate = validateAll || !provenTextures.has(key)
-      const error = validate ? gl.getError() : (gl.NO_ERROR as number)
+      // One getError per allocation, always. A GL error is sticky only until someone reads it:
+      // an OUT_OF_MEMORY left on the flag here would be read and discarded by the next reader —
+      // a readback's drain loop, a mesh build — and a texture without storage would pass as a
+      // success, with the completeness cache below then vouching for a target over it. The step
+      // path allocates nothing, so this round trip costs nothing there.
+      const error = gl.getError()
       gl.bindTexture(gl.TEXTURE_2D, previous)
 
       if (error !== gl.NO_ERROR) {
         gl.deleteTexture(handle)
-        // GL errors are sticky until read: when allocations went unvalidated since the last
-        // read, the flag may be one of theirs, and the message says so rather than guessing.
-        const suffix =
-          unvalidated === 0
-            ? ''
-            : ` (${unvalidated} allocations since the last check were not validated; ` +
-              `the error may be theirs)`
-        unvalidated = 0
         return new GlError(
           `${label}: texStorage2D ${d.width}x${d.height} ${d.format} failed, ` +
-            `GL error 0x${error.toString(16)}${suffix}`,
+            `GL error 0x${error.toString(16)}`,
         )
-      }
-      if (validate) {
-        unvalidated = 0
-        provenTextures.add(key)
-      } else {
-        unvalidated += 1
       }
 
       return {
@@ -388,7 +363,7 @@ export function createGlContext(
 
     target(t: Texture) {
       const key = combination(t)
-      const check = validateAll || !provenTargets.has(key)
+      const check = !provenTargets.has(key)
       const target = createTarget(gl, t, caps.floatRT, boundDrawFramebuffer, check)
       if (GlError.is(target)) return target
       provenTargets.add(key)
