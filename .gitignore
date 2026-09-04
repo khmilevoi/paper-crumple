@@ -9,6 +9,8 @@ coverage/
 .claude/worktrees/
 test-results/
 playwright-report/
+# Benchmark output (tools/bench/cpu writes cpu.json and .cpuprofile files here).
+tools/bench/out/
 .playwright-mcp
 .vitest-attachments/
 
