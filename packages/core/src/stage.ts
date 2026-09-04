@@ -634,7 +634,9 @@ function buildStage(p: StageParts): BuiltStage {
     // Whatever the queue still held for this key just landed, at the current values.
     rebuildQueue.forget(key)
     // §8.8 — an idle view redraws now; a running one picks the new front up at its next step.
-    for (const v of viewsShowing(key)) if (v.state === 'idle') v.refresh()
+    // Snapshotted for the same reason `invalidateSpriteAt` snapshots: a re-show under a refresh
+    // appends to the live set, and the loop would follow it round.
+    for (const v of [...viewsShowing(key)]) if (v.state === 'idle') v.refresh()
     return undefined
   }
 
@@ -835,7 +837,11 @@ function buildStage(p: StageParts): BuiltStage {
   /** `invalidateSprite` with the level already computed — a stage-level patch has one level for
    *  every sprite it touches, and computing it per sprite was pure repetition. */
   function invalidateSpriteAt(record: SpriteRecord, level: Invalidates): void {
-    const shown = viewsShowing(record.key)
+    // A snapshot, never the live set: a `show()` under one of these refreshes — a consumer's
+    // `on('error')` or orphan handler (§10.6) re-showing the view onto the same sprite — moves
+    // that view to the end of the set (`attachRecord`), and a live `Set` iterator visits entries
+    // appended during iteration, so the fan-out would revisit it and never run out.
+    const shown = [...viewsShowing(record.key)]
     if (!atOrAbove(level, 'front')) {
       // Draw class is sprite-scoped too: every view showing this sprite repaints.
       for (const v of shown) v.refresh()
