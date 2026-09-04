@@ -36,7 +36,7 @@ import {
   type KnobValues,
 } from './knob-registry.js'
 import type { KnobPatch, KnobSetter } from './knob-patch.js'
-import type { Invalidates } from './knobs.js'
+import type { Invalidates, Knobs } from './knobs.js'
 import { presetForImageId } from './preset.js'
 import type { PoseRef } from './pose.js'
 import { createRebuildQueue } from './rebuild-queue.js'
@@ -536,7 +536,7 @@ function buildStage(p: StageParts): BuiltStage {
     const front = p.o.sheet.build(
       record.handle,
       record.fit.frontSize,
-      p.registry.projector('sheet')(knobsFor(record, {})) as never,
+      sheetKnobsFor(record) as never,
     )
     if (SourceExpiredError.is(front)) {
       void resourceFront(record)
@@ -603,7 +603,7 @@ function buildStage(p: StageParts): BuiltStage {
       // §6.3 — the hull is traced at the sprite's current values, hull tier included. A knob that
       // moves again while this decode is out shows up as drift on the rebuild below, which
       // schedules the next re-source rather than losing the move.
-      knobs: p.registry.projector('sheet')(knobsFor(record, {})),
+      knobs: sheetKnobsFor(record),
     })
     // §8.5.4 — the stage closes every bitmap it obtained and never closes one it was given.
     if (got.owned) attempt(() => got.bitmap.close())
@@ -634,9 +634,7 @@ function buildStage(p: StageParts): BuiltStage {
     // Whatever the queue still held for this key just landed, at the current values.
     rebuildQueue.forget(key)
     // §8.8 — an idle view redraws now; a running one picks the new front up at its next step.
-    for (const v of views) {
-      if (internals(v).spriteKey === key && v.state === 'idle') v.refresh()
-    }
+    for (const v of viewsShowing(key)) if (v.state === 'idle') v.refresh()
     return undefined
   }
 
@@ -654,6 +652,134 @@ function buildStage(p: StageParts): BuiltStage {
   // §6.2's ground truth: every value under its namespaced path. `stage.set` writes this layer,
   // which sits between the registry's defaults and every sprite's own layer (§6.6, §6.8).
   const stageLayer: Record<string, KnobPrimitive> = {}
+  /**
+   * # C1 — the knob-bag cache
+   *
+   * §6.6's ladder was re-walked **per draw per view**: four `Object.entries` merges into a fresh
+   * ~55-key object plus a projection, for values that move only inside `set()`. The profile put it
+   * at ~70 % of a scheduler tick over 64 views, at ~1 MB of garbage per tick.
+   *
+   * Each of the three writable layers now carries a version counter, bumped by every patch that
+   * lands on it — the stage layer's here, a sprite layer's in its `KnobCache` entry, a view
+   * layer's in the view's own closure. The resolved values and the two projections are cached
+   * against the versions they were built at, so a draw whose layers have not moved pays three
+   * integer compares. The bags handed to a slot are **frozen**: they are now shared between draws,
+   * and a slot that wrote into one would corrupt every later draw rather than only its own.
+   *
+   * The values are identical to what the un-cached ladder produced — the cache changes when the
+   * merge runs, never what it merges — and `stage-knobs.test.ts` pins that against a from-scratch
+   * resolution after a patch at each of the three scopes.
+   */
+  let stageVersion = 0
+  /** `defaults -> stage`, and its two projections: rebuilt only when the stage layer moves. */
+  let baseValues: KnobValues = {}
+  let baseVersion = -1
+  let baseSheetBag: Knobs | null = null
+  let baseMotionBag: Knobs | null = null
+
+  function baseKnobs(): KnobValues {
+    if (baseVersion !== stageVersion) {
+      baseValues = resolveKnobValues([p.registry.defaults(), stageLayer])
+      baseSheetBag = null
+      baseMotionBag = null
+      baseVersion = stageVersion
+    }
+    return baseValues
+  }
+
+  // The two projectors are asked for once, here, rather than per draw: `projector(slot)` memoises
+  // the closure now, but naming it once also says that the slot list cannot change under a stage.
+  const projectSheet = p.registry.projector('sheet')
+  const projectMotion = p.registry.projector('motion')
+
+  /**
+   * The bags for a sprite and a view that both carry an EMPTY layer — a grid's ordinary state,
+   * where §6.6's ladder ends at the stage and every sprite and view resolves to the same values.
+   * One projection for the whole stage instead of one per view per draw.
+   */
+  function baseSheet(): Knobs {
+    baseKnobs()
+    if (baseSheetBag === null) baseSheetBag = Object.freeze(projectSheet(baseValues))
+    return baseSheetBag
+  }
+
+  function baseMotion(): Knobs {
+    baseKnobs()
+    if (baseMotionBag === null) baseMotionBag = Object.freeze(projectMotion(baseValues))
+    return baseMotionBag
+  }
+
+  /** One entry per sprite record: its layer's version, and what was resolved at that version. */
+  interface KnobCache {
+    /** Bumped by every patch `sprite.set` lands on `record.knobs`. */
+    version: number
+    /** Whether that layer is still empty, so the ladder up to the sprite IS the stage's. */
+    empty: boolean
+    /** The (stage, sprite) versions `values` was built at; `-1` while nothing is cached. */
+    atStage: number
+    atSprite: number
+    /** `defaults -> stage -> sprite` — the build ladder, and the draw ladder's first three rungs. */
+    values: KnobValues | null
+    /** The sheet slot's frozen bag over `values`. */
+    sheet: Knobs | null
+  }
+  const knobCaches = new WeakMap<SpriteRecord, KnobCache>()
+
+  function cacheFor(record: SpriteRecord): KnobCache {
+    const found = knobCaches.get(record)
+    if (found !== undefined) return found
+    const fresh: KnobCache = {
+      version: 0,
+      empty: true,
+      atStage: -1,
+      atSprite: -1,
+      values: null,
+      sheet: null,
+    }
+    knobCaches.set(record, fresh)
+    return fresh
+  }
+
+  /** core defaults -> slot defaults -> stage -> sprite (§6.6), cached against the two versions. */
+  function spriteValues(record: SpriteRecord): KnobValues {
+    const cache = cacheFor(record)
+    if (cache.empty) return baseKnobs()
+    if (
+      cache.values === null ||
+      cache.atStage !== stageVersion ||
+      cache.atSprite !== cache.version
+    ) {
+      cache.values = resolveKnobValues([baseKnobs(), record.knobs])
+      cache.sheet = null
+      cache.atStage = stageVersion
+      cache.atSprite = cache.version
+    }
+    return cache.values
+  }
+
+  /**
+   * The sheet slot's bag for `source()` and `build()`: no view layer, because a front is shared
+   * by every view showing the sprite and a view owns draw class only (amendment 20).
+   */
+  function sheetKnobsFor(record: SpriteRecord): Knobs {
+    const values = spriteValues(record)
+    if (values === baseValues) return baseSheet()
+    const cache = cacheFor(record)
+    if (cache.sheet === null) cache.sheet = Object.freeze(projectSheet(values))
+    return cache.sheet
+  }
+
+  /**
+   * core defaults -> slot defaults -> stage -> sprite -> view (§6.6). The returned object is the
+   * cached one and is never written to by a caller — `delta()` and the projectors only read it.
+   */
+  function knobsFor(record: SpriteRecord | null, viewLayer: KnobValues): KnobValues {
+    const upToSprite = record === null ? baseKnobs() : spriteValues(record)
+    // An empty view layer is the common case — only `view.set` ever fills one — and merging it
+    // would copy the whole ladder for nothing.
+    if (Object.keys(viewLayer).length === 0) return upToSprite
+    return resolveKnobValues([upToSprite, viewLayer])
+  }
 
   function applyPatch(
     patch: Readonly<Record<string, unknown>>,
@@ -666,11 +792,6 @@ function buildStage(p: StageParts): BuiltStage {
     return undefined
   }
 
-  /** core defaults -> slot defaults -> stage -> sprite -> view (§6.6). */
-  function knobsFor(record: SpriteRecord | null, viewLayer: KnobValues): KnobValues {
-    return resolveKnobValues([p.registry.defaults(), stageLayer, record?.knobs ?? {}, viewLayer])
-  }
-
   function delta(before: KnobValues, after: KnobValues): KnobValues {
     const out: Record<string, KnobPrimitive> = {}
     for (const [path, value] of Object.entries(after)) {
@@ -679,28 +800,62 @@ function buildStage(p: StageParts): BuiltStage {
     return out
   }
 
+  /**
+   * C1 — the views showing each sprite, by key. Every per-sprite fan-out used to scan **all** the
+   * stage's views (`invalidateSprite` twice over, the re-source's redraw, `remove({ detach })`),
+   * so a `stage.set` over a 64-tile grid walked 64 × 64 views for 64 redraws. Maintained wherever
+   * a view's record changes — `show`, a swap's `adopt`, `dispose` — which is the only place it
+   * can be maintained: nothing else moves a view between sprites.
+   */
+  const viewsBySprite = new Map<string, Set<View>>()
+  const NO_VIEWS: ReadonlySet<View> = new Set()
+
+  function viewsShowing(key: string): ReadonlySet<View> {
+    return viewsBySprite.get(key) ?? NO_VIEWS
+  }
+
+  function indexShow(v: View, key: string): void {
+    const shown = viewsBySprite.get(key)
+    if (shown === undefined) viewsBySprite.set(key, new Set([v]))
+    else shown.add(v)
+  }
+
+  function indexHide(v: View, key: string): void {
+    const shown = viewsBySprite.get(key)
+    if (shown === undefined) return
+    shown.delete(v)
+    if (shown.size === 0) viewsBySprite.delete(key)
+  }
+
   function invalidateSprite(record: SpriteRecord, changed: KnobValues): void {
     const level = p.registry.invalidationOf(changed)
-    if (level === undefined) return
+    if (level !== undefined) invalidateSpriteAt(record, level)
+  }
+
+  /** `invalidateSprite` with the level already computed — a stage-level patch has one level for
+   *  every sprite it touches, and computing it per sprite was pure repetition. */
+  function invalidateSpriteAt(record: SpriteRecord, level: Invalidates): void {
+    const shown = viewsShowing(record.key)
     if (!atOrAbove(level, 'front')) {
       // Draw class is sprite-scoped too: every view showing this sprite repaints.
-      for (const v of views) if (internals(v).spriteKey === record.key) v.refresh()
+      for (const v of shown) v.refresh()
       return
     }
     // §8.8 demand 3 — a front-class set() on a sprite with attachCount > 0. On a running view it
     // marks dirty and the rebuild lands at the top of the next step, at most one dwell later; on
     // an idle view the rebuild and a redraw happen synchronously inside set().
     rebuildQueue.mark(record.key)
-    const running = views.some(
-      (v) => internals(v).spriteKey === record.key && v.state !== 'idle' && v.state !== 'disposed',
-    )
-    if (running) return
+    for (const v of shown) {
+      if (v.state !== 'idle' && v.state !== 'disposed') return
+    }
     rebuildQueue.drain({ demand: 'front-set', mandatory: record.key })
-    for (const v of views) if (internals(v).spriteKey === record.key) v.refresh()
+    for (const v of shown) v.refresh()
   }
 
   function invalidate(changed: KnobValues): void {
-    for (const record of p.sprites.values()) invalidateSprite(record, changed)
+    const level = p.registry.invalidationOf(changed)
+    if (level === undefined) return
+    for (const record of p.sprites.values()) invalidateSpriteAt(record, level)
   }
 
   // §8.8 — the byte budget, tracked separately from `p.lru`'s internal one so the warning below
@@ -781,11 +936,13 @@ function buildStage(p: StageParts): BuiltStage {
     })
   }
 
+  /** `knobs` is the caller's cached motion bag — §6.6 resolved to the view, frozen and reused for
+   *  as long as none of the three layers moves (`motionKnobsFor`). */
   function drawInto(
     record: SpriteRecord,
     targetFor: TargetRule,
     pose: number,
-    viewLayer: KnobValues,
+    knobs: Knobs,
   ): Error | undefined {
     const front = record.front
     if (front === null) return new GlError('the front is not resident; prepare() it first')
@@ -818,7 +975,7 @@ function buildStage(p: StageParts): BuiltStage {
         out: target,
         // §6.6's resolution order, applied at draw time: core defaults -> slot defaults -> stage
         // -> sprite -> view, the view winning at draw class.
-        knobs: p.registry.projector('motion')(knobsFor(record, viewLayer)) as never,
+        knobs: knobs as never,
       })
       return drawn instanceof Error ? drawn : undefined
     })
@@ -882,6 +1039,65 @@ function buildStage(p: StageParts): BuiltStage {
     let record: SpriteRecord | null = null
     /** §6.6 — the view's own draw-class layer. Written by `view.set` alone. */
     let viewLayer: KnobValues = {}
+    /** Bumped by every patch `view.set` lands on `viewLayer` — the third of C1's three versions. */
+    let viewVersion = 0
+    /** The motion bag this view last projected, and the three versions it was projected at. */
+    let motionCache: {
+      record: SpriteRecord
+      stage: number
+      sprite: number
+      view: number
+      bag: Knobs
+    } | null = null
+
+    /**
+     * §6.6 projected for the motion slot, for THIS view: the whole ladder, the view winning at
+     * draw class. Rebuilt only when one of the three layers has moved since the last draw.
+     */
+    function motionKnobsFor(r: SpriteRecord): Knobs {
+      const cache = cacheFor(r)
+      const hit = motionCache
+      if (
+        hit !== null &&
+        hit.record === r &&
+        hit.stage === stageVersion &&
+        hit.sprite === cache.version &&
+        hit.view === viewVersion
+      ) {
+        return hit.bag
+      }
+      const values = knobsFor(r, viewLayer)
+      // Every view of a stage whose sprites and views carry no layer of their own projects the
+      // same bag; `baseMotion()` is that bag, made once per `stage.set` rather than once per view.
+      const bag = values === baseValues ? baseMotion() : Object.freeze(projectMotion(values))
+      motionCache = {
+        record: r,
+        stage: stageVersion,
+        sprite: cache.version,
+        view: viewVersion,
+        bag,
+      }
+      return bag
+    }
+
+    /**
+     * The one place a view changes which sprite it shows — `show`, a swap's `adopt` and
+     * `dispose` all go through it — so the attach accounting (§4.5) and C1's view index cannot
+     * drift apart.
+     */
+    function attachRecord(next: SpriteRecord | null): void {
+      if (record !== null) {
+        record.attachCount -= 1
+        p.lru.detach(record.key)
+        indexHide(view, record.key)
+      }
+      record = next
+      if (record !== null) {
+        record.attachCount += 1
+        p.lru.attach(record.key)
+        indexShow(view, record.key)
+      }
+    }
 
     const paint = (next: number): void => {
       if (record === null) return
@@ -891,7 +1107,7 @@ function buildStage(p: StageParts): BuiltStage {
         rebuildQueue.drain({ demand: 'show', mandatory: record.key })
       }
       pose = next
-      const drawn = drawInto(record, targetFor, next, viewLayer)
+      const drawn = drawInto(record, targetFor, next, motionKnobsFor(record))
       if (drawn !== undefined) {
         // No caller on the stack for a step, and `refresh` / `draw` return `void` by design, so
         // every dropped frame is an orphan (§10.6).
@@ -912,7 +1128,7 @@ function buildStage(p: StageParts): BuiltStage {
       if (r.front === null || rebuildQueue.dirty(r.key)) {
         rebuildQueue.drain({ demand: 'step', mandatory: r.key })
       }
-      const drawn = drawInto(r, targetFor, next, viewLayer)
+      const drawn = drawInto(r, targetFor, next, motionKnobsFor(r))
       if (drawn !== undefined) return drawn
       return 'canvas' in t ? blitOut(t, r) : undefined
     }
@@ -1072,18 +1288,12 @@ function buildStage(p: StageParts): BuiltStage {
         // is where the sprite, fit and bucket are exchanged, and what makes a bucket change
         // across a swap invisible rather than merely well hidden.
         adopt: (next) => {
-          if (record !== null) {
-            record.attachCount -= 1
-            p.lru.detach(record.key)
-          }
-          record = next
-          record.attachCount += 1
-          p.lru.attach(record.key)
+          attachRecord(next)
           held()
-          if (record.front === null) {
+          if (next.front === null) {
             // §8.8 demand 5 — settlement while the view is rising or parked. The park is free
             // time and the ideal moment to build the incoming front.
-            rebuildQueue.drain({ demand: 'target-settled', mandatory: record.key })
+            rebuildQueue.drain({ demand: 'target-settled', mandatory: next.key })
           }
           return undefined
         },
@@ -1174,15 +1384,7 @@ function buildStage(p: StageParts): BuiltStage {
               )
             : undefined
         }
-        if (record !== null) {
-          record.attachCount -= 1
-          p.lru.detach(record.key)
-        }
-        record = sprite === null ? null : findRecord(sprite)
-        if (record !== null) {
-          record.attachCount += 1
-          p.lru.attach(record.key)
-        }
+        attachRecord(sprite === null ? null : findRecord(sprite))
         state = 'idle'
         paint(0)
         return undefined
@@ -1212,6 +1414,7 @@ function buildStage(p: StageParts): BuiltStage {
         const failed = applyPatch(patch, VIEW_SCOPE, layer)
         if (failed !== undefined) return failed
         viewLayer = layer
+        viewVersion += 1
         // Draw class: no rebuild, one redraw at the current pose.
         if (state === 'idle') view.refresh()
         return undefined
@@ -1226,11 +1429,7 @@ function buildStage(p: StageParts): BuiltStage {
         // bus is cleared — or the `end` `dispose()` owes it would never reach a listener.
         controller?.dispose()
         state = 'disposed'
-        if (record !== null) {
-          record.attachCount -= 1
-          p.lru.detach(record.key)
-          record = null
-        }
+        attachRecord(null)
         if ('canvas' in t) claimed.delete(t.canvas)
         bus.clear()
         const at = views.indexOf(view)
@@ -1278,7 +1477,7 @@ function buildStage(p: StageParts): BuiltStage {
     // defaults instead, it shadowed every stage-level value for as long as the sprite lived —
     // `stage.set()` of any knob changed nothing a view of an existing sprite drew or built.
     const at = knobsFor(null, {})
-    const sheetKnobs = p.registry.projector('sheet')(at)
+    const sheetKnobs = Object.freeze(projectSheet(at))
     const handle = await p.o.sheet.source(acquired.bitmap, {
       maxSize: p.host.surface.width,
       artworkLongSide: p.artworkLongSide,
@@ -1328,7 +1527,10 @@ function buildStage(p: StageParts): BuiltStage {
     // — a hull-tier move through the re-source row, anything else in place. Draw-class movement
     // rides along: one redundant rebuild in a window this narrow, against a second bookkeeping
     // path that would have to know the class.
-    if (Object.keys(delta(at, knobsFor(null, {}))).length > 0) rebuildQueue.mark(key)
+    // `baseKnobs()` hands back the very object `at` holds while the stage layer has not moved, so
+    // the common case is one reference compare and no merge at all.
+    const now = knobsFor(null, {})
+    if (now !== at && Object.keys(delta(at, now)).length > 0) rebuildQueue.mark(key)
 
     // Boxed rather than a bare `let`: `sprite`'s getters must close over `record`, which does not
     // exist until after `sprite` is built. `record` itself is assigned exactly once, so it stays
@@ -1359,6 +1561,9 @@ function buildStage(p: StageParts): BuiltStage {
         const failed = applyPatch(patch, SPRITE_SCOPE, layer)
         if (failed !== undefined) return failed
         current.knobs = layer
+        const cache = cacheFor(current)
+        cache.version += 1
+        cache.empty = Object.keys(layer).length === 0
         invalidateSprite(current, delta(before, layer))
         return undefined
       }) as never,
@@ -1597,9 +1802,8 @@ function buildStage(p: StageParts): BuiltStage {
     // `mount`, so the caller no longer has to find them. It changes **who performs the
     // disposal** and never the rule that an attached sprite is not freed.
     if (o?.detach === true) {
-      for (const v of [...views]) {
-        if (internals(v).spriteKey === key) v.dispose()
-      }
+      // Copied: `dispose()` takes the view out of the index this iterates.
+      for (const v of [...viewsShowing(key)]) v.dispose()
     }
     if (record.attachCount > 0) {
       return p.policy.returned(
@@ -1866,6 +2070,7 @@ function buildStage(p: StageParts): BuiltStage {
       const before = { ...stageLayer }
       const failed = applyPatch(patch, INVALIDATION_ORDER, stageLayer)
       if (failed !== undefined) return failed
+      stageVersion += 1
       invalidate(delta(before, stageLayer))
       return undefined
     }) as never,
