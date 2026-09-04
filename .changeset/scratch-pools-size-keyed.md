@@ -20,5 +20,6 @@ resident texture instead of re-creating it, and Pool B stays one source-sized sl
 
 `paperSheet()` uses them: its JFA coord targets are sized once and run in a sub-viewport, its
 fields are size-keyed, `source()` no longer blurs a loose field nothing reads, and the jump-flood
-shaders select texels with `texelFetch`. A warm `stage.add` of a 1024² artwork allocates two
-textures and one framebuffer where it allocated eighteen and sixteen; every field is byte-identical.
+shaders select texels with `texelFetch`. A warm `stage.add` of a 1024² artwork allocates three
+textures and two framebuffers (the front, the hull mask and one transient source copy) where it
+allocated eighteen and sixteen; every field is byte-identical.
