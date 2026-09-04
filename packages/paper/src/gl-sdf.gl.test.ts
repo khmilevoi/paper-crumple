@@ -1,8 +1,14 @@
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { GlError } from '@paper-crumple/core'
 import type { DrawTarget } from '@paper-crumple/core'
-import { createScratchPools, drawTargetFor, poolABytes } from '@paper-crumple/core/unstable'
-import type { ScratchPools } from '@paper-crumple/core/unstable'
+import {
+  createScratchPools,
+  drawTargetFor,
+  FULLSCREEN_VS,
+  poolABytes,
+  uploadBytes,
+} from '@paper-crumple/core/unstable'
+import type { GlContext, ScratchPools, Target, Texture } from '@paper-crumple/core/unstable'
 import { createGlFixture, type PaperGlFixture } from './testing/gl-fixture.js'
 import { createSdfBuilder, looseSizeFor, sigmaFor } from './gl-sdf.js'
 
@@ -542,5 +548,410 @@ describe('pass B, the looseness blur', () => {
     expect(b.target).toBe(a.target)
     expect(b.sigmaPx).not.toBe(a.sigmaPx)
     builder.dispose()
+  })
+})
+
+// -----------------------------------------------------------------------------------------------
+// The texel-selection oracle.
+//
+// `STEP_FS` and `RESOLVE_FS` read their NEAREST coord targets with `texelFetch(sampler, ivec2, 0)`
+// where they used to read `texture(sampler, p / uSize)`; the taps land on texel centres, so the
+// two select the same texel by construction — and "by construction" is proven here rather than
+// argued: the oracle below is pass A exactly as it shipped before the switch (`gl-sdf.ts` at
+// 5f61a46: `COORD_HEADER`, `SEED_FS`, `STEP_FS`, `RESOLVE_FS` and `scheduleFor`), copied rather
+// than imported so the comparison has an independent reference — the production builder measured
+// against its own current self would prove nothing. The oracle runs on dedicated, exact-size
+// targets, which also makes it the reference for the ping-pong sub-viewport (`gl-sdf.ts`'s
+// `pingPong`): the production build's coord textures may be larger than the field, the oracle's
+// never are, and the resolved fields must still agree to the byte.
+//
+// Byte mode (`RGBA8` coords and field, no float render target) is carried in the copy, but
+// SwiftShader has float render targets, so only the `RG16F` / `R16F` path runs in this suite.
+// -----------------------------------------------------------------------------------------------
+
+const ORACLE_COORD_HEADER = (byteMode: boolean): string => `#version 300 es
+precision highp float;
+${byteMode ? '#define BYTE_COORDS 1' : ''}
+
+#ifdef BYTE_COORDS
+vec4 encodeCoord(vec2 c) {
+  if (c.x < 0.0) return vec4(1.0);
+  vec2 hi = floor(c / 256.0);
+  vec2 lo = c - hi * 256.0;
+  return vec4(hi.x, lo.x, hi.y, lo.y) / 255.0;
+}
+vec2 decodeCoord(vec4 t) {
+  vec4 v = floor(t * 255.0 + 0.5);
+  vec2 c = vec2(v.x * 256.0 + v.y, v.z * 256.0 + v.w);
+  return (c.x > 65000.0) ? vec2(-1.0) : c;
+}
+#else
+vec4 encodeCoord(vec2 c) { return vec4(c, 0.0, 1.0); }
+vec2 decodeCoord(vec4 t) { return t.xy; }
+#endif
+`
+
+const ORACLE_SEED_FS = (byteMode: boolean): string => `${ORACLE_COORD_HEADER(byteMode)}
+uniform highp usampler2D uSrc;
+uniform vec2 uSize;
+uniform int uSeedInside;
+uniform vec4 uArtworkUv;
+out vec4 outColor;
+void main() {
+  vec2 uv = gl_FragCoord.xy / uSize;
+  vec2 artworkUv = uv * uArtworkUv.xy + uArtworkUv.zw;
+  bool inRange = artworkUv.x >= 0.0 && artworkUv.x <= 1.0 && artworkUv.y >= 0.0 && artworkUv.y <= 1.0;
+  ivec2 srcSize = textureSize(uSrc, 0);
+  ivec2 p = clamp(ivec2(floor(artworkUv * vec2(srcSize))), ivec2(0), srcSize - ivec2(1));
+  bool inside = inRange && (texelFetch(uSrc, p, 0).a >= 128u);
+  bool seed = (uSeedInside == 1) ? inside : !inside;
+  outColor = encodeCoord(seed ? gl_FragCoord.xy : vec2(-1.0));
+}`
+
+const ORACLE_STEP_FS = (byteMode: boolean): string => `${ORACLE_COORD_HEADER(byteMode)}
+uniform sampler2D uPrev;
+uniform vec2 uSize;
+uniform float uStep;
+out vec4 outColor;
+void main() {
+  vec2 fc = gl_FragCoord.xy;
+  vec2 best = decodeCoord(texture(uPrev, fc / uSize));
+  float bestD = (best.x < 0.0) ? 1e20 : dot(best - fc, best - fc);
+  for (int y = -1; y <= 1; y++) {
+    for (int x = -1; x <= 1; x++) {
+      if (x == 0 && y == 0) continue;
+      vec2 p = fc + vec2(float(x), float(y)) * uStep;
+      if (p.x < 0.0 || p.y < 0.0 || p.x >= uSize.x || p.y >= uSize.y) continue;
+      vec2 c = decodeCoord(texture(uPrev, p / uSize));
+      if (c.x < 0.0) continue;
+      float d = dot(c - fc, c - fc);
+      if (d < bestD) { bestD = d; best = c; }
+    }
+  }
+  outColor = encodeCoord(best);
+}`
+
+const ORACLE_RESOLVE_FS = (
+  byteMode: boolean,
+  byteOut: boolean,
+): string => `${ORACLE_COORD_HEADER(byteMode)}
+uniform sampler2D uInsideSeeds;
+uniform sampler2D uOutsideSeeds;
+uniform float uPxScale;
+uniform vec2 uEncode;
+out vec4 outColor;
+void main() {
+  vec2 fc = gl_FragCoord.xy;
+  vec2 uv = fc / vec2(textureSize(uInsideSeeds, 0));
+  vec2 pi = decodeCoord(texture(uInsideSeeds, uv));
+  vec2 po = decodeCoord(texture(uOutsideSeeds, uv));
+  float dOut = (pi.x < 0.0) ? 1e4 : length(pi - fc);
+  float dIn  = (po.x < 0.0) ? 1e4 : length(po - fc);
+  float d = (dIn - dOut) * uPxScale;
+  ${byteOut ? 'outColor = vec4(clamp(d * uEncode.x + uEncode.y, 0.0, 1.0));' : 'outColor = vec4(d, 0.0, 0.0, 1.0);'}
+}`
+
+/** `scheduleFor`, verbatim: `N/2, N/4 ... 1` plus one extra unit pass. */
+function oracleSchedule(w: number, h: number): number[] {
+  const levels = Math.ceil(Math.log2(Math.max(w, h)))
+  const schedule: number[] = []
+  for (let k = levels - 1; k >= 0; k--) schedule.push(2 ** k)
+  schedule.push(1)
+  return schedule
+}
+
+/**
+ * The raw stored value of every texel of a resolved field, row-major — channel 0 of an
+ * `RGBA/FLOAT` read on a float target (a half's float expansion is exact, so this IS the byte
+ * content), the raw byte on an `RGBA8` one. No decode: identity is asserted on what is stored.
+ */
+function readRawField(ctx: GlContext, target: Target, byteMode: boolean): Float32Array {
+  const { gl } = ctx
+  const w = target.width
+  const h = target.height
+  const out = new Float32Array(w * h)
+  ctx.scope(() => {
+    gl.bindFramebuffer(gl.READ_FRAMEBUFFER, target.framebuffer)
+    if (byteMode) {
+      const px = new Uint8Array(w * h * 4)
+      gl.readPixels(0, 0, w, h, gl.RGBA, gl.UNSIGNED_BYTE, px)
+      for (let i = 0; i < out.length; i++) out[i] = px[i * 4]!
+    } else {
+      const fl = new Float32Array(w * h * 4)
+      gl.readPixels(0, 0, w, h, gl.RGBA, gl.FLOAT, fl)
+      for (let i = 0; i < out.length; i++) out[i] = fl[i * 4]!
+    }
+    gl.bindFramebuffer(gl.READ_FRAMEBUFFER, null)
+  })
+  return out
+}
+
+/** The index of the first texel where `a` and `b` differ, or -1. `Object.is`, so NaN is caught. */
+function firstMismatch(a: Float32Array, b: Float32Array): number {
+  if (a.length !== b.length) return Math.min(a.length, b.length)
+  for (let i = 0; i < a.length; i++) if (!Object.is(a[i], b[i])) return i
+  return -1
+}
+
+/** Pass A the pre-`texelFetch` way, on dedicated exact-size targets: the raw resolved field. */
+function oraclePassA(
+  ctx: GlContext,
+  artwork: Texture,
+  artworkUv: readonly [number, number, number, number],
+  w: number,
+  h: number,
+  sourceLongSide: number,
+): Error | Float32Array {
+  const byteMode = !ctx.caps.floatRT
+  const seed = ctx.program(FULLSCREEN_VS, ORACLE_SEED_FS(byteMode), 'oracle.seed')
+  if (GlError.is(seed)) return seed
+  const step = ctx.program(FULLSCREEN_VS, ORACLE_STEP_FS(byteMode), 'oracle.step')
+  if (GlError.is(step)) return step
+  const resolve = ctx.program(
+    FULLSCREEN_VS,
+    ORACLE_RESOLVE_FS(byteMode, byteMode),
+    'oracle.resolve',
+  )
+  if (GlError.is(resolve)) return resolve
+  const owned: Target[] = []
+  const dedicated = (format: 'RG16F' | 'RGBA8' | 'R16F', filter: 'NEAREST' | 'LINEAR') => {
+    const texture = ctx.texture({ width: w, height: h, format, filter, label: 'oracle' })
+    if (GlError.is(texture)) return texture
+    const target = ctx.target(texture)
+    if (GlError.is(target)) {
+      texture.dispose()
+      return target
+    }
+    owned.push(target)
+    return target
+  }
+  const release = () => {
+    for (const t of owned) {
+      t.dispose()
+      t.texture.dispose()
+    }
+    seed.dispose()
+    step.dispose()
+    resolve.dispose()
+  }
+
+  const encode: readonly [number, number] = byteMode ? [127 / 255 / 128, 128 / 255] : [1, 0]
+  const pxScale = sourceLongSide / Math.max(w, h)
+  const schedule = oracleSchedule(w, h)
+  const halves: Target[] = []
+  for (const seedInside of [1, 0]) {
+    const a = dedicated(byteMode ? 'RGBA8' : 'RG16F', 'NEAREST')
+    const b = dedicated(byteMode ? 'RGBA8' : 'RG16F', 'NEAREST')
+    if (GlError.is(a) || GlError.is(b)) {
+      release()
+      return GlError.is(a) ? a : (b as Error)
+    }
+    let src = a
+    let dst = b
+    ctx.scope((s) => {
+      const { gl } = ctx
+      s.bindTarget(drawTargetFor(src))
+      gl.useProgram(seed.handle)
+      gl.activeTexture(gl.TEXTURE0)
+      gl.bindTexture(gl.TEXTURE_2D, artwork.handle)
+      gl.uniform1i(seed.uniformLocation('uSrc'), 0)
+      gl.uniform2f(seed.uniformLocation('uSize'), w, h)
+      gl.uniform1i(seed.uniformLocation('uSeedInside'), seedInside)
+      gl.uniform4f(seed.uniformLocation('uArtworkUv'), ...artworkUv)
+      gl.drawArrays(gl.TRIANGLES, 0, 3)
+      gl.useProgram(step.handle)
+      gl.uniform2f(step.uniformLocation('uSize'), w, h)
+      for (const stepSize of schedule) {
+        s.bindTarget(drawTargetFor(dst))
+        gl.activeTexture(gl.TEXTURE0)
+        gl.bindTexture(gl.TEXTURE_2D, src.texture.handle)
+        gl.uniform1i(step.uniformLocation('uPrev'), 0)
+        gl.uniform1f(step.uniformLocation('uStep'), stepSize)
+        gl.drawArrays(gl.TRIANGLES, 0, 3)
+        const t = src
+        src = dst
+        dst = t
+      }
+    })
+    halves.push(src)
+  }
+  const out = dedicated(byteMode ? 'RGBA8' : 'R16F', 'LINEAR')
+  if (GlError.is(out)) {
+    release()
+    return out
+  }
+  ctx.scope((s) => {
+    const { gl } = ctx
+    s.bindTarget(drawTargetFor(out))
+    gl.useProgram(resolve.handle)
+    gl.activeTexture(gl.TEXTURE0)
+    gl.bindTexture(gl.TEXTURE_2D, halves[0]!.texture.handle)
+    gl.uniform1i(resolve.uniformLocation('uInsideSeeds'), 0)
+    gl.activeTexture(gl.TEXTURE1)
+    gl.bindTexture(gl.TEXTURE_2D, halves[1]!.texture.handle)
+    gl.uniform1i(resolve.uniformLocation('uOutsideSeeds'), 1)
+    gl.uniform1f(resolve.uniformLocation('uPxScale'), pxScale)
+    gl.uniform2f(resolve.uniformLocation('uEncode'), encode[0], encode[1])
+    gl.drawArrays(gl.TRIANGLES, 0, 3)
+  })
+  const field = readRawField(ctx, out, byteMode)
+  release()
+  return field
+}
+
+/**
+ * `tools/bench/gl/harness.ts`'s `insideSilhouette` / `silhouetteBytes` — the bench artwork, a
+ * head over two legs. Keep the two in step: this copy is what makes "identical on the bench
+ * artwork" a statement about the artwork the bench actually measures.
+ */
+function insideSilhouette(w: number, h: number, x: number, y: number): boolean {
+  const cx = w / 2
+  const cy = h * 0.36
+  const r = Math.min(w, h) * 0.27
+  if (Math.hypot(x - cx, y - cy) <= r) return true
+  const legW = w * 0.15
+  const top = cy
+  const bottom = h * 0.93
+  const l1 = cx - w * 0.22
+  const l2 = cx + w * 0.07
+  return y >= top && y <= bottom && ((x >= l1 && x <= l1 + legW) || (x >= l2 && x <= l2 + legW))
+}
+
+function silhouetteBytes(w: number, h: number): Uint8Array {
+  const out = new Uint8Array(w * h * 4)
+  for (let y = 0; y < h; y++) {
+    for (let x = 0; x < w; x++) {
+      const p = (y * w + x) * 4
+      const inside = insideSilhouette(w, h, x + 0.5, y + 0.5)
+      out[p] = (x * 255) / w
+      out[p + 1] = (y * 255) / h
+      out[p + 2] = 140
+      out[p + 3] = inside ? 255 : 0
+    }
+  }
+  return out
+}
+
+interface IdentityCase {
+  readonly name: string
+  readonly artwork: { readonly w: number; readonly h: number }
+  readonly bytes: Uint8Array
+  readonly artworkUv: readonly [number, number, number, number]
+  readonly field: { readonly w: number; readonly h: number }
+  /** The pool's `sdfRes`, when it should exceed the field (exercises the ping-pong sub-rect). */
+  readonly sdfRes?: number
+}
+
+/** Builds `c` through the production builder and through the oracle; the fields must agree. */
+function expectIdenticalField(ctx: GlContext, c: IdentityCase): void {
+  const sdfRes = c.sdfRes ?? Math.max(c.field.w, c.field.h)
+  const casePools = createScratchPools({ gl: ctx, artwork: c.artwork, sdfRes })
+  const artwork = casePools.poolA.holdArtwork('sprite', {
+    width: c.artwork.w,
+    height: c.artwork.h,
+    format: 'RGBA8UI',
+    filter: 'NEAREST',
+    label: `artwork:${c.name}`,
+  })
+  expect(GlError.is(artwork), c.name).toBe(false)
+  if (GlError.is(artwork)) {
+    casePools.dispose()
+    return
+  }
+  expect(ctx.scope(() => uploadBytes(ctx.gl, artwork, c.bytes))).toBeUndefined()
+  const builder = createSdfBuilder(ctx, casePools.poolA)
+  expect(GlError.is(builder), c.name).toBe(false)
+  if (GlError.is(builder)) {
+    casePools.dispose()
+    return
+  }
+  const sourceLongSide = Math.max(c.field.w, c.field.h)
+  const built = builder.buildField({
+    artwork,
+    artworkUv: c.artworkUv,
+    width: c.field.w,
+    height: c.field.h,
+    sourceLongSide,
+  })
+  expect(GlError.is(built), c.name).toBe(false)
+  if (GlError.is(built)) {
+    builder.dispose()
+    casePools.dispose()
+    return
+  }
+  const byteMode = !ctx.caps.floatRT
+  const ours = readRawField(ctx, built.target, byteMode)
+  const theirs = oraclePassA(ctx, artwork, c.artworkUv, c.field.w, c.field.h, sourceLongSide)
+  expect(theirs instanceof Error, c.name).toBe(false)
+  if (theirs instanceof Error) {
+    builder.dispose()
+    casePools.dispose()
+    return
+  }
+  // Not vacuous: the field is signed, so both sides of the silhouette are in the comparison.
+  let lo = Infinity
+  let hi = -Infinity
+  for (const v of theirs) {
+    if (v < lo) lo = v
+    if (v > hi) hi = v
+  }
+  expect(lo, c.name).toBeLessThan(0)
+  expect(hi, c.name).toBeGreaterThan(0)
+  expect(firstMismatch(ours, theirs), `${c.name}: first differing texel`).toBe(-1)
+  builder.dispose()
+  casePools.dispose()
+}
+
+describe('texelFetch selects the texel texture(p / uSize) selected — byte for byte (P6b)', () => {
+  it('on the disc fixtures: square, non-square, odd and margin-framed', () => {
+    const { ctx } = open()
+    const cases: IdentityCase[] = [
+      {
+        name: 'disc 64x64',
+        artwork: { w: 64, h: 64 },
+        bytes: disc(64, 64, 20),
+        artworkUv: [1, 1, 0, 0],
+        field: { w: 64, h: 64 },
+      },
+      {
+        name: 'disc 48x40',
+        artwork: { w: 48, h: 40 },
+        bytes: disc(48, 40, 12),
+        artworkUv: [1, 1, 0, 0],
+        field: { w: 48, h: 40 },
+      },
+      {
+        name: 'disc 33x17',
+        artwork: { w: 33, h: 17 },
+        bytes: disc(33, 17, 6),
+        artworkUv: [1, 1, 0, 0],
+        field: { w: 33, h: 17 },
+      },
+      {
+        // A 64² artwork centred in a 96x80 field: the seed pass's overscan uv mapping (spec 8.5).
+        name: 'disc 64x64 in a 96x80 field',
+        artwork: { w: 64, h: 64 },
+        bytes: disc(64, 64, 20),
+        artworkUv: [96 / 64, 80 / 64, -16 / 64, -8 / 64],
+        field: { w: 96, h: 80 },
+      },
+    ]
+    for (const c of cases) expectIdenticalField(ctx, c)
+  })
+
+  it('on the bench artwork at 256x192 and at the production maximum, 512x384', () => {
+    const { ctx } = open()
+    for (const [w, h] of [
+      [256, 192],
+      [512, 384],
+    ] as const) {
+      expectIdenticalField(ctx, {
+        name: `silhouette ${w}x${h}`,
+        artwork: { w, h },
+        bytes: silhouetteBytes(w, h),
+        artworkUv: [1, 1, 0, 0],
+        field: { w, h },
+      })
+    }
   })
 })

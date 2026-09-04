@@ -93,6 +93,18 @@ void main() {
 // One jump-flooding round: look at 8 neighbours a fixed stride away plus self, keep the
 // nearest seed any of them knows about. log2(size) rounds later every pixel knows its
 // nearest seed, which is what makes this O(n log n) instead of O(n * radius).
+//
+// The taps read `texelFetch` at integer texel coordinates. They used to read
+// `texture(uPrev, p / uSize)` on a NEAREST target, which selects texel `floor(p)` — and `p` is
+// always a texel centre (`gl_FragCoord` is `i + 0.5`, `uStep` is a power of two), so
+// `floor(p) == ivec2(fc) + offset * int(uStep)` texel for texel. The bounds check is the same
+// predicate on integers: `p.x >= uSize.x` with `p.x = q.x + 0.5` and an integer `uSize.x` is
+// `q.x >= uSize.x`. Two things fall out. The divide and the sampler's filter/wrap path leave the
+// inner loop; and the texture's own size is no longer a term anywhere in pass A, so the coord
+// targets may be larger than the field and the passes run in a sub-viewport (`pingPong`, below).
+// The switch is proven, not argued: `gl-sdf.gl.test.ts` carries the pre-switch shaders as an
+// oracle and asserts the resolved field byte for byte on the fixtures and the bench artwork.
+// `fc` stays a float for the distance terms, which are unchanged.
 const STEP_FS = (byteMode: boolean): string => `${COORD_HEADER(byteMode)}
 uniform sampler2D uPrev;
 uniform vec2 uSize;
@@ -100,14 +112,17 @@ uniform float uStep;
 out vec4 outColor;
 void main() {
   vec2 fc = gl_FragCoord.xy;
-  vec2 best = decodeCoord(texture(uPrev, fc / uSize));
+  ivec2 q0 = ivec2(fc);
+  ivec2 size = ivec2(uSize);
+  int stride = int(uStep);
+  vec2 best = decodeCoord(texelFetch(uPrev, q0, 0));
   float bestD = (best.x < 0.0) ? 1e20 : dot(best - fc, best - fc);
   for (int y = -1; y <= 1; y++) {
     for (int x = -1; x <= 1; x++) {
       if (x == 0 && y == 0) continue;
-      vec2 p = fc + vec2(float(x), float(y)) * uStep;
-      if (p.x < 0.0 || p.y < 0.0 || p.x >= uSize.x || p.y >= uSize.y) continue;
-      vec2 c = decodeCoord(texture(uPrev, p / uSize));
+      ivec2 q = q0 + ivec2(x, y) * stride;
+      if (q.x < 0 || q.y < 0 || q.x >= size.x || q.y >= size.y) continue;
+      vec2 c = decodeCoord(texelFetch(uPrev, q, 0));
       if (c.x < 0.0) continue;
       float d = dot(c - fc, c - fc);
       if (d < bestD) { bestD = d; best = c; }
@@ -119,7 +134,8 @@ void main() {
 // Resolve: distance to the nearest inside pixel and to the nearest outside pixel, subtracted.
 // Inside the silhouette the first is 0, so the result is +(distance to the boundary);
 // outside it is the mirror. Accurate to about half a pixel, which is far below the scale
-// the tear noise works at.
+// the tear noise works at. Reads the two halves with `texelFetch` at this fragment's own texel,
+// the texel `texture(seeds, fc / textureSize(seeds))` selected (see `STEP_FS`).
 const RESOLVE_FS = (byteMode: boolean, byteOut: boolean): string => `${COORD_HEADER(byteMode)}
 uniform sampler2D uInsideSeeds;
 uniform sampler2D uOutsideSeeds;
@@ -128,9 +144,9 @@ uniform vec2 uEncode;     // inverse of the decode contract
 out vec4 outColor;
 void main() {
   vec2 fc = gl_FragCoord.xy;
-  vec2 uv = fc / vec2(textureSize(uInsideSeeds, 0));
-  vec2 pi = decodeCoord(texture(uInsideSeeds, uv));
-  vec2 po = decodeCoord(texture(uOutsideSeeds, uv));
+  ivec2 q = ivec2(fc);
+  vec2 pi = decodeCoord(texelFetch(uInsideSeeds, q, 0));
+  vec2 po = decodeCoord(texelFetch(uOutsideSeeds, q, 0));
   float dOut = (pi.x < 0.0) ? 1e4 : length(pi - fc);
   float dIn  = (po.x < 0.0) ? 1e4 : length(po - fc);
   float d = (dIn - dOut) * uPxScale;
