@@ -116,6 +116,12 @@ export interface StagingPool {
    * Take the staging texture for `key`. A different key takes it at once — reusing the texture
    * when the source size is unchanged, reallocating it when it is not — so a grid of same-sized
    * sources uploads into one texture instead of allocating one per sprite.
+   *
+   * **Handing a same-sized texture to a new sprite without clearing it is correct only because
+   * the caller always re-uploads before it reads**: `uploadViaByteFetch` runs `texSubImage2D`
+   * over the whole staging rect on every resample (`@paper-crumple/paper`, `artwork.ts`), so the
+   * previous sprite's bytes are gone before the first fetch. A future "the size matches, skip
+   * the upload" would hand one sprite's pixels out under another sprite's key.
    */
   acquire(key: string, source: Size): Err | Texture
   /** Arm the idle release for `key`. A no-op while Pool A's artwork slot still holds `key`. */

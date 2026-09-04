@@ -8,9 +8,14 @@ import { gradeAttributes } from './surface-grade.js'
  * # The surface, and who owns it (§4.0)
  *
  * A stage has exactly one WebGL2 context and exactly one drawing surface, and **it creates both
- * on a canvas of its own**, so that no element the consumer holds ever carries a WebGL context.
- * `present: 'blit'` puts that canvas offscreen; `present: 'direct'` makes it a detached
- * `HTMLCanvasElement` the consumer appends. An injected context has no owned surface at all.
+ * on a canvas of its own**. `present: 'blit'` puts that canvas offscreen, where the consumer
+ * never reaches it at all; `present: 'direct'` makes it a detached `HTMLCanvasElement` the
+ * consumer appends — so under `direct` the consumer *does* hold the element carrying the
+ * context, and the element alone is theirs: it is theirs to append, place and style, and the
+ * context on it stays the stage's. **The consumer must not call `getContext` on it**, because
+ * both owned modes create the context with `GlContextOptions.owned` true and its baseline
+ * restore assumes nothing outside the library ever touches that context. An injected context
+ * has no owned surface at all.
  */
 export interface SurfaceHost {
   readonly surface: Surface

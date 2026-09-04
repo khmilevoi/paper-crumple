@@ -1430,6 +1430,9 @@ function buildStage(p: StageParts): BuiltStage {
         controller?.dispose()
         state = 'disposed'
         attachRecord(null)
+        // The last projection holds a `SpriteRecord` and its bag. A disposed view the consumer
+        // still holds would otherwise keep both alive for as long as it does.
+        motionCache = null
         if ('canvas' in t) claimed.delete(t.canvas)
         bus.clear()
         const at = views.indexOf(view)
@@ -1981,9 +1984,13 @@ function buildStage(p: StageParts): BuiltStage {
     batch<T>(fn: () => T): T {
       if (batching) return fn()
       batching = true
-      const out = p.ctx.scope(() => fn())
-      batching = false
-      return out
+      // `fn` is the consumer's, so it may throw; the flag has to come back down either way or
+      // every later `batch` takes the nested no-op path and draws outside any scope.
+      try {
+        return p.ctx.scope(() => fn())
+      } finally {
+        batching = false
+      }
     },
 
     budget: (o: { bytes?: number; artworkSlots?: number }) => {

@@ -57,6 +57,12 @@ export interface GlContextOptions {
    * the state at every outermost scope entry is one known constant: the pinned baseline. It is
    * captured once here and every restore writes it back; no scope pays a query.
    *
+   * **Both owned presentation modes set it**, `present: 'direct'` included: a direct canvas is
+   * handed to the consumer to append, place and style, but the stage owns the context on it just
+   * as it owns the offscreen one under `'blit'`. The consumer must therefore never call
+   * `getContext` on that element — a second context handle, or any state written through one,
+   * is exactly what the baseline restore assumes cannot exist (`stage-surface.ts`).
+   *
    * Default `false`: an injected context (§7.3) may carry any state between two library calls,
    * so every outermost scope captures for real, as it always has. A write through the `gl`
    * escape hatch outside any scope is honoured on an injected context and undone at the next
