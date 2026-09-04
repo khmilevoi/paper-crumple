@@ -184,7 +184,9 @@ export function createKnobRegistry(slots: {
 
   // Written as one pass rather than `Object.keys(...).flatMap(...)` into `maxInvalidation`: a
   // stage-level `set()` asks this once per sprite, and the two intermediate arrays per sprite were
-  // the whole of its allocation.
+  // the whole of its allocation. The loop below therefore restates `maxInvalidation`'s ranking
+  // deliberately: both walk `invalidationRank` and keep the highest, and they must stay in step,
+  // but only this one gets to do it without materialising a level per key first.
   const invalidationOf = (delta: KnobValues): Invalidates | undefined => {
     let best: Invalidates | undefined
     for (const path of Object.keys(delta)) {

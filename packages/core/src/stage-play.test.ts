@@ -3,7 +3,7 @@ import { isAborted } from './abort.js'
 import { GlError } from './errors.js'
 import { createStage } from './stage.js'
 import { createFakeTimers } from './testing/fake-timers.js'
-import { fakeMotion, fakeSheet, stageEnv } from './testing/fake-slots.js'
+import { fakeGlContext, fakeMotion, fakeSheet, stageEnv } from './testing/fake-slots.js'
 
 function destCanvas() {
   return {
@@ -280,6 +280,25 @@ describe('stage.batch', () => {
     g.stage.batch(() => g.stage.batch(() => 0))
     expect(((ctx as { scopes: number } | undefined)?.scopes ?? 0) - before).toBeLessThanOrEqual(1)
     g.stage.dispose()
+  })
+
+  it('resets the flag when the callback throws, so the next batch still opens its own scope', async () => {
+    const ctx = fakeGlContext()
+    const stage = await createStage(
+      { sheet: fakeSheet(), motion: fakeMotion(), maxSize: 384, present: 'blit' },
+      stageEnv({ timers: createFakeTimers(), makeContext: () => ctx }),
+    )
+    if (stage instanceof Error || isAborted(stage)) return expect.fail('stage refused')
+    // §7.3: `batch` is the consumer's callback, and a consumer may throw out of it. The flag
+    // that makes a nested `batch` a no-op must not survive that, or every later batch runs
+    // outside a scope and restores nothing.
+    // `JSON.parse` rather than a `throw`: §10.8 forbids one in this package, and what matters
+    // here is only that the callback leaves by an exception.
+    expect(() => stage.batch(() => JSON.parse('{') as unknown)).toThrow(SyntaxError)
+    const before = ctx.scopes
+    stage.batch(() => 0)
+    expect(ctx.scopes).toBe(before + 1)
+    stage.dispose()
   })
 
   it('a bare show() outside a batch still saves and restores', async () => {

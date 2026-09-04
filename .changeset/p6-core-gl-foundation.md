@@ -11,9 +11,11 @@ inherited, blending, scissoring, depth and the two coverage modes off, and the w
 open. `program`, `texture` and `target` return a `GlError` rather than throwing; textures are
 immutable single-level storage in one of six formats and never `SRGB8_ALPHA8`.
 
-`scope()` saves and restores **exactly** what §5.1 enumerates and no more, so a slot that leaves
-`DEPTH_TEST` on cannot reach its neighbour — and a slot that binds on a texture unit other than
-the active one still leaks, which is what "exactly" costs and is documented rather than quietly
+The **outermost** `scope()` saves and restores **exactly** what §5.1 enumerates and no more — a
+scope entered while another is live on the same context restores nothing at its own exit, the way
+§7.3's nested `batch` is a no-op rather than a double save — so a slot that leaves `DEPTH_TEST` on
+cannot reach the next outermost scope, and a slot that binds on a texture unit other than the
+active one still leaks, which is what "exactly" costs and is documented rather than quietly
 widened. `DrawScope` has no `clear()` and no route to the canvas: the view performs a scissored
 clear over its own rect and a slot never chooses its destination.
 

@@ -131,6 +131,7 @@ describe('texture() and target() save only the binding they disturb', () => {
     const f = fakeGl()
     const ctx = createGlContext(f.gl)
     const texture = ctx.texture({ width: 8, height: 8, format: 'RGBA8' })
+    expect(texture).not.toBeInstanceOf(GlError)
     if (GlError.is(texture)) return
     f.reset()
     const target = ctx.target(texture)
@@ -163,6 +164,7 @@ describe('scope() on an owned context (§4.0): the pinned baseline, no query at 
     const ctx = createGlContext(f.gl, { owned: true })
     f.reset()
     const texture = ctx.texture({ width: 8, height: 8, format: 'RGBA8' })
+    expect(texture).not.toBeInstanceOf(GlError)
     if (GlError.is(texture)) return
     ctx.target(texture)
     // Outside a scope nothing but the library has written, so both bindings are the baseline's.
@@ -171,6 +173,7 @@ describe('scope() on an owned context (§4.0): the pinned baseline, no query at 
       f.reset()
       // Inside a scope a slot may have bound anything through the escape hatch; ask.
       const inner = ctx.texture({ width: 8, height: 8, format: 'R8' })
+      expect(inner).not.toBeInstanceOf(GlError)
       if (GlError.is(inner)) return
       ctx.target(inner)
       expect(f.parameters()).toEqual(['TEXTURE_BINDING_2D', 'DRAW_FRAMEBUFFER_BINDING'])
@@ -187,6 +190,9 @@ describe('status queries off the hot path', () => {
     const a = ctx.texture(desc)
     const b = ctx.texture(desc)
     const c = ctx.texture({ ...desc, width: 16 })
+    expect(a).not.toBeInstanceOf(GlError)
+    expect(b).not.toBeInstanceOf(GlError)
+    expect(c).not.toBeInstanceOf(GlError)
     if (GlError.is(a) || GlError.is(b) || GlError.is(c)) return
     f.reset()
     expect(ctx.target(a)).not.toBeInstanceOf(GlError)
@@ -229,6 +235,7 @@ describe('status queries off the hot path', () => {
     // completeness cache never sees it: the next target of that combination still asks.
     f.answers.error = 'NO_ERROR'
     const good = ctx.texture(desc)
+    expect(good).not.toBeInstanceOf(GlError)
     if (GlError.is(good)) return
     f.reset()
     expect(ctx.target(good)).not.toBeInstanceOf(GlError)
