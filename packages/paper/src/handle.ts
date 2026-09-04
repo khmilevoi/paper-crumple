@@ -136,9 +136,11 @@ export interface ArtworkFraming {
  * §8.6, per axis. The artwork's long side is `srcLong` under `exact`, else the largest value
  * `<= artworkLongSide` (when given) whose front fits `maxSize` on its long side; the front is
  * the artwork plus a `ceil(overscan * artwork.h)` texel margin on every side. The cap's closed
- * form, `floor(maxSize / (1 + 2 * overscan * min(1, srcH / srcW)))`, can overshoot by the
- * rounding of the short side and of the margin, so it is corrected by stepping the long side
- * down until the front fits — at most a couple of steps.
+ * form, `floor(maxSize / (1 + 2 * overscan * min(1, srcH / srcW)))`, can be off by one texel
+ * either way from the rounding of the short side and of the margin — usually an overshoot,
+ * corrected by stepping the long side down until the front fits, but sometimes an undershoot, so
+ * `capA + 1` is probed first (see the comment at its call site below): at most a couple of steps
+ * either direction.
  */
 export function frontForArtwork(o: {
   overscan: number
@@ -148,11 +150,47 @@ export function frontForArtwork(o: {
   exact: boolean
   artworkLongSide?: number
 }): InstanceType<typeof SheetError> | ArtworkFraming {
+  // Every non-finite input below reaches `aLong -= 1` as `NaN`, and `NaN < 1` is false — the
+  // `for (;;)` loop then spins forever, synchronously, blocking the thread with no way for a
+  // caller to recover. `paperSheet()` itself cannot reach a non-finite `overscan` (`mount()`
+  // already refused if `freezeOverscan` failed) or a non-finite `maxSize`/`srcW`/`srcH`, but this
+  // function is exported and `SourceOptions.artworkLongSide` is public and unvalidated, so a
+  // fractional or non-finite value here would silently yield fractional artwork/front sizes
+  // without this guard. Fail cleanly instead — an infinite synchronous loop is not an acceptable
+  // failure mode for a public entry point, reachable or not.
+  if (
+    !Number.isFinite(o.overscan) ||
+    !Number.isFinite(o.srcW) ||
+    !Number.isFinite(o.srcH) ||
+    !Number.isFinite(o.maxSize)
+  ) {
+    return new SheetError(
+      `paperSheet: frontForArtwork needs finite overscan, srcW, srcH and maxSize (got overscan ` +
+        `${o.overscan}, srcW ${o.srcW}, srcH ${o.srcH}, maxSize ${o.maxSize}, spec 8.6)`,
+    )
+  }
+  if (
+    o.artworkLongSide !== undefined &&
+    (!Number.isFinite(o.artworkLongSide) ||
+      !Number.isInteger(o.artworkLongSide) ||
+      o.artworkLongSide <= 0)
+  ) {
+    return new SheetError(
+      `paperSheet: artworkLongSide must be a finite positive integer, got ${o.artworkLongSide} ` +
+        `(SourceOptions.artworkLongSide, spec 8.6)`,
+    )
+  }
   const p = o.overscan
   const srcLong = Math.max(o.srcW, o.srcH)
   const a = Math.min(1, o.srcH / o.srcW)
+  // `capA` is a closed-form estimate; the rounding of the short side (`dimsForLongSide`) and of
+  // the margin (`ceil(p * artwork.h)`) can make the true maximum `capA + 1`. Probing `capA + 1`
+  // first — the loop below steps back down if it does not actually fit — finds that true maximum
+  // instead of leaving it on the table; the under-shoot is never more than one texel, so a single
+  // upward probe suffices. `max(front) <= maxSize` still holds for every input: the loop only
+  // returns a size it has itself verified fits.
   const capA = Math.floor(o.maxSize / (1 + 2 * p * a))
-  let aLong = o.exact ? srcLong : Math.min(o.artworkLongSide ?? Number.POSITIVE_INFINITY, capA)
+  let aLong = o.exact ? srcLong : Math.min(o.artworkLongSide ?? Number.POSITIVE_INFINITY, capA + 1)
   for (;;) {
     if (aLong < 1) {
       return new SheetError(

@@ -184,7 +184,9 @@ describe('source() (spec 5.2, 8.5, 8.6)', () => {
     expect(handle.front.w - handle.artwork.w).toBe(
       2 * Math.ceil(handle.overscan * handle.artwork.h),
     )
-    expect(handle.artwork.w).toBeGreaterThanOrEqual(Math.floor(128 / (1 + 2 * handle.overscan)) - 1)
+    // Exact, not `- 1`: that tolerance covered `frontForArtwork`'s closed-form estimate
+    // under-shooting the true maximum by one texel, which the `capA + 1` probe (F3) now corrects.
+    expect(handle.artwork.w).toBe(Math.floor(128 / (1 + 2 * handle.overscan)))
     sheet.dispose()
   })
 

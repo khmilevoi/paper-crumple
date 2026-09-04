@@ -106,4 +106,13 @@ describe('FRONT_LONG_SIDE_CAP and frontCapFor', () => {
     expect(frontCapFor({ artworkLongSide: 100, overscan: Infinity, cap: 2048 })).toBe(2048)
     expect(frontCapFor({ artworkLongSide: 100, overscan: Number.NaN, cap: 2048 })).toBe(2048)
   })
+
+  it('requests enough front for the sheet to actually deliver artworkLongSide texels (the sheet needs A + 2*ceil(p*A), not ceil(A*(1+2p)))', () => {
+    // p = 105/790, A = 151: ceil(A*(1+2p)) = 192, which paperSheet()'s frontForArtwork can only
+    // fill with 150 artwork texels on a portrait or square sprite (2*ceil(x) - ceil(2x) can be 1,
+    // and rounding up to a multiple of 64 does not always absorb it). The true requirement,
+    // A + 2*ceil(p*A) = 193, rounds up to 256 and leaves room for the full 151.
+    const overscan = 105 / 790
+    expect(frontCapFor({ artworkLongSide: 151, overscan, cap: 2048 })).toBe(256)
+  })
 })

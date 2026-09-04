@@ -4,7 +4,13 @@ import type { Size } from '@paper-crumple/core'
 import { handleBytes } from '@paper-crumple/core/unstable'
 import type { EdgeParams } from '@paper-crumple/core/unstable'
 import { packPolygons } from './hull-shape.js'
-import { checkReserve, freezeOverscan, frontForArtwork, handleFactsFor } from './handle.js'
+import {
+  checkReserve,
+  dimsForLongSide,
+  freezeOverscan,
+  frontForArtwork,
+  handleFactsFor,
+} from './handle.js'
 import type { PaperSheetHandle } from './handle.js'
 
 const hullDefaults: EdgeParams = {
@@ -139,18 +145,44 @@ describe('frontForArtwork (spec 8.6, per axis)', () => {
       expect(result.margin).toBe(c.margin)
       expect(result.front).toEqual(c.front)
 
-      // Maximality: one more texel on the long side would not fit `maxSize`.
-      const longer = frontForArtwork({
-        overscan: p,
-        srcW: c.srcW,
-        srcH: c.srcH,
-        maxSize: 128,
-        exact: false,
-        artworkLongSide: Math.max(c.artwork.w, c.artwork.h) + 1,
-      })
-      expect(SheetError.is(longer)).toBe(false)
-      if (SheetError.is(longer)) continue
-      expect(longer.artwork).toEqual(c.artwork)
+      // Maximality: one more texel on the long side would not fit `maxSize`. Computed directly
+      // from the margin formula, NOT by calling `frontForArtwork` again with
+      // `artworkLongSide: got + 1` — that call internally clamps to `min(got + 1, capA)`, so it
+      // would report the requested size fits even when `got` was one texel short of the true
+      // maximum (see the regression test below, which pins exactly that bug).
+      const longArtwork = dimsForLongSide(
+        Math.max(result.artwork.w, result.artwork.h) + 1,
+        c.srcW,
+        c.srcH,
+      )
+      const longMargin = Math.ceil(p * longArtwork.h)
+      const longFront = {
+        w: longArtwork.w + 2 * longMargin,
+        h: longArtwork.h + 2 * longMargin,
+      }
+      expect(Math.max(longFront.w, longFront.h)).toBeGreaterThan(128)
+    }
+  })
+
+  it('is maximal: capA + 1 is tried before stepping down, so the loop never leaves a spare texel on the table', () => {
+    // Regression for the closed-form estimate under-shooting by exactly one texel: at the hull
+    // overscan (p = 84/832), a 96x64 source's front cap `floor(maxSize / (1 + 2p·(64/96)))` is
+    // one texel below the true maximum for these four `maxSize` values. Confirmed by hand:
+    // 135 -> 118 (119 fits), 152 -> 133 (134 fits), 169 -> 148 (149 fits), 489 -> 430 (431 fits).
+    for (const maxSize of [135, 152, 169, 489]) {
+      const result = frontForArtwork({ overscan: p, srcW: 96, srcH: 64, maxSize, exact: false })
+      expect(SheetError.is(result)).toBe(false)
+      if (SheetError.is(result)) continue
+      expect(Math.max(result.front.w, result.front.h)).toBeLessThanOrEqual(maxSize)
+
+      // Maximality, computed directly (not through frontForArtwork's own clamp — see above).
+      const longArtwork = dimsForLongSide(Math.max(result.artwork.w, result.artwork.h) + 1, 96, 64)
+      const longMargin = Math.ceil(p * longArtwork.h)
+      const longFront = {
+        w: longArtwork.w + 2 * longMargin,
+        h: longArtwork.h + 2 * longMargin,
+      }
+      expect(Math.max(longFront.w, longFront.h)).toBeGreaterThan(maxSize)
     }
   })
 
@@ -209,6 +241,53 @@ describe('frontForArtwork (spec 8.6, per axis)', () => {
   it('returns a SheetError when nothing fits', () => {
     const result = frontForArtwork({ overscan: 0.5, srcW: 10, srcH: 10, maxSize: 1, exact: false })
     expect(SheetError.is(result)).toBe(true)
+  })
+
+  // F7: a non-finite input used to reach `aLong -= 1` as NaN, and `NaN < 1` is false, so the
+  // `for (;;)` loop spins forever, synchronously — not reachable through `paperSheet()` today
+  // (whose overscan is either finite or +Infinity, and +Infinity already returns a clean
+  // SheetError above `frontForArtwork`), but this function is exported, so a guard is required
+  // regardless. Every case here must return promptly rather than hang.
+  it('fails cleanly, rather than looping forever, on a non-finite overscan/srcW/srcH/maxSize', () => {
+    expect(
+      SheetError.is(
+        frontForArtwork({ overscan: NaN, srcW: 10, srcH: 10, maxSize: 20, exact: false }),
+      ),
+    ).toBe(true)
+    expect(
+      SheetError.is(
+        frontForArtwork({ overscan: p, srcW: NaN, srcH: 10, maxSize: 20, exact: false }),
+      ),
+    ).toBe(true)
+    expect(
+      SheetError.is(
+        frontForArtwork({ overscan: p, srcW: 10, srcH: NaN, maxSize: 20, exact: false }),
+      ),
+    ).toBe(true)
+    expect(
+      SheetError.is(
+        frontForArtwork({ overscan: p, srcW: 10, srcH: 10, maxSize: NaN, exact: false }),
+      ),
+    ).toBe(true)
+    expect(
+      SheetError.is(
+        frontForArtwork({ overscan: Infinity, srcW: 10, srcH: 10, maxSize: 20, exact: false }),
+      ),
+    ).toBe(true)
+  })
+
+  it('rejects a fractional, zero or non-finite artworkLongSide (a public, unvalidated SourceOptions field)', () => {
+    for (const artworkLongSide of [10.5, 0, -1, NaN, Infinity]) {
+      const result = frontForArtwork({
+        overscan: p,
+        srcW: 64,
+        srcH: 64,
+        maxSize: 128,
+        exact: false,
+        artworkLongSide,
+      })
+      expect(SheetError.is(result)).toBe(true)
+    }
   })
 })
 

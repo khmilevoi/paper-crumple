@@ -62,9 +62,11 @@ describe('the root manifest', () => {
     // package until that dist exists (spec 10.4). All three published packages are filtered in:
     // core was alone only while paper and motion had no buildable entries, and wave 4 gave them
     // theirs — paper's src/tiles.ts and motion's src/packs/*.ts. @paper-crumple/tsconfig is
-    // private and builds nothing, so it stays out.
+    // private and builds nothing, so it stays out. The playground's own `tsc -p tsconfig.json`
+    // runs after the root `typecheck`: it is the only consumer of `artworkCssPx` and the three
+    // built packages above, so it needs their dists too and would otherwise never run in CI.
     expect(scripts.check).toBe(
-      'turbo run build --filter=@paper-crumple/core --filter=@paper-crumple/paper --filter=@paper-crumple/motion && pnpm lint && pnpm format:check && pnpm typecheck && pnpm test && pnpm test:gl',
+      'turbo run build --filter=@paper-crumple/core --filter=@paper-crumple/paper --filter=@paper-crumple/motion && pnpm lint && pnpm format:check && pnpm typecheck && pnpm --filter @paper-crumple/playground typecheck && pnpm test && pnpm test:gl',
     )
     // The build leads. A lane that typechecks before those dists exist is the bug this guards.
     expect(scripts.check.split(' && ')[0]).toBe(

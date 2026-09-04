@@ -51,21 +51,28 @@ export interface FrontCapRequest {
   /** The artwork's wanted long side, in texels — `ceil(artworkCssPx x dpr)`. */
   readonly artworkLongSide: number
   /** The sheet's reserve, `SheetRenderer.overscan`: a front's long side is at most
-   *  `artworkLongSide x (1 + 2 x overscan)` for every aspect. */
+   *  `artworkLongSide + 2 x ceil(overscan x artworkLongSide)` for every aspect. */
   readonly overscan: number
   readonly cap: number
 }
 
 /**
  * The front cap — the owned surface's side — that lets every sprite carry `artworkLongSide`
- * artwork texels: `artworkLongSide x (1 + 2 x overscan)`, rounded up to a multiple of 64 and
- * clamped to `cap`, through `sizeForDisplay` at `dpr` 1 so the two share one quantisation. A
- * non-finite `overscan` (a sheet whose reserve could not be derived; its `mount()` refuses) is
- * read as "reserve everything" and lands on `cap`, never on the floor.
+ * artwork texels: `artworkLongSide + 2 x ceil(overscan x artworkLongSide)`, matching the sheet's
+ * own per-axis margin (`frontForArtwork` in `paper/src/handle.ts`) texel for texel, rounded up to
+ * a multiple of 64 and clamped to `cap`, through `sizeForDisplay` at `dpr` 1 so the two share one
+ * quantisation. A non-finite `overscan` (a sheet whose reserve could not be derived; its
+ * `mount()` refuses) is read as "reserve everything" and lands on `cap`, never on the floor.
  */
 export function frontCapFor(o: FrontCapRequest): number {
   const p = Number.isFinite(o.overscan) ? Math.max(0, o.overscan) : Number.POSITIVE_INFINITY
-  const wanted = Math.ceil(Math.max(0, o.artworkLongSide) * (1 + 2 * p))
+  const a = Math.max(0, o.artworkLongSide)
+  // Not `ceil(A * (1 + 2p))`: the sheet's own margin is `ceil(p * A)` texels on EACH side
+  // (`frontForArtwork` in `paper/src/handle.ts`), so the front it actually needs is
+  // `A + 2 * ceil(p * A)`. `2 * ceil(x) - ceil(2x)` can be 1, and rounding up to a multiple of
+  // 64 does not always absorb that texel, so the closed form under-requests by one texel for
+  // roughly 1% of `A` values (e.g. `p = 105/790`, `A = 151`: 192 vs the needed 193 -> 256).
+  const wanted = a + 2 * Math.ceil(p * a)
   return sizeForDisplay({ cssPx: wanted, dpr: 1, cap: o.cap })
 }
 

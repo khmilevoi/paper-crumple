@@ -261,20 +261,23 @@ describe("the front's artwork rect through readPixels, partitioned by alpha", ()
   })
 
   /**
-   * Ruling 2: `maxSize: 32` is chosen, not the brief's `64`, because at the shipped hull overscan
+   * Ruling 2: `maxSize: 28` is chosen, not the brief's `64`, because at the shipped hull overscan
    * (0.101, not §8.6's illustrative 0.09) `frontForArtwork` (§8.6 amendment, `handle.ts`) picks
    * the largest artwork long side whose front — the artwork plus `ceil(p * A.h)` texels of margin
    * on every side — fits `maxSize`. At `maxSize: 64` that is well above `SRC.w (40)` — no
-   * reduction happens at all. `maxSize: 32` gives a 26x26 artwork (front 32x32), a clean margin
-   * under 40.
+   * reduction happens at all. `maxSize: 28` gives a 22x22 artwork (front 28x28), a clean margin
+   * under 40, and — unlike `32`, which gives a 26x26 artwork whose margin happens to fall exactly
+   * outside the reference's alpha-0 ring (F8: `covered` is empty there, so the "paper, not the
+   * artwork" check below never ran) — one where the hull's reach still lands inside that ring.
    *
    * Ruling 3: the oracle is measured, not assumed. A reduction blurs the fixture's hard alpha edge,
    * so `identityResample`'s TypeScript reference carries partial alpha in a ring around the old
-   * edge. Measured directly against this fixture at `maxSize: 32` (676 texels total): the front's
-   * `uEdgeMode == 2` coverage mask reproduces the reference exactly on both the 324 texels where
-   * the reference's own alpha is 255 (all four channels, zero mismatches) and the 276 texels where
-   * it is 0 (front reads exactly `(0,0,0,0)`, zero mismatches) — but NOT on the 76 texels in
-   * between, where the reference carries partial alpha: every one of those 76 mismatches, on both
+   * edge. Measured directly against this fixture at `maxSize: 28` (484 texels total): the front's
+   * `uEdgeMode == 2` coverage mask reproduces the reference exactly on both the 196 texels where
+   * the reference's own alpha is 255 (all four channels, zero mismatches) and the 228 texels where
+   * it is 0 (before the sheet's own reach is applied — see the covered/clear/feathered split
+   * below, zero mismatches on the ones it does not reach) — but NOT on the 60 texels in
+   * between, where the reference carries partial alpha: every one of those 60 mismatches, on both
    * RGB and alpha. That rules out rung 1 (whole-rect exact) and rung 2 (whole-rect
    * alpha exact); rung 3 — assert only the reference's alpha-255 and alpha-0 texels, leave the
    * partial-alpha ring unasserted — is the highest rung this measurement supports, and holds with
@@ -285,14 +288,14 @@ describe("the front's artwork rect through readPixels, partitioned by alpha", ()
     const sheet = paperSheet()
     expect(sheet.mount(ctx)).toBeUndefined()
     const bitmap = await sourceBitmap()
-    const handle = await sheet.source(bitmap, { maxSize: 32, exact: false })
+    const handle = await sheet.source(bitmap, { maxSize: 28, exact: false })
     bitmap.close()
     if (GlError.is(handle) || SheetError.is(handle) || isAborted(handle)) {
       return expect.fail(`source() refused: ${String(handle)}`)
     }
     expect(handle.artwork.w).toBeLessThan(SRC.w)
 
-    const front = sheet.build(handle, { w: 32, h: 32 }, defaultsFor('hull') as never)
+    const front = sheet.build(handle, { w: 28, h: 28 }, defaultsFor('hull') as never)
     if (front instanceof Error) return expect.fail(front.message)
 
     const reference = identityResample(
@@ -313,37 +316,41 @@ describe("the front's artwork rect through readPixels, partitioned by alpha", ()
     // the measured counts the doc comment above reasons from, so if the reference changed and the
     // partial-alpha ring grew, the ring the oracle deliberately leaves unasserted would be caught
     // here rather than silently widening under a comment that had become false.
-    expect(opaque.length).toBe(324)
-    expect(empty.length).toBe(276)
-    expect(partial.length).toBe(76)
+    expect(opaque.length).toBe(196)
+    expect(empty.length).toBe(228)
+    expect(partial.length).toBe(60)
     expect(opaque.length + empty.length + partial.length).toBe(handle.artwork.w * handle.artwork.h)
 
     expect(firstDifferencesAt(got, reference, opaque, handle.artwork.w)).toEqual([])
     expect(pickTexels(got, opaque)).toEqual(pickTexels(reference, opaque))
 
     // Under `uEdgeMode == 1` the reference's alpha-0 class is no longer uniformly `(0,0,0,0)` on
-    // the front. It splits three ways here, not two as in test 1: `front.h = 32` scales the default
-    // `maxDist` of 72 reference px to only `72 * 32 / 1000 = 2.3` px, so the sheet's reach and the
-    // artwork's own (now 26x26, one texel smaller than before the §8.6 per-axis amendment) leave no
-    // texel of the reference's alpha-0 class both inside the sheet's ring AND still within the
-    // artwork rect — measured, `covered` is empty here, `clear` is every alpha-0 texel the sheet
-    // does not reach, and `feathered` is the polygon's own antialiased edge, wider than in test 1
-    // because at 2.3 px the polygon's edge crosses the artwork's own texel grid at an angle almost
+    // the front. It splits three ways here, not two as in test 1: `front.h = 28` scales the default
+    // `maxDist` of 72 reference px to `72 * 28 / 1000 = 2.0` px, so the sheet's reach and the
+    // artwork's own (22x22, one texel smaller than before the §8.6 per-axis amendment would have
+    // given at this maxSize) leave 38 texels of the reference's alpha-0 class both inside the
+    // sheet's ring AND still within the artwork rect — measured, `covered` is 38 (F8: a maxSize of
+    // 32 gives an artwork whose margin happens to land just outside this ring instead, leaving
+    // `covered` empty and this check a no-op; 28 is chosen so it still exercises the "paper, not a
+    // stray copy of the artwork" assertion below), `clear` is every alpha-0 texel the sheet does
+    // not reach, and `feathered` is the polygon's own antialiased edge, wider than in test 1
+    // because at 2.0 px the polygon's edge crosses the artwork's own texel grid at an angle almost
     // everywhere. All three counts are measured and pinned individually rather than summed, so a
-    // hull that started reaching inside the rect again, or a feathered edge that grew, would fail
-    // here rather than widen under a stale comment. The feathered class is pinned by count only and
-    // its bytes are left unasserted, exactly as Ruling 3 leaves the reference's own partial-alpha
-    // ring unasserted, and for the same reason: no oracle in this file predicts them.
+    // hull that lost its reach into the rect, or a feathered edge that grew, would fail here rather
+    // than widen under a stale comment. The feathered class is pinned by count only and its bytes
+    // are left unasserted, exactly as Ruling 3 leaves the reference's own partial-alpha ring
+    // unasserted, and for the same reason: no oracle in this file predicts them.
     const covered = empty.filter((t) => got[t * 4 + 3] === 255)
     const clear = empty.filter((t) => got[t * 4 + 3] === 0)
     const feathered = empty.filter((t) => got[t * 4 + 3] !== 0 && got[t * 4 + 3] !== 255)
-    expect(covered.length).toBe(0)
-    expect(clear.length).toBe(249)
-    expect(feathered.length).toBe(27)
+    expect(covered.length).toBe(38)
+    expect(clear.length).toBe(136)
+    expect(feathered.length).toBe(54)
     expect(covered.length + clear.length + feathered.length).toBe(empty.length)
-    // Nothing to check here at this reduction — `covered` is empty (see the comment above); the
-    // loop is a deliberate no-op rather than a removed assertion, so a future measurement that
-    // makes `covered` non-empty again is exercised by this same code, not silently skipped.
+    // Paper, not a stray copy of the artwork: the default `paperColor` (#f7f4ed) reads high on all
+    // three channels, live-checked here (see Ruling 2 above for why `maxSize: 32` could not run
+    // this loop). Measured, the per-channel minimum over the sixteen texels sampled is
+    // (242, 239, 232) — clears the bound below by 82 counts.
     for (const t of covered.slice(0, 16)) {
       expect(got[t * 4]).toBeGreaterThan(150)
       expect(got[t * 4 + 1]).toBeGreaterThan(150)
