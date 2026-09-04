@@ -412,10 +412,10 @@ function ensurePools(
   m.pools = null
   m.sdf = null
   m.poolsSize = null
-  // Whatever `build()` last cached in `lastFieldBuild` points at Targets the disposed `SdfBuilder`
-  // owned (`gl-sdf.ts`'s own `targetsBySlot`); a fresh `SdfBuilder` below re-acquires new ones at
-  // the same pool slots, so the cache would otherwise hand a later `build()` call a `Field` whose
-  // framebuffer no longer exists.
+  // Whatever `build()` last cached in `lastFieldBuild` points at field targets the disposed pools
+  // owned (`ArtworkPool.acquireSized`: texture and framebuffer alike); fresh pools below hand out
+  // new ones at the same slots, so the cache would otherwise hand a later `build()` call a `Field`
+  // whose texture and framebuffer no longer exist.
   m.lastFieldBuild = null
 
   const pools = createScratchPools({ gl: m.ctx, artwork, sdfRes })
@@ -1269,6 +1269,12 @@ export function paperSheet(options?: PaperSheetOptions): PaperSheet {
     })
     if (GlError.is(artworkTexture)) return artworkTexture
 
+    // A `GlError` out of any pass below ends this call — and ends the record too. The record's
+    // fields are safe from eviction only while they are the framing being built or the one
+    // before it (`gl-sdf.ts`'s module doc); an allocation at a new framing that failed part-way
+    // may already have evicted them to make room for what failed, so a record left pointing at
+    // them could hand the next `build()` a disposed texture. The cost is one pass A more on the
+    // call after a failure, which is nothing against the failure itself.
     let tight: Field
     if (tightReusable) {
       tight = cachedField.tight
@@ -1280,7 +1286,10 @@ export function paperSheet(options?: PaperSheetOptions): PaperSheet {
         height: field.h,
         sourceLongSide: frontLongSide,
       })
-      if (GlError.is(built)) return built
+      if (GlError.is(built)) {
+        m.lastFieldBuild = null
+        return built
+      }
       tight = built
     }
 
@@ -1297,7 +1306,10 @@ export function paperSheet(options?: PaperSheetOptions): PaperSheet {
         sigmaPx: sigmaFor(looseness, frontLongSide),
         frontLongSide,
       })
-      if (GlError.is(blurred)) return blurred
+      if (GlError.is(blurred)) {
+        m.lastFieldBuild = null
+        return blurred
+      }
       loose = blurred
     }
 
@@ -1398,6 +1410,9 @@ export function paperSheet(options?: PaperSheetOptions): PaperSheet {
         })
         mask.dispose()
         if (GlError.is(builtField)) {
+          // Same reason as the two returns above: the hull field's allocation may have evicted
+          // what `fieldRecord` (already published) points at.
+          m.lastFieldBuild = null
           return new SheetError(
             `paperSheet: build() could not build the hull field for sprite ${handle.spriteKey}`,
             { cause: builtField },

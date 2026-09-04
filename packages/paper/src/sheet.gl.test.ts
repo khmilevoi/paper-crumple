@@ -943,14 +943,98 @@ describe('source() spends pass A alone; the first build() at its framing reuses 
     expect(firstDraws).toBe(2 + passesFor(field) + 1)
     // And the second build at the same knobs draws the front alone.
     expect(secondDraws).toBe(1)
-    // The loose field `build()` made is the one every later build reads: two fronts built from
-    // it are byte-identical, so building it in `build()` rather than `source()` changed no pixel.
+    // The loose field `build()` made on the first call is the one the cached second call reads:
+    // the two fronts are byte-identical. (The "same as before the change" half of the pin is the
+    // golden test below, not this comparison of two post-change fronts.)
     expect(Array.from(readRect(ctx, first.texture, 0, 0, first.width, first.height))).toEqual(
       Array.from(readRect(ctx, second.texture, 0, 0, second.width, second.height)),
     )
 
     sheet.releaseFront(first)
     sheet.releaseFront(second)
+    sheet.dispose()
+  })
+
+  /** FNV-1a (32-bit) over `bytes`, as eight hex digits — a golden small enough to read. */
+  function fnv1a(bytes: Uint8Array): string {
+    let h = 0x811c9dc5
+    for (const b of bytes) {
+      h ^= b
+      h = Math.imul(h, 0x01000193) >>> 0
+    }
+    return h.toString(16).padStart(8, '0')
+  }
+
+  /**
+   * The front `build(handle, handle.front)` rendered right after `source()` at 5f61a46 — when the
+   * loose field it sampled was the one `source()` had blurred — hashed over its RGBA bytes on the
+   * level-2 suite's own SwiftShader (the same rasteriser the `__screenshots__` suite pins pixels
+   * on). Regenerate only for a deliberate change to the fields or the paper shader, by running
+   * this test at the commit being pinned and copying the hash the failure prints.
+   */
+  const FRONT_AT_HANDLE_FRONT_GOLDEN = { hull: 'c890972d', torn: '43b1fbf8' } as const
+
+  it('renders, at handle.front, the front the source-time blur used to produce (golden from 5f61a46)', async () => {
+    const ctx = open()
+    for (const edgeMode of ['hull', 'torn'] as const) {
+      const sheet = paperSheet({ edgeMode })
+      sheet.mount(ctx)
+      const bitmap = await compactSprite()
+      const handle = await sheet.source(bitmap, { maxSize: 128, exact: false })
+      bitmap.close()
+      expect(GlError.is(handle) || SheetError.is(handle) || isAborted(handle)).toBe(false)
+      if (GlError.is(handle) || SheetError.is(handle) || isAborted(handle)) return
+      const front = sheet.build(handle, handle.front, defaultsFor(edgeMode) as never)
+      expect(front instanceof Error, String((front as Error)?.message)).toBe(false)
+      if (front instanceof Error) return
+      const bytes = readRect(ctx, front.texture, 0, 0, front.width, front.height)
+      // Not a blank: the paper is there.
+      expect(bytes.some((b, i) => i % 4 === 3 && b > 0)).toBe(true)
+      // `soft`, so a regeneration run prints both modes' hashes at once.
+      expect
+        .soft(fnv1a(bytes), `${edgeMode} front at handle.front`)
+        .toBe(FRONT_AT_HANDLE_FRONT_GOLDEN[edgeMode])
+      sheet.releaseFront(front)
+      sheet.dispose()
+    }
+  })
+
+  it('forgets lastFieldBuild when a build at a new framing fails mid-way, so the next build restarts from pass A', async () => {
+    const ctx = open()
+    const sheet = paperSheet()
+    sheet.mount(ctx)
+    const bitmap = await compactSprite()
+    const handle = await sheet.source(bitmap, { maxSize: 128, exact: false })
+    bitmap.close()
+    expect(GlError.is(handle) || SheetError.is(handle) || isAborted(handle)).toBe(false)
+    if (GlError.is(handle) || SheetError.is(handle) || isAborted(handle)) return
+    expect(handle.hull.kind).toBe('polygons')
+    const warm = sheet.build(handle, handle.front, defaultsFor('hull') as never)
+    expect(warm instanceof Error).toBe(false)
+    if (warm instanceof Error) return
+    sheet.releaseFront(warm)
+
+    // A build at another framing whose first allocation — the tight field at the new size —
+    // fails: `gl-context.ts` reads `getError` once per allocation, so one reported error is one
+    // refused texture and a `GlError` out of `buildField`. Nothing else in `build()` reads
+    // `getError` before that point.
+    const getError = vi.spyOn(ctx.gl, 'getError').mockReturnValueOnce(ctx.gl.OUT_OF_MEMORY)
+    const failed = sheet.build(handle, { w: 140, h: 100 }, defaultsFor('hull') as never)
+    getError.mockRestore()
+    expect(GlError.is(failed), String((failed as Error)?.message)).toBe(true)
+
+    // The record for `handle.front` must not survive a failed build at a new framing (its slots
+    // may have been evicted to make room for what failed): the next build at `handle.front`
+    // starts from pass A — tight, blur, the hull field and the front — rather than the cached 1.
+    const field = dimsForLongSide(handle.sdfRes, handle.front.w, handle.front.h, 2)
+    const drawArrays = vi.spyOn(ctx.gl, 'drawArrays')
+    const again = sheet.build(handle, handle.front, defaultsFor('hull') as never)
+    const draws = drawArrays.mock.calls.length
+    drawArrays.mockRestore()
+    expect(again instanceof Error, String((again as Error)?.message)).toBe(false)
+    if (again instanceof Error) return
+    expect(draws).toBe(passesFor(field) + 2 + passesFor(field) + 1)
+    sheet.releaseFront(again)
     sheet.dispose()
   })
 })
