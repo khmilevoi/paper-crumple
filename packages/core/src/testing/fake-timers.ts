@@ -19,6 +19,12 @@ export interface FakeTimers extends Timers {
   /** Move the clock by `ms` without firing anything. */
   freeze(ms: number): void
   readonly pending: number
+  /**
+   * How many times `yield()` was awaited. The fake's yield is a **microtask**, not a task: every
+   * lane guarantee (§8.10) holds by construction of its queue, so no fake-timer test has to drive
+   * a task boundary, and a budget test reads this count instead.
+   */
+  readonly yields: number
 }
 
 interface Scheduled {
@@ -30,6 +36,7 @@ interface Scheduled {
 export function createFakeTimers(start = 0): FakeTimers {
   let clock = start
   let seq = 0
+  let yields = 0
   const queue = new Map<number, Scheduled>()
 
   function due(limit: number): number | null {
@@ -77,6 +84,13 @@ export function createFakeTimers(start = 0): FakeTimers {
     },
     get pending() {
       return queue.size
+    },
+    yield() {
+      yields += 1
+      return Promise.resolve()
+    },
+    get yields() {
+      return yields
     },
   }
 }
