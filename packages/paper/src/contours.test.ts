@@ -1,15 +1,18 @@
 import { beforeEach, describe, expect, it } from 'vitest'
 import {
   CANDIDATE_BAND,
+  CANDIDATE_ROW_SLACK,
   CONTOUR_SCRATCH_SLOTS,
+  contourCandidateCells,
   contourScratchStats,
   extractContours,
+  extractContoursWithSlack,
   releaseContourScratch,
   signedArea,
 } from './contours.js'
 import type { Loop } from './point.js'
 import { signedDistanceField } from './sdf.js'
-import { annulusAlpha, discAlpha, unionAlpha } from './test-fixtures.js'
+import { annulusAlpha, discAlpha, logoAlpha, noisySdf, unionAlpha } from './test-fixtures.js'
 
 beforeEach(() => {
   releaseContourScratch()
@@ -92,6 +95,114 @@ describe('extractContours', () => {
     extractContours(a, 64, 64, 0)
     const reused = extractContours(b, 64, 64, 0)
     expect(reused).toEqual(fresh)
+  })
+})
+
+/**
+ * The step-1 row skip (perf package P4 / report C2). Its whole claim is that it changes nothing:
+ * the candidate cells are the same cells in the same order, so the traced loops are the same loops.
+ * `slack = Infinity` runs the exhaustive scan the skip replaces, which is the reference every case
+ * below is judged against — the assertions are equalities, not tolerances.
+ */
+describe('the Lipschitz row skip in the candidate scan', () => {
+  /** Every fixture is a field the tracer is actually asked to run on, with the iso it runs at. */
+  const cases: readonly { name: string; field: Float32Array; w: number; h: number; iso: number }[] =
+    [
+      {
+        name: 'the analytic disc',
+        field: signedDistanceField(discAlpha(64, 64, 32, 32, 20), 64, 64),
+        w: 64,
+        h: 64,
+        iso: -4,
+      },
+      {
+        name: 'the analytic annulus (an outer loop and a hole)',
+        field: signedDistanceField(annulusAlpha(64, 64, 32, 32, 24, 10), 64, 64),
+        w: 64,
+        h: 64,
+        iso: 0,
+      },
+      {
+        name: 'two islands',
+        field: signedDistanceField(
+          unionAlpha(discAlpha(192, 96, 48, 48, 26), discAlpha(192, 96, 144, 48, 26)),
+          192,
+          96,
+        ),
+        w: 192,
+        h: 96,
+        iso: -9,
+      },
+      {
+        name: 'a corner-jammed quarter-disc (the documented border limitation)',
+        field: signedDistanceField(discAlpha(48, 48, 0, 0, 20), 48, 48),
+        w: 48,
+        h: 48,
+        iso: -2,
+      },
+      {
+        name: "a CPU-EDT field of the bench's synthetic logo",
+        field: signedDistanceField(logoAlpha(128), 128, 128),
+        w: 128,
+        h: 128,
+        iso: -6,
+      },
+      {
+        name: 'a jump-flood-like field: a true SDF with ±0.5 texel of noise',
+        field: noisySdf(128, 128),
+        w: 128,
+        h: 128,
+        iso: -5,
+      },
+    ]
+
+  it('keeps a slack of one texel, which is what the two field sources need', () => {
+    expect(CANDIDATE_ROW_SLACK).toBe(1)
+  })
+
+  for (const c of cases) {
+    it(`admits exactly the exhaustive scan's candidate cells on ${c.name}`, () => {
+      const skipped = contourCandidateCells(c.field, c.w, c.h, c.iso)
+      const full = contourCandidateCells(c.field, c.w, c.h, c.iso, Infinity)
+      expect(
+        full.length,
+        'the fixture must produce candidates, or the equality proves nothing',
+      ).toBeGreaterThan(0)
+      expect(skipped).toEqual(full)
+    })
+
+    it(`traces exactly the exhaustive scan's loops on ${c.name}`, () => {
+      releaseContourScratch()
+      const skipped = extractContours(c.field, c.w, c.h, c.iso)
+      releaseContourScratch()
+      const full = extractContoursWithSlack(c.field, c.w, c.h, c.iso, Infinity)
+      expect(skipped).toEqual(full)
+    })
+  }
+
+  it('actually skips: the logo field is scanned in far fewer reads than it has texels', () => {
+    // A `Proxy` over the field counts the reads the scan makes. The exhaustive scan reads every
+    // texel once; the skip must read a small fraction of them, or it is not doing anything.
+    const field = signedDistanceField(logoAlpha(128), 128, 128)
+    let reads = 0
+    const counted: ArrayLike<number> = new Proxy(field, {
+      get(target, key) {
+        if (typeof key === 'string' && key !== 'length') reads++
+        return Reflect.get(target, key) as unknown
+      },
+    }) as unknown as ArrayLike<number>
+    contourCandidateCells(counted, 128, 128, -6)
+    expect(reads).toBeLessThan(128 * 128 * 0.5)
+  })
+
+  it('never skips on a field that hugs the band, so nothing is lost where it matters', () => {
+    // Every texel within one unit of the iso: the skip can never fire, and the two scans must be
+    // the same scan.
+    const field = new Float32Array(32 * 32)
+    for (let i = 0; i < field.length; i++) field[i] = ((i % 7) - 3) * 0.3
+    expect(contourCandidateCells(field, 32, 32, 0)).toEqual(
+      contourCandidateCells(field, 32, 32, 0, Infinity),
+    )
   })
 })
 
