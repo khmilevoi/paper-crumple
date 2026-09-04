@@ -177,3 +177,90 @@ describe('scope() on an owned context (§4.0): the pinned baseline, no query at 
     })
   })
 })
+
+describe('status queries off the hot path', () => {
+  const desc = { width: 8, height: 8, format: 'RGBA8' } as const
+
+  it('checks framebuffer completeness once per (format, size), and trusts a proven combination', () => {
+    const f = fakeGl()
+    const ctx = createGlContext(f.gl)
+    const a = ctx.texture(desc)
+    const b = ctx.texture(desc)
+    const c = ctx.texture({ ...desc, width: 16 })
+    if (GlError.is(a) || GlError.is(b) || GlError.is(c)) return
+    f.reset()
+    expect(ctx.target(a)).not.toBeInstanceOf(GlError)
+    expect(f.calls('checkFramebufferStatus')).toBe(1)
+    expect(ctx.target(b)).not.toBeInstanceOf(GlError)
+    expect(ctx.target(a)).not.toBeInstanceOf(GlError)
+    expect(f.calls('checkFramebufferStatus')).toBe(1)
+    // A never-proven combination is checked, and its failure is still reported.
+    f.answers.framebufferStatus = 'FRAMEBUFFER_UNSUPPORTED'
+    const bad = ctx.target(c)
+    expect(f.calls('checkFramebufferStatus')).toBe(2)
+    expect(bad).toBeInstanceOf(GlError)
+    expect((bad as InstanceType<typeof GlError>).message).toMatch(
+      /^RGBA8: framebuffer incomplete, status 0x/,
+    )
+    // A failure proves nothing: the next attempt at that combination asks again.
+    f.answers.framebufferStatus = 'FRAMEBUFFER_COMPLETE'
+    expect(ctx.target(c)).not.toBeInstanceOf(GlError)
+    expect(f.calls('checkFramebufferStatus')).toBe(3)
+  })
+
+  it('validates the first allocation of each (format, size) and skips getError for the rest', () => {
+    const f = fakeGl()
+    const ctx = createGlContext(f.gl)
+    f.reset()
+    expect(ctx.texture(desc)).not.toBeInstanceOf(GlError)
+    expect(f.calls('getError')).toBe(1)
+    expect(ctx.texture(desc)).not.toBeInstanceOf(GlError)
+    expect(ctx.texture({ ...desc, label: 'another' })).not.toBeInstanceOf(GlError)
+    expect(f.calls('getError')).toBe(1)
+    // A never-proven combination is validated, and its failure surfaces with the same message
+    // (plus the note about the two unvalidated allocations above; the next test pins that).
+    f.answers.error = 'OUT_OF_MEMORY'
+    const bad = ctx.texture({ ...desc, format: 'R8', label: 'mask' })
+    expect(f.calls('getError')).toBe(2)
+    expect(bad).toBeInstanceOf(GlError)
+    expect((bad as InstanceType<typeof GlError>).message).toMatch(
+      /^mask: texStorage2D 8x8 R8 failed, GL error 0x[0-9a-f]+/,
+    )
+    // A failure proves nothing either.
+    f.answers.error = 'NO_ERROR'
+    expect(ctx.texture({ ...desc, format: 'R8' })).not.toBeInstanceOf(GlError)
+    expect(f.calls('getError')).toBe(3)
+  })
+
+  it('names the unvalidated allocations when a later check may be reporting one of them', () => {
+    const f = fakeGl()
+    const ctx = createGlContext(f.gl)
+    expect(ctx.texture(desc)).not.toBeInstanceOf(GlError)
+    expect(ctx.texture(desc)).not.toBeInstanceOf(GlError)
+    expect(ctx.texture(desc)).not.toBeInstanceOf(GlError)
+    f.answers.error = 'OUT_OF_MEMORY'
+    const bad = ctx.texture({ ...desc, format: 'R8', label: 'mask' })
+    expect(bad).toBeInstanceOf(GlError)
+    // GL errors are sticky until read: the flag may belong to one of the two allocations that
+    // went unvalidated since the last getError, and the message says so instead of guessing.
+    expect((bad as InstanceType<typeof GlError>).message).toMatch(
+      /^mask: texStorage2D 8x8 R8 failed, GL error 0x[0-9a-f]+ \(2 allocations since the last check were not validated; the error may be theirs\)$/,
+    )
+  })
+
+  it('validates every allocation when asked to, for the tests and a debug option', () => {
+    const f = fakeGl()
+    const ctx = createGlContext(f.gl, { validateAllocations: true })
+    f.reset()
+    expect(ctx.texture(desc)).not.toBeInstanceOf(GlError)
+    expect(ctx.texture(desc)).not.toBeInstanceOf(GlError)
+    expect(f.calls('getError')).toBe(2)
+    const a = ctx.texture(desc)
+    const b = ctx.texture(desc)
+    if (GlError.is(a) || GlError.is(b)) return
+    f.reset()
+    ctx.target(a)
+    ctx.target(b)
+    expect(f.calls('checkFramebufferStatus')).toBe(2)
+  })
+})
