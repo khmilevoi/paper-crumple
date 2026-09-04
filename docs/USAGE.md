@@ -129,8 +129,10 @@ export async function mountGrid(items: Item[], ac: AbortController) {
     sheet:   paperSheet({ edgeMode: 'torn', tiles }),     // edgeMode is a factory option (§6.5)
     motion:  bakedMotion({ packs: [pack2x3, pack1x1] }),  // an unsupplied bucket returns an
                                                           // AssetError naming the missing subpath
-    cssPx:   192,                 // the stage runs sizeForDisplay({ cssPx, dpr: devicePixelRatio,
-                                  // cap: 512 }) for you. Exactly one of cssPx / maxSize is required.
+    cssPx:   192,                 // the CSS long side of the box the PAPER is fitted into: the stage
+                                  // runs sizeForDisplay({ cssPx, dpr: devicePixelRatio, cap: 2048 })
+                                  // for you. Exactly one of cssPx / maxSize / artworkCssPx (§"pin
+                                  // the picture") is required.
     budget:  64 * 1024 * 1024,    // §8.8: the byte budget governs exactly one per-sprite tier — fronts
     present: 'blit',              // no default any more: this literal selects the BlitStage overload
     onError: ({ error, view, observed }) => {
@@ -191,6 +193,32 @@ the front size is bucket-derived and unexposed; §7.4's claim that the number of
 `devicePixelRatio` is thought about goes from N to one is true of the front and was false of the
 destination. Pass `size: 'manual'` to own it yourself, and then `sprite.frontSize`, `sprite.rect`
 and `view.idealSize` are the numbers your layout code needs.
+
+**To pin the picture rather than the paper**, build the stage with `artworkCssPx` instead of
+`cssPx` and read `view.frame`. `cssPx` sizes the front to the box the *paper* fits into, so the
+artwork inside it is `1 / (1 + 2 x sheet.overscan)` of that size — right for a grid tile, and a
+1.3-5x upscale if you then stretch the artwork itself to `cssPx`. `artworkCssPx` is the CSS long
+side the *artwork* holds on screen: the stage asks the sheet for `ceil(artworkCssPx x dpr)`
+artwork texels and sizes its surface to hold them plus the paper margin for every aspect.
+
+```ts
+const stage = await pc.paperStage({ sheet, motion, artworkCssPx: 360, present: 'blit', signal })
+// …after mount, after every swap, and after a hull-tier knob's re-source has landed
+// (`await stage.prepare(key)` joins it):
+const f = view.frame                                   // { box, artwork } in box pixels, or null
+if (f) {
+  const s = 360 / Math.max(f.artwork.w, f.artwork.h)   // 1:1 at devicePixelRatio
+  el.style.width  = `${f.box.w * s}px`;  el.style.height = `${f.box.h * s}px`
+  el.style.left   = `${-f.artwork.x * s}px`; el.style.top = `${-f.artwork.y * s}px`
+}
+```
+
+`View.frame` is `{ box, artwork }`: the box the view draws into and where the unpadded artwork
+lands inside it, both in that box's pixels, `null` until a front is resident. The sheet is centred
+on the *paper's* box, which the hull grows asymmetrically around the picture, so re-read it at the
+three moments above. The paper overflows the picture by however far the edge knobs reach, and the
+front costs `(1 + 2 x overscan)²` more texels than `cssPx` would for the same number — use `cssPx`
+for grids and `artworkCssPx` for the hero.
 
 The blit also **clears the destination 2D canvas** before each `drawImage`, at minimum the letterbox
 bars. Without that, a swap from a wide sprite to a narrow one under `fit: 'contain'` leaves the
@@ -508,6 +536,9 @@ if (resizeErr) return resizeErr
 // exact needs maxTextureSize BEFORE the first add(), and this is where it comes from.
 // exact: true renders the front at the source size, which is +22.3 MB of front and +39.4 MB
 // transient during its build (§7.4) — for the single large view, never for a grid.
+// Known limitation: under present: 'blit' an exact front larger than the stage's surface is
+// drawn clipped — use exact with 'direct' (as here) or a maxSize >= the source's long side
+// x (1 + 2 x sheet.overscan). A follow-up grows the blit surface to the front.
 const hero = await stage.add(heroUrl, {
   key: 'hero',
   exact: stage.caps.maxTextureSize >= 2048,
