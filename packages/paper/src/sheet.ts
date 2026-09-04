@@ -235,9 +235,13 @@ interface Mounted {
   /**
    * Task 12's own addition: what the last `buildField`/`blurField` call (from either `source()`
    * or `build()`) left the shared Pool A field slots holding. `buildField`/`blurField` write into
-   * one shared `sdf.tight` / `sdf.loose` slot apiece (§8.1) — there is no per-sprite storage for a
-   * field — so a later `build()` call can only skip pass A (the jump flood) when it is asking for
-   * exactly what this record already holds: the same sprite, at the same requested size. `null`
+   * one shared `sdf.tight` / `sdf.loose` slot apiece (§8.1; size-keyed, so a slot keeps one
+   * resident per framing, but a later build at the same framing overwrites it) — there is no
+   * per-sprite storage for a field — so a later `build()` call can only skip pass A (the jump
+   * flood) when it is asking for exactly what this record already holds: the same sprite, at the
+   * same requested size. The record's own fields are never evicted from under it: `gl-sdf.ts`'s
+   * module doc does the §8.1 arithmetic (the record's framing plus the one being built always
+   * fit; eviction removes only framings no record refers to). `null`
    * until the first `source()`/`build()` call, and reset to `null` whenever `ensurePools` disposes
    * and rebuilds the pools this record's `Field`s point into (a size a later sprite needs that
    * this mount's Pool A was not sized for).

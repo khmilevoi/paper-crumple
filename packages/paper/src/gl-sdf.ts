@@ -18,9 +18,30 @@
  *
  * `blurField` — pass B, the looseness blur — is task 6's addition: `SdfBuilder` now compiles a
  * fourth program (`BLUR_FS`) alongside the three pass A needs (seed, step, resolve).
+ *
+ * **How this module spends Pool A's §8.1 field budget** (28.25 B per `sdfRes` texel; `bytes.ts`
+ * states the figure, `gl-pools.ts` enforces it, and which textures realise it is this module's):
+ *
+ * - The JFA coord ping-pong (`inA`/`inB`/`outA`/`outB`, `RG16F`): 16 B/texel, in four
+ *   *exclusive* slots sized once at the largest field this builder has been asked for — never
+ *   more than `sdfRes²`, the size §8.1 budgets it at. A smaller field runs its passes in a
+ *   viewport sub-rect of those targets; every read is a `texelFetch` at an integer coordinate
+ *   inside the sub-rect (`STEP_FS`, `RESOLVE_FS`), so the texture's own size is not a term in
+ *   any pass and the field is identical to the byte (`gl-sdf.gl.test.ts` proves it against an
+ *   exact-size oracle). Sizing them per field was the thrash: every `stage.add` builds at two
+ *   framings, and 16 B/texel × two near-maximum framings (32) does not fit the 28.25 the budget
+ *   states, so keeping *two* ping-pong sets resident was never an option inside §8.1.
+ * - The fields (`tight`, `loose`, `blur`, `hullField`): 2 + 0.125 + 0.125 + 2 = 4.25 B/texel per
+ *   framing, in *size-keyed* slots (`ArtworkPool.acquireSized`) that keep every framing resident
+ *   until the budget says otherwise. With the ping-pong at its maximum and §8.1's 4 B/texel hull
+ *   mask left dedicated (`sheet.ts`), 12.25 B/texel remain: two framings at the maximum field
+ *   (8.5) always fit, and the least-recently-used framing goes only when a third would not. A
+ *   `build()` that reuses `lastFieldBuild`'s fields therefore never finds them evicted — the
+ *   record's framing plus the one being built is 8.5 ≤ 12.25 — and what eviction removes is
+ *   only framings no record refers to.
  */
 import { GlError } from '@paper-crumple/core'
-import type { Size } from '@paper-crumple/core'
+import type { DrawTarget, Size } from '@paper-crumple/core'
 import type {
   ArtworkPool,
   DrawScope,
@@ -204,6 +225,10 @@ void main() {
   ${byteOut ? 'outColor = vec4(clamp(d * uEncode.x + uEncode.y, 0.0, 1.0));' : 'outColor = vec4(d, 0.0, 0.0, 1.0);'}
 }`
 
+/**
+ * Pool A's slot names. `inA`..`outB` are exclusive slots sized once (the module doc's ping-pong);
+ * the four fields are size-keyed, one resident per framing.
+ */
 export const SDF_POOL_SLOTS = Object.freeze({
   inA: 'sdf.inA',
   inB: 'sdf.inB',
@@ -371,13 +396,13 @@ export function createSdfBuilder(ctx: GlContext, pool: ArtworkPool): Err | SdfBu
     }
   }
 
-  // `ctx.target()` allocates a brand-new WebGLFramebuffer on every call, but `pool.acquire()`
-  // hands back the *same* Texture (same `.handle`) whenever a slot's desc has not changed. Every
-  // slot this builder touches — Pass A's ping-pong halves as much as Pass B's `loose`/`blur` —
-  // is re-acquired on every `buildField`/`blurField` call (that is what makes the looseness knob
-  // "cheap enough to run live off a slider"), so without caching, every call leaked one
-  // framebuffer per slot. The Target wrapping each slot's pooled texture is cached here and only
-  // rebuilt when the pool hands back a different texture identity or size (a resize/replace).
+  // The coord ping-pong's four exclusive slots. `ctx.target()` allocates a brand-new
+  // WebGLFramebuffer on every call, but `pool.acquire()` hands back the *same* Texture (same
+  // `.handle`) whenever a slot's desc has not changed, and these are re-acquired on every
+  // `buildField` call — so without caching, every call leaked one framebuffer per slot. The
+  // Target wrapping each slot's pooled texture is cached here and only rebuilt when the pool
+  // hands back a different texture identity or size (a resize). The size-keyed field slots need
+  // no such cache: the pool owns their targets (`ArtworkPool.acquireSized`).
   const targetsBySlot = new Map<string, Target>()
   function acquireTarget(slot: string, d: TextureDesc): Err | Target {
     const texture = pool.acquire(slot, d)
@@ -404,6 +429,19 @@ export function createSdfBuilder(ctx: GlContext, pool: ArtworkPool): Err | SdfBu
     return target
   }
 
+  // The ping-pong's size: the largest field this builder has been asked for, on each axis — a
+  // high-water mark that only ever grows, and never past `sdfRes²` because every field is
+  // `fieldDimsFor(sdfRes, front)` (the module doc's budget paragraph). A field smaller than the
+  // mark runs in a sub-rect of the targets; a larger one grows them (one reallocation, then
+  // stable). Per-field sizing was the thrash this ends.
+  const pingPong = { w: 0, h: 0 }
+
+  /** `drawTargetFor(target)` restricted to the field's own `w x h` at the origin. */
+  function subRect(target: Target, w: number, h: number): DrawTarget {
+    const box = { x: 0, y: 0, w, h }
+    return { framebuffer: target.framebuffer, viewport: box, dest: box }
+  }
+
   // A `const` arrow, not a hoisted `function` declaration: `seed`/`step`/`resolve`/`blur` are
   // narrowed to `Program` above by the early-return `GlError.is()` checks, but that narrowing does
   // not survive into a nested `function` declaration's body (TS's CFA treats a hoisted function as
@@ -422,15 +460,18 @@ export function createSdfBuilder(ctx: GlContext, pool: ArtworkPool): Err | SdfBu
     const schedule = scheduleFor(w, h)
     const passes = 2 * (schedule.length + 1) + 1
 
+    if (w > pingPong.w) pingPong.w = w
+    if (h > pingPong.h) pingPong.h = h
+
     // Two ping-pong pairs, one per half, so neither half has to be copied out of the way.
     const halves: Target[] = []
     for (const [seedInside, keyA, keyB] of [
       [1, SDF_POOL_SLOTS.inA, SDF_POOL_SLOTS.inB],
       [0, SDF_POOL_SLOTS.outA, SDF_POOL_SLOTS.outB],
     ] as const) {
-      const targetA = acquireTarget(keyA, coordTargetDesc(w, h, keyA))
+      const targetA = acquireTarget(keyA, coordTargetDesc(pingPong.w, pingPong.h, keyA))
       if (GlError.is(targetA)) return targetA
-      const targetB = acquireTarget(keyB, coordTargetDesc(w, h, keyB))
+      const targetB = acquireTarget(keyB, coordTargetDesc(pingPong.w, pingPong.h, keyB))
       if (GlError.is(targetB)) return targetB
 
       let src = targetA
@@ -438,7 +479,7 @@ export function createSdfBuilder(ctx: GlContext, pool: ArtworkPool): Err | SdfBu
 
       const seedFail = ctx.scope((s: DrawScope): Err | undefined => {
         const { gl } = ctx
-        s.bindTarget(drawTargetFor(src))
+        s.bindTarget(subRect(src, w, h))
         gl.useProgram(seed.handle)
         gl.activeTexture(gl.TEXTURE0)
         gl.bindTexture(gl.TEXTURE_2D, artwork.handle)
@@ -462,7 +503,7 @@ export function createSdfBuilder(ctx: GlContext, pool: ArtworkPool): Err | SdfBu
         gl.useProgram(step.handle)
         gl.uniform2f(step.uniformLocation('uSize'), w, h)
         for (const stepSize of schedule) {
-          s.bindTarget(drawTargetFor(dst))
+          s.bindTarget(subRect(dst, w, h))
           gl.activeTexture(gl.TEXTURE0)
           gl.bindTexture(gl.TEXTURE_2D, src.texture.handle)
           gl.uniform1i(step.uniformLocation('uPrev'), 0)
@@ -479,7 +520,7 @@ export function createSdfBuilder(ctx: GlContext, pool: ArtworkPool): Err | SdfBu
       halves.push(src)
     }
 
-    const out = into ?? acquireTarget(slot ?? SDF_POOL_SLOTS.tight, fieldTargetDesc(w, h))
+    const out = into ?? pool.acquireSized(slot ?? SDF_POOL_SLOTS.tight, fieldTargetDesc(w, h))
     if (GlError.is(out)) return out
 
     const resolveFail = ctx.scope((s: DrawScope): Err | undefined => {
@@ -516,11 +557,11 @@ export function createSdfBuilder(ctx: GlContext, pool: ArtworkPool): Err | SdfBu
     const size = looseSizeFor({ w: field.width, h: field.height })
     const outDesc = fieldTargetDesc(size.w, size.h)
 
-    const out = acquireTarget(SDF_POOL_SLOTS.loose, outDesc)
+    const out = pool.acquireSized(SDF_POOL_SLOTS.loose, outDesc)
     if (GlError.is(out)) return out
     // The horizontal half's shared scratch is a Pool A slot rather than a private `Map` entry:
     // it is dead the moment the vertical half reads it, so every sprite in a grid can share one.
-    const tmp = acquireTarget(SDF_POOL_SLOTS.blur, outDesc)
+    const tmp = pool.acquireSized(SDF_POOL_SLOTS.blur, outDesc)
     if (GlError.is(tmp)) return tmp
 
     // Deliberately derived from the output, not the input: a baked field may be at any
@@ -591,8 +632,9 @@ export function createSdfBuilder(ctx: GlContext, pool: ArtworkPool): Err | SdfBu
       blur.dispose()
       // The pool owns the coord and field textures backing every slot above, and disposes its
       // own on `pool.dispose()` — this builder never holds a texture Pool A did not hand it. The
-      // framebuffers wrapping those textures are this builder's own, though (see
-      // `acquireTarget`'s comment), so they are released here.
+      // framebuffers wrapping the ping-pong textures are this builder's own, though (see
+      // `acquireTarget`'s comment), so they are released here; the field targets are the pool's,
+      // texture and framebuffer alike.
       for (const target of targetsBySlot.values()) target.dispose()
       targetsBySlot.clear()
     },

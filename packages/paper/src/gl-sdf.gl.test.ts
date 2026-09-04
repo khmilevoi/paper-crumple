@@ -838,13 +838,17 @@ interface IdentityCase {
   readonly bytes: Uint8Array
   readonly artworkUv: readonly [number, number, number, number]
   readonly field: { readonly w: number; readonly h: number }
-  /** The pool's `sdfRes`, when it should exceed the field (exercises the ping-pong sub-rect). */
-  readonly sdfRes?: number
+  /**
+   * A larger field to build first on the same builder, so `field` runs on coord targets bigger
+   * than itself — the ping-pong sub-viewport (`gl-sdf.ts`'s `pingPong`), whose identity is
+   * exactly what the exact-size oracle then proves.
+   */
+  readonly first?: { readonly w: number; readonly h: number }
 }
 
 /** Builds `c` through the production builder and through the oracle; the fields must agree. */
 function expectIdenticalField(ctx: GlContext, c: IdentityCase): void {
-  const sdfRes = c.sdfRes ?? Math.max(c.field.w, c.field.h)
+  const sdfRes = Math.max(c.field.w, c.field.h, c.first?.w ?? 0, c.first?.h ?? 0)
   const casePools = createScratchPools({ gl: ctx, artwork: c.artwork, sdfRes })
   const artwork = casePools.poolA.holdArtwork('sprite', {
     width: c.artwork.w,
@@ -864,6 +868,16 @@ function expectIdenticalField(ctx: GlContext, c: IdentityCase): void {
   if (GlError.is(builder)) {
     casePools.dispose()
     return
+  }
+  if (c.first !== undefined) {
+    const grown = builder.buildField({
+      artwork,
+      artworkUv: c.artworkUv,
+      width: c.first.w,
+      height: c.first.h,
+      sourceLongSide: Math.max(c.first.w, c.first.h),
+    })
+    expect(GlError.is(grown), `${c.name}: first build`).toBe(false)
   }
   const sourceLongSide = Math.max(c.field.w, c.field.h)
   const built = builder.buildField({
@@ -953,5 +967,109 @@ describe('texelFetch selects the texel texture(p / uSize) selected — byte for 
         field: { w, h },
       })
     }
+  })
+
+  it('on coord targets larger than the field — the ping-pong sub-viewport — still byte for byte', () => {
+    const { ctx } = open()
+    expectIdenticalField(ctx, {
+      name: 'disc 48x40 after a 64x64 build',
+      artwork: { w: 48, h: 40 },
+      bytes: disc(48, 40, 12),
+      artworkUv: [1, 1, 0, 0],
+      field: { w: 48, h: 40 },
+      first: { w: 64, h: 64 },
+    })
+    expectIdenticalField(ctx, {
+      name: 'disc 33x17 after a 40x64 build',
+      artwork: { w: 33, h: 17 },
+      bytes: disc(33, 17, 6),
+      artworkUv: [1, 1, 0, 0],
+      field: { w: 33, h: 17 },
+      first: { w: 40, h: 64 },
+    })
+    // The production pair: the bucket-framed field (452x512 at sdfRes 512) built after the
+    // reserve-framed one (512x512), on the bench artwork.
+    expectIdenticalField(ctx, {
+      name: 'silhouette 452x512 after a 512x512 build',
+      artwork: { w: 452, h: 512 },
+      bytes: silhouetteBytes(452, 512),
+      artworkUv: [1, 1, 0, 0],
+      field: { w: 452, h: 512 },
+      first: { w: 512, h: 512 },
+    })
+  })
+})
+
+describe('the field slots do not thrash between two framings (spec 8.1)', () => {
+  it('allocates nothing once each framing has been built once, and both fields stay readable', () => {
+    const { ctx } = open()
+    const builder = createSdfBuilder(ctx, pools!.poolA)
+    expect(GlError.is(builder)).toBe(false)
+    if (GlError.is(builder)) return
+    const artwork = pools!.poolA.holdArtwork('sprite', {
+      width: ARTWORK.w,
+      height: ARTWORK.h,
+      format: 'RGBA8UI',
+      filter: 'NEAREST',
+      label: 'a',
+    })
+    expect(GlError.is(artwork)).toBe(false)
+    if (GlError.is(artwork)) return
+    expect(ctx.scope(() => uploadBytes(ctx.gl, artwork, disc(ARTWORK.w, ARTWORK.h, 20)))).toBe(
+      undefined,
+    )
+
+    // Two framings of one artwork, the way `source()` (reserve-sized front) and `build()`
+    // (bucket-sized front) frame theirs: the same artwork, a different field grid.
+    const framings = [
+      { w: 64, h: 64, uv: [1, 1, 0, 0] as const },
+      { w: 56, h: 48, uv: [1, 1, 0, 0] as const },
+    ]
+    const round = () => {
+      for (const f of framings) {
+        const field = builder.buildField({
+          artwork,
+          artworkUv: f.uv,
+          width: f.w,
+          height: f.h,
+          sourceLongSide: Math.max(f.w, f.h),
+        })
+        expect(GlError.is(field)).toBe(false)
+        if (GlError.is(field)) return
+        const loose = builder.blurField({ field, sigmaPx: 4, frontLongSide: Math.max(f.w, f.h) })
+        expect(GlError.is(loose)).toBe(false)
+        // Readable, and right: the disc's centre is inside, its corner outside — in both framings.
+        const read = (x: number, y: number) =>
+          readDistance(ctx, drawTargetFor(field.target), builder.contract.bits, field.decode, x, y)
+        expect(read(f.w >> 1, f.h >> 1)).toBeGreaterThan(0)
+        expect(read(0, 0)).toBeLessThan(0)
+      }
+    }
+
+    const texStorage2D = vi.spyOn(ctx.gl, 'texStorage2D')
+    const createFramebuffer = vi.spyOn(ctx.gl, 'createFramebuffer')
+    const getError = vi.spyOn(ctx.gl, 'getError')
+    round()
+    // The first round allocates: the coord ping-pong (once, at the larger framing), and each
+    // framing's own field, loose and scratch. Never zero, or the assertion below is vacuous.
+    expect(texStorage2D.mock.calls.length).toBeGreaterThan(0)
+    texStorage2D.mockClear()
+    createFramebuffer.mockClear()
+    getError.mockClear()
+    for (let i = 0; i < 4; i++) round()
+    const stores = texStorage2D.mock.calls.length
+    const framebuffers = createFramebuffer.mock.calls.length
+    const errors = getError.mock.calls.length
+    texStorage2D.mockRestore()
+    createFramebuffer.mockRestore()
+    getError.mockRestore()
+    // Four more rounds alternating between the two framings allocate nothing at all — no
+    // texture, no framebuffer, and no allocation-time `getError` round trip — which is the
+    // thrash `SDF_POOL_SLOTS`'s doc comment describes, ended.
+    expect(stores).toBe(0)
+    expect(framebuffers).toBe(0)
+    expect(errors).toBe(0)
+    expect(pools!.poolA.bytes()).toBeLessThanOrEqual(poolABytes(ARTWORK, FIELD))
+    builder.dispose()
   })
 })
