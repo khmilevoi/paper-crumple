@@ -10,7 +10,7 @@
  * costs 4 B/texel, so the slot is exactly `frontBytes(artwork)` — Pool A's artwork term,
  * unchanged.
  *
- * **Getting the source bytes into an integer texture, and the one transient it costs.**
+ * **Getting the source bytes into an integer texture, and the second texture it costs.**
  * `RESAMPLE_FS` reads a `usampler2D`, and WebGL2 forbids a `TexImageSource` upload into an
  * integer internal format (§8.5.3: `RGBA8UI` with `RGBA_INTEGER` raises `INVALID_OPERATION` from
  * every `ImageBitmap` overload). Two branches, on `ctx.exactByteFetch`:
@@ -21,17 +21,22 @@
  * - **Probe red** — `drawImage` the bitmap into an `OffscreenCanvas`, `getImageData`, and
  *   `uploadBytes` those bytes straight into the same source-sized `RGBA8UI`. Slower (§8.5.3
  *   prices it at 4–8 ms against 0.7–2.0), and correct on a driver whose unorm-to-float
- *   conversion drifts. Pool B is unused on this branch.
+ *   conversion drifts. The staging is unused on this branch.
  *
- * That source-sized `RGBA8UI` is a **dedicated, non-pooled allocation released synchronously at
- * the end of the call**, on the mechanism §8.1 already blesses for `exact: true`. It exists
- * because `poolB.acquire` hard-codes `format: 'RGBA8'` and neither pool's budget has room for a
- * second source-sized texture. §8.5.3 claims that with the probe green "the `RGBA8UI` texture
- * and the `ArrayBufferView` disappear from the runtime entirely"; the `ArrayBufferView` and the
- * CPU staging canvas do, and the integer texture does not, because `RESAMPLE_FS`'s own signature
+ * That source-sized `RGBA8UI` is **Pool B's second slot** (`poolB.acquireSourceBytes`): sized by
+ * the source like the staging, keyed by the same sprite, released by the same idle interval. It
+ * used to be a dedicated allocation released synchronously at the end of this call, which made
+ * every `stage.add` pay a source-sized `texStorage2D`, a framebuffer and their status queries
+ * for a texture whose contents are dead the moment the resample below has read them — and the
+ * staging beside it was keyed per sprite, so it was re-created every add too. Both are now
+ * allocated once per *source size*: a grid of same-sized artworks allocates them once. The cost
+ * is one more source-sized texture resident for Pool B's idle window; `gl-pools.ts` records the
+ * accounting. §8.5.3 claims that with the probe green "the `RGBA8UI` texture and the
+ * `ArrayBufferView` disappear from the runtime entirely"; the `ArrayBufferView` and the CPU
+ * staging canvas do, and the integer texture does not, because `RESAMPLE_FS`'s own signature
  * requires one at both ends. **A `sampler2D`-source variant of the resample shader — which is
  * P6's to write, not this plan's, since §7.4.1 makes the reference and its GLSL twin two plans'
- * work on purpose — would delete this transient.**
+ * work on purpose — would delete it.**
  *
  * **Pool ownership.** `resample()` calls `poolA.holdArtwork(spriteKey, desc)` for the output, so
  * §8.5's "the pool keeps one artwork slot, keyed by sprite" is enforced by the pool and not by
@@ -88,8 +93,9 @@ export interface Resampler {
 }
 
 /**
- * Upload `bitmap` into Pool B's `RGBA8` staging and recover the exact bytes into `dedicated`
- * with `EXACT_BYTE_FETCH_FS`. Probe-green branch — no CPU decode, no `ArrayBufferView`.
+ * Upload `bitmap` into Pool B's `RGBA8` staging and recover the exact bytes into `sourceBytes`
+ * — Pool B's `RGBA8UI` target — with `EXACT_BYTE_FETCH_FS`. Probe-green branch — no CPU decode,
+ * no `ArrayBufferView`.
  */
 function uploadViaByteFetch(
   ctx: GlContext,
@@ -98,15 +104,12 @@ function uploadViaByteFetch(
   spriteKey: string,
   srcRect: Rect,
   bitmap: ImageBitmap,
-  dedicated: Texture,
+  sourceBytes: Target,
 ): Err | undefined {
   const staging = poolB.acquire(spriteKey, { w: srcRect.w, h: srcRect.h })
   if (GlError.is(staging)) return staging
 
-  const target = ctx.target(dedicated)
-  if (GlError.is(target)) return target
-
-  const failure = ctx.scope((s): Err | undefined => {
+  return ctx.scope((s): Err | undefined => {
     const { gl } = ctx
     gl.bindTexture(gl.TEXTURE_2D, staging.handle)
     // §8.5.4: a closed or detached bitmap must resolve to an error, never throw. This is the
@@ -128,7 +131,7 @@ function uploadViaByteFetch(
     )
     if (GlError.is(upload)) return upload
 
-    s.bindTarget(drawTargetFor(target))
+    s.bindTarget(drawTargetFor(sourceBytes))
     gl.useProgram(byteFetch.handle)
     gl.activeTexture(gl.TEXTURE0)
     gl.bindTexture(gl.TEXTURE_2D, staging.handle)
@@ -136,20 +139,17 @@ function uploadViaByteFetch(
     gl.drawArrays(gl.TRIANGLES, 0, 3)
     return undefined
   })
-
-  target.dispose()
-  return failure
 }
 
 /**
  * `drawImage` the bitmap into an `OffscreenCanvas`, `getImageData`, and `uploadBytes` those bytes
- * straight into `dedicated`. Probe-red branch — Pool B is unused.
+ * straight into `sourceBytes`. Probe-red branch — the staging is unused.
  */
 function uploadViaCanvas(
   ctx: GlContext,
   srcRect: Rect,
   bitmap: ImageBitmap,
-  dedicated: Texture,
+  sourceBytes: Texture,
 ): Err | undefined {
   const canvas = attempt(
     () => new OffscreenCanvas(srcRect.w, srcRect.h),
@@ -177,7 +177,7 @@ function uploadViaCanvas(
   return ctx.scope(() =>
     uploadBytes(
       ctx.gl,
-      dedicated,
+      sourceBytes,
       new Uint8Array(imageData.data.buffer, imageData.data.byteOffset, imageData.data.byteLength),
     ),
   )
@@ -224,26 +224,19 @@ export function createResampler(ctx: GlContext): Err | Resampler {
     const { spriteKey, bitmap, srcRect, artwork, poolA, poolB } = o
     const { gl } = ctx
 
-    const dedicated = ctx.texture({
-      width: srcRect.w,
-      height: srcRect.h,
-      format: 'RGBA8UI',
-      filter: 'NEAREST',
-      label: `resample.src:${spriteKey}`,
-    })
-    if (GlError.is(dedicated)) return dedicated
+    // Pool B's `RGBA8UI` copy of the source — allocated once per source size, not per sprite
+    // (the header's "second texture it costs").
+    const sourceBytes = poolB.acquireSourceBytes(spriteKey, { w: srcRect.w, h: srcRect.h })
+    if (GlError.is(sourceBytes)) return sourceBytes
 
     const uploadFail = ctx.exactByteFetch
-      ? uploadViaByteFetch(ctx, byteFetch, poolB, spriteKey, srcRect, bitmap, dedicated)
-      : uploadViaCanvas(ctx, srcRect, bitmap, dedicated)
+      ? uploadViaByteFetch(ctx, byteFetch, poolB, spriteKey, srcRect, bitmap, sourceBytes)
+      : uploadViaCanvas(ctx, srcRect, bitmap, sourceBytes.texture)
     if (uploadFail !== undefined) {
-      dedicated.dispose()
-      // Bounded, not unbounded (Pool B is single-slot and the next `acquire`/`dispose` would
-      // reclaim it regardless): `uploadViaByteFetch` may have already taken Pool B's one slot
+      // Bounded, not unbounded (Pool B is single-key and the next `acquire`/`dispose` would
+      // reclaim it regardless): the two acquisitions above have taken Pool B's slot for this key
       // before failing, and only the happy path below released it — release it here too, on
       // every error return, so a failed upload does not pin the slot until the next call.
-      // `releaseIdle` is a no-op when this key never held the slot (`gl-pools.ts`), so calling it
-      // unconditionally is safe even for the `uploadViaCanvas` branch, which never touches Pool B.
       poolB.releaseIdle(spriteKey)
       return uploadFail
     }
@@ -256,13 +249,13 @@ export function createResampler(ctx: GlContext): Err | Resampler {
       label: `artwork:${spriteKey}`,
     })
     if (GlError.is(artworkTexture)) {
-      dedicated.dispose()
+      poolB.releaseIdle(spriteKey)
       return artworkTexture
     }
 
     const target = acquireArtworkTarget(artworkTexture)
     if (GlError.is(target)) {
-      dedicated.dispose()
+      poolB.releaseIdle(spriteKey)
       return target
     }
 
@@ -270,7 +263,7 @@ export function createResampler(ctx: GlContext): Err | Resampler {
       s.bindTarget(drawTargetFor(target))
       gl.useProgram(resampleProgram.handle)
       gl.activeTexture(gl.TEXTURE0)
-      gl.bindTexture(gl.TEXTURE_2D, dedicated.handle)
+      gl.bindTexture(gl.TEXTURE_2D, sourceBytes.texture.handle)
       gl.uniform1i(resampleProgram.uniformLocation(RESAMPLE_UNIFORMS.source), 0)
       gl.uniform4i(
         resampleProgram.uniformLocation(RESAMPLE_UNIFORMS.srcRect),
@@ -283,7 +276,6 @@ export function createResampler(ctx: GlContext): Err | Resampler {
       gl.drawArrays(gl.TRIANGLES, 0, 3)
     })
 
-    dedicated.dispose()
     poolB.releaseIdle(spriteKey)
 
     return { texture: artworkTexture, size: artwork, srcRect }
