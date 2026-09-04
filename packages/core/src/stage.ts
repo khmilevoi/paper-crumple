@@ -1,5 +1,6 @@
 import { ABORTED, isAborted, type Aborted } from './abort.js'
 import { attempt } from './attempt.js'
+import { createIngestLane, type IngestClass, type IngestSlot } from './ingest-lane.js'
 import { blitPlan, managedBackingStore } from './blit.js'
 import {
   planStagePlay,
@@ -483,6 +484,13 @@ function internals(v: View): ViewInternals {
   )
 }
 
+/** What `acquire` or `resupply` handed back, narrowed to the bitmap: the lane job's input (§8.10). */
+type Obtained = Exclude<
+  | Awaited<ReturnType<NormalizedSource['acquire']>>
+  | Awaited<ReturnType<NonNullable<NormalizedSource['resupply']>>>,
+  Error | Aborted
+>
+
 function buildStage(p: StageParts): BuiltStage {
   let batching = false
   const views: View[] = []
@@ -498,11 +506,20 @@ function buildStage(p: StageParts): BuiltStage {
    */
   const resourcing = new Map<string, Promise<Error | undefined>>()
   /**
-   * Re-sources run one at a time, stage-wide. `source()` suspends after it has taken the slot
-   * (its abort check points, §10.5), so two in flight would displace each other and neither's
-   * `build()` would ever find its own artwork — a stage-level `set()` over a grid would loop.
+   * §8.10 — the ingest lane. Every `source()` this stage makes runs inside one of its jobs, so at
+   * most one sprite is between `source()` and `build()` at any time: `source()` suspends after it
+   * has taken the artwork slot (its abort check points, §10.5), and two in flight would displace
+   * each other and neither's `build()` would ever find its own artwork — a stage-level `set()`
+   * over a grid would loop, and thirty `add()`s in one turn answered twenty-nine `SheetError`s.
+   * A job's class is inferred here, never passed in by a consumer.
    */
-  let resourceChain: Promise<unknown> = Promise.resolve()
+  const lane = createIngestLane({ timers: p.timers })
+  /**
+   * The promise each `add()` returned, by key, so `holdTarget` can promote the add a `crumpleTo`
+   * is parked on (§4.5's `hold` is the natural promotion signal, §8.10). Weak: the entry lives
+   * exactly as long as a consumer can still hand the promise back.
+   */
+  const pendingAdds = new WeakMap<Promise<unknown>, string>()
 
   // The queue lives with the rebuild it drives: `rebuildKey` needs the views, for the redraw a
   // re-source ends in, and the views are this function's.
@@ -559,14 +576,10 @@ function buildStage(p: StageParts): BuiltStage {
     const key = record.key
     const inFlight = resourcing.get(key)
     if (inFlight !== undefined) return inFlight
-    const run: Promise<Error | undefined> = resourceChain.then(
-      () => resource(record),
-      // Nothing upstream rejects — every step returns its failure — but a chain that could be
-      // broken by one rejection would stay broken for the stage's life, so it is settled here.
-      () => undefined,
-    )
+    // Serialised by the lane (§8.10), not by a promise chain: the supplier runs now, and the
+    // `source()` that follows it waits its turn behind whatever the lane holds.
+    const run = resource(record)
     resourcing.set(key, run)
-    resourceChain = run
     void run.then((failed) => {
       if (resourcing.get(key) === run) resourcing.delete(key)
       if (failed !== undefined) p.policy.orphan(failed, null)
@@ -585,21 +598,55 @@ function buildStage(p: StageParts): BuiltStage {
     const key = record.key
     const live = (): boolean => p.sprites.get(key) === record && dead() === undefined
     if (!live()) return undefined
+    // I/O first, outside the lane (§8.10): no slot is touched until `source()`.
     const got =
       record.source.resupply !== undefined
         ? await record.source.resupply({ key })
         : await record.source.acquire()
     // No signal is passed, so ABORTED cannot come back; narrowed because the type says it can.
-    if (isAborted(got)) return undefined
-    if (got instanceof Error) return got
+    // A promotion `prepare()` left for the job is consumed by the enqueue below; on the paths
+    // that never reach it, it is dropped rather than remembered for a job that never comes.
+    if (isAborted(got) || got instanceof Error) {
+      lane.forget(key)
+      return isAborted(got) ? undefined : got
+    }
     if (!live()) {
+      lane.forget(key)
       if (got.owned) attempt(() => got.bitmap.close())
       return undefined
     }
+    const ticket = lane.enqueue<Error | undefined>({
+      key,
+      // A sprite a view is showing goes ahead of background work; `prepare()` promotes the rest.
+      cls: viewsShowing(key).size > 0 ? 'visible' : 'background',
+      // §8.5.4 — dropped before it ran: the bitmap the stage obtained is closed here.
+      discard: () => {
+        if (got.owned) attempt(() => got.bitmap.close())
+      },
+      run: (slot) => resourceIngest(record, got, slot),
+    })
+    const settled = await ticket.done
+    // The lane's signal is fired only by `dispose()`, and a disposed stage has nothing to report.
+    return isAborted(settled) ? undefined : settled
+  }
+
+  /**
+   * The lane job of a re-source (§8.10): `source()` at the sprite's current values, one
+   * checkpoint, then the rebuild. The lane's signal goes into `source()` and is re-read after the
+   * checkpoint, so a stage disposed mid-job hands the late handle straight back.
+   */
+  async function resourceIngest(
+    record: SpriteRecord,
+    got: Obtained,
+    slot: IngestSlot,
+  ): Promise<Error | undefined | Aborted> {
+    const key = record.key
+    const live = (): boolean => p.sprites.get(key) === record && dead() === undefined
     const handle = await p.o.sheet.source(got.bitmap, {
       maxSize: p.host.surface.width,
       artworkLongSide: p.artworkLongSide,
       exact: record.exact,
+      signal: slot.signal,
       // §6.3 — the hull is traced at the sprite's current values, hull tier included. A knob that
       // moves again while this decode is out shows up as drift on the rebuild below, which
       // schedules the next re-source rather than losing the move.
@@ -607,9 +654,10 @@ function buildStage(p: StageParts): BuiltStage {
     })
     // §8.5.4 — the stage closes every bitmap it obtained and never closes one it was given.
     if (got.owned) attempt(() => got.bitmap.close())
-    if (isAborted(handle)) return undefined
+    if (isAborted(handle)) return ABORTED
     if (handle instanceof Error) return handle
-    if (!live()) {
+    await slot.checkpoint()
+    if (!live() || slot.signal.aborted) {
       // Removed, replaced or disposed while the decode was out: the handle that arrived late is
       // nobody's, so it goes straight back.
       p.o.sheet.release(handle)
@@ -1235,6 +1283,10 @@ function buildStage(p: StageParts): BuiltStage {
       }
       if (!(target instanceof Promise)) take(target)
       else {
+        // §8.10 — the add this run is parked on goes to the head of the lane. The §4.5 hold on
+        // the LRU below is untouched; the lane reads the same signal from the ingest side.
+        const pendingKey = pendingAdds.get(target)
+        if (pendingKey !== undefined) lane.promote(pendingKey, 'held')
         void target.then((s) => {
           if (!(s instanceof Error) && !isAborted(s)) take(s)
         })
@@ -1326,10 +1378,27 @@ function buildStage(p: StageParts): BuiltStage {
     function swapToMethod(src: SpriteSource, o?: SwapOptions): Run<SwapResult> {
       if (p.isDisposed() || state === 'disposed') return settledRun(ABORTED)
       const key = `swap:${presetForImageId(String(src))}:${String(swapCounter++)}`
+      // §8.10 — a superseded, stopped or disposed swap aborts the `add()` it started, so a
+      // second `swapTo` on the same view does not pay for an ingest nobody will show. The gate
+      // is the consumer's signal plus the run's own settlement; the superseded run still settles
+      // `ABORTED` after the new `start` (§7.1 — the runner is untouched), and an aborted `add()`
+      // frees its key (§10.5).
+      const gate = new AbortController()
+      const consumer = o?.signal
+      const onAbort = (): void => {
+        gate.abort(consumer?.reason)
+      }
+      consumer?.addEventListener('abort', onAbort, { once: true })
+      if (consumer?.aborted === true) gate.abort(consumer.reason)
       // `add()` is started here and its promise is passed straight through — the loading
       // indicator form of §4.2, with no second mechanism.
-      const pending = add(src, { key, signal: o?.signal } as never)
-      return view.crumpleTo(pending as never, o)
+      const pending = add(src, { key, signal: gate.signal } as never)
+      const run = view.crumpleTo(pending as never, o)
+      void run.done.then((settled) => {
+        consumer?.removeEventListener('abort', onAbort)
+        if (isAborted(settled)) gate.abort()
+      })
+      return run
     }
 
     function stopMethod(): void {
@@ -1478,11 +1547,39 @@ function buildStage(p: StageParts): BuiltStage {
     key: string,
     source: NormalizedSource,
     opts: { signal?: AbortSignal; exact?: boolean },
+    cls: IngestClass,
   ): Promise<SpriteRecord | AddError | Aborted> {
+    // I/O first, outside the lane (§8.10): no slot is touched until `source()`.
     const acquired = await source.acquire({ signal: opts.signal })
     if (isAborted(acquired)) return ABORTED
     if (acquired instanceof Error) return acquired
+    const ticket = lane.enqueue<SpriteRecord | AddError>({
+      key,
+      cls,
+      ...(opts.signal === undefined ? {} : { signal: opts.signal }),
+      // §8.5.4 — dropped before it ran: the bitmap the stage obtained is closed here; a borrowed
+      // one stays the caller's.
+      discard: () => {
+        if (acquired.owned) attempt(() => acquired.bitmap.close())
+      },
+      run: (slot) => ingestSprite(key, source, acquired, opts, slot),
+    })
+    return ticket.done
+  }
 
+  /**
+   * The lane job of an `add()` or `replace()` (§8.10): the sheet's `source()`, the motion fit and
+   * load, the first `build()`, the record. One checkpoint after `source()` returns and one after
+   * `load()` returns; the lane's signal goes into both calls and is re-read after each
+   * checkpoint, so a job whose swap was superseded pays for nothing past the phase it is in.
+   */
+  async function ingestSprite(
+    key: string,
+    source: NormalizedSource,
+    acquired: Obtained,
+    opts: { signal?: AbortSignal; exact?: boolean },
+    slot: IngestSlot,
+  ): Promise<SpriteRecord | AddError | Aborted> {
     // §6.6 — core defaults -> slot defaults -> stage, and no sprite layer yet: the record's own
     // layer below starts EMPTY, the sprite's delta over the stage. Seeded with a copy of the
     // defaults instead, it shadowed every stage-level value for as long as the sprite lived —
@@ -1493,7 +1590,7 @@ function buildStage(p: StageParts): BuiltStage {
       maxSize: p.host.surface.width,
       artworkLongSide: p.artworkLongSide,
       exact: opts.exact === true,
-      signal: opts.signal,
+      signal: slot.signal,
       // §6.3 — the hull is traced at the stage's current values, hull tier included, and the
       // first front is built at the SAME values below: the two must agree, or `build()` answers
       // `SourceExpiredError` and `add()` has no re-source row to fall back on.
@@ -1503,6 +1600,13 @@ function buildStage(p: StageParts): BuiltStage {
     if (acquired.owned) attempt(() => acquired.bitmap.close())
     if (isAborted(handle)) return ABORTED
     if (handle instanceof Error) return handle
+    // §8.10 — the lane's checkpoint between the sheet's phases; a signal that fired during the
+    // wait means the handle is nobody's.
+    await slot.checkpoint()
+    if (slot.signal.aborted) {
+      p.o.sheet.release(handle)
+      return ABORTED
+    }
 
     // D5 — the key selects the fold preset, and "a grid must not fold in unison" depends on it.
     // `frontRect`, not `rect`: `fit` sizes the front over the box it is given, in that box's own
@@ -1516,10 +1620,16 @@ function buildStage(p: StageParts): BuiltStage {
       return fit
     }
 
-    const clip = await p.o.motion.load(fit, { signal: opts.signal })
+    const clip = await p.o.motion.load(fit, { signal: slot.signal })
     if (isAborted(clip) || clip instanceof Error) {
       p.o.sheet.release(handle)
       return isAborted(clip) ? ABORTED : clip
+    }
+    await slot.checkpoint()
+    if (slot.signal.aborted) {
+      p.o.motion.release(clip)
+      p.o.sheet.release(handle)
+      return ABORTED
     }
 
     const front = p.o.sheet.build(handle, fit.frontSize, sheetKnobs as never)
@@ -1596,9 +1706,38 @@ function buildStage(p: StageParts): BuiltStage {
     return record
   }
 
-  async function add(
+  /**
+   * §8.10 — `add()` is a background job of the lane; `mount()` adds at `visible`, and a
+   * `crumpleTo` parked on the promise promotes it to `held` through `pendingAdds`. Not `async`:
+   * the promise a consumer gets back must be the very one `holdTarget` looks up.
+   */
+  function add(
     src: SpriteSource,
     opts: { key: string; signal?: AbortSignal; exact?: boolean; pin?: true },
+  ): Promise<Sprite | AddError | Aborted> {
+    return addAs(src, opts, 'background')
+  }
+
+  function addAs(
+    src: SpriteSource,
+    opts: { key: string; signal?: AbortSignal; exact?: boolean; pin?: true },
+    cls: IngestClass,
+  ): Promise<Sprite | AddError | Aborted> {
+    const done = addBody(src, opts, cls)
+    pendingAdds.set(done, opts.key)
+    // A promotion that landed before the job reached the lane, for a job that never will — the
+    // source refused at `acquire` — must not be remembered for the next add under this key.
+    // Registered before the consumer's own continuation, so it runs first.
+    void done.then(() => {
+      lane.forget(opts.key)
+    })
+    return done
+  }
+
+  async function addBody(
+    src: SpriteSource,
+    opts: { key: string; signal?: AbortSignal; exact?: boolean; pin?: true },
+    cls: IngestClass,
   ): Promise<Sprite | AddError | Aborted> {
     const gone = dead()
     if (gone !== undefined) return p.policy.returned(gone, null)
@@ -1631,7 +1770,7 @@ function buildStage(p: StageParts): BuiltStage {
     }
 
     p.reserved.add(opts.key)
-    const built = await buildSprite(opts.key, source, opts)
+    const built = await buildSprite(opts.key, source, opts, cls)
     p.reserved.delete(opts.key)
     // An aborted add() frees its key; a failed one frees it too.
     if (isAborted(built)) return ABORTED
@@ -1723,6 +1862,8 @@ function buildStage(p: StageParts): BuiltStage {
     // one demand that waits for it rather than returning a front it knows is stale or absent.
     const pending = resourcing.get(key)
     if (pending !== undefined) {
+      // §8.10 — the one demand that waits goes ahead of background work in the lane.
+      lane.promote(key, 'visible')
       const failed = await pending
       if (record.front === null) {
         const message = `prepare('${key}') could not restore the front; the re-source failed`
@@ -1774,7 +1915,13 @@ function buildStage(p: StageParts): BuiltStage {
     p.o.sheet.release(record.handle)
     p.o.motion.release(record.clip)
 
-    const built = await buildSprite(key, source, { signal: o?.signal, exact: record.exact })
+    const built = await buildSprite(
+      key,
+      source,
+      { signal: o?.signal, exact: record.exact },
+      // §8.10 — a sprite a view is showing is rebuilt ahead of background work.
+      viewsShowing(key).size > 0 ? 'visible' : 'background',
+    )
     if (isAborted(built)) {
       // The D3 release above already handed this record's handle and clip back to the slots, so
       // the record cannot outlive an abort: a later `remove(key)` would release both a second
@@ -1865,11 +2012,16 @@ function buildStage(p: StageParts): BuiltStage {
     if (gone !== undefined) return p.policy.returned(new ViewError(gone.message), null)
     if (o?.signal?.aborted === true) return ABORTED
 
-    const sprite = await add(item.src, {
-      key: item.key,
-      signal: o?.signal,
-      ...(item.pin === true ? { pin: true as const } : {}),
-    } as never)
+    // §8.10 — a mounted sprite is about to be shown: `visible`, ahead of background adds.
+    const sprite = await addAs(
+      item.src,
+      {
+        key: item.key,
+        signal: o?.signal,
+        ...(item.pin === true ? { pin: true as const } : {}),
+      } as never,
+      'visible',
+    )
     if (isAborted(sprite) || sprite instanceof Error) return sprite
 
     const created = stage.view({
@@ -2096,6 +2248,8 @@ function buildStage(p: StageParts): BuiltStage {
       // Views first — §4.6's teardown order — then the slots, then the context, then the surface.
       for (const v of [...views]) (v as unknown as { dispose(): void }).dispose()
       views.length = 0
+      // §8.10 — queued ingests settle ABORTED and close what they own; the running one is told.
+      lane.dispose()
       p.lru.clear()
       p.bus.clear()
       while (p.teardown.length > 0) p.teardown.pop()?.()
