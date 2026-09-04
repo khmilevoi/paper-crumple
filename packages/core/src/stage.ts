@@ -841,6 +841,8 @@ function buildStage(p: StageParts): BuiltStage {
     // `on('error')` or orphan handler (§10.6) re-showing the view onto the same sprite — moves
     // that view to the end of the set (`attachRecord`), and a live `Set` iterator visits entries
     // appended during iteration, so the fan-out would revisit it and never run out.
+    // The snapshot also refreshes a view a handler hid or moved mid-fan-out; that is safe because
+    // `paint` returns early when the view has no record, matching the walk in `remove`.
     const shown = [...viewsShowing(record.key)]
     if (!atOrAbove(level, 'front')) {
       // Draw class is sprite-scoped too: every view showing this sprite repaints.

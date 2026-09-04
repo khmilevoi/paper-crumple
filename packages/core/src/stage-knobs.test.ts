@@ -678,7 +678,7 @@ describe('the view index by sprite key', () => {
     // Two views refreshed once each, and each refresh's hook re-shows both (one nested draw
     // apiece): six draws. A count anywhere near the hook's cap means the loop was fed by the
     // re-shows rather than by the two views that were showing when set() was called.
-    expect(draws).toBeLessThanOrEqual(6)
+    expect(draws).toBe(6)
     s.stage.dispose()
   })
 })
