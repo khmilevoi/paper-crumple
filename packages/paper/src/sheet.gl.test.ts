@@ -1072,15 +1072,17 @@ describe('task 12 fix round 1 (findings 1, 2, 3)', () => {
       sheet.dispose()
       return
     }
-    // renderFront's own one draw, plus the hull field's own pass A (design 2026-09-02 §2) — and
-    // nothing from the tight or loose passes, which are consumed from `source()`'s own build. The
-    // count is exact rather than approximate: the hull field is the built size, 128x128, so
-    // `scheduleFor` (gl-sdf.ts:295) gives `levels = ceil(log2(128)) = 7`, a schedule of
+    // renderFront's own one draw, plus the hull field's own pass A (design 2026-09-02 §2), plus
+    // pass B's two draws — and nothing from the tight pass, which is consumed from `source()`'s
+    // own build. (`source()` builds no loose field any more: nothing reads one before `build()`,
+    // so the first `build()` at this framing is where pass B runs — `lastFieldBuild.loose`'s doc
+    // comment.) The count is exact rather than approximate: the hull field is the built size,
+    // 128x128, so `scheduleFor` (gl-sdf.ts) gives `levels = ceil(log2(128)) = 7`, a schedule of
     // `[64,32,16,8,4,2,1]` plus the extra unit pass = 8 entries, and pass A therefore spends
-    // `2 * (8 + 1) + 1 = 19` draws (gl-sdf.ts:407). 19 + renderFront's 1 = 20. A regression that
-    // stopped reusing `source()`'s tight and loose fields would add pass A a second time and pass B
-    // on top, which this exact count still catches.
-    expect(draws).toBe(20)
+    // `2 * (8 + 1) + 1 = 19` draws. 19 + pass B's 2 + renderFront's 1 = 22. A regression that
+    // stopped reusing `source()`'s tight field would add pass A a second time, which this exact
+    // count still catches.
+    expect(draws).toBe(22)
 
     sheet.releaseFront(front)
     sheet.dispose()
