@@ -10,6 +10,7 @@ import {
 } from '@paper-crumple/core/unstable'
 import type { GlContext, ScratchPools, Target, Texture } from '@paper-crumple/core/unstable'
 import { createGlFixture, type PaperGlFixture } from './testing/gl-fixture.js'
+import { silhouetteBytes } from './testing/silhouette.js'
 import { createSdfBuilder, looseSizeFor, sigmaFor } from './gl-sdf.js'
 
 let fixture: PaperGlFixture | null = null
@@ -799,39 +800,6 @@ function oraclePassA(
   return field
 }
 
-/**
- * `tools/bench/gl/harness.ts`'s `insideSilhouette` / `silhouetteBytes` — the bench artwork, a
- * head over two legs. Keep the two in step: this copy is what makes "identical on the bench
- * artwork" a statement about the artwork the bench actually measures.
- */
-function insideSilhouette(w: number, h: number, x: number, y: number): boolean {
-  const cx = w / 2
-  const cy = h * 0.36
-  const r = Math.min(w, h) * 0.27
-  if (Math.hypot(x - cx, y - cy) <= r) return true
-  const legW = w * 0.15
-  const top = cy
-  const bottom = h * 0.93
-  const l1 = cx - w * 0.22
-  const l2 = cx + w * 0.07
-  return y >= top && y <= bottom && ((x >= l1 && x <= l1 + legW) || (x >= l2 && x <= l2 + legW))
-}
-
-function silhouetteBytes(w: number, h: number): Uint8Array {
-  const out = new Uint8Array(w * h * 4)
-  for (let y = 0; y < h; y++) {
-    for (let x = 0; x < w; x++) {
-      const p = (y * w + x) * 4
-      const inside = insideSilhouette(w, h, x + 0.5, y + 0.5)
-      out[p] = (x * 255) / w
-      out[p + 1] = (y * 255) / h
-      out[p + 2] = 140
-      out[p + 3] = inside ? 255 : 0
-    }
-  }
-  return out
-}
-
 interface IdentityCase {
   readonly name: string
   readonly artwork: { readonly w: number; readonly h: number }
@@ -844,6 +812,8 @@ interface IdentityCase {
    * exactly what the exact-size oracle then proves.
    */
   readonly first?: { readonly w: number; readonly h: number }
+  /** The field storage the builder must report — proof that a forced byte-mode case took it. */
+  readonly expectBits?: 'R16F' | 'RGBA8'
 }
 
 /** Builds `c` through the production builder and through the oracle; the fields must agree. */
@@ -869,6 +839,7 @@ function expectIdenticalField(ctx: GlContext, c: IdentityCase): void {
     casePools.dispose()
     return
   }
+  if (c.expectBits !== undefined) expect(builder.contract.bits, c.name).toBe(c.expectBits)
   if (c.first !== undefined) {
     const grown = builder.buildField({
       artwork,
@@ -902,15 +873,17 @@ function expectIdenticalField(ctx: GlContext, c: IdentityCase): void {
     casePools.dispose()
     return
   }
-  // Not vacuous: the field is signed, so both sides of the silhouette are in the comparison.
+  // Not vacuous: the field is signed, so both sides of the silhouette are in the comparison. The
+  // raw byte-mode value is the encoded distance, whose zero level set is `encode.y * 255 = 128`.
+  const zero = byteMode ? 128 : 0
   let lo = Infinity
   let hi = -Infinity
   for (const v of theirs) {
     if (v < lo) lo = v
     if (v > hi) hi = v
   }
-  expect(lo, c.name).toBeLessThan(0)
-  expect(hi, c.name).toBeGreaterThan(0)
+  expect(lo, c.name).toBeLessThan(zero)
+  expect(hi, c.name).toBeGreaterThan(zero)
   expect(firstMismatch(ours, theirs), `${c.name}: first differing texel`).toBe(-1)
   builder.dispose()
   casePools.dispose()
@@ -996,6 +969,33 @@ describe('texelFetch selects the texel texture(p / uSize) selected — byte for 
       artworkUv: [1, 1, 0, 0],
       field: { w: 452, h: 512 },
       first: { w: 512, h: 512 },
+    })
+  })
+
+  it('in byte mode (no float render target): the RGBA8 coords and field, byte for byte', () => {
+    const { ctx } = open()
+    // `createGlContext` returns a plain object (the artwork suite forces `exactByteFetch` the same
+    // way), so a shallow clone with `caps.floatRT` off sends the builder — and the oracle, which
+    // reads the same flag — down the `RGBA8` path on a driver that does have float targets. The
+    // 16-bit fixed-point coord packing and the byte field contract are what this exercises;
+    // `expectBits` proves the branch fired rather than silently taking `R16F`.
+    const byteCtx: GlContext = { ...ctx, caps: { ...ctx.caps, floatRT: false } }
+    expectIdenticalField(byteCtx, {
+      name: 'disc 64x64, byte mode',
+      artwork: { w: 64, h: 64 },
+      bytes: disc(64, 64, 20),
+      artworkUv: [1, 1, 0, 0],
+      field: { w: 64, h: 64 },
+      expectBits: 'RGBA8',
+    })
+    expectIdenticalField(byteCtx, {
+      name: 'disc 48x40 after a 64x64 build, byte mode',
+      artwork: { w: 48, h: 40 },
+      bytes: disc(48, 40, 12),
+      artworkUv: [1, 1, 0, 0],
+      field: { w: 48, h: 40 },
+      first: { w: 64, h: 64 },
+      expectBits: 'RGBA8',
     })
   })
 })
