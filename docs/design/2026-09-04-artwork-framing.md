@@ -240,10 +240,13 @@ scaled by the sprite's `h / w` — so every sample was upscaled on screen: sweat
 `341.3 x 190.2` CSS is the `384 x 214` front at `360 / 405`, and the store equals the front.
 
 Resolution: (1) `paperSheet()` reserves the margin per axis in texels (`ceil(p x A.h)` on every
-side), so `A` no longer depends on aspect and `PaperSheetHandle.overscan === sheet.overscan`;
-(2) the playground builds its stage with `artworkCssPx: 360` — a new `paperStage` option that asks
-the sheet for `ceil(360 x dpr)` artwork texels and sizes the surface for them — instead of
-`cssPx`, which means the *paper's* box; (3) the front cap is 2048 texels. Under blit,
+side), so `PaperSheetHandle.overscan === sheet.overscan` for every sprite (this alone made `A`
+aspect-free ONLY under `artworkCssPx` / `SourceOptions.artworkLongSide`, where `A` is the input;
+under `cssPx` / `maxSize`, `A` is still derived from the front and so still varies with aspect —
+in the harmless direction now, a landscape source getting MORE artwork rather than a portrait one
+getting less); (2) the playground builds its stage with `artworkCssPx: 360` — a new `paperStage`
+option that asks the sheet for `ceil(360 x dpr)` artwork texels and sizes the surface for them —
+instead of `cssPx`, which means the *paper's* box; (3) the front cap is 2048 texels. Under blit,
 `view.frame.artwork`'s long side now equals `ceil(360 x dpr)` for every sample and the backing
 store equals the canvas's CSS box times `dpr`. Known limitation kept: `exact: true` under
 `present: 'blit'` still overflows the surface; a follow-up grows the blit surface to the front.

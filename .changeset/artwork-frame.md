@@ -1,6 +1,6 @@
 ---
-'@paper-crumple/core': minor
-'@paper-crumple/paper': minor
+'@paper-crumple/core': major
+'@paper-crumple/paper': major
 '@paper-crumple/motion': minor
 ---
 
@@ -21,13 +21,17 @@ built front, which `paperSheet().build()` had as `placement` all along and now r
 `rect`. This is an addition to the `SheetRenderer` contract (spec 5.2): a custom sheet slot must
 now report it. Every slot in this family does.
 
-**`paperSheet()` freezes the overscan reserve at the factory's defaults plus `overscanHeadroom`,
-scaled by the sprite's aspect — never at the live knob values.** `maxDist` is both a hull-tier
-knob and the whole of `r_hull`, so a reserve derived from the live values was re-frozen on every
-hull-tier re-source: `p` grew, `A = maxSize / (1 + 2p)` shrank, and the artwork rescaled inside a
-bucket `fit` had sized once at `add()` — spec 8.6's forbidden silent clamp, as a silent rescale.
-`build()`'s `checkReserve` already compared against the factory reserve; `source()` now agrees
-with it. A knob past the reserve is "re-add required", as spec 8.6 says, and `overscanHeadroom`
-is the way to buy room. The `PaperSheet.overscan` doc comment states the reading and why the
-literal one — "the values at first `add()`" — is not implementable by a `source()` that has no
-memory of an earlier handle.
+**`paperSheet()` freezes the overscan reserve at the factory's defaults plus `overscanHeadroom` —
+never at the live knob values.** `maxDist` is both a hull-tier knob and the whole of `r_hull`, so a
+reserve derived from the live values was re-frozen on every hull-tier re-source: `p` grew, the
+artwork shrank, and it rescaled inside a bucket `fit` had sized once at `add()` — spec 8.6's
+forbidden silent clamp, as a silent rescale. `build()`'s `checkReserve` already compared against
+the factory reserve; `source()` now agrees with it. A knob past the reserve is "re-add required",
+as spec 8.6 says, and `overscanHeadroom` is the way to buy room. The `PaperSheet.overscan` doc
+comment states the reading and why the literal one — "the values at first `add()`" — is not
+implementable by a `source()` that has no memory of an earlier handle. (The reserve is also no
+longer scaled by the sprite's aspect at all — see `.changeset/artwork-resolution.md`, which lands
+in this same release: `PaperSheetHandle.overscan` now equals the factory's `overscan` for every
+sprite, and the margin is `ceil(overscan × artwork.h)` texels per axis rather than a uniform uv
+fraction, so `A = maxSize / (1 + 2p)` is no longer the general formula — that changeset is
+authoritative for the reserve's shape; this one is only about WHEN it is frozen.)
