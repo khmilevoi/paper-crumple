@@ -28,6 +28,22 @@
  *    (even though the front build passes `uFoldCount = 0`), and the shadow path (even though the
  *    front build passes `uShadow = 0`) are kept whole. A line deleted now cannot be added back by
  *    a later plan without re-deriving it.
+ *
+ * The performance programme's P6a then made three more edits, each identical at the RGBA8 byte
+ * level by derivation (the block above `main()` carries the proof,
+ * `paper-shader-early-out.gl.test.ts` the byte-for-byte evidence):
+ *
+ * 6. **Two early-outs at the top of `main()`**, under the front build's uniform guard
+ *    (`frontFastPath()`): an opaque artwork texel the tear's floor already covers writes
+ *    `vec4(img.rgb, 1.0)`; an empty texel further outside the noise-free scrap than any edge term
+ *    can reach writes `vec4(0.0)`. `#define PAPER_EARLY_OUT 0` compiles them out (tests only).
+ * 7. **The drop-shadow base is skipped at `uShadow == 0.0`** (and `uShadowBlur > 0.0`, which is
+ *    what keeps `shadowA` finite): `sa` is exactly `0.0` on that path, as `shadowA * 0.0` was.
+ * 8. **Three helpers split out of `scrapBase`, `noiseGate` and `tearOf`** (`scrapUnguarded`,
+ *    `gateReach`, `tearFloor`), so the early-outs evaluate the same arithmetic the full path does;
+ *    and `img`, `nUv` and `wear` moved to the top of `main()` — `wear` because `creaseNet` takes
+ *    `fwidth`, which has to stay in uniform control flow ahead of any per-fragment `return`.
+ *    Nothing else moved.
  */
 
 /** `poses.js:16`. `build()` renders pose 0, whose fold list is empty; the fold table itself is
@@ -64,6 +80,9 @@ precision highp float;
 precision highp int;
 
 #define MAX_FOLDS ${MAX_FOLDS}
+// P6a: 1 compiles the front-build early-outs in (see the block above main()), 0 compiles them
+// out. The GL identity test flips it to 0 through a string replace; it is not a knob or a uniform.
+#define PAPER_EARLY_OUT 1
 
 uniform vec2 uFrontSize;  // front-pass render target size, px
 out vec4 outColor;
@@ -332,8 +351,11 @@ vec2 toUv(vec2 p) { return p / vec2(uAspect, 1.0) + 0.5; }
  * Thresholded at zero this is a single connected blob. Everything the noise does downstream
  * is a bounded perturbation of THIS contour, which is what keeps the scrap in one piece.
  */
-float scrapBase(vec2 uv) {
-  float tight = sampleTight(uv);
+// The scrap before its border guard, plus the tight sample it started from. Split out of
+// scrapBase (P6a) so the far-outside early-out evaluates the very same arithmetic it reasons
+// about; scrapBase is this minus the guard, operation for operation as before.
+float scrapUnguarded(vec2 uv, out float tight) {
+  tight = sampleTight(uv);
   float d = max(tight, sampleLoose(uv) + uLoosePush);
   // The loose envelope collapses onto the tight field as the edge width goes to zero. Scaling
   // uLoosePush alone would not do it: a blurred SDF is HIGHER than the tight one inside every
@@ -342,6 +364,11 @@ float scrapBase(vec2 uv) {
   float k = edgeK();
   if (k < 1.0) d = tight + (d - tight) * k;
   d += uThickness;
+  return d;
+}
+float scrapBase(vec2 uv) {
+  float tight;
+  float d = scrapUnguarded(uv, tight);
   // The padded texture is finite, so refuse to paint paper on its very border where the
   // field is clamped and meaningless.
   vec2 q = abs(uv - 0.5);
@@ -376,15 +403,24 @@ float baseField(vec2 uv) {
  * on the inside, so the tear can still bite deep INWARD at full amplitude; it only limits
  * outward creation. The outward reach of the scrap comes from the blurred envelope instead.
  */
-float noiseGate(float base) {
+// The gate's reach on its own (P6a): the far-outside early-out needs exactly the number the gate
+// clamps against, so both read it from here.
+float gateReach() {
   float k = edgeK();
   float reach = uThickness + (uTearAmp * k) * 0.6 * uLooseness + (uMidAmp * k);
   // At thickness 0 the reach is exactly zero and smoothstep(0, 0, x) is undefined — on D3D it
   // came out as NaN, which leaked through the mask into the alpha of every pixel outside the
   // artwork. The floor is far below any thickness that draws a border, so it changes nothing else.
-  reach = max(reach, 0.01);
+  return max(reach, 0.01);
+}
+float noiseGate(float base) {
+  float reach = gateReach();
   return smoothstep(-reach, -reach * 0.15, base);
 }
+
+// The tear's floor (P6a): tearOf never returns less than this, in source px — see its last two
+// lines. The deep-inside early-out rests on that being an exact lower bound of paperField.
+float tearFloor(vec2 uv) { return sampleTight(uv) + uThickness * 0.4; }
 
 // Lattice of the angular base: cells per tear-frequency cell, and the lattice's rotation off
 // the image axes (so its three edge directions never line up with the sprite's).
@@ -539,7 +575,7 @@ float tearOf(vec2 uv, float base, float baseAng, out float shaped) {
   // 0.4 of the thickness rather than the earlier quarter: the V notches bite deeper than the
   // old scallops did, and where they hit the floor the band needs a few pixels of sheet under
   // it or the core rim becomes an outline drawn straight onto the print.
-  float floorD = sampleTight(uv) + uThickness * 0.4;
+  float floorD = tearFloor(uv);
   shaped = max(shaped, floorD);
   return max(d, floorD);
 }
@@ -1473,9 +1509,162 @@ vec3 fieldViz(float d) {
   return base;
 }
 
+// =============================================================================================
+// P6a — the front build's early-outs.
+//
+// Two classes of fragment have an answer before paperField runs, and this block proves it from
+// the code below rather than from the picture: the answer is identical to the full path's at the
+// RGBA8 byte level the front is written in (and bit-identical wherever a step says so; the two
+// places that are only ulp-identical under a lerp lowering of mix are called out). Everything
+// here is uniform-only arithmetic plus the one or two field fetches a predicate needs. A fragment
+// that fails a predicate simply takes the full path, so every threshold errs towards the full
+// path.
+//
+// THE GUARD, frontFastPath(): uShadow == 0.0 (with uShadowBlur > 0.0, so the shadow term the
+// full path multiplies by uShadow is a finite number — step 4 in main), uFoldCount == 0,
+// uCrumpleFill == 0.0 and uDebug == 0: the uniforms paper-renderer.ts's renderFront fixes at the
+// front build ('uniform1f(loc('shadow'), 0)', 'uniform1i(loc('foldCount'), 0)',
+// 'uniform1f(loc('crumpleFill'), 0)', 'uniform1i(loc('debug'), 0)'). Reading main() top to
+// bottom under them: the fold loop runs 0 times, so remaining = 1.0; flapPossible and
+// shadowPossible are false, so flap = layers = 0.0, top = -1, flapShadow = 0.0;
+// 'front *= 1.0 - 0.0 * 0.7 * 0.0' is 'front *= 1.0'; the crumple block is skipped
+// ('uCrumpleFill > 0.0' is false), so bodyIn = 0.0, bodyOut = 1.0 and crumple = shell = body =
+// 0.0; backAmt = 0.0; a = baseA = sheetCov; premul = back * 0.0 + front * sheetCov * 1.0, where
+// back is finite (facetShade normalises (0, 0, 1); foldCreases returns 1.0 at uFoldCount 0);
+// 'a *= 1.0', 'premul *= 1.0'; sa = 0.0 (step 4); outA = sheetCov; rgb = premul / outA when
+// outA > 1e-4, else vec3(0.0); and uDebug == 0 writes vec4(rgb, outA).
+// At uShadowBlur == 0.0 — the shadowBlur knob's minimum — the guard is false and the early-outs
+// are disabled: a performance cliff on that one setting, not a correctness one.
+//
+// (a) DEEP INSIDE — img.a == 1.0 and deepInside(uv). With img.a == 1.0 (255 / 255.0 exactly):
+//   - sheetCov = max(paperMask, 1.0) = 1.0: paperMask = sheetA + fringe * (1.0 - sheetA) lies in
+//     [0, 1], because smoothstep's t*t*(3-2t) at t <= 1 rounds to at most 1.0 and fringeTerm is a
+//     product of coverages in [0, 1];
+//   - front = mix(sheet, img.rgb, 1.0) = sheet * 0.0 + img.rgb * 1.0 = img.rgb under the spec's
+//     definition of mix, and within an ulp of it under a lerp lowering (x + (y - x) * 1.0); sheet
+//     is finite (every noise is a fract/dot of finite inputs, relief normalises a vector with
+//     z = 1.0, tearShade is an exp of a non-positive number). An ulp does not survive the RGBA8
+//     write: img.rgb is k / 255, and k / 255 within an ulp still quantises to the byte k;
+//   - the premultiplied re-blend is skipped ('sheetCov < 1.0' is false);
+//   - the deckle band's blend weight carries (1.0 - img.a) = 0.0, so front is unchanged (to the
+//     same ulp under a lerp lowering, i.e. at the byte level) whether or not that branch runs
+//     (core is finite: both smoothsteps in it have edge0 < edge1);
+//   - the hair blend is the ONLY remaining write to front, and it runs only if fringe > 0.0.
+//   So a = 1.0, premul = img.rgb, outA = 1.0, rgb = img.rgb / 1.0, and the full path writes
+//   vec4(img.rgb, 1.0) — this early-out, identical at the RGBA8 byte level — unless fringe > 0.0
+//   and sheetA < 1.0. In hull mode
+//   paperField sets fringe = 0.0 outright. In torn mode fringeTerm returns 0.0 whenever
+//   't < -uAaPx' with t = -chewed, i.e. whenever chewed > uAaPx, and tearOf's last line makes
+//   chewed = max(d, floorD) >= floorD = tearFloor(uv) exactly (max returns one of its operands).
+//   deepInside() therefore asks tearFloor(uv) > uAaPx + one tight-field texel: the expression
+//   the full path itself evaluates, plus a texel of margin for any contraction or reassociation
+//   difference between the two call sites. In hull mode the same shape is kept
+//   (samplePaper(uv) > uAaPx + one paper-field texel) although the derivation no longer needs a
+//   field test there. A texel with 0 < img.a < 1 never takes (a).
+//
+// (b) FAR OUTSIDE — img.a == 0.0 and farOutside(uv, aa). With img.a == 0.0: sheetCov =
+//   max(paperMask, 0.0) = paperMask; front = mix(sheet, img.rgb, 0.0) = sheet, and the
+//   premultiplied re-blend is skipped ('img.a > 0.0' is false). If paperMask == 0.0 then
+//   a = 0.0, premul = back * 0.0 + front * 0.0 * 1.0 = 0.0, outA = 0.0, rgb = vec3(0.0) (the
+//   'outA > 1e-4' test fails) and the full path writes vec4(0.0) — this early-out. paperMask
+//   is 0.0 exactly when sheetA == 0.0 (field <= -aa: smoothstep's clamp lands t on 0.0) and
+//   fringe == 0.0.
+//   Hull mode: field is samplePaper(uv) (uEdgeMode 1) or the alpha distance
+//   -max(aa, 0.5) <= -aa (uEdgeMode 2), and fringe = 0.0. farOutside asks
+//   samplePaper(uv) < -uAaPx, below -aa = -0.6 * uAaPx with 0.4 * uAaPx >= 0.2 px to spare.
+//   Torn mode. Let u = scrapUnguarded(uv, tight) and base = scrapBase(uv) = u - guard <= u.
+//   tearOf builds, with k = edgeK():
+//     shaped = baseAng + (low * tearAmp * uLooseness + mid * midAmp) * noiseGate(base)
+//     shaped = max(shaped, floorD)
+//     chewed = max(shaped + high * teeth * band * toothClump, floorD)
+//   and paperField returns chewed; below k == 1 main then mixes it with the alpha distance.
+//   1. noiseGate(base) is exactly 0.0 once base <= -gateReach() (smoothstep clamps t to 0.0), so
+//      the low and mid octaves add (finite) * 0.0 = 0.0 and shaped = baseAng.
+//   2. baseAng = mix(base, v, ang), ang = uTearAngular * k in [0, 1], v the barycentric
+//      interpolation of scrapBase at the three corners of the angular lattice triangle around uv
+//      (cell = uPlanePx / (uTearFreq * ANG_FREQ) source px on a side). scrapUnguarded is a max
+//      of two bilinearly sampled 1-Lipschitz fields (a signed distance and its blur) plus a
+//      constant, and a bilinear sample is a convex combination of the four texels around the
+//      point, so for any two points |F(c) - F(p)| <= |c - p| + 2*sqrt(2)*h + s (h the texel, s
+//      the quantisation step): the texels around c and p are within sqrt(2)*h of them. The
+//      barycentric-weighted distance from an interior point to a triangle's corners is at most
+//      cell / sqrt(2) (its maximum sits at the hypotenuse's midpoint), and the guard only ever
+//      lowers a corner, so v <= u + cell / sqrt(2) + slop, where slop covers the 2*sqrt(2)
+//      texels of the coarser field, one tight texel more for the jump flood's own error, and one
+//      quantisation step (R16F: 1 px below 2048 px; byte mode: uDecode.x / 255). So
+//      baseAng <= max(base, v) <= u + cell / sqrt(2) + slop; when ang <= 0.0 baseAngular returns
+//      base and the cell term is 0.
+//   3. floorD = tearFloor(uv) = tight + 0.4 * uThickness <= u - 0.6 * uThickness <= u, since
+//      max(tight, ...) >= tight. farOutside tests it explicitly all the same.
+//   4. band = 1.0 - smoothstep(0.0, max(teeth * 1.8, 0.5), abs(shaped)) is exactly 0.0 once
+//      abs(shaped) >= 1.8 * teeth (teeth = 1.6 * uChew * k), so the teeth add (finite) * 0.0 and
+//      chewed = max(shaped, floorD) = shaped.
+//   5. sheetA == 0.0 needs field <= -aa. fringe == 0.0 holds whenever chewed < -1.05 * strandLen
+//      (fringeTerm's 't > strandLen * 1.05' return, strandLen = STRAND_MULT * uFiberLen * k),
+//      whether or not paperField's 'abs(shaped) < reach' block runs. Below k == 1 the field is
+//      mix(-max(aa, 0.5), chewed, k), a convex blend of two values at most -aa - slop: at most
+//      -aa + 1 ulp after rounding, so sheetA is 0.0 or of the order of 1e-8, the alpha byte is 0
+//      either way, and the identity there is at the RGBA8 byte level.
+//   farOutside therefore asks u < -max(gateReach(), cell / sqrt(2) + slop + 2 * teeth
+//   + 1.05 * strandLen + aa): the first operand is step 1, the second steps 2-5 (a sum where a
+//   max would do — the surplus is margin). The gate's reach is NOT added to the edge terms: past
+//   -gateReach() the octaves it gates are exactly zero, so the tear amplitudes cannot move the
+//   contour there at all.
+//
+// CONTROL FLOW. Both early-outs 'return' under a per-fragment condition, which puts the rest of
+// main() in non-uniform control flow for the fragments that stay. The one derivative the front
+// build takes is creaseNet's fwidth, so 'wear' is evaluated ABOVE the early-outs, in uniform
+// flow as before; the fold loop's fwidth runs 0 times at uFoldCount == 0; and every texture()
+// below samples a single-level texture, where the implicit LOD is irrelevant (the deckle band
+// already did so under 'deckle > 0.002').
+// =============================================================================================
+float fieldTexelPx(vec2 pxPerUv, ivec2 texels) {
+  return max(pxPerUv.x / float(texels.x), pxPerUv.y / float(texels.y));
+}
+float tightTexelPx() {
+  vec2 pxPerUv = vec2(uPlanePx * uAspect / uTightUv.x, uPlanePx / uTightUv.y);
+  return fieldTexelPx(pxPerUv, textureSize(uSdfTight, 0));
+}
+float looseTexelPx() {
+  return fieldTexelPx(vec2(uPlanePx * uAspect, uPlanePx), textureSize(uSdfLoose, 0));
+}
+float paperTexelPx() {
+  return fieldTexelPx(vec2(uPlanePx * uAspect, uPlanePx), textureSize(uPaperField, 0));
+}
+
+bool frontFastPath() {
+  return uShadow == 0.0 && uShadowBlur > 0.0 && uFoldCount == 0 && uCrumpleFill == 0.0 &&
+         uDebug == 0;
+}
+
+bool deepInside(vec2 uv) {
+  if (uEdgeMode != 0) return samplePaper(uv) > uAaPx + paperTexelPx();
+  return tearFloor(uv) > uAaPx + tightTexelPx();
+}
+
+bool farOutside(vec2 uv, float aa) {
+  if (uEdgeMode != 0) return samplePaper(uv) < -uAaPx;
+  float tight;
+  float u = scrapUnguarded(uv, tight);
+  float k = edgeK();
+  float hTight = tightTexelPx();
+  float slop = 3.0 * max(hTight, looseTexelPx()) + hTight +
+               max(2.0, max(uDecodeTight.x, uDecodeLoose.x) / 255.0);
+  float ang = uTearAngular * k;
+  float cell = (ang > 0.0) ? uPlanePx / max(uTearFreq * ANG_FREQ, 1e-4) : 0.0;
+  // cell / sqrt(2): the furthest a triangle's corners can be, barycentrically weighted, from a
+  // point inside it (proof block, step 2).
+  float angTerm = cell * 0.70710678;
+  float teeth = (uChew * k) * 1.6;
+  float strandLen = (uFiberLen * k) * STRAND_MULT;
+  float edge = angTerm + slop + 2.0 * teeth + strandLen * 1.05 + aa;
+  return u < -max(gateReach(), edge) && tight + uThickness * 0.4 < -edge;
+}
+
 void main() {
   vec2 uv = gl_FragCoord.xy / uFrontSize;
   vec2 p = toPlane(uv);
+  vec2 nUv = uv * vec2(uAspect, 1.0);
 
   // Hard edge. The antialiasing width comes from uAaPx, not from fwidth of the field: the
   // field carries 1 px teeth, so its own derivative would blur exactly the detail the
@@ -1483,15 +1672,55 @@ void main() {
   // separately as translucent hair (see fringeTerm), so the sheet's own edge stays crisp under
   // the fuzz, which is what the macro photographs show.
   float aa = uAaPx * 0.6;
-  float fringe = 0.0;
-  vec2 edgeN = vec2(0.0, 1.0);
-  float field = paperField(uv, fringe, edgeN);
-  // The artwork, sampled at this fragment's own position. No transform. Ever.
+  // The artwork, sampled at this fragment's own position. No transform. Ever. (Read ahead of
+  // the paper field since P6a: the early-outs key on its alpha, and the fetch is pure.)
   ivec2 aPix = ivec2(floor(gl_FragCoord.xy - uArtworkRect.xy));
   vec4 img = (aPix.x < 0 || aPix.y < 0 ||
               aPix.x >= int(uArtworkRect.z) || aPix.y >= int(uArtworkRect.w))
     ? vec4(0.0)
     : vec4(texelFetch(uImage, aPix, 0)) / 255.0;
+
+  // Pale hairline wear across the face of the sheet. Ridged noise raised to a high power gives
+  // thin bright lines; at a low amplitude they cost nothing and are most of what makes the
+  // backing read as a physical object that has been handled.
+  //
+  // The domain is strongly ANISOTROPIC, which is the whole trick. An isotropic ridged noise has
+  // curved crests, and broad curved arcs across a sheet read as smudges, not as creases — that
+  // was the earlier build's worst surface artefact. Compressing one axis and stretching the
+  // other by 12x makes the noise vary quickly across the crease and slowly along it, so its
+  // crests run nearly straight for a long way, which is what handling creases actually look
+  // like in the collage reference. Three families at unrelated angles, so it does not read as
+  // hatching either.
+  // Two scales, because they do two different jobs. 'wear' is the handling crease — a long
+  // straight line every few hundred pixels, the mark of a sheet that has been picked up. It
+  // belongs on flat paper and it is what stops the backing reading as a flat fill.
+  //
+  // The same construction at a finer scale was tried for the crumple and does NOT work: an
+  // anisotropic ridge network run fine enough to be crumple is a set of long parallel streaks
+  // that cross the whole scrap and break into dashes where the crest dips under its threshold.
+  // It reads as machine stitching. Crumple creases are SHORT segments meeting at vertices, which
+  // is a Voronoi boundary, not a ridge — see crinkleLines below.
+  //
+  // Evaluated here, ahead of the early-outs, since P6a: creaseNet takes fwidth, and a derivative
+  // is only defined in uniform control flow — every fragment of the quad has to compute it,
+  // including the ones that return early just below.
+  float wear = 0.0;
+  if (uCreases > 0.0) wear = creaseNet(nUv, 1.0, uSeed);
+
+#if PAPER_EARLY_OUT
+  // --- 0. the front build's early-outs (P6a; the proof is the block above main) -------------
+  if (frontFastPath()) {
+    if (img.a == 1.0) {
+      if (deepInside(uv)) { outColor = vec4(img.rgb, 1.0); return; } // P6a early-out (a)
+    } else if (img.a == 0.0) {
+      if (farOutside(uv, aa)) { outColor = vec4(0.0); return; } // P6a early-out (b)
+    }
+  }
+#endif
+
+  float fringe = 0.0;
+  vec2 edgeN = vec2(0.0, 1.0);
+  float field = paperField(uv, fringe, edgeN);
   // Below the top of the edge-width ramp the field is blended toward the artwork's OWN alpha,
   // read as a distance the way the baker reads it: coverage - 0.5 is the signed distance of a
   // straight edge from the pixel centre. The distance field is sampled from a texture coarser
@@ -1578,7 +1807,7 @@ void main() {
   }
 
   // --- 3. shading ----------------------------------------------------------
-  vec2 nUv = uv * vec2(uAspect, 1.0);
+  // (nUv and the handling wear are computed at the top of main since P6a.)
   // Paper tooth. Weighted toward the fine octave: a heavy low octave reads as coloured
   // mottling rather than as a surface. Both octaves are kept above two pixels per cell — a
   // finer lattice than that is one independent hash per pixel, which is television snow rather
@@ -1593,29 +1822,6 @@ void main() {
   float grainPhoto = texture(uFibreA, nUv * uPlanePx / (300.0 * uPxScale)).r;
   float grain = mix(grainProc, grainPhoto, uPhotoFibre);
   float grainFactor = 1.0 + (grain - 0.5) * uGrain;
-
-  // Pale hairline wear across the face of the sheet. Ridged noise raised to a high power gives
-  // thin bright lines; at a low amplitude they cost nothing and are most of what makes the
-  // backing read as a physical object that has been handled.
-  //
-  // The domain is strongly ANISOTROPIC, which is the whole trick. An isotropic ridged noise has
-  // curved crests, and broad curved arcs across a sheet read as smudges, not as creases — that
-  // was the earlier build's worst surface artefact. Compressing one axis and stretching the
-  // other by 12x makes the noise vary quickly across the crease and slowly along it, so its
-  // crests run nearly straight for a long way, which is what handling creases actually look
-  // like in the collage reference. Three families at unrelated angles, so it does not read as
-  // hatching either.
-  // Two scales, because they do two different jobs. 'wear' is the handling crease — a long
-  // straight line every few hundred pixels, the mark of a sheet that has been picked up. It
-  // belongs on flat paper and it is what stops the backing reading as a flat fill.
-  //
-  // The same construction at a finer scale was tried for the crumple and does NOT work: an
-  // anisotropic ridge network run fine enough to be crumple is a set of long parallel streaks
-  // that cross the whole scrap and break into dashes where the crest dips under its threshold.
-  // It reads as machine stitching. Crumple creases are SHORT segments meeting at vertices, which
-  // is a Voronoi boundary, not a ridge — see crinkleLines below.
-  float wear = 0.0;
-  if (uCreases > 0.0) wear = creaseNet(nUv, 1.0, uSeed);
 
   // --- 3a'. the edge frame: exposed-core band width and the tear shadow -----------------------
   // Everything about the torn rim is measured in the contour's own frame — distance across it
@@ -1960,46 +2166,57 @@ void main() {
   premul *= bodyOut;
 
   // --- 4. outer drop shadow ------------------------------------------------
-  // The noise-free base, offset. The shadow is soft enough that the missing tear is
-  // invisible, and this costs two samples instead of a nine-tap blur of the real mask.
-  vec2 sUv = uv - uShadowOffset;
-  float dS = baseField(sUv);
-  float shadowMask = smoothstep(-uShadowBlur, uShadowBlur * 0.25, dS);
-  // The scrap's shadow follows the scrap, so the folds cut it away too.
-  float shadowRemaining = 1.0;
-  for (int i = 0; i < MAX_FOLDS; i++) {
-    if (i >= uFoldCount) break;
-    shadowRemaining = min(shadowRemaining, 1.0 - step(0.0, dot(toPlane(sUv), uFolds[i].xy) - uFolds[i].z));
-  }
-
-  // Once the compaction is under way the shadow follows the ball rather than the sheet: the
-  // sheet's shadow is faded out by the same frontier that fades the sheet, and the plate
-  // outline's own shadow takes over, fully so at fill 1 — the fold polygon's shadow is smaller
-  // than the ball where the rim plates stick out and cut by fold lines the ball no longer has.
-  float shadowA = shadowMask * shadowRemaining;
-  if (uShadow > 0.0 && uCrumpleFill > 0.0) {
-    vec2 bS = toBall(toPlane(sUv));
-    float rS = length(bS);
-    vec2 cS = bS / max(rS, 1e-4);
-    float lowS = tearFbm(cS * 2.4 + uSeed) * 2.0 - 1.0;
-    float midS = noiseLinear(rot2(cS * 5.2, 1.13) + uSeed * 3.1) * 2.0 - 1.0;
-    float rrS = rS / (1.0 + lowS * 0.16 + midS * 0.06);
-    float fadeS = 1.0 - smoothstep(rOut, rOut + softOut, rrS);
-    // The ball's own shadow only once the ball is nearly there: before that the sheet's shadow
-    // covers it anyway, and the two rim lookups over a 1.6 R disc are not free.
-    float ballK = smoothstep(0.7, 1.0, uCrumpleFill);
-    float ballS = 0.0;
-    if (ballK > 0.0 && rS < 1.6) {
-      float oS = outlineD(bS, reach) * uBallR * uPlanePx;
-      ballS = smoothstep(-uShadowBlur, uShadowBlur * 0.25, -oS);
+  // P6a (D2): the front build passes uShadow = 0 and the whole of this step used to be dead work
+  // — two field fetches (one in hull mode) per fragment, multiplied by 0.0 at the end. It is
+  // skipped exactly when that multiplication is a finite number times 0.0: shadowMask is a
+  // smoothstep of dS, which is finite (both base fields are finite samples plus finite uniforms,
+  // the border guard included) provided uShadowBlur > 0.0 — at uShadowBlur == 0.0 the smoothstep
+  // has edge0 == edge1 and is undefined, so that case keeps today's path, whatever it yields.
+  // With shadowA finite and non-negative, shadowA * 0.0 * (1.0 - a) is +0.0 (or -0.0), and
+  // a + (+-0.0) == a for every a: sa = 0.0 is the same outA, bit for bit.
+  float sa = 0.0;
+  if (uShadow != 0.0 || uShadowBlur <= 0.0) {
+    // The noise-free base, offset. The shadow is soft enough that the missing tear is
+    // invisible, and this costs two samples instead of a nine-tap blur of the real mask.
+    vec2 sUv = uv - uShadowOffset;
+    float dS = baseField(sUv);
+    float shadowMask = smoothstep(-uShadowBlur, uShadowBlur * 0.25, dS);
+    // The scrap's shadow follows the scrap, so the folds cut it away too.
+    float shadowRemaining = 1.0;
+    for (int i = 0; i < MAX_FOLDS; i++) {
+      if (i >= uFoldCount) break;
+      shadowRemaining = min(shadowRemaining, 1.0 - step(0.0, dot(toPlane(sUv), uFolds[i].xy) - uFolds[i].z));
     }
-    shadowA = max(shadowA * fadeS, ballS * ballK);
-  }
 
-  // A flap can land outside the base scrap and past the fold lines that cut it — that is
-  // exactly how the protruding points happen — so the alpha above is the union of what is left
-  // of the sheet with the flaps lying over it, not the sheet alone.
-  float sa = shadowA * uShadow * (1.0 - a);
+    // Once the compaction is under way the shadow follows the ball rather than the sheet: the
+    // sheet's shadow is faded out by the same frontier that fades the sheet, and the plate
+    // outline's own shadow takes over, fully so at fill 1 — the fold polygon's shadow is smaller
+    // than the ball where the rim plates stick out and cut by fold lines the ball no longer has.
+    float shadowA = shadowMask * shadowRemaining;
+    if (uShadow > 0.0 && uCrumpleFill > 0.0) {
+      vec2 bS = toBall(toPlane(sUv));
+      float rS = length(bS);
+      vec2 cS = bS / max(rS, 1e-4);
+      float lowS = tearFbm(cS * 2.4 + uSeed) * 2.0 - 1.0;
+      float midS = noiseLinear(rot2(cS * 5.2, 1.13) + uSeed * 3.1) * 2.0 - 1.0;
+      float rrS = rS / (1.0 + lowS * 0.16 + midS * 0.06);
+      float fadeS = 1.0 - smoothstep(rOut, rOut + softOut, rrS);
+      // The ball's own shadow only once the ball is nearly there: before that the sheet's shadow
+      // covers it anyway, and the two rim lookups over a 1.6 R disc are not free.
+      float ballK = smoothstep(0.7, 1.0, uCrumpleFill);
+      float ballS = 0.0;
+      if (ballK > 0.0 && rS < 1.6) {
+        float oS = outlineD(bS, reach) * uBallR * uPlanePx;
+        ballS = smoothstep(-uShadowBlur, uShadowBlur * 0.25, -oS);
+      }
+      shadowA = max(shadowA * fadeS, ballS * ballK);
+    }
+
+    // A flap can land outside the base scrap and past the fold lines that cut it — that is
+    // exactly how the protruding points happen — so the alpha above is the union of what is left
+    // of the sheet with the flaps lying over it, not the sheet alone.
+    sa = shadowA * uShadow * (1.0 - a);
+  }
   float outA = a + sa;
   vec3 rgb = (outA > 1e-4) ? premul / outA : vec3(0.0);
 
