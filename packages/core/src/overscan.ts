@@ -21,15 +21,6 @@ export const KNOB_REFERENCE_PX = 1000
  */
 export const EDGE_SLOP_REFERENCE_PX = 12
 
-/**
- * The conservative `maxDim / H` bound from the widest bucket (spec 8.6). Spec 8.6 offers either
- * this or one fixed-point iteration; the bound is taken because it is stated as a number, while
- * the iteration needs `maxDim` and `H` in a coordinate space 8.6 never defines. Overscan is a
- * reserve, so over-estimating is safe and under-estimating is the failure this whole section
- * exists to prevent.
- */
-export const ASPECT_BOUND = 1.3
-
 /** Where `paper.js:319-322`'s hard cut begins, in centred normalised texture coordinates. */
 export const GUARD_BAND_INNER = 0.482
 
@@ -62,56 +53,30 @@ export const GUARD_EPSILON_REFERENCE_PX = 2
  */
 export const RADIUS_CAP_REFERENCE_PX = KNOB_REFERENCE_PX * (GUARD_BAND_OUTER - GUARD_MARGIN_G)
 
-export type EdgeMode = 'hull' | 'torn' | 'both'
-
-/** Every term of spec 8.6's radius formulae, in reference pixels unless noted. */
+/** design 2026-09-05 §4.1's single radius. Every term is reference px unless noted. */
 export interface EdgeParams {
-  readonly mode: EdgeMode
-  /** The hull's maximum distance - the only consumer of the margin in the default mode. */
-  readonly maxDist: number
-  /** The paper's thickness. */
-  readonly thickness: number
-  /** 0..1. Drives both the blur sigma and the tear bracket. */
-  readonly looseness: number
-  /** Tear amplitude. */
-  readonly tearAmp: number
-  /** Mid-frequency amplitude. */
-  readonly midAmp: number
-  /** Fibre length; the margin reserves four of them. */
+  /** `W` — the contour's own width, design §3. */
+  readonly widthRef: number
+  /** `v` — `edgeVariance`, 0..1. */
+  readonly variance: number
+  /** `0` under finish `'clean'`; the margin reserves four of them. */
   readonly fiberLen: number
-  /** Overrides `EDGE_SLOP_REFERENCE_PX`. */
+  /** `0` under finish `'clean'`. */
+  readonly deckleWidth: number
   readonly slop?: number
 }
 
-function smoothstep(edge0: number, edge1: number, x: number): number {
-  const t = Math.min(1, Math.max(0, (x - edge0) / (edge1 - edge0)))
-  return t * t * (3 - 2 * t)
-}
-
 /**
- * The reserved radius `r`, in reference pixels, for a front build (pose 0, shadow 0):
+ * `r = W (1 + v) + 4 fiberLen + deckleWidth + e`.
  *
- * ```
- * r_hull = maxDist + e
- * r_torn = 0.45*sigma + thickness + [thickness + 0.6*looseness*tearAmp + midAmp]*edgeK
- *          + 4*fiberLen + e
- * r_both = maxDist  + thickness + [same bracket]                                 + 4*fiberLen + e
- *          sigma = 200*looseness^1.6*(maxDim/H),  edgeK = smoothstep(0, 6, thickness)
- * ```
- *
- * `r_both` is `r_torn` with `maxDist` substituted for the `0.45*sigma` blur term - the hull radius
- * standing in for the looseness blur - so `[same bracket]` reproduces the bracket whole, `edgeK`
- * included. The two readings coincide for any `thickness >= 6`, where `edgeK` saturates.
+ * `ASPECT_BOUND` and the `0.45 * sigma` blur lead are gone with `looseness`'s contribution to the
+ * width (design §6.1 item 2 zeroes `uLoosePush` in every cell), and `thickness` is gone because it
+ * has BECOME `W` (§2.3). What is left is the honest outward reach: the band's far edge, plus the
+ * two finish decorations that draw past it.
  */
 export function overscanRadius(p: EdgeParams): number {
   const slop = p.slop ?? EDGE_SLOP_REFERENCE_PX
-  if (p.mode === 'hull') return p.maxDist + slop
-
-  const edgeK = smoothstep(0, 6, p.thickness)
-  const bracket = (p.thickness + 0.6 * p.looseness * p.tearAmp + p.midAmp) * edgeK
-  const lead =
-    p.mode === 'torn' ? 0.45 * (200 * Math.pow(p.looseness, 1.6) * ASPECT_BOUND) : p.maxDist
-  return lead + p.thickness + bracket + 4 * p.fiberLen + slop
+  return p.widthRef * (1 + p.variance) + 4 * p.fiberLen + p.deckleWidth + slop
 }
 
 /**

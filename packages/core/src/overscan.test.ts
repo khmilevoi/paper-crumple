@@ -2,7 +2,6 @@ import { describe, expect, it } from 'vitest'
 import { KnobError, SheetError } from './errors.js'
 import type { EdgeParams } from './overscan.js'
 import {
-  ASPECT_BOUND,
   artworkLongSide,
   checkGuardBand,
   EDGE_SLOP_REFERENCE_PX,
@@ -19,19 +18,15 @@ import {
   RADIUS_CAP_REFERENCE_PX,
 } from './overscan.js'
 
-/**
- * A parameter set that lands spec 8.6's headline `hull ~= 0.09`. The default *values* of these
- * knobs belong to the paper slot (P10); this file asserts the arithmetic, not the defaults.
- */
-const hullParams: EdgeParams = {
-  mode: 'hull',
-  maxDist: 64,
-  thickness: 8,
-  looseness: 0.35,
-  tearAmp: 30,
-  midAmp: 12,
-  fiberLen: 6,
+/** design 2026-09-05 §4.1's single radius: `cleanParams` under finish `'clean'`. */
+const cleanParams: EdgeParams = {
+  widthRef: 47,
+  variance: 0.53,
+  fiberLen: 0,
+  deckleWidth: 0,
 }
+/** Same width and variance, under finish `'paper'`. */
+const paperParams: EdgeParams = { ...cleanParams, fiberLen: 4, deckleWidth: 7 }
 
 const number = (v: InstanceType<typeof KnobError> | number): number => {
   expect(v).not.toBeInstanceOf(KnobError)
@@ -45,10 +40,6 @@ describe('the reference frame', () => {
 
   it('takes the conservative end of the 8-12 reference px slop band', () => {
     expect(EDGE_SLOP_REFERENCE_PX).toBe(12)
-  })
-
-  it('uses the conservative maxDim/H bound from the widest bucket', () => {
-    expect(ASPECT_BOUND).toBe(1.3)
   })
 })
 
@@ -70,56 +61,25 @@ describe('overscanFromRadius', () => {
   })
 })
 
-describe('overscanRadius', () => {
-  it('is maxDist + slop in hull mode, and nothing else', () => {
-    expect(overscanRadius(hullParams)).toBe(64 + 12)
-    // The default mode needs no tear, no teeth and no fibre - only maxDist.
-    expect(overscanRadius({ ...hullParams, tearAmp: 900, fiberLen: 900, midAmp: 900 })).toBe(76)
+describe('overscanRadius (design 2026-09-05 §4.1)', () => {
+  it('collapses the three branches to one radius', () => {
+    expect(overscanRadius(cleanParams)).toBeCloseTo(47 * 1.53 + 12, 9)
+    expect(overscanRadius(paperParams)).toBeCloseTo(47 * 1.53 + 4 * 4 + 7 + 12, 9)
   })
 
-  it('lands spec 8.6 hull ~= 0.09 for a 64 reference px maxDist', () => {
-    expect(number(overscanFor(hullParams))).toBeCloseTo(0.09, 2)
-  })
-
-  it('adds the blur, the thickness bracket and the fibre in torn mode', () => {
-    const p: EdgeParams = { ...hullParams, mode: 'torn' }
-    const sigma = 200 * Math.pow(p.looseness, 1.6) * ASPECT_BOUND
-    const edgeK = smoothstep(0, 6, p.thickness)
-    const expected =
-      0.45 * sigma +
-      p.thickness +
-      (p.thickness + 0.6 * p.looseness * p.tearAmp + p.midAmp) * edgeK +
-      4 * p.fiberLen +
-      EDGE_SLOP_REFERENCE_PX
-    expect(overscanRadius(p)).toBeCloseTo(expected, 10)
-  })
-
-  it('substitutes maxDist for the blur term in both mode, bracket and edgeK intact', () => {
-    const torn: EdgeParams = { ...hullParams, mode: 'torn' }
-    const both: EdgeParams = { ...hullParams, mode: 'both' }
-    const sigma = 200 * Math.pow(hullParams.looseness, 1.6) * ASPECT_BOUND
-    expect(overscanRadius(both)).toBeCloseTo(
-      overscanRadius(torn) - 0.45 * sigma + hullParams.maxDist,
-      10,
-    )
-  })
-
-  it('orders the three modes hull < torn < both, which is what 8.6 measures', () => {
-    const hull = overscanRadius(hullParams)
-    const torn = overscanRadius({ ...hullParams, mode: 'torn' })
-    const both = overscanRadius({ ...hullParams, mode: 'both' })
-    expect(hull).toBeLessThan(torn)
-    expect(torn).toBeLessThan(both)
-  })
-
-  it('saturates edgeK at thickness 6, so the bracket reading cannot matter above it', () => {
-    const thick: EdgeParams = { ...hullParams, mode: 'torn', thickness: 6 }
-    const thicker: EdgeParams = { ...thick, thickness: 12 }
-    expect(overscanRadius(thicker) - overscanRadius(thick)).toBeCloseTo(12, 6)
+  it('is the slop alone at width 0', () => {
+    expect(overscanRadius({ widthRef: 0, variance: 0.53, fiberLen: 0, deckleWidth: 0 })).toBe(12)
   })
 
   it('accepts a caller-supplied slop instead of the default', () => {
-    expect(overscanRadius({ ...hullParams, slop: 8 })).toBe(72)
+    expect(overscanRadius({ ...cleanParams, slop: 8 })).toBeCloseTo(47 * 1.53 + 8, 9)
+  })
+
+  it('composes with overscanFromRadius through overscanFor', () => {
+    expect(number(overscanFor(cleanParams))).toBeCloseTo(
+      number(overscanFromRadius(overscanRadius(cleanParams))),
+      12,
+    )
   })
 })
 
@@ -278,8 +238,3 @@ describe('the guard margin (design 2026-09-05 §4.2)', () => {
     expect(rows).toHaveLength(3)
   })
 })
-
-function smoothstep(edge0: number, edge1: number, x: number): number {
-  const t = Math.min(1, Math.max(0, (x - edge0) / (edge1 - edge0)))
-  return t * t * (3 - 2 * t)
-}

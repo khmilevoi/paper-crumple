@@ -67,9 +67,14 @@ export interface NumberKnob extends KnobBase {
   readonly min: number
   readonly max: number
   readonly step?: number
-  /** Quoted against a 1000 px-tall sprite; the renderer rescales, the UI shows it unscaled
-   *  (§6.4). Use `scaleKnob` below. */
-  readonly reference?: 'sprite-px'
+  /**
+   * `'sprite-px'` is quoted against a 1000 px-tall sprite; the renderer rescales through
+   * `scaleKnob`, the UI shows it unscaled (§6.4). `'artwork-pct'` is a percentage of the
+   * ARTWORK'S SHORT SIDE (design 2026-09-05 §3) and `scaleKnob` deliberately does NOT interpret
+   * it: it is a marker for the UI's unit column and for `paperSheet`'s own resolution step, which
+   * computes one reference-px width and hands it to all three consumers.
+   */
+  readonly reference?: 'sprite-px' | 'artwork-pct'
 }
 
 export interface IntKnob extends KnobBase {
