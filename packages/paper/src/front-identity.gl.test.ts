@@ -224,15 +224,16 @@ describe("the front's artwork rect through readPixels, partitioned by alpha", ()
     // clear. Measured at this build the sheet covers a 1-4 px ring around the silhouette and
     // nothing beyond it — Ruling 1 above gives the mechanism and the numbers. Both counts are
     // pinned individually rather than summed so the split is stated outright rather than implied,
-    // and because the sheet's reach is now the hull's own (traced at a 49 px front, carried over
-    // 1:1), a hull that lost or gained reach moves them.
+    // and because the sheet's reach is now the hull's own (traced at a 52 px front — design
+    // 2026-09-05 §4.2 widens the exact-mode trace front's margin over its pre-§4.2 figure, which
+    // moves this split — carried over 1:1), a hull that lost or gained reach moves them.
     const covered = empty.filter((t) => got[t * 4 + 3] === 255)
     const clear = empty.filter((t) => got[t * 4 + 3] === 0)
-    expect(covered.length).toBe(191)
-    expect(clear.length).toBe(625)
+    expect(covered.length).toBe(152)
+    expect(clear.length).toBe(664)
     expect(covered.length + clear.length).toBe(empty.length)
     // Paper, not a stray copy of the artwork: the default `paperColor` (#f7f4ed) reads high on all
-    // three channels. Measured, the per-channel minimum over all 191 covered texels is
+    // three channels. Measured, the per-channel minimum over all 152 covered texels is
     // (241, 238, 231), so the bound below clears it by ~90 counts; the artwork's own RGB at the
     // sixteen texels sampled (the ring's first row) is `g = 40..94, b <= 17`, nowhere near it.
     for (const t of covered.slice(0, 16)) {

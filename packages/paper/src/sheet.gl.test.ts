@@ -3,7 +3,7 @@ import { ABORTED, GlError, SheetError, SourceExpiredError, isAborted } from '@pa
 import {
   checkGuardBand,
   frontBytes,
-  GUARD_BAND_INNER,
+  guardMarginsFor,
   KNOB_REFERENCE_PX,
   overscanRadius,
 } from '@paper-crumple/core/unstable'
@@ -182,12 +182,19 @@ describe('source() (spec 5.2, 8.5, 8.6)', () => {
     expect(handle instanceof Error || isAborted(handle)).toBe(false)
     if (handle instanceof Error || isAborted(handle)) return
     expect(Math.max(handle.front.w, handle.front.h)).toBeLessThanOrEqual(128)
-    expect(handle.front.w - handle.artwork.w).toBe(
-      2 * Math.ceil(handle.overscan * handle.artwork.h),
-    )
-    // Exact, not `- 1`: that tolerance covered `frontForArtwork`'s closed-form estimate
-    // under-shooting the true maximum by one texel, which the `capA + 1` probe (F3) now corrects.
-    expect(handle.artwork.w).toBe(Math.floor(128 / (1 + 2 * handle.overscan)))
+    // design 2026-09-05 §4.2: the margin is paint plus guard band, per axis (`guardMarginsFor`),
+    // not the plain `ceil(overscan * artwork.h)` figure both axes used to share.
+    const margins = guardMarginsFor({ artwork: handle.artwork, overscan: handle.overscan })
+    expect(handle.front.w - handle.artwork.w).toBe(2 * margins.x)
+    expect(handle.front.h - handle.artwork.h).toBe(2 * margins.y)
+    // Maximal: one more texel of artwork would not have fit `maxSize` (F3's `capA + 1` probe).
+    const bigger = dimsForLongSide(Math.max(handle.artwork.w, handle.artwork.h) + 1, 64, 64)
+    const biggerMargins = guardMarginsFor({ artwork: bigger, overscan: handle.overscan })
+    const biggerFront = {
+      w: bigger.w + 2 * biggerMargins.x,
+      h: bigger.h + 2 * biggerMargins.y,
+    }
+    expect(Math.max(biggerFront.w, biggerFront.h)).toBeGreaterThan(128)
     sheet.dispose()
   })
 
@@ -202,7 +209,9 @@ describe('source() (spec 5.2, 8.5, 8.6)', () => {
     if (handle instanceof Error || isAborted(handle)) return
     expect(handle.exact).toBe(true)
     expect(handle.artwork).toEqual({ w: 40, h: 40 })
-    expect(handle.front.w).toBe(40 + 2 * Math.ceil(handle.overscan * 40))
+    const margins = guardMarginsFor({ artwork: { w: 40, h: 40 }, overscan: handle.overscan })
+    expect(handle.front.w).toBe(40 + 2 * margins.x)
+    expect(handle.front.h).toBe(40 + 2 * margins.y)
     sheet.dispose()
   })
 
@@ -225,10 +234,13 @@ describe('source() (spec 5.2, 8.5, 8.6)', () => {
       expect(handle instanceof Error || isAborted(handle)).toBe(false)
       if (handle instanceof Error || isAborted(handle)) continue
       expect(handle.overscan).toBe(sheet.overscan)
-      expect(handle.front.w - handle.artwork.w).toBe(handle.front.h - handle.artwork.h)
-      expect(handle.front.w - handle.artwork.w).toBe(
-        2 * Math.ceil(handle.overscan * handle.artwork.h),
-      )
+      // design 2026-09-05 §4.2: `frontForArtwork` no longer applies the same texel count on both
+      // axes — the two per-axis identities replace the old x/y symmetry assertion.
+      expect(handle.front.w - handle.artwork.w).toBe(2 * handle.marginX)
+      expect(handle.front.h - handle.artwork.h).toBe(2 * handle.marginY)
+      const margins = guardMarginsFor({ artwork: handle.artwork, overscan: handle.overscan })
+      expect(handle.marginX).toBe(margins.x)
+      expect(handle.marginY).toBe(margins.y)
       expect(Math.max(handle.front.w, handle.front.h)).toBeLessThanOrEqual(128)
     }
     sheet.dispose()
@@ -292,7 +304,9 @@ describe('source() (spec 5.2, 8.5, 8.6)', () => {
     if (handle instanceof Error || isAborted(handle)) return
     expect(Math.max(handle.front.w, handle.front.h)).toBeLessThanOrEqual(256)
     expect(Math.max(handle.artwork.w, handle.artwork.h)).toBeLessThan(400)
-    expect(Math.max(handle.artwork.w, handle.artwork.h)).toBe(212)
+    // design 2026-09-05 §4.2: the guard band widens the margin, so the artwork this maxSize can
+    // hold is smaller than the pre-§4.2 figure.
+    expect(Math.max(handle.artwork.w, handle.artwork.h)).toBe(202)
     sheet.dispose()
   })
 
@@ -443,11 +457,15 @@ async function boxSprite(w: number, h: number, inset: number): Promise<ImageBitm
  * Before the §8.6 per-axis amendment, the reserve was a single uv FRACTION applied to both axes,
  * so on a portrait front the x margin held only `w / h` of it and every 2:3 demo sample (trench,
  * jeans, avatar, camel coat) was refused with "the hull reaches 0.5000 of the front on axis x"
- * while the landscape ones (sweater, sneakers) sailed through. Now the margin is `ceil(p * A.h)`
- * TEXELS on every side of the artwork, so the x margin holds the same number of texels as the y
- * margin and nothing needs scaling by `h / w`; the guard band still reads the sheet's real,
- * unrounded reach rather than §8.3's rect — whose 4 % margin is bucket-decision safety, not
- * paint, and whose clamp to the plane can never report more than 0.5000.
+ * while the landscape ones (sweater, sneakers) sailed through. §8.6's fix made the margin
+ * `ceil(p * A.h)` TEXELS on every side of the artwork, closing that hole for the paint reserve.
+ * design 2026-09-05 §4.2 closes a second, pre-existing hole in the same spot: the TEXTURE guard
+ * band itself (`checkGuardBand`'s 1.8 % outer band) was additive-and-per-axis while the paint
+ * reserve above was multiplicative-and-isotropic, so the margin is now `guardMarginsFor`'s
+ * per-axis total (paint plus guard band), which coincides with `ceil(p * A.h)` on x and y only
+ * for a square artwork. The guard band still reads the sheet's real, unrounded reach rather than
+ * §8.3's rect — whose 4 % margin is bucket-decision safety, not paint, and whose clamp to the
+ * plane can never report more than 0.5000.
  */
 describe('portrait sprites and the guard band (spec 8.6)', () => {
   function refused(handle: unknown): handle is Error {
@@ -482,24 +500,22 @@ describe('portrait sprites and the guard band (spec 8.6)', () => {
     sheet.dispose()
   })
 
-  it('still refuses a full-bleed photo at zero headroom, naming a reach inside the band', async () => {
+  it('now sources a full-bleed photo at zero headroom, which design 2026-09-05 §4.2 fixes', async () => {
+    // Before §4.2, the reserve left exactly zero clearance for a silhouette that fills its own
+    // bitmap beyond the paint radius itself: the margin was paint alone, so the guard band's own
+    // 1.8 % outer strip had nothing reserving it, and the paint reached to within the half texel
+    // between the silhouette's own texel centres and its true edge — a real figure just inside the
+    // band (measured at the time: 0.4962, where the clamped §8.3 rect the check used to read could
+    // only ever say a flat 0.5000) — and `source()` refused with "guard band" / "re-add required".
+    // §4.2 folds the guard band `g` into the reserved margin itself (`guardMarginsFor`), so this
+    // exact case — the pre-existing hole this task closes — now has real clearance and succeeds.
     const ctx = open()
     const sheet = paperSheet({ edgeMode: 'torn' })
     sheet.mount(ctx)
     const bitmap = await boxSprite(64, 96, 0)
     const handle = await sheet.source(bitmap, { maxSize: 128, exact: false })
     bitmap.close()
-    expect(SheetError.is(handle)).toBe(true)
-    if (!SheetError.is(handle)) return
-    expect(handle.message).toContain('guard band')
-    expect(handle.message).toContain('re-add required')
-    // The reserve leaves exactly zero clearance for a silhouette that fills its own bitmap, so
-    // the paint reaches the front's edge to within the half texel between the silhouette's own
-    // texel centres and its true edge — a real figure inside the band (measured: 0.4962 here),
-    // where the clamped §8.3 rect the check used to read could only ever say a flat 0.5000.
-    const reached = Number(/reaches (\d+\.\d+)/.exec(handle.message)?.[1])
-    expect(reached).toBeGreaterThan(GUARD_BAND_INNER)
-    expect(reached).toBeLessThanOrEqual(0.5)
+    expect(refused(handle), String((handle as Error)?.message)).toBe(false)
     sheet.dispose()
   })
 
@@ -966,13 +982,16 @@ describe('source() spends pass A alone; the first build() at its framing reuses 
   }
 
   /**
-   * The front `build(handle, handle.front)` rendered right after `source()` at 5f61a46 — when the
-   * loose field it sampled was the one `source()` had blurred — hashed over its RGBA bytes on the
+   * The front `build(handle, handle.front)` rendered right after `source()` — when the loose
+   * field it sampled was the one `source()` had blurred — hashed over its RGBA bytes on the
    * level-2 suite's own SwiftShader (the same rasteriser the `__screenshots__` suite pins pixels
-   * on). Regenerate only for a deliberate change to the fields or the paper shader, by running
-   * this test at the commit being pinned and copying the hash the failure prints.
+   * on). Regenerated for design 2026-09-05 §4.2 (previously pinned at 5f61a46): §4.2 changes
+   * `handle.front`'s size for this fixture, which reflows every pixel this hash covers even
+   * though the fields and the paper shader are unchanged. Regenerate only for a deliberate change
+   * to the fields, the paper shader, or the margin, by running this test at the commit being
+   * pinned and copying the hash the failure prints.
    */
-  const FRONT_AT_HANDLE_FRONT_GOLDEN = { hull: 'c890972d', torn: '43b1fbf8' } as const
+  const FRONT_AT_HANDLE_FRONT_GOLDEN = { hull: '457ed64a', torn: '44a1976d' } as const
 
   it('renders, at handle.front, the front the source-time blur used to produce (golden from 5f61a46)', async () => {
     const ctx = open()
@@ -1957,44 +1976,47 @@ type ReadbackGolden = {
 }
 
 /**
- * What `source()` answered for three fixtures in both edge modes at perf/2x @ 653d394 — the
- * synchronous `readBackField` path, on the level-2 suite's own SwiftShader — right before the
- * field readback became asynchronous (`PIXEL_PACK_BUFFER` + `fenceSync`, spec §8.10). The pin is
- * that the decode, the hull traced off it and the two rects it feeds did not move by a byte: the
- * hull digest is over the polygon's raw `Float32Array`, and `frontRect` / `rect` are the exact
- * integers. Regenerate only for a deliberate change to pass A or the decode, by running this test
- * at the commit being pinned and copying what the failures print.
+ * What `source()` answers for three fixtures in both edge modes at the hull default reserve — the
+ * synchronous `readBackField` path, on the level-2 suite's own SwiftShader. Regenerated for design
+ * 2026-09-05 §4.2's per-axis guard margin (previously pinned at perf/2x @ 653d394, right before
+ * the field readback became asynchronous, `PIXEL_PACK_BUFFER` + `fenceSync`, spec §8.10): §4.2
+ * changes the front's size for every non-square fixture here, which shifts `frontRect` and moves
+ * the hull digest even though pass A and the decode are unchanged. The pin is that the decode, the
+ * hull traced off it and the two rects it feeds do not move by a byte ACROSS RUNS: the hull digest
+ * is over the polygon's raw `Float32Array`, and `frontRect` / `rect` are the exact integers.
+ * Regenerate only for a deliberate change to pass A, the decode, or the margin, by running this
+ * test at the commit being pinned and copying what the failures print.
  */
 const READBACK_GOLDEN: Record<string, ReadbackGolden> = {
   'ellipse/hull': {
-    hull: '2bbbd370',
-    frontRect: { x: 22, y: 14, w: 89, h: 63 },
-    rect: { x: 6, y: 3, w: 38, h: 27 },
+    hull: 'd1b998b9',
+    frontRect: { x: 19, y: 14, w: 91, h: 64 },
+    rect: { x: 4, y: 2, w: 41, h: 29 },
   },
   'ellipse/torn': {
     hull: 'use-alpha',
-    frontRect: { x: 10, y: 6, w: 108, h: 82 },
-    rect: { x: -2, y: -4, w: 53, h: 40 },
+    frontRect: { x: 14, y: 10, w: 102, h: 79 },
+    rect: { x: -2, y: -4, w: 52, h: 40 },
   },
   'top/hull': {
-    hull: '9e56b7ea',
-    frontRect: { x: 27, y: 11, w: 81, h: 73 },
-    rect: { x: 10, y: 0, w: 49, h: 44 },
+    hull: '87af288d',
+    frontRect: { x: 27, y: 13, w: 78, h: 68 },
+    rect: { x: 8, y: -1, w: 50, h: 44 },
   },
   'top/torn': {
     hull: 'use-alpha',
-    frontRect: { x: 13, y: 2, w: 102, h: 91 },
-    rect: { x: -4, y: -12, w: 74, h: 66 },
+    frontRect: { x: 15, y: 6, w: 99, h: 87 },
+    rect: { x: -5, y: -12, w: 75, h: 66 },
   },
   'square/hull': {
-    hull: '639f583f',
-    frontRect: { x: 16, y: 13, w: 95, h: 101 },
-    rect: { x: 3, y: 1, w: 57, h: 61 },
+    hull: 'e58c543a',
+    frontRect: { x: 15, y: 15, w: 95, h: 99 },
+    rect: { x: 1, y: 1, w: 61, h: 63 },
   },
   'square/torn': {
     hull: 'use-alpha',
-    frontRect: { x: 5, y: 5, w: 116, h: 116 },
-    rect: { x: -10, y: -10, w: 84, h: 84 },
+    frontRect: { x: 8, y: 8, w: 112, h: 112 },
+    rect: { x: -11, y: -11, w: 85, h: 85 },
   },
 }
 

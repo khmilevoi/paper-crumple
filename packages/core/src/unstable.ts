@@ -52,10 +52,15 @@ export {
   exactFrontLongSide,
   GUARD_BAND_INNER,
   GUARD_BAND_OUTER,
+  GUARD_EPSILON_REFERENCE_PX,
+  GUARD_MARGIN_G,
+  guardMarginsFor,
   KNOB_REFERENCE_PX,
+  marginFractionFor,
   overscanFor,
   overscanFromRadius,
   overscanRadius,
+  RADIUS_CAP_REFERENCE_PX,
 } from './overscan.js'
 export type { EdgeMode, EdgeParams, GuardCheckInput } from './overscan.js'
 

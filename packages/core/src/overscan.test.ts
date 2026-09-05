@@ -8,10 +8,15 @@ import {
   EDGE_SLOP_REFERENCE_PX,
   exactFrontLongSide,
   GUARD_BAND_INNER,
+  GUARD_EPSILON_REFERENCE_PX,
+  GUARD_MARGIN_G,
+  guardMarginsFor,
   KNOB_REFERENCE_PX,
+  marginFractionFor,
   overscanFor,
   overscanFromRadius,
   overscanRadius,
+  RADIUS_CAP_REFERENCE_PX,
 } from './overscan.js'
 
 /**
@@ -181,6 +186,96 @@ describe('checkGuardBand', () => {
     expect(
       checkGuardBand({ frontSize: { w: 0, h: 384 }, hullExtent: { x: 0, y: 0, w: 1, h: 1 } }),
     ).toBeInstanceOf(SheetError)
+  })
+})
+
+describe('the guard margin (design 2026-09-05 §4.2)', () => {
+  it('derives g from the band itself', () => {
+    expect(GUARD_MARGIN_G).toBeCloseTo(0.018, 12)
+    expect(RADIUS_CAP_REFERENCE_PX).toBeCloseTo(482, 9)
+  })
+
+  it('refuses a radius at or past the 482 px cap, where the guard margin diverges', () => {
+    expect(overscanFromRadius(RADIUS_CAP_REFERENCE_PX)).toBeInstanceOf(KnobError)
+    expect(overscanFromRadius(RADIUS_CAP_REFERENCE_PX - 1)).not.toBeInstanceOf(KnobError)
+  })
+
+  // R14: the brief's own test named this "129 texels of total y margin" but its assertion
+  // evaluates to 131 (129 is the epsilon = 0 value, 128.7164 before rounding). Named to state
+  // both.
+  it('reproduces the hull defaults: 128.72 before epsilon, 131 texels with epsilon = 2, of total y margin at A.h 790', () => {
+    // The radius is the REDESIGN's, `W (1 + v) + e` at `W 47, v 0.53`, times the 0.25 headroom —
+    // not `maxDist + e`, which is 105 and gives a different sixth digit.
+    const p = number(overscanFromRadius(1.25 * (47 * 1.53 + 12)))
+    expect(p).toBeCloseTo(0.132731, 6)
+    expect(marginFractionFor(p)).toBeCloseTo(0.162932, 6)
+    const eps = GUARD_EPSILON_REFERENCE_PX / KNOB_REFERENCE_PX
+    const m = guardMarginsFor({ artwork: { w: 790, h: 790 }, overscan: p })
+    expect(m.y).toBe(Math.ceil(790 * (0.162932 + eps)))
+    expect(m.y).toBe(131)
+    expect(m.x).toBe(m.y) // a square: the two axes coincide
+  })
+
+  it('needs a wider x margin than y on a landscape artwork', () => {
+    const p = number(overscanFromRadius(1.25 * (47 * 1.53 + 12)))
+    const m = guardMarginsFor({ artwork: { w: 2370, h: 790 }, overscan: p })
+    expect(m.x).toBeGreaterThan(m.y)
+    const g = GUARD_MARGIN_G
+    const eps = GUARD_EPSILON_REFERENCE_PX / KNOB_REFERENCE_PX
+    const q = 1 - 2 * g * (1 + 2 * p)
+    expect(m.x).toBe(Math.ceil((g * 2370 + (790 * p) / q) / (1 - 2 * g) + 790 * eps))
+  })
+
+  it('keeps q <= GUARD_BAND_INNER on both axes for every aspect and reserve it is used with', () => {
+    for (const R of [40, 84, 105, 150, 300]) {
+      const p = number(overscanFromRadius(R))
+      for (const [w, h] of [
+        [790, 790],
+        [2370, 790],
+        [790, 3160],
+        [531, 271],
+        [433, 768],
+      ]) {
+        const m = guardMarginsFor({ artwork: { w, h }, overscan: p })
+        const front = { w: w + 2 * m.x, h: h + 2 * m.y }
+        const rho = (R * front.h) / KNOB_REFERENCE_PX
+        const check = checkGuardBand({
+          frontSize: front,
+          hullExtent: { x: m.x - rho, y: m.y - rho, w: w + 2 * rho, h: h + 2 * rho },
+        })
+        expect(check, `R ${R} on ${w}x${h}: ${String(check?.message)}`).toBeUndefined()
+      }
+    }
+  })
+
+  // measurement, not a gate (R13): see the task report for the verdict line this produces.
+  it('reports the slack the closed form leaves at epsilon 0 (design §11, item 4)', () => {
+    const rows: string[] = []
+    // R14: rho is computed from the true reserve radius R = 104.8875, not the rounded 105 the
+    // brief's own snippet used — the rounded value pushes qx to 0.482073, over the line, for no
+    // real reason.
+    const R = 1.25 * (47 * 1.53 + 12)
+    const p = number(overscanFromRadius(R))
+    for (const [w, h] of [
+      [790, 790],
+      [2370, 790],
+      [790, 3160],
+    ]) {
+      const g = GUARD_MARGIN_G
+      const q = 1 - 2 * g * (1 + 2 * p)
+      const my = Math.ceil(h * marginFractionFor(p))
+      const mx = Math.ceil((g * w + (h * p) / q) / (1 - 2 * g))
+      const front = { w: w + 2 * mx, h: h + 2 * my }
+      const rho = (R * front.h) / KNOB_REFERENCE_PX
+      rows.push(
+        `${w}x${h}: qx=${((w + 2 * rho) / 2 / front.w).toFixed(6)} ` +
+          `qy=${((h + 2 * rho) / 2 / front.h).toFixed(6)}`,
+      )
+    }
+    // Recorded in the task report; the gate is the `q <= 0.482` case above, which runs at
+    // epsilon 2. Verdict per controller ruling R1: epsilon frozen at 2 for the whole branch —
+    // not revisited here despite every measured q clearing 0.482 at epsilon 0.
+    expect(rows).toHaveLength(3)
   })
 })
 

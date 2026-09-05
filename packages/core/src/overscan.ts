@@ -36,6 +36,28 @@ export const GUARD_BAND_INNER = 0.482
 /** Where it is complete: the field has collapsed to -1e4 by here. */
 export const GUARD_BAND_OUTER = 0.5
 
+/**
+ * The band's own width, as a fraction of the texture: `0.5 - 0.482`. Never write `0.018`.
+ * design 2026-09-05 §4.2.
+ */
+export const GUARD_MARGIN_G = GUARD_BAND_OUTER - GUARD_BAND_INNER
+
+/**
+ * Insurance on top of the closed form, in reference px. The derivation is exact and every
+ * rounding in the pipeline (`reachRect`'s `+0.5`, the inclusive `signedFieldExtent` box, the
+ * `ceil`s below) runs in the check's favour, so this is not load-bearing — design §11's fourth
+ * measurement is whether it can be zero. Frozen at 2 by controller ruling R1 for the whole
+ * branch: changing it after Task 8 would invalidate the committed `hull-default.json` golden
+ * frame, which cannot be recaptured once `develop`'s `edgeMode` is gone.
+ */
+export const GUARD_EPSILON_REFERENCE_PX = 2
+
+/**
+ * Where the guard margin diverges: `1 - 2g - 2R/1000 = 0`. Past it no front is large enough to
+ * hold the reserve outside the band, so `overscanFromRadius` refuses here rather than at 500.
+ */
+export const RADIUS_CAP_REFERENCE_PX = KNOB_REFERENCE_PX * (GUARD_BAND_OUTER - GUARD_MARGIN_G)
+
 export type EdgeMode = 'hull' | 'torn' | 'both'
 
 /** Every term of spec 8.6's radius formulae, in reference pixels unless noted. */
@@ -95,13 +117,43 @@ export function overscanRadius(p: EdgeParams): number {
  * negative. Spec 8.6 forbids a silent clamp and spec 10.8 forbids a throw, so it returns.
  */
 export function overscanFromRadius(r: number): InstanceType<typeof KnobError> | number {
-  if (!Number.isFinite(r) || r < 0 || 2 * r >= KNOB_REFERENCE_PX) {
+  if (!Number.isFinite(r) || r < 0 || r >= RADIUS_CAP_REFERENCE_PX) {
     return new KnobError(
-      `edge parameters reserve ${r} reference px per side, which leaves no artwork inside the ` +
-        `${KNOB_REFERENCE_PX} px reference frame - re-add required with smaller edge knobs`,
+      `edge parameters reserve ${r} reference px per side, which leaves no artwork outside the ` +
+        `shader's guard band inside the ${KNOB_REFERENCE_PX} px reference frame - re-add ` +
+        `required with smaller edge knobs`,
     )
   }
   return r / (KNOB_REFERENCE_PX - 2 * r)
+}
+
+/**
+ * The TOTAL per-side margin on the front's height axis, as a fraction of the artwork's height —
+ * paint plus guard, `epsilon` NOT included. design 2026-09-05 §4.2's y-axis solve:
+ * `m_y / A.h = (p(1 + 2g) + g) / Q`, `Q = 1 - 2g(1 + 2p)`.
+ */
+export function marginFractionFor(overscan: number): number {
+  const p = Math.max(0, overscan)
+  const g = GUARD_MARGIN_G
+  return (p * (1 + 2 * g) + g) / (1 - 2 * g * (1 + 2 * p))
+}
+
+/**
+ * The TOTAL per-side margin in texels on each axis. `y` carries the self-referential solve; `x`
+ * follows from it, because the paint reach is isotropic in texels but quoted against the front's
+ * HEIGHT, while `axisIntrusion` is relative to each axis's own dimension.
+ */
+export function guardMarginsFor(o: { readonly artwork: Size; readonly overscan: number }): {
+  readonly x: number
+  readonly y: number
+} {
+  const p = Math.max(0, o.overscan)
+  const g = GUARD_MARGIN_G
+  const eps = GUARD_EPSILON_REFERENCE_PX / KNOB_REFERENCE_PX
+  const q = 1 - 2 * g * (1 + 2 * p)
+  const y = Math.ceil(o.artwork.h * (marginFractionFor(p) + eps))
+  const x = Math.ceil((g * o.artwork.w + (o.artwork.h * p) / q) / (1 - 2 * g) + o.artwork.h * eps)
+  return { x, y }
 }
 
 /**

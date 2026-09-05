@@ -1306,7 +1306,7 @@ export function paperSheet(options?: PaperSheetOptions): PaperSheet {
       artworkLongSide: o.artworkLongSide,
     })
     if (SheetError.is(framing)) return framing
-    const { artwork, front } = framing
+    const { artwork, marginX, marginY, front } = framing
     const frontLongSide = Math.max(front.w, front.h)
 
     // Step 4: sdfRes, off the front's long side (§7.4.3).
@@ -1725,6 +1725,8 @@ export function paperSheet(options?: PaperSheetOptions): PaperSheet {
       frontRect,
       front,
       artwork,
+      marginX,
+      marginY,
       overscan: p,
       sdfRes,
       srcW,

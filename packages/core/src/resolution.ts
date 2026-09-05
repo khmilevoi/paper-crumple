@@ -1,4 +1,5 @@
 /** Resolution arithmetic (spec 7.4 and 7.4.3). Pure integer, no GL, no allocation. */
+import { GUARD_EPSILON_REFERENCE_PX, KNOB_REFERENCE_PX, marginFractionFor } from './overscan.js'
 
 /**
  * Every *bucket* front size and every `sdfRes` is a multiple of this; the `exact` front (§7.4.3)
@@ -58,21 +59,26 @@ export interface FrontCapRequest {
 
 /**
  * The front cap — the owned surface's side — that lets every sprite carry `artworkLongSide`
- * artwork texels: `artworkLongSide + 2 x ceil(overscan x artworkLongSide)`, matching the sheet's
- * own per-axis margin (`frontForArtwork` in `paper/src/handle.ts`) texel for texel, rounded up to
- * a multiple of 64 and clamped to `cap`, through `sizeForDisplay` at `dpr` 1 so the two share one
+ * artwork texels: `artworkLongSide + 2 x ceil(artworkLongSide x (marginFractionFor(overscan) +
+ * epsilon))`, matching the sheet's own per-axis margin (`guardMarginsFor`, applied by
+ * `frontForArtwork` in `paper/src/handle.ts`) texel for texel on the long side, rounded up to a
+ * multiple of 64 and clamped to `cap`, through `sizeForDisplay` at `dpr` 1 so the two share one
  * quantisation. A non-finite `overscan` (a sheet whose reserve could not be derived; its
- * `mount()` refuses) is read as "reserve everything" and lands on `cap`, never on the floor.
+ * `mount()` refuses) is read as "reserve everything" and lands on `cap`, never on the floor —
+ * handled before `marginFractionFor` runs, because that closed form is only defined below
+ * `RADIUS_CAP_REFERENCE_PX`'s divergence and diverges to a negative fraction past it, not to
+ * `+Infinity`.
  */
 export function frontCapFor(o: FrontCapRequest): number {
-  const p = Number.isFinite(o.overscan) ? Math.max(0, o.overscan) : Number.POSITIVE_INFINITY
   const a = Math.max(0, o.artworkLongSide)
-  // Not `ceil(A * (1 + 2p))`: the sheet's own margin is `ceil(p * A)` texels on EACH side
-  // (`frontForArtwork` in `paper/src/handle.ts`), so the front it actually needs is
-  // `A + 2 * ceil(p * A)`. `2 * ceil(x) - ceil(2x)` can be 1, and rounding up to a multiple of
-  // 64 does not always absorb that texel, so the closed form under-requests by one texel for
-  // roughly 1% of `A` values (e.g. `p = 105/790`, `A = 151`: 192 vs the needed 193 -> 256).
-  const wanted = a + 2 * Math.ceil(p * a)
+  // The sheet's own per-axis margin (`guardMarginsFor`, applied by `frontForArtwork`) texel for
+  // texel on the long side: `marginFractionFor` is the y-axis total, and design §4.2 shows the
+  // x-axis bound coincides with it at the square and is smaller for a landscape source, so this
+  // is a ceiling for every aspect.
+  const eps = GUARD_EPSILON_REFERENCE_PX / KNOB_REFERENCE_PX
+  const wanted = Number.isFinite(o.overscan)
+    ? a + 2 * Math.ceil(a * (marginFractionFor(Math.max(0, o.overscan)) + eps))
+    : Number.POSITIVE_INFINITY
   return sizeForDisplay({ cssPx: wanted, dpr: 1, cap: o.cap })
 }
 

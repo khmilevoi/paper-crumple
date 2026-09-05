@@ -84,16 +84,16 @@ describe('paperStage(), the factory', () => {
       e,
     )
     if (stage instanceof Error || isAborted(stage)) return expect.fail('stage refused')
-    // frontCapFor({ artworkLongSide: 540, overscan: 0.08, cap: 2048 }): 540 * 1.16 = 626.4 -> 627
-    // -> sizeForDisplay rounds up to the next multiple of 64 -> 640.
-    expect(stage.surface.width).toBe(640)
+    // frontCapFor({ artworkLongSide: 540, overscan: 0.08, cap: 2048 }) (design 2026-09-05 §4.2:
+    // paint plus the guard band, not paint alone) -> sizeForDisplay rounds up to 704.
+    expect(stage.surface.width).toBe(704)
     const sprite = await stage.add(asBitmap(fakeBitmap({ width: 64, height: 64 })), {
       key: 'a',
       pin: true,
     })
     if (sprite instanceof Error || isAborted(sprite)) return expect.fail('add refused')
     expect(sheet.calls.source[0]?.o.artworkLongSide).toBe(540)
-    expect(sheet.calls.source[0]?.o.maxSize).toBe(640)
+    expect(sheet.calls.source[0]?.o.maxSize).toBe(704)
     stage.dispose()
   })
 
