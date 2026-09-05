@@ -587,19 +587,47 @@ interface PendingReadback {
 }
 
 /**
- * How many turns `awaitFieldReadback` polls before it gives the field up to the CPU fallback. A
- * safety net against a fence that never signals while the context still says it is not lost —
- * not a budget, and not a number of milliseconds: a turn is whatever `nextTurn()` costs on the
- * thread at hand. Measured on `gl.e2e.add.1024` (a 512² field, one sprite, nothing else
- * queued): ANGLE D3D11 signals its ~20 ms readback after 250–1720 turns, the level-2 suite's
- * SwiftShader its ~700 ms of raster after ~15 000 — 20–50 µs of `postTask` per turn on an
- * otherwise idle thread, either way. A swap burst queues up to thirty sprites' builds ahead of
- * one readback, so the legitimate wait is ~1 s on D3D11 (~60 000 turns at the fastest rate
- * seen) and ~20 s on SwiftShader (~450 000). Sized past both; a fence that outlives it is a
- * driver that has hung without losing the context, and the CPU field is the right answer for
- * that.
+ * How many turns `awaitFieldReadback` polls at full speed before it backs off (spec §8.10).
+ *
+ * A fence poll costs one platform turn, and a turn is ~47 µs of `postTask` on an otherwise idle
+ * thread — so polling a whole fence wait undelayed spins one core for its entire length:
+ * measured on `gl.e2e.add.1024`, 586–1722 turns for ANGLE D3D11's ~20 ms readback and ~15 000
+ * for the level-2 suite's SwiftShader ~700 ms. That is the CPU of a busy wait paid for a GPU
+ * the thread is not waiting on.
+ *
+ * Eight turns of it is not: it is the window in which a fence that is already signalled, or
+ * signals within a few turns of the issue, is answered with zero added latency — the common
+ * case, and the one the back-off must not tax. Past it every poll takes
+ * `READBACK_SLOW_DELAY_MS` instead.
  */
-const READBACK_POLL_MAX = 1_000_000
+const READBACK_FAST_POLLS = 8
+
+/**
+ * The back-off turn's delay in milliseconds past the fast phase (spec §8.10). One millisecond is
+ * the smallest delay worth asking for, and the browser's own timer clamp is the real floor
+ * (4 ms once timers nest past the fifth, which a long poll does), so a fence is noticed between
+ * 1 and 4 ms after it signals rather than within a turn: up to +4 ms on a single add's
+ * `sourceMs`, against ~20 ms (D3D11) to ~700 ms (SwiftShader) of a core no longer spinning.
+ * `scheduler.postTask`, where it exists, has no such clamp and answers nearer the 1 ms.
+ */
+const READBACK_SLOW_DELAY_MS = 1
+
+/**
+ * How long `awaitFieldReadback` waits, in wall-clock milliseconds, before it gives the field up
+ * to the CPU fallback (spec §8.10). A safety net against a fence that never signals while the
+ * context still says it is not lost — not a budget: every legitimate wait is far inside it. A
+ * swap burst queues up to thirty sprites' builds ahead of one readback, so the longest
+ * legitimate wait measured is ~1 s on D3D11 and ~20 s on SwiftShader — the latter being a
+ * software rasteriser under a test harness, not a driver a consumer runs on, and the ceiling is
+ * sized for the real one. A fence that outlives ten seconds of polling is a driver that has hung
+ * without losing the context, and the CPU field is the right answer for that.
+ *
+ * Wall-clock and not a turn count because the turn is no longer a fixed cost: the fast phase's
+ * turns are microseconds and the back-off's are milliseconds, so the same count would mean two
+ * different waits (S2's `READBACK_POLL_MAX` of 1 000 000 turns was ~47 s of spinning on a hung
+ * driver, and would have been ~20 minutes at the back-off's rate).
+ */
+const READBACK_WAIT_MAX_MS = 10_000
 
 /**
  * §8.10 — the first half of `readBackField`, with the copy's destination moved from a client
@@ -672,14 +700,25 @@ function issueFieldReadback(m: Mounted, field: Field): PendingReadback | null {
 }
 
 /**
- * §8.10 — polls the fence once per platform turn and deletes it on every exit. One `nextTurn()`
- * per iteration, FIRST: WebGL updates a sync's status only between tasks, so a poll in the
- * issuing task would always read `TIMEOUT_EXPIRED`. Each iteration reads the signal — the
- * `ABORTED` answer is `source()`'s check point 2 (§10.5): stop spending, keep what is already
- * paid for — then `isContextLost()` (`'failed'`: a lost context never signals), then
- * `clientWaitSync(sync, 0, 0)`: signalled → `'ready'`; `WAIT_FAILED` → `'failed'`;
- * `TIMEOUT_EXPIRED` → another turn, up to `READBACK_POLL_MAX`. `'failed'` means the CPU
- * fallback, exactly as a refused `readPixels` does.
+ * §8.10 — polls the fence once per platform turn and deletes it on every exit. One yield per
+ * iteration, FIRST: WebGL updates a sync's status only between tasks, so a poll in the issuing
+ * task would always read `TIMEOUT_EXPIRED`. Each iteration reads the signal — the `ABORTED`
+ * answer is `source()`'s check point 2 (§10.5, §5.2's `source(signal)`): stop spending, keep
+ * what is already paid for — then `isContextLost()` (`'failed'`: a lost context never signals),
+ * then `clientWaitSync(sync, 0, 0)`: signalled → `'ready'`; `WAIT_FAILED` → `'failed'`;
+ * `TIMEOUT_EXPIRED` → another turn. `'failed'` means the CPU fallback, exactly as a refused
+ * `readPixels` does, and every exit reaches it at most once because there is one exit per call.
+ *
+ * **The turn backs off** (S9): the first `READBACK_FAST_POLLS` are plain `nextTurn()`s, so a
+ * fence that is already signalled or signals within a few turns is answered with no added
+ * latency at all; every later one is `nextTurn({ delay: READBACK_SLOW_DELAY_MS })`, which parks
+ * the poll on the platform's timer instead of spinning a core through the whole GPU wait. The
+ * price is the timer clamp — the fence is noticed 1–4 ms after it signals rather than within a
+ * turn — and the wait that pays it is the one that was already 20–700 ms long.
+ *
+ * The give-up bound is therefore wall-clock (`READBACK_WAIT_MAX_MS` from the moment the wait
+ * starts) and not a turn count, since the two phases' turns differ by three orders of magnitude.
+ * It is only ever read in the slow phase: the fast phase cannot outlast it.
  *
  * The poll itself runs outside `scope()`: `clientWaitSync`, `isContextLost` and `deleteSync`
  * bind nothing and write no state §5.1 enumerates, and an outermost scope's restore is some
@@ -691,8 +730,10 @@ async function awaitFieldReadback(
   signal: AbortSignal | undefined,
 ): Promise<'ready' | 'failed' | Aborted> {
   const { gl } = m.ctx
-  for (let turn = 0; turn < READBACK_POLL_MAX; turn++) {
-    await nextTurn()
+  const deadline = performance.now() + READBACK_WAIT_MAX_MS
+  for (let turn = 0; ; turn++) {
+    const fast = turn < READBACK_FAST_POLLS
+    await (fast ? nextTurn() : nextTurn({ delay: READBACK_SLOW_DELAY_MS }))
     if (signal !== undefined && signal.aborted) {
       gl.deleteSync(pending.sync)
       return ABORTED
@@ -710,9 +751,11 @@ async function awaitFieldReadback(
       gl.deleteSync(pending.sync)
       return 'failed'
     }
+    if (!fast && performance.now() >= deadline) {
+      gl.deleteSync(pending.sync)
+      return 'failed'
+    }
   }
-  gl.deleteSync(pending.sync)
-  return 'failed'
 }
 
 /**
@@ -1339,8 +1382,9 @@ export function paperSheet(options?: PaperSheetOptions): PaperSheet {
     // Abort check point 2 (§10.5): after the resample and pass A, before the CPU hull trace —
     // the boundary between work already paid for and the one genuinely interruptible step. A
     // signal already aborted spends no readback; otherwise the check point is `readField`'s
-    // yield (§8.10: the readback is issued now and its fence polled once per turn, so the wait
-    // for the GPU — the whole queue ahead of this sprite, in a burst — leaves the main thread),
+    // yield (§8.10: the readback is issued now and its fence polled once per turn — eight fast
+    // turns, then one every `READBACK_SLOW_DELAY_MS` — so the wait for the GPU, the whole queue
+    // ahead of this sprite in a burst, leaves both the main thread and the CPU),
     // or one platform turn when no field is needed. Either way this call yields once here,
     // which is what makes this point (and the third one, below) observable from outside a
     // synchronous call: without it nothing here would ever yield.
