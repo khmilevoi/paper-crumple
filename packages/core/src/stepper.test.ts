@@ -247,4 +247,27 @@ describe('createFakeTimers', () => {
     expect(fired).not.toHaveBeenCalled()
     expect(timers.pending).toBe(0)
   })
+
+  it('yield() counts the yield and leaves the clock alone', async () => {
+    const timers = createFakeTimers(0)
+    const fired = vi.fn()
+    timers.setTimeoutFn(fired, 2)
+    await timers.yield()
+    expect(timers.yields).toBe(1)
+    expect(timers.now()).toBe(0)
+    expect(fired).not.toHaveBeenCalled()
+  })
+
+  it('yield({ delay }) advances the clock by delay — firing what falls due — and still counts', async () => {
+    const timers = createFakeTimers(0)
+    const fired = vi.fn()
+    timers.setTimeoutFn(fired, 2)
+    await timers.yield({ delay: 1 })
+    expect(timers.now()).toBe(1)
+    expect(fired).not.toHaveBeenCalled()
+    await timers.yield({ delay: 1 })
+    expect(timers.now()).toBe(2)
+    expect(timers.yields).toBe(2)
+    expect(fired).toHaveBeenCalledTimes(1)
+  })
 })

@@ -1998,6 +1998,54 @@ const READBACK_GOLDEN: Record<string, ReadbackGolden> = {
   },
 }
 
+interface PostTaskOptions {
+  readonly priority: 'user-visible'
+}
+interface SchedulerLike {
+  postTask(fn: () => void, o: PostTaskOptions): unknown
+}
+
+/** The sheet's own `READBACK_SLOW_DELAY_MS`; a module constant there, restated here on purpose. */
+const READBACK_SLOW_DELAY_MS_FOR_TEST = 1
+
+/**
+ * Every platform turn taken while it is installed, in order, as its delay in milliseconds: `0`
+ * for a fast turn, the back-off for a delayed one (spec §8.10). A fast turn is
+ * `scheduler.postTask` — the route `nextTurn()` prefers, and the level-2 suite's Chromium has it
+ * — and a back-off turn is `setTimeout`, the only route that can wait. Both spies call through,
+ * so the turns still happen; the timer spy records only the sheet's own back-off delay, so a
+ * timer some other part of the page arms is not counted as a poll.
+ */
+function watchTurns() {
+  const seq: number[] = []
+  const g = globalThis as unknown as { scheduler?: Partial<SchedulerLike> }
+  expect(
+    typeof g.scheduler?.postTask,
+    'this browser has no scheduler.postTask, so the turn spy would be reading the wrong route',
+  ).toBe('function')
+  const scheduler = g.scheduler as SchedulerLike
+  const realPost = scheduler.postTask.bind(scheduler)
+  const post = vi.spyOn(scheduler, 'postTask').mockImplementation((fn, o) => {
+    seq.push(0)
+    return realPost(fn, o)
+  })
+  const realTimeout = globalThis.setTimeout
+  const timer = vi.spyOn(globalThis, 'setTimeout').mockImplementation(((
+    fn: () => void,
+    ms?: number,
+  ) => {
+    if (ms === READBACK_SLOW_DELAY_MS_FOR_TEST) seq.push(ms)
+    return realTimeout(fn, ms)
+  }) as unknown as typeof setTimeout)
+  return {
+    delays: (): number[] => seq,
+    restore: () => {
+      post.mockRestore()
+      timer.mockRestore()
+    },
+  }
+}
+
 describe('async field readback (spec §8.10)', () => {
   const fixtures = [
     ['ellipse', () => sprite()],
@@ -2271,6 +2319,104 @@ describe('async field readback (spec §8.10)', () => {
     expect(readPixels, 'a fresh mount has no cached hull').toHaveBeenCalledTimes(1)
     expect(hullDigest(again.hull)).toBe(READBACK_GOLDEN['ellipse/hull'].hull)
     readPixels.mockRestore()
+    sheet.dispose()
+  })
+
+  it('a fence that signals at once is answered inside the fast phase, with no delayed poll', async () => {
+    const ctx = open()
+    const sheet = paperSheet()
+    sheet.mount(ctx)
+    const bitmap = await topSprite()
+    // The fence's status is the variable under test, so it is stated rather than raced for.
+    const clientWaitSync = vi
+      .spyOn(ctx.gl, 'clientWaitSync')
+      .mockImplementation(() => ctx.gl.ALREADY_SIGNALED)
+    const turns = watchTurns()
+    const handle = await sheet.source(bitmap, { maxSize: 128, exact: false })
+    const delays = turns.delays()
+    turns.restore()
+    bitmap.close()
+    expect(GlError.is(handle) || SheetError.is(handle) || isAborted(handle)).toBe(false)
+    if (GlError.is(handle) || SheetError.is(handle) || isAborted(handle)) return
+    expect(clientWaitSync, 'one poll settles it').toHaveBeenCalledTimes(1)
+    expect(
+      delays,
+      'the whole wait is fast turns: the back-off costs a signalled fence nothing',
+    ).toEqual([0])
+    expect(hullDigest(handle.hull)).toBe(READBACK_GOLDEN['top/hull'].hull)
+    clientWaitSync.mockRestore()
+    sheet.dispose()
+  })
+
+  it('backs off to a delayed turn after eight fast polls when the fence signals late (spec §8.10)', async () => {
+    const ctx = open()
+    const sheet = paperSheet()
+    sheet.mount(ctx)
+    const bitmap = await topSprite()
+    let polls = 0
+    const clientWaitSync = vi.spyOn(ctx.gl, 'clientWaitSync').mockImplementation(() => {
+      polls += 1
+      return polls <= 12 ? ctx.gl.TIMEOUT_EXPIRED : ctx.gl.ALREADY_SIGNALED
+    })
+    const turns = watchTurns()
+    const handle = await sheet.source(bitmap, { maxSize: 128, exact: false })
+    const delays = turns.delays()
+    turns.restore()
+    bitmap.close()
+    expect(GlError.is(handle) || SheetError.is(handle) || isAborted(handle)).toBe(false)
+    if (GlError.is(handle) || SheetError.is(handle) || isAborted(handle)) return
+    expect(clientWaitSync).toHaveBeenCalledTimes(13)
+    expect(
+      delays.slice(0, 8),
+      'eight fast turns first, so a fence that signals soon waits nothing',
+    ).toEqual([0, 0, 0, 0, 0, 0, 0, 0])
+    expect(delays.slice(8), 'every later turn is a millisecond of back-off, not a spin').toEqual([
+      1, 1, 1, 1, 1,
+    ])
+    // The late signal changes when the bytes are decoded, not what they say.
+    expect(hullDigest(handle.hull)).toBe(READBACK_GOLDEN['top/hull'].hull)
+    clientWaitSync.mockRestore()
+    sheet.dispose()
+  })
+
+  it('gives the field up to the CPU fallback — exactly once — when the wall-clock bound runs out', async () => {
+    const ctx = open()
+    const sheet = paperSheet()
+    sheet.mount(ctx)
+    const bitmap = await topSprite()
+    const clientWaitSync = vi
+      .spyOn(ctx.gl, 'clientWaitSync')
+      .mockImplementation(() => ctx.gl.TIMEOUT_EXPIRED)
+    const deleteSync = vi.spyOn(ctx.gl, 'deleteSync')
+    const getBufferSubData = vi.spyOn(ctx.gl, 'getBufferSubData')
+    // A clock that gains a million seconds a reading: whichever call the wait takes for its base,
+    // the next one it makes is already past any finite bound. The bound is wall-clock, so this
+    // is what exhausting it looks like — no test waits ten real seconds for it.
+    let reading = 0
+    const now = vi.spyOn(performance, 'now').mockImplementation(() => {
+      reading += 1
+      return reading * 1e9
+    })
+    // `cpuFieldFallback` is the only 2D-canvas user on this path (the resample takes the GPU
+    // branch on this context), so a 2D context asked for after this line is the fallback running.
+    const getContext = vi.spyOn(OffscreenCanvas.prototype, 'getContext')
+    const handle = await sheet.source(bitmap, { maxSize: 128, exact: false })
+    now.mockRestore()
+    bitmap.close()
+    expect(GlError.is(handle) || SheetError.is(handle) || isAborted(handle)).toBe(false)
+    if (GlError.is(handle) || SheetError.is(handle) || isAborted(handle)) return
+    expect(
+      clientWaitSync,
+      'the fast phase runs, then one slow poll finds the bound gone',
+    ).toHaveBeenCalledTimes(9)
+    expect(deleteSync, 'the fence is deleted on the exhausted exit').toHaveBeenCalledTimes(1)
+    expect(getBufferSubData, 'an exhausted wait never reads the buffer').not.toHaveBeenCalled()
+    expect(getContext, 'the CPU fallback runs exactly once').toHaveBeenCalledTimes(1)
+    expect(Math.abs(handle.frontRect.y - READBACK_GOLDEN['top/hull'].frontRect.y)).toBeLessThan(10)
+    clientWaitSync.mockRestore()
+    deleteSync.mockRestore()
+    getBufferSubData.mockRestore()
+    getContext.mockRestore()
     sheet.dispose()
   })
 })
