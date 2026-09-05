@@ -39,6 +39,7 @@ import {
   drawTargetFor,
   hullCacheKey,
   KNOB_REFERENCE_PX,
+  nextTurn,
   overscanRadius,
   uploadBytes,
 } from '@paper-crumple/core/unstable'
@@ -291,6 +292,17 @@ interface Mounted {
      */
     readonly paperField: Field | null
   } | null
+  /**
+   * §8.10 — the one `PIXEL_PACK_BUFFER` `source()`'s field readback lands in: created on the
+   * first readback, grown (`bufferData`, never shrunk) to the largest field read since, freed by
+   * `dispose()`. One buffer because the stage's ingest lane admits one sprite between `source()`
+   * and `build()`; `readbackBusy` is its occupancy, set from the issue to the copy (or the
+   * abort), and a `source()` that finds it set — a direct caller's second concurrent call, never
+   * the lane's — takes the synchronous `readBackField` instead.
+   */
+  readbackBuffer: WebGLBuffer | null
+  readbackBytes: number
+  readbackBusy: boolean
 }
 
 /**
@@ -437,12 +449,14 @@ function ensurePools(
  * 147 KB for the decoded field plus 147 KB (RED/FLOAT) or 590 KB (RGBA/FLOAT) for the destination,
  * per add; at the bench's 512² it is a megabyte each.
  *
- * Safe only because every one of them is **consumed before the next call can start**. The decoded
- * field goes to `buildHull` (which reads it and returns a `PackedHull` of its own points) or to
- * `signedFieldExtent` (which returns four numbers), both synchronous, both on the same statement as
- * the `acquireCpuField` call that produced it; `cpuFieldFallback`'s field is a fresh array and is
- * never one of these. The `readPixels` buffers never leave this function. Nothing retains them, so
- * nothing can observe the reuse.
+ * Safe only because every one of them is **consumed in the task that fills it**. The decoded
+ * field goes to `buildHull` (which reads it and returns a `PackedHull` of its own points) and to
+ * `signedFieldExtent` (which returns four numbers), both synchronous, and `source()` reaches both
+ * without yielding after the decode: `completeFieldReadback` runs after the fence poll's last
+ * turn, and `readBackField` on the busy path decodes before its turn and copies out first
+ * (§8.10); `cpuFieldFallback`'s field is a fresh array and is never one of these. The read
+ * buffers never leave these functions. Nothing retains them across a turn, so nothing can
+ * observe the reuse.
  *
  * Grow-only, handed out as a `subarray` of the exact length asked for, so a smaller field after a
  * larger one reuses the same storage rather than reallocating (and never sees stale tail texels:
@@ -478,6 +492,10 @@ function byteReadbackScratch(n: number): Uint8Array {
  * format ("a quarter of the transfer and what ANGLE reports for an R16F target"), RGBA/FLOAT
  * otherwise; the RGBA8 fallback decodes through the byte contract. `null` on any failure — errors
  * are swallowed on purpose, because the caller has a CPU transform (§8.2.1).
+ *
+ * Since §8.10 this is the **busy fallback**: `source()` reads through `issueFieldReadback` /
+ * `completeFieldReadback` below — the same read, split around a fence so the GPU wait leaves the
+ * main thread — and takes this synchronous path only while the pack buffer is another call's.
  *
  * `READ_FRAMEBUFFER` is bound explicitly: `DrawScope.bindTarget` only ever binds
  * `DRAW_FRAMEBUFFER`, so a caller that skipped this would silently read the canvas backbuffer.
@@ -538,6 +556,196 @@ function readBackField(ctx: GlContext, field: Field, texelPx: number): Float32Ar
     } else {
       const buf = byteReadbackScratch(w * h * 4)
       gl.readPixels(0, 0, w, h, gl.RGBA, gl.UNSIGNED_BYTE, buf)
+      if (gl.getError() === gl.NO_ERROR) {
+        out = decodeScratch(w * h)
+        for (let i = 0, p = 0; i < out.length; i++, p += 4) {
+          out[i] = ((buf[p] / 255) * d0 + d1) / texelPx
+        }
+      }
+    }
+    return out
+  })
+}
+
+/**
+ * A field readback in flight (§8.10): `readPixels` into the sheet's pack buffer is queued behind
+ * pass A on the GPU, and `sync` signals once it has executed. Everything `completeFieldReadback`
+ * needs to decode the copy travels here, so the field slot itself is free to be reused meanwhile
+ * — GL ordering guarantees the copy read what pass A wrote, whatever a later call draws there.
+ */
+interface PendingReadback {
+  readonly sync: WebGLSync
+  readonly w: number
+  readonly h: number
+  readonly channels: 1 | 4
+  readonly kind: 'float' | 'byte'
+  readonly decode: readonly [number, number]
+}
+
+/**
+ * How many turns `awaitFieldReadback` polls before it gives the field up to the CPU fallback. A
+ * safety net against a fence that never signals while the context still says it is not lost —
+ * not a budget, and not a number of milliseconds: a turn is whatever `nextTurn()` costs, and
+ * that spans three orders of magnitude. Measured on `gl.e2e.add.1024` (a 512² field, one
+ * sprite, nothing else queued): ANGLE D3D11 signals its ~30 ms readback after 590–1720 turns
+ * — 20–50 µs of `postTask` per turn on an idle thread — while the level-2 suite's SwiftShader
+ * needs 11–26 turns for its ~600 ms, because the software rasteriser starves the main thread
+ * and a turn stretches to tens of ms. A swap burst queues up to thirty sprites' builds ahead
+ * of one readback, so the legitimate wait is ~1 s on D3D11: ~60 000 turns at the fastest rate
+ * seen. Sized an order of magnitude past that; a fence that outlives it is a driver that has
+ * hung without losing the context, and the CPU field is the right answer for that.
+ */
+const READBACK_POLL_MAX = 1_000_000
+
+/**
+ * §8.10 — the first half of `readBackField`, with the copy's destination moved from a client
+ * array to the sheet's `PIXEL_PACK_BUFFER`: bind `READ_FRAMEBUFFER` to pass A's target, drain
+ * stale errors (the loop `readBackField` explains), size the pack buffer (grow-only),
+ * `readPixels` at offset 0 — which returns at once, the copy queued behind pass A — then a fence
+ * behind it and a `flush` so the queue actually runs rather than waiting for the next drain.
+ * The pack buffer is UNBOUND before the scope exits: §5.1's restore set does not cover it, and a
+ * bound pack buffer redirects every later `readPixels` on the context, the level-2 suite's own
+ * included.
+ *
+ * The CPU-fallback decision stays synchronous and exactly where it was: `getError` right after
+ * `readPixels` — `sheet.gl.test.ts` forces that read non-zero to reach `cpuFieldFallback`, and
+ * `null` here means what `null` from `readBackField` means. The read format is chosen the way
+ * `readBackField` chooses it (RED/FLOAT when the driver reports that as its implementation
+ * format, RGBA/FLOAT otherwise; the RGBA8 byte contract without float targets), so the bytes
+ * that land in the buffer are the bytes the client array used to receive.
+ */
+function issueFieldReadback(m: Mounted, field: Field): PendingReadback | null {
+  const { gl } = m.ctx
+  const w = field.width
+  const h = field.height
+  return m.ctx.scope((): PendingReadback | null => {
+    gl.bindFramebuffer(gl.READ_FRAMEBUFFER, field.target.framebuffer)
+    while (gl.getError() !== gl.NO_ERROR) {
+      // drain — see `readBackField`
+    }
+    let channels: 1 | 4 = 4
+    let kind: 'float' | 'byte' = 'byte'
+    if (m.ctx.caps.floatRT) {
+      kind = 'float'
+      const single =
+        gl.getParameter(gl.IMPLEMENTATION_COLOR_READ_FORMAT) === gl.RED &&
+        gl.getParameter(gl.IMPLEMENTATION_COLOR_READ_TYPE) === gl.FLOAT
+      channels = single ? 1 : 4
+    }
+    const bytes = w * h * channels * (kind === 'float' ? 4 : 1)
+    if (m.readbackBuffer === null) {
+      m.readbackBuffer = gl.createBuffer()
+      if (m.readbackBuffer === null) return null
+    }
+    gl.bindBuffer(gl.PIXEL_PACK_BUFFER, m.readbackBuffer)
+    const grow = m.readbackBytes < bytes
+    if (grow) gl.bufferData(gl.PIXEL_PACK_BUFFER, bytes, gl.STREAM_READ)
+    if (kind === 'float') {
+      gl.readPixels(0, 0, w, h, channels === 1 ? gl.RED : gl.RGBA, gl.FLOAT, 0)
+    } else {
+      gl.readPixels(0, 0, w, h, gl.RGBA, gl.UNSIGNED_BYTE, 0)
+    }
+    // Not a drain: this read IS the CPU-fallback decision (as in `readBackField`), and it also
+    // covers a refused `bufferData` — so the recorded size only grows once the read went through.
+    const refused = gl.getError() !== gl.NO_ERROR
+    const sync = refused ? null : gl.fenceSync(gl.SYNC_GPU_COMMANDS_COMPLETE, 0)
+    if (sync !== null) gl.flush()
+    gl.bindBuffer(gl.PIXEL_PACK_BUFFER, null)
+    if (sync === null) return null
+    if (grow) m.readbackBytes = bytes
+    return { sync, w, h, channels, kind, decode: field.decode }
+  })
+}
+
+/**
+ * §8.10 — polls the fence once per platform turn and deletes it on every exit. One `nextTurn()`
+ * per iteration, FIRST: WebGL updates a sync's status only between tasks, so a poll in the
+ * issuing task would always read `TIMEOUT_EXPIRED`. Each iteration reads the signal — the
+ * `ABORTED` answer is `source()`'s check point 2 (§10.5): stop spending, keep what is already
+ * paid for — then `isContextLost()` (`'failed'`: a lost context never signals), then
+ * `clientWaitSync(sync, 0, 0)`: signalled → `'ready'`; `WAIT_FAILED` → `'failed'`;
+ * `TIMEOUT_EXPIRED` → another turn, up to `READBACK_POLL_MAX`. `'failed'` means the CPU
+ * fallback, exactly as a refused `readPixels` does.
+ *
+ * The poll itself runs outside `scope()`: `clientWaitSync`, `isContextLost` and `deleteSync`
+ * bind nothing and write no state §5.1 enumerates, and an outermost scope's restore is some
+ * thirty state writes — per turn, for as many turns as the GPU takes.
+ */
+async function awaitFieldReadback(
+  m: Mounted,
+  pending: PendingReadback,
+  signal: AbortSignal | undefined,
+): Promise<'ready' | 'failed' | Aborted> {
+  const { gl } = m.ctx
+  for (let turn = 0; turn < READBACK_POLL_MAX; turn++) {
+    await nextTurn()
+    if (signal !== undefined && signal.aborted) {
+      gl.deleteSync(pending.sync)
+      return ABORTED
+    }
+    if (gl.isContextLost()) {
+      gl.deleteSync(pending.sync)
+      return 'failed'
+    }
+    const status = gl.clientWaitSync(pending.sync, 0, 0)
+    if (status === gl.ALREADY_SIGNALED || status === gl.CONDITION_SATISFIED) {
+      gl.deleteSync(pending.sync)
+      return 'ready'
+    }
+    if (status === gl.WAIT_FAILED) {
+      gl.deleteSync(pending.sync)
+      return 'failed'
+    }
+  }
+  gl.deleteSync(pending.sync)
+  return 'failed'
+}
+
+/**
+ * §8.10 — the second half of `readBackField`: the pack buffer's bytes into the same float/byte
+ * scratch `readBackField` reads into, then the decode loops VERBATIM from there — the
+ * `(v * d0 + d1) / texelPx` order is an identity contract (`sheet.gl.test.ts`'s readback goldens
+ * pin it to the byte). Stale errors are drained first, as before the issue, and `null` when
+ * `getError` reports the copy failed (→ the CPU fallback). The pack buffer is unbound before the
+ * scope exits, for the reason `issueFieldReadback` gives.
+ */
+function completeFieldReadback(
+  m: Mounted,
+  pending: PendingReadback,
+  texelPx: number,
+): Float32Array | null {
+  const { gl } = m.ctx
+  const buffer = m.readbackBuffer
+  if (buffer === null) return null
+  const w = pending.w
+  const h = pending.h
+  const channels = pending.channels
+  const d0 = pending.decode[0]
+  const d1 = pending.decode[1]
+  return m.ctx.scope((): Float32Array | null => {
+    while (gl.getError() !== gl.NO_ERROR) {
+      // drain — see `readBackField`
+    }
+    gl.bindBuffer(gl.PIXEL_PACK_BUFFER, buffer)
+    let out: Float32Array | null = null
+    if (pending.kind === 'float') {
+      const buf = floatReadbackScratch(w * h * channels)
+      gl.getBufferSubData(gl.PIXEL_PACK_BUFFER, 0, buf)
+      gl.bindBuffer(gl.PIXEL_PACK_BUFFER, null)
+      if (gl.getError() === gl.NO_ERROR) {
+        out = decodeScratch(w * h)
+        if (channels === 1) {
+          for (let i = 0; i < out.length; i++) out[i] = (buf[i] * d0 + d1) / texelPx
+        } else {
+          for (let i = 0, p = 0; i < out.length; i++, p += channels) {
+            out[i] = (buf[p] * d0 + d1) / texelPx
+          }
+        }
+      }
+    } else {
+      const buf = byteReadbackScratch(w * h * 4)
+      gl.getBufferSubData(gl.PIXEL_PACK_BUFFER, 0, buf)
+      gl.bindBuffer(gl.PIXEL_PACK_BUFFER, null)
       if (gl.getError() === gl.NO_ERROR) {
         out = decodeScratch(w * h)
         for (let i = 0, p = 0; i < out.length; i++, p += 4) {
@@ -631,28 +839,6 @@ function cpuFieldFallback(
   const data = imageData.data
   for (let i = 0, k = 3; i < alpha.length; i++, k += 4) alpha[i] = data[k] / 255
   return cpuSdfFromAlpha(alpha, w, h)
-}
-
-/**
- * The CPU signed field for the hull trace, from whichever branch succeeds — `readBackField` when
- * the driver allows it, `cpuFieldFallback` otherwise. Both share the same row order (checked, not
- * assumed — see `cpuFieldFallback`'s own doc comment) and now the same artwork placement, so a
- * hull traced off either branch for the same sprite is equivalent rather than mirrored or
- * margin-shifted; neither branch needs to be told which the caller is (fix round 1, findings 1 and
- * 4 — departures the original report named and this round resolves by normalising at the source
- * rather than by carrying a flag downstream).
- */
-function acquireCpuField(
-  ctx: GlContext,
-  tight: Field,
-  texelPx: number,
-  bitmap: ImageBitmap,
-  placement: Rect,
-  front: Size,
-): InstanceType<typeof GlError> | Float32Array {
-  const readBack = readBackField(ctx, tight, texelPx)
-  if (readBack !== null) return readBack
-  return cpuFieldFallback(bitmap, tight.width, tight.height, placement, front)
 }
 
 export function paperSheet(options?: PaperSheetOptions): PaperSheet {
@@ -819,6 +1005,9 @@ export function paperSheet(options?: PaperSheetOptions): PaperSheet {
       frontTextures: new WeakMap<SheetFront, { texture: Texture }>(),
       liveHandles: new Map<string, number>(),
       lastFieldBuild: null,
+      readbackBuffer: null,
+      readbackBytes: 0,
+      readbackBusy: false,
     }
 
     tilesReadyState = makeDeferred<InstanceType<typeof GlError> | true>()
@@ -1027,26 +1216,88 @@ export function paperSheet(options?: PaperSheetOptions): PaperSheet {
     // stack frame.
     afterFieldForTest?.()
 
-    // Abort check point 2 (§10.5): after the resample and pass A, before the CPU
-    // hull trace — the boundary between work already paid for and the one genuinely
-    // interruptible step. The `await` is what makes this point (and the third one, below)
-    // observable from outside a synchronous call: without it nothing here would ever yield.
-    await Promise.resolve()
+    // The hull cache key is known already (§6.3: the sprite, sdfRes and the hull tier), and it
+    // decides whether this call needs the CPU field at all — a cache miss traces off it, torn
+    // mode reads the silhouette extent off it, a cached polygon needs none — which decides
+    // whether a readback is issued before the yield below. `texel` is what the decode divides
+    // by, so it is derived here too.
+    const knobKey = hullCacheKey(knobDescriptors, values)
+    const cacheKey: HullCacheKey = { spriteKey, sdfRes, knobKey }
+    const texel = front.w / field.w
+    const needField = edgeMode === 'torn' || m.cache.get(cacheKey) === undefined
+
+    /**
+     * The CPU signed field for the hull trace (§8.2.1), from whichever branch succeeds:
+     * `completeFieldReadback` once the fence has signalled, `readBackField` while the pack
+     * buffer is another call's, `cpuFieldFallback` when the driver refused the readback or the
+     * wait failed. The branches share one row order and one artwork placement (checked, not
+     * assumed — `cpuFieldFallback`'s own doc comment), so a hull traced off any of them is
+     * equivalent rather than mirrored or margin-shifted, and nothing downstream is told which
+     * (fix round 1, findings 1 and 4).
+     *
+     * The yield inside is check point 2 (§10.5): the fence poll when a readback is pending — its
+     * `ABORTED` answer is the check point — and one platform turn otherwise, the signal read
+     * after it. The busy path decodes BEFORE it yields, while the field slot is still this
+     * call's own, and copies out of the shared decode scratch because it then yields (the
+     * scratch is consumed in the task that fills it — `decodeScratch`'s own doc comment).
+     */
+    const readField = async (): Promise<InstanceType<typeof GlError> | Aborted | Float32Array> => {
+      if (m.readbackBusy) {
+        const sync = readBackField(m.ctx, tight, texel)
+        const own = sync === null ? null : sync.slice()
+        await nextTurn()
+        if (signalAborted(o.signal)) return ABORTED
+        return own ?? cpuFieldFallback(bitmap, tight.width, tight.height, placement, front)
+      }
+      const pending = issueFieldReadback(m, tight)
+      if (pending === null) {
+        await nextTurn()
+        if (signalAborted(o.signal)) return ABORTED
+        return cpuFieldFallback(bitmap, tight.width, tight.height, placement, front)
+      }
+      m.readbackBusy = true
+      const awaited = await awaitFieldReadback(m, pending, o.signal)
+      m.readbackBusy = false
+      if (isAborted(awaited)) return ABORTED
+      const copied = awaited === 'ready' ? completeFieldReadback(m, pending, texel) : null
+      return copied ?? cpuFieldFallback(bitmap, tight.width, tight.height, placement, front)
+    }
+
+    // Abort check point 2 (§10.5): after the resample and pass A, before the CPU hull trace —
+    // the boundary between work already paid for and the one genuinely interruptible step. A
+    // signal already aborted spends no readback; otherwise the check point is `readField`'s
+    // yield (§8.10: the readback is issued now and its fence polled once per turn, so the wait
+    // for the GPU — the whole queue ahead of this sprite, in a burst — leaves the main thread),
+    // or one platform turn when no field is needed. Either way this call yields once here,
+    // which is what makes this point (and the third one, below) observable from outside a
+    // synchronous call: without it nothing here would ever yield.
     if (signalAborted(o.signal)) return ABORTED
+    let cpu: Float32Array | null = null
+    if (needField) {
+      const got = await readField()
+      if (isAborted(got)) return ABORTED
+      if (GlError.is(got)) return got
+      cpu = got
+    } else {
+      await nextTurn()
+      if (signalAborted(o.signal)) return ABORTED
+    }
 
     // Step 9: the CPU signed field for the hull trace, then buildHull, then the rect, then the
     // guard-band check.
-    const texel = front.w / field.w
     const pxScale = front.h / KNOB_REFERENCE_PX
     const k = pxScale / texel
 
-    const knobKey = hullCacheKey(knobDescriptors, values)
-    const cacheKey: HullCacheKey = { spriteKey, sdfRes, knobKey }
-
     let hull: HullShape | undefined = m.cache.get(cacheKey)
     if (hull === undefined) {
-      const cpu = acquireCpuField(m.ctx, tight, texel, bitmap, placement, front)
-      if (GlError.is(cpu)) return cpu
+      if (cpu === null) {
+        // The entry left the cache while this call was yielding (`invalidateHull` from
+        // outside): read the field now, the same way.
+        const got = await readField()
+        if (isAborted(got)) return ABORTED
+        if (GlError.is(got)) return got
+        cpu = got
+      }
 
       // `torn` mode declares no hull-only descriptors at all — `values.minDist`/`maxDist` are
       // simply absent — so it always passes 0/0, which is what makes `buildHull` return
@@ -1092,12 +1343,16 @@ export function paperSheet(options?: PaperSheetOptions): PaperSheet {
     let box: AlphaBox
     let reach: Rect
     if (bounds === undefined) {
-      // Only reachable for `torn` (always `use-alpha`) or a degenerate empty trace. The CPU field
-      // is not retained past the cache-hit branch above, so a use-alpha rect always re-acquires
-      // it — cheap relative to the trace it replaces, and never on the hot (cached-hull) path for
-      // hull/both.
-      const cpu = acquireCpuField(m.ctx, tight, texel, bitmap, placement, front)
-      if (GlError.is(cpu)) return cpu
+      // Only reachable for `torn` (always `use-alpha`) or a degenerate empty trace. Torn mode
+      // read its field above, so the extent takes it from the same readback the trace used —
+      // one readback per add where two used to be spent (§8.10); a cached use-alpha hull in
+      // hull mode read none and reads it now, off the hot (cached-polygon) path for hull/both.
+      if (cpu === null) {
+        const got = await readField()
+        if (isAborted(got)) return ABORTED
+        if (GlError.is(got)) return got
+        cpu = got
+      }
       const raw = signedFieldExtent(cpu, field.w, field.h)
       if (raw === undefined) {
         return new SheetError('paperSheet: source() found an empty silhouette')
@@ -1559,6 +1814,13 @@ export function paperSheet(options?: PaperSheetOptions): PaperSheet {
     m.resampler.dispose()
     m.sdf?.dispose()
     m.pools?.dispose()
+    if (m.readbackBuffer !== null) {
+      const buffer = m.readbackBuffer
+      m.readbackBuffer = null
+      m.ctx.scope(() => {
+        m.ctx.gl.deleteBuffer(buffer)
+      })
+    }
     m.cache.clear()
   }
 

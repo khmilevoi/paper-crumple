@@ -109,7 +109,10 @@ export const GL = Object.freeze({
   QUERY_RESULT_AVAILABLE: 0x8867,
   ARRAY_BUFFER: 0x8892,
   ELEMENT_ARRAY_BUFFER: 0x8893,
+  STREAM_READ: 0x88e1,
   STATIC_DRAW: 0x88e4,
+  PIXEL_PACK_BUFFER: 0x88eb,
+  PIXEL_PACK_BUFFER_BINDING: 0x88ed,
   SAMPLER_BINDING: 0x8919,
   FRAGMENT_SHADER: 0x8b30,
   VERTEX_SHADER: 0x8b31,
@@ -131,7 +134,11 @@ export const GL = Object.freeze({
   RGBA8UI: 0x8d7c,
   RED_INTEGER: 0x8d94,
   RGBA_INTEGER: 0x8d99,
+  SYNC_GPU_COMMANDS_COMPLETE: 0x9117,
   ALREADY_SIGNALED: 0x911a,
+  TIMEOUT_EXPIRED: 0x911b,
+  CONDITION_SATISFIED: 0x911c,
+  WAIT_FAILED: 0x911d,
   UNPACK_FLIP_Y_WEBGL: 0x9240,
   UNPACK_PREMULTIPLY_ALPHA_WEBGL: 0x9241,
   UNPACK_COLORSPACE_CONVERSION_WEBGL: 0x9243,
@@ -215,6 +222,7 @@ export function createRecordingGl(o = {}) {
   let total = 0
   let nextId = 1
   let lastUpload = null
+  let lastPack = null
   const uniformLocations = new Map()
   const unknownEnums = new Map()
   const canvas = {
@@ -323,7 +331,20 @@ export function createRecordingGl(o = {}) {
       const last = args[args.length - 1]
       if (ArrayBuffer.isView(last)) lastUpload = last
     },
+    getBufferSubData(target, offset, out) {
+      // The pack-buffer half of a §8.10 readback: the field the last `readPixels` at an offset
+      // asked for, now copied out.
+      if (lastPack !== null && o.readback !== undefined && out instanceof Float32Array) {
+        o.readback(lastPack.w, lastPack.h, out)
+        lastPack = null
+      }
+    },
     readPixels(x, y, w, h, format, type, out) {
+      if (typeof out === 'number') {
+        // A `PIXEL_PACK_BUFFER` readback (§8.10): the bytes are answered by `getBufferSubData`.
+        lastPack = type === GL.FLOAT ? { w, h } : null
+        return
+      }
       if (type === GL.FLOAT && o.readback !== undefined && out instanceof Float32Array) {
         o.readback(w, h, out)
         return
