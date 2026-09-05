@@ -48,7 +48,8 @@ import type { Resampler } from './artwork.js'
 import { cpuSdfFromAlpha } from './field.js'
 import { growBox, scaleBox, sheetRectFromExtent, signedFieldExtent } from './extent.js'
 import type { AlphaBox } from './mask.js'
-import { createSdfBuilder, sigmaFor, SDF_POOL_SLOTS } from './gl-sdf.js'
+import { createSdfBuilder, createSdfPrograms, sigmaFor, SDF_POOL_SLOTS } from './gl-sdf.js'
+import type { SdfPrograms } from './gl-sdf.js'
 import type { Field, LooseField, SdfBuilder } from './gl-sdf.js'
 import {
   checkReserve,
@@ -213,6 +214,8 @@ interface Mounted {
   poolsSize: { artwork: Size; sdfRes: number } | null
   readonly resampler: Resampler
   readonly renderer: PaperRenderer
+  /** The field programs, linked once at `mount()` and shared by every `sdf` builder (P7). */
+  readonly sdfPrograms: SdfPrograms
   readonly cache: HullCache
   tiles: MountedTiles
   /** Every front texture `build()` handed out and the core has not yet released, so `dispose()`
@@ -419,7 +422,7 @@ function ensurePools(
   m.lastFieldBuild = null
 
   const pools = createScratchPools({ gl: m.ctx, artwork, sdfRes })
-  const sdf = createSdfBuilder(m.ctx, pools.poolA)
+  const sdf = createSdfBuilder(m.ctx, pools.poolA, m.sdfPrograms)
   if (GlError.is(sdf)) {
     pools.dispose()
     return sdf
@@ -799,8 +802,18 @@ export function paperSheet(options?: PaperSheetOptions): PaperSheet {
       return renderer
     }
 
+    // The field programs, linked here rather than with the first scratch pools (P7): their link
+    // starts at mount, alongside the paper program's, and source() waits for both in one place.
+    const sdfPrograms = createSdfPrograms(ctx)
+    if (GlError.is(sdfPrograms)) {
+      renderer.dispose()
+      resampler.dispose()
+      return sdfPrograms
+    }
+
     const neutral = mountNeutralTiles(ctx)
     if (GlError.is(neutral)) {
+      sdfPrograms.dispose()
       renderer.dispose()
       resampler.dispose()
       return neutral
@@ -813,6 +826,7 @@ export function paperSheet(options?: PaperSheetOptions): PaperSheet {
       poolsSize: null,
       resampler,
       renderer,
+      sdfPrograms,
       cache: hullCache(),
       tiles: neutral,
       liveFronts: new Set<Texture>(),
@@ -912,6 +926,8 @@ export function paperSheet(options?: PaperSheetOptions): PaperSheet {
     if (rendererReady !== undefined) return rendererReady
     const resamplerReady = await m.resampler.ready()
     if (resamplerReady !== undefined) return resamplerReady
+    const fieldsReady = await m.sdfPrograms.ready()
+    if (fieldsReady !== undefined) return fieldsReady
     if (mounted !== m) {
       return new SheetError('paperSheet: dispose() ran while source() waited for the program link')
     }
@@ -960,33 +976,11 @@ export function paperSheet(options?: PaperSheetOptions): PaperSheet {
 
     // Step 5: pools, sized at { artwork, sdfRes } — created lazily here, reused across sprites,
     // re-created (with disposal) when a later sprite needs a bigger Pool A.
-    let ensured = ensurePools(m, artwork, sdfRes)
+    // No wait between here and the passes (P7): the builder draws with `m.sdfPrograms`, linked
+    // at mount and awaited above, so a concurrent source() of another size re-sizes the pools
+    // only between two calls' synchronous runs from the pools to the fields — as before.
+    const ensured = ensurePools(m, artwork, sdfRes)
     if (GlError.is(ensured)) return ensured
-    // The builder's four programs may have been linked just now (P7): waited for here, before
-    // the first pass reads a uniform location and would block on them. Milliseconds on D3D11,
-    // and only on the first source() into a mount or after a pool re-size. The wait is a window
-    // another source() can re-size the pools in — the same window check point 2's microtask
-    // already opened for the fields — so the pools are sized for this sprite again if that
-    // happened, a bounded number of times; a `dispose()` or an abort in the window is honoured.
-    for (let attempt = 0; ; attempt++) {
-      const sdfReady = await ensured.sdf.ready()
-      if (sdfReady !== undefined) return sdfReady
-      if (mounted !== m) {
-        return new SheetError(
-          'paperSheet: dispose() ran while source() waited for the field programs',
-        )
-      }
-      if (signalAborted(o.signal)) return ABORTED
-      if (m.sdf === ensured.sdf) break
-      if (attempt >= 3) {
-        return new SheetError(
-          'paperSheet: source() could not settle the scratch pools — concurrent source() calls ' +
-            'of different sizes keep re-sizing them',
-        )
-      }
-      ensured = ensurePools(m, artwork, sdfRes)
-      if (GlError.is(ensured)) return ensured
-    }
     const { pools, sdf } = ensured
 
     // Step 6: resample into the Pool A artwork slot — unless it is already sitting there. A
@@ -1601,6 +1595,7 @@ export function paperSheet(options?: PaperSheetOptions): PaperSheet {
     m.renderer.dispose()
     m.resampler.dispose()
     m.sdf?.dispose()
+    m.sdfPrograms.dispose()
     m.pools?.dispose()
     m.cache.clear()
   }

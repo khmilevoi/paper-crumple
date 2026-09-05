@@ -32,7 +32,11 @@ describe('gl.compile', () => {
       iterations: 3,
       async run() {
         salt += 1
-        const program = f.ctx.program(FULLSCREEN_VS, `${PAPER_FS}\n// bench salt ${salt}\n`, 'paper')
+        const program = f.ctx.program(
+          FULLSCREEN_VS,
+          `${PAPER_FS}\n// bench salt ${salt}\n`,
+          'paper',
+        )
         if (GlError.is(program)) {
           outcome = program
           return
