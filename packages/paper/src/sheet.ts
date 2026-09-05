@@ -634,6 +634,12 @@ const READBACK_SLOW_DELAY_MS = 1
  * driver, and would have been ~20 minutes at the back-off's rate).
  */
 const READBACK_WAIT_MAX_MS = 10_000
+/**
+ * A second, absolute exit for the same loop: a clock that stands still (a frozen or replaced
+ * `performance.now`) must not turn the wall-clock bound into an endless loop. At one delayed turn
+ * per ~5 ms this is far beyond `READBACK_WAIT_MAX_MS` and never the first bound to fire.
+ */
+const READBACK_TURN_MAX = 1_000_000
 
 /**
  * §8.10 — the first half of `readBackField`, with the copy's destination moved from a client
@@ -757,7 +763,7 @@ async function awaitFieldReadback(
       gl.deleteSync(pending.sync)
       return 'failed'
     }
-    if (!fast && performance.now() >= deadline) {
+    if (!fast && (performance.now() >= deadline || turn >= READBACK_TURN_MAX)) {
       gl.deleteSync(pending.sync)
       return 'failed'
     }
