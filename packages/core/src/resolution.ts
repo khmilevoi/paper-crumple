@@ -52,7 +52,8 @@ export interface FrontCapRequest {
   /** The artwork's wanted long side, in texels — `ceil(artworkCssPx x dpr)`. */
   readonly artworkLongSide: number
   /** The sheet's reserve, `SheetRenderer.overscan`: a front's long side is at most
-   *  `artworkLongSide + 2 x ceil(overscan x artworkLongSide)` for every aspect. */
+   *  `artworkLongSide + 2 x ceil(artworkLongSide x (marginFractionFor(overscan) + epsilon))`
+   *  (design 2026-09-05 §4.2) for every aspect. */
   readonly overscan: number
   readonly cap: number
 }

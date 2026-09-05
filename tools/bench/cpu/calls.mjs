@@ -76,7 +76,7 @@ function readbackFor(edgeMode) {
     maxSize: MAX_SIZE,
     exact: false,
   })
-  const inset = framing.margin / framing.front.w
+  const inset = framing.marginX / framing.front.w
   const fields = new Map()
   return (w, h, out) => {
     const key = `${w}x${h}`

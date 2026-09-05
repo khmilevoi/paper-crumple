@@ -519,10 +519,16 @@ describe('portrait sprites and the guard band (spec 8.6)', () => {
     sheet.dispose()
   })
 
-  it('sources a full-bleed square in hull mode once the headroom covers the band', async () => {
+  it('sources a full-bleed square in hull mode, headroom no longer required after §4.2', async () => {
     const ctx = open()
-    // `ambient-pins.gl.test.ts` documents this exact refusal and pads its fixture around it;
-    // 0.4 × 84 reference px is ~34 of clearance against the band's 18.
+    // `ambient-pins.gl.test.ts` documents the pre-§4.2 refusal this fixture reproduced and pads
+    // its own fixture around it. The `overscanHeadroom: 0.4` here predates §4.2: at the time, the
+    // base reserve was paint alone, so only headroom bought clearance against the band's own 18
+    // reference px (`0.4 x 84` reference px is ~34 of it). Design 2026-09-05 §4.2 folds the guard
+    // band into the base reserve itself (`guardMarginsFor`), so this exact fixture now clears the
+    // band at `overscanHeadroom: 0` too (confirmed directly) — the headroom kept here is no
+    // longer load-bearing, only harmless, and stays to keep this case distinct from the
+    // zero-headroom case pinned above.
     const sheet = paperSheet({ overscanHeadroom: 0.4 })
     sheet.mount(ctx)
     const bitmap = await boxSprite(48, 48, 0)
@@ -993,7 +999,7 @@ describe('source() spends pass A alone; the first build() at its framing reuses 
    */
   const FRONT_AT_HANDLE_FRONT_GOLDEN = { hull: '457ed64a', torn: '44a1976d' } as const
 
-  it('renders, at handle.front, the front the source-time blur used to produce (golden from 5f61a46)', async () => {
+  it('renders, at handle.front, the front the source-time blur used to produce (golden regenerated for design 2026-09-05 §4.2)', async () => {
     const ctx = open()
     for (const edgeMode of ['hull', 'torn'] as const) {
       const sheet = paperSheet({ edgeMode })
@@ -2075,7 +2081,7 @@ describe('async field readback (spec §8.10)', () => {
     ['square', () => boxSprite(64, 64, 8)],
   ] as const
 
-  it('answers the hull, frontRect and rect the synchronous readback answered (golden from 653d394)', async () => {
+  it('answers the hull, frontRect and rect the synchronous readback answered (golden regenerated for design 2026-09-05 §4.2)', async () => {
     const ctx = open()
     for (const [name, make] of fixtures) {
       for (const edgeMode of ['hull', 'torn'] as const) {

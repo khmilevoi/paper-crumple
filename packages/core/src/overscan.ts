@@ -43,12 +43,16 @@ export const GUARD_BAND_OUTER = 0.5
 export const GUARD_MARGIN_G = GUARD_BAND_OUTER - GUARD_BAND_INNER
 
 /**
- * Insurance on top of the closed form, in reference px. The derivation is exact and every
- * rounding in the pipeline (`reachRect`'s `+0.5`, the inclusive `signedFieldExtent` box, the
- * `ceil`s below) runs in the check's favour, so this is not load-bearing — design §11's fourth
- * measurement is whether it can be zero. Frozen at 2 by controller ruling R1 for the whole
- * branch: changing it after Task 8 would invalidate the committed `hull-default.json` golden
- * frame, which cannot be recaptured once `develop`'s `edgeMode` is gone.
+ * Insurance on top of the closed form, stated as ε reference px out of the
+ * `KNOB_REFERENCE_PX` (1000 px) reference frame — but `guardMarginsFor` applies it as
+ * `A.h · ε / KNOB_REFERENCE_PX` TEXELS (a fraction of the artwork's height), not as a flat
+ * `ε`-texel reserve, so it comes out to well under 2 texels at realistic artwork sizes (≈1.5 at
+ * the hull defaults, `A.h ≈ 790`). The derivation is exact and every rounding in the pipeline
+ * (`reachRect`'s `+0.5`, the inclusive `signedFieldExtent` box, the `ceil`s below) runs in the
+ * check's favour, so this is not load-bearing — design §11's fourth measurement is whether it
+ * can be zero. Frozen at 2 by controller ruling R1 for the whole branch: changing it after
+ * Task 8 would invalidate the committed `hull-default.json` golden frame, which cannot be
+ * recaptured once `develop`'s `edgeMode` is gone.
  */
 export const GUARD_EPSILON_REFERENCE_PX = 2
 
@@ -113,15 +117,18 @@ export function overscanRadius(p: EdgeParams): number {
 /**
  * `p = r / (1000 - 2r)`, the reserved radius expressed as a fraction of the artwork's long side.
  *
- * At `r >= 500` the reserve leaves no artwork inside the reference frame and `p` is undefined or
- * negative. Spec 8.6 forbids a silent clamp and spec 10.8 forbids a throw, so it returns.
+ * At `r >= RADIUS_CAP_REFERENCE_PX` (482, design 2026-09-05 §4.2 — narrowed from the pre-§4.2
+ * 500, a documented breaking change per ruling R2) the guard margin diverges and the reserve
+ * leaves no artwork outside the shader's guard band inside the reference frame. Spec 8.6 forbids
+ * a silent clamp and spec 10.8 forbids a throw, so it returns.
  */
 export function overscanFromRadius(r: number): InstanceType<typeof KnobError> | number {
   if (!Number.isFinite(r) || r < 0 || r >= RADIUS_CAP_REFERENCE_PX) {
     return new KnobError(
-      `edge parameters reserve ${r} reference px per side, which leaves no artwork outside the ` +
-        `shader's guard band inside the ${KNOB_REFERENCE_PX} px reference frame - re-add ` +
-        `required with smaller edge knobs`,
+      `edge parameters reserve ${r} reference px per side as the reserve radius, at or past the ` +
+        `${RADIUS_CAP_REFERENCE_PX} px cap (design 2026-09-05 §4.2, R2) where the guard margin ` +
+        `diverges and leaves no artwork outside the shader's guard band inside the ` +
+        `${KNOB_REFERENCE_PX} px reference frame - re-add required with smaller edge knobs`,
     )
   }
   return r / (KNOB_REFERENCE_PX - 2 * r)

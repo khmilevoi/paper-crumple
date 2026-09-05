@@ -169,20 +169,24 @@ describe("the front's artwork rect through readPixels, partitioned by alpha", ()
    * (`paper-shader.ts:1693`) and the artwork's own bytes survive. The alpha-0 half moved, and is
    * re-measured rather than derived. Measured, of the 1600 texels in the 40x40 artwork rect: all
    * 784 alpha-255 texels still match the source byte for byte, and the 816 alpha-0 texels split
-   * 191 covered (opaque paper) / 625 still clear, with no feathered texel between them.
+   * 152 covered (opaque paper) / 664 still clear, with no feathered texel between them (design
+   * 2026-09-05 §4.2 moves this split from a pre-§4.2 191/625 — see below).
    *
    * The split is the hull's own reach, and nothing else. The hull is traced in `source()`, at
    * *that* call's own front: under `exact: true` the front is the artwork (40x40) plus
-   * `ceil(p * 40) = 5` texels of per-axis margin on every side (`handle.ts`'s `frontForArtwork`,
-   * §8.6 amendment) = 50, not the 128 this test later builds at, so `minDist`/`maxDist` (22/72
-   * reference px) are 1.1/3.6 px there. `build()` then places the artwork 1:1 at
-   * `round((size - artwork) / 2)` and carries the polygon into the 128 front translated to that
-   * same origin (`sheet.ts`'s `artworkPlacement`, `fillHullMask`'s `tx`/`ty`), so the sheet sits a
-   * few px around the 28x28 silhouette: measured, the artwork rect lands at `[44, 84)` — which is
-   * what leaves 625 of its alpha-0 texels clear. Before `artworkPlacement`, the field was framed
-   * by a flat `p` inset instead, which at `size = 128` stretched the sheet to `[23, 103]` — an
-   * overhang of roughly 20 px on every side that covered the whole rect and hid the hull's real
-   * reach.
+   * `guardMarginsFor`'s per-axis margin (§4.2; 6 texels on every side here, not the pre-§4.2
+   * `ceil(p * 40) = 5`) on every side (`handle.ts`'s `frontForArtwork`) = 52, not the 128 this
+   * test later builds at, so `minDist`/`maxDist` (22/72 reference px) are ≈1.1/3.7 px there.
+   * `build()` then places the artwork 1:1 at `round((size - artwork) / 2)` and carries the
+   * polygon into the 128 front translated to that same origin (`sheet.ts`'s `artworkPlacement`,
+   * `fillHullMask`'s `tx`/`ty`), so the sheet sits a few px around the 28x28 silhouette: measured,
+   * the artwork rect lands at `[44, 84)` — unaffected by §4.2, since it depends only on the
+   * artwork's own size and the 128 build front, not the trace front's margin — which is what
+   * leaves 664 of its alpha-0 texels clear (152 covered — both moved from the trace front's own
+   * margin widening, which changes `maxDist`'s reference-px-to-texel scale at the trace front,
+   * not the placement above). Before `artworkPlacement`, the field was framed by a flat `p` inset
+   * instead, which at `size = 128` stretched the sheet to `[23, 103]` — an overhang of roughly
+   * 20 px on every side that covered the whole rect and hid the hull's real reach.
    *
    * Test 2 below traces at a 32 px front, where `maxDist` scales to `72 * 32 / 1000 = 2.3` px, and
    * its split is measured separately.
