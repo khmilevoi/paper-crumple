@@ -324,14 +324,8 @@ function compile(
    * already complete costs no turn at all and one that completes within a few costs no added
    * latency; every turn after them is `nextTurn({ delay: LINK_SLOW_DELAY_MS })`, which parks the
    * poll on the platform's timer instead of spinning a core through a link that runs for
-   * seconds. Three exits are read in the slow phase only, which the fast phase cannot outlast:
-   * a `dispose()` — the program's or its context's — ends the wait on the next delayed turn
-   * without another status read, through `abandon()`'s dispose branch (a disposed owner must
-   * not keep a poll alive for the seconds a link runs, or the minute a hung driver is given;
-   * the `deleteProgram` this costs may resolve the link on ANGLE, once, as the dispose's own
-   * price); and `LINK_WAIT_MAX_MS` of wall clock and `LINK_TURN_MAX` turns bound a driver that
-   * never answers. In the fast phase a dispose stays deferred to the poll (`compile`'s header):
-   * the link is expected within turns, and the deletion waits for it.
+   * seconds. Two exits bound a driver that never answers — `LINK_WAIT_MAX_MS` of wall clock and
+   * `LINK_TURN_MAX` turns, only ever read in the slow phase, which the fast phase cannot outlast.
    */
   async function awaitLink(): Promise<Err | undefined> {
     // Without the extension nothing is pending and this is never reached; the narrowing is for
@@ -344,9 +338,7 @@ function compile(
       if (gl.getProgramParameter(handle, parallel.COMPLETION_STATUS_KHR) !== false) return settle()
       const fast = turn < LINK_FAST_POLLS
       await (fast ? nextTurn() : nextTurn({ delay: LINK_SLOW_DELAY_MS }))
-      if (!fast && (disposed || performance.now() >= deadline || turn >= LINK_TURN_MAX)) {
-        return abandon()
-      }
+      if (!fast && (performance.now() >= deadline || turn >= LINK_TURN_MAX)) return abandon()
     }
   }
 
