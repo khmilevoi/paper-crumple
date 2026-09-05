@@ -9,7 +9,8 @@
  *   pnpm bench:smooth -- --iter 3                timed storms per row (2)
  *   pnpm bench:smooth -- --profile               one more storm per row under the CDP profiler
  *   pnpm bench:smooth -- --gpu                   ANGLE D3D11 (same as BENCH_GPU=1)
- *   pnpm bench:smooth -- --gate                  the D3D11 verdict fails the run (BENCH_GATE=1)
+ *   pnpm bench:smooth -- --check                 the D3D11 verdict fails the run (BENCH_CHECK=1;
+ *                                                --gate / BENCH_GATE is the old spelling)
  *
  * Anything else is handed to vitest unchanged (`-t smooth.burst`, `--reporter`, ...). The
  * `bench:smooth` script installs Chromium first, as `bench:gl` does.
@@ -35,7 +36,7 @@ function parseArgs(argv) {
     else if (flag === '--iter') o.env.BENCH_ITER = value()
     else if (flag === '--profile') o.env.BENCH_PROFILE = '1'
     else if (flag === '--gpu') o.env.BENCH_GPU = '1'
-    else if (flag === '--gate') o.env.BENCH_GATE = '1'
+    else if (flag === '--check' || flag === '--gate') o.env.BENCH_CHECK = '1'
     else o.rest.push(a)
   }
   return o

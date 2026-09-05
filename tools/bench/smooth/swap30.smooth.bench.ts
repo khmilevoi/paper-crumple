@@ -15,47 +15,92 @@
  * `fit: 'contain'`ed into it; the playground's per-step `frameHero` re-layout is not replicated,
  * so the layout-read cost here is the floor a page pays, not the ceiling.
  *
- * **Cadences.** `burst` — all 30 swaps in one synchronous block (a "next page" click), from URLs
- * (`burst.url`) or pre-decoded bitmaps (`burst.bitmap`); `stream` — one view every 100 ms for 30
- * swaps (a gallery cycling); `double` — every view swapped twice 50 ms apart (supersession: the
- * first wave's runs settle `ABORTED`, and any `sheet.source` beyond one per view is a wasted
- * ingest); `burst.drag` — the URL burst while a draw-class knob is written on one view every frame
- * (`view.set`, the continuous-drag case); `idle` — 2 s of nothing, the control that calibrates the
- * recorders. `burst.url` and `stream` also run at DPR 2 (`Emulation.setDeviceMetricsOverride`;
- * the fronts scale with it exactly as on a HiDPI screen). Each row: one cold storm, then
- * `BENCH_ITER` timed ones (2), and with `BENCH_PROFILE=1` one more under the CDP sampling profiler
- * for `profile-phases.mjs`. Before the storms, one `stage.add` of each source kind is timed alone
- * on the idle stage (median of three): the **per-swap ingest**, and `idealMs = max(issue span,
- * 30 × ingest)` is the sequential ideal the storm's ingest time is compared with.
+ * **Rows (cadences).** The five the smooth-swap plan requires, plus three the bench also keeps.
+ *   - `sequential` (`smooth.sequential.dpr1`) — **the ideal**: thirty `await stage.add(url_i,
+ *     { key })` one after another, on a stage with **no views** at all. Nothing overlaps, so its
+ *     per-add median is what the same thirty images cost when nothing is contended, and
+ *     `sequentialIdealMs = 30 × that median` is the floor every other row's storm is judged
+ *     against. Its own task / frame / input columns say how smooth the ideal itself is.
+ *   - `burst-url` (`smooth.burst.url.dpr1`) — all 30 `swapTo(url)` calls in one synchronous block
+ *     (a "next page" click).
+ *   - `burst-bitmap` (`smooth.burst.bitmap.dpr1`) — the 30 bitmaps are decoded with
+ *     `createImageBitmap` **before** the timed window; the window is one synchronous loop of 30
+ *     `stage.add(bitmap, { key, pin: true })`, then `Promise.all`, then one `view.crumpleTo(sprite)`
+ *     per view. That exact shape is what reproduces the §1.3 hazard (29 of 30 adds settle
+ *     `SheetError`); a loop that awaits, or bitmaps decoded inside the window, does not.
+ *   - `stream` (`smooth.stream.dpr1`) — one swap every 100 ms, 30 of them (a gallery cycling).
+ *   - `double-swap` (`smooth.double.dpr1`) — every view `swapTo(a)` then `swapTo(b)`, the second
+ *     wave 50 ms after the first: supersession. The first wave's runs settle `ABORTED`; every
+ *     `sheet.source` call beyond one per view is a **wasted ingest** (`wastedIngests`), which is
+ *     what the lane must drive to 0 — the aborted count is 30 both before and after.
+ *   - Also: `idle` — 2 s of nothing, the control that calibrates the recorders and shows machine
+ *     contention; `burst-drag` — the URL burst while a draw-class knob is written on one view every
+ *     frame (`view.set`); `burst-url@dpr2` and `stream@dpr2` at DPR 2
+ *     (`Emulation.setDeviceMetricsOverride`; the fronts scale as on a HiDPI screen).
  *
- * **Metrics, per storm.** Storm time (first call → the last view's `end`), ingest time (first call
- * → the last `sheet.build` return, every new front resident) and adopt time (first call → the last
- * view's first `step` drawn with its new sprite); `stormRatio = ingest / idealMs`. Main-thread
- * tasks two ways: every top-level `RunTask` between the storm's user-timing marks from a CDP
- * `Tracing` session over `disabled-by-default-devtools.timeline` (n, p50 / p95 / max, count over
- * 50 ms), and the in-page `PerformanceObserver` `longtask` (count over 50 ms, max) as the
- * cross-check. Frame times from a `requestAnimationFrame` recorder: p50 / p95 / max, frames
- * dropped at 60 Hz. Input latency on a page-level handler for the CDP-synthesised mouse moves,
- * clicks and keys at ~60 Hz (`performance.now() - event.timeStamp`): p50 / p95 / max, the longest
- * interval with no input handled, and the CDP acknowledgement round trip as the outside
- * cross-check. How the swaps settled: ok / failed (rolled back) / aborted (superseded), the distinct
- * `view.frame.artwork` rects among the views that swapped (30 artworks → 30 rects; fewer means a
- * front built from another sprite's field), wasted ingests. Wrapped-method phase timers —
- * `sheet.source` and `build`, `motion.draw`, the 2D `drawImage` blit, `getBoundingClientRect`,
- * `readPixels`, texture uploads, shader link, `createImageBitmap` — as the in-page side of the phase
- * breakdown the profile completes.
+ * Each row: one cold storm, then `BENCH_ITER` timed ones (2 — "run twice, keep the better"), and
+ * with `BENCH_PROFILE=1` one more under the CDP sampling profiler for `profile-phases.mjs`. The
+ * better timed storm is the one with the lowest task max, then the lowest task p95; **every**
+ * reported column comes from that one storm, so the row is internally consistent but its frame and
+ * input columns inherit the optimism of a best-of-two on tasks — the per-storm lines are printed
+ * beneath the headline so the spread is visible. Before the storms every row runs its own
+ * **sequential probe**: 30 awaited `stage.add`s of the row's source kind, removed as they go, no
+ * sleeps — the plan's `sequential`, measured for this row's source kind, since a bitmap ingest and
+ * a URL ingest are not the same number. `sequentialIdealMs = 30 × its median`, and
+ * `idealMs = max(issue span, sequentialIdealMs)` is what `stormRatio` divides by (for `stream` the
+ * 2.9 s issue span dominates, so its ratio is ~1 by construction and bites only when the stream
+ * falls behind).
  *
- * **Proposed acceptance thresholds — on the D3D11 backend (`BENCH_GPU=1`), for the better of the
- * timed storms of every swapping row (the controller may adjust):**
- *   - no main-thread task over 50 ms (hard: `tasks.max ≤ 50`, `longTasks.count === 0`);
- *   - task p95 ≤ 10 ms over the storm's work tasks (top-level tasks of 1 ms or more; the
- *     sub-millisecond ticks would pin the quantile to zero — the time-weighted p95 is beside it);
+ * **Metrics, per storm.** Storm time (first call → the last view's `end`; for `sequential`, the
+ * loop itself), ingest time (first call → the last `sheet.build` return, every new front resident)
+ * and adopt time (first call → the last view's first `step` drawn with its new sprite);
+ * `stormRatio = ingest / idealMs`. Main-thread tasks two ways: **`taskP95Ms` comes from CDP
+ * tracing** — every top-level `RunTask` on the page's main thread between the `smooth:storm:start`
+ * / `:end` user-timing marks (`disabled-by-default-devtools.timeline` + `blink.user_timing`),
+ * overlap and not containment, so the task the storm was issued from is counted; nested `RunTask`s
+ * are counted once at the outer length. The quantile is over the **work tasks — those of 1 ms or
+ * more**: a storm's window also holds tens of sub-millisecond tasks (timer ticks, input dispatch,
+ * empty animation frames) that cannot block anything and would pin any quantile to zero. `max` and
+ * `over50` are over *every* task, and the time-weighted p95 (the length under which 95 % of the
+ * busy time falls) is reported beside the plain one. The in-page `PerformanceObserver({ type:
+ * 'longtask' })` runs alongside as the independent cross-check (50 ms floor, so it can only confirm
+ * `over50`). Frame times from a `requestAnimationFrame` recorder: p50 / p95 / max, frames dropped
+ * at 60 Hz. Input latency at a **capturing `window` handler** for the CDP-synthesised mouse moves,
+ * clicks and keys — `performance.now() − event.timeStamp`, i.e. dispatch (the timestamp the browser
+ * stamped when it created the event) → handler entry, so a blocked main thread shows up as latency
+ * exactly as a real user's would; the `idle` row's p50 (12–16 ms) is the rAF-aligned dispatch floor
+ * these thresholds sit on top of, and the CDP send → ack round trip is kept as the outside
+ * cross-check. `longestGapMs` is the longest interval with no input handled, head and tail of the
+ * window included. Outcomes: ok / failed (rolled back) / aborted (superseded); `distinctRects` =
+ * distinct `${rect.x},${rect.y},${rect.w},${rect.h}` over the sprites the **successful** adds
+ * produced, `distinctPixels` = distinct FNV-1a hashes of the swapped canvases as its robust twin;
+ * `wastedIngests`. Wrapped-method phase timers — `sheet.source` and `build`, `motion.draw`, the 2D
+ * `drawImage` blit, `getBoundingClientRect`, `readPixels`, texture uploads, shader link,
+ * `createImageBitmap` — as the in-page side of the phase breakdown the profile completes.
+ *
+ * **Acceptance thresholds — D3D11 (`BENCH_GPU=1`), the better of the timed storms of every row
+ * (`docs/superpowers/plans/2026-09-05-smooth-swap.md`, task S0 step 3, verbatim):**
+ *   - longest task ≤ 50 ms;
+ *   - task p95 ≤ 10 ms;
  *   - frame p95 ≤ 20 ms;
- *   - input latency p95 ≤ 50 ms, and no input gap over 100 ms;
- *   - the throughput floor: storm ingest ≤ 1.5 × the sequential ideal (`stormRatio ≤ 1.5`);
- *   - every swap lands: `adds.ok === 30` and 30 distinct rects (the `burst.bitmap` regression).
- * On SwiftShader the rows are report-only (raster-bound; spec §11, level 3). The verdict is
- * written and printed for every D3D11 row, check by check; `BENCH_GATE=1` makes it an assertion.
+ *   - input p95 ≤ 50 ms;
+ *   - no input gap > 100 ms;
+ *   - storm ≤ 1.5 × `sequentialIdealMs`;
+ *   - `burst-bitmap` 30/30 ok with 30 distinct rects;
+ *   - `double-swap` 30 aborted + 30 ok.
+ * SwiftShader is report-only (raster-bound; spec §11). `BENCH_CHECK=1` makes the run exit non-zero
+ * when any D3D11 row misses (`--check`; `BENCH_GATE` / `--gate` is the old spelling and still
+ * works). The `30/30 ok` and `30 distinct rects` checks are applied to **every** swapping row, not
+ * only `burst-bitmap`: a row that silently stopped swapping must not pass on smoothness.
+ *
+ * **Why no check can pass vacuously.** Every row's verdict opens with a `probe` check that fails
+ * unless the trace actually delivered tasks (`tasks.source === 'tracing'`), the synthesised user
+ * was handled (≥ 10 events inside the window), the rAF recorder saw frames (≥ 5 intervals) and the
+ * expected number of runs settled. Without it the three quiet failure modes all read as passes: a
+ * trace that returned nothing leaves `tasks.max` falling back to `longTasks.maxMs = 0`; an input
+ * driver that never connected leaves no latency samples; and a storm that issued nothing has
+ * neither tasks nor frames to fail on. The remaining metrics fail closed on their own — an empty
+ * quantile is `NaN` and `NaN <= limit` is `false` — but the `probe` line says *why*.
  */
 import { afterAll, beforeAll, describe, expect, it } from 'vitest'
 import { commands } from 'vitest/browser'
@@ -81,6 +126,7 @@ import type {
   LongTasks,
   Quantiles,
   RowResult,
+  RowSummary,
   SmoothMeta,
   SourceKind,
   StormResult,
@@ -103,13 +149,15 @@ declare const __BENCH_ITER__: number
 declare const __BENCH_GPU__: boolean
 declare const __BENCH_PROFILE__: boolean
 declare const __BENCH_FILTER__: string
-declare const __BENCH_GATE__: boolean
+declare const __BENCH_CHECK__: boolean
 
 const ITERATIONS: number = __BENCH_ITER__
 const REAL_GPU: boolean = __BENCH_GPU__
 const PROFILE: boolean = __BENCH_PROFILE__
 const FILTER: readonly string[] = __BENCH_FILTER__.split(',').filter(Boolean)
-const GATE: boolean = __BENCH_GATE__
+/** `BENCH_CHECK=1` (`--check`; `BENCH_GATE` / `--gate` is the old spelling). */
+const CHECK: boolean = __BENCH_CHECK__
+const BACKEND: 'd3d11' | 'swiftshader' = REAL_GPU ? 'd3d11' : 'swiftshader'
 
 // --- the scenario ----------------------------------------------------------------------------
 
@@ -130,11 +178,16 @@ const STREAM_PERIOD_MS = 100
 const DOUBLE_GAP_MS = 50
 const IDLE_MS = 2000
 const SETTLE_MS = 400
-const ISOLATED_ADDS = 3
+/** The other source kind's probe: reported for comparison, never the row's ideal. */
+const SHORT_PROBE = 3
 const FRAME_MS = 1000 / 60
 const MARK_START = 'smooth:storm:start'
 const MARK_END = 'smooth:storm:end'
+/** The measurement is worthless below these; `probe` fails and the row's verdict with it. */
+const MIN_INPUT_EVENTS = 10
+const MIN_FRAME_INTERVALS = 5
 
+/** The plan's numbers (task S0 step 3). Nothing here is tuned to what the code does today. */
 const THRESHOLDS = {
   taskMaxMs: 50,
   taskP95Ms: 10,
@@ -146,6 +199,8 @@ const THRESHOLDS = {
 
 interface RowSpec {
   readonly name: string
+  /** The plan's row id, and `RowSummary.row`. */
+  readonly row: string
   readonly cadence: Cadence
   readonly source: SourceKind
   readonly drag: boolean
@@ -153,15 +208,77 @@ interface RowSpec {
 }
 
 const ROWS: readonly RowSpec[] = [
-  { name: 'smooth.idle.dpr1', cadence: 'idle', source: 'url', drag: false, dpr: 1 },
-  { name: 'smooth.burst.url.dpr1', cadence: 'burst', source: 'url', drag: false, dpr: 1 },
-  { name: 'smooth.burst.bitmap.dpr1', cadence: 'burst', source: 'bitmap', drag: false, dpr: 1 },
-  { name: 'smooth.stream.dpr1', cadence: 'stream', source: 'url', drag: false, dpr: 1 },
-  { name: 'smooth.double.dpr1', cadence: 'double', source: 'url', drag: false, dpr: 1 },
-  { name: 'smooth.burst.drag.dpr1', cadence: 'burst', source: 'url', drag: true, dpr: 1 },
-  { name: 'smooth.burst.url.dpr2', cadence: 'burst', source: 'url', drag: false, dpr: 2 },
-  { name: 'smooth.stream.dpr2', cadence: 'stream', source: 'url', drag: false, dpr: 2 },
+  { name: 'smooth.idle.dpr1', row: 'idle', cadence: 'idle', source: 'url', drag: false, dpr: 1 },
+  {
+    name: 'smooth.sequential.dpr1',
+    row: 'sequential',
+    cadence: 'sequential',
+    source: 'url',
+    drag: false,
+    dpr: 1,
+  },
+  {
+    name: 'smooth.burst.url.dpr1',
+    row: 'burst-url',
+    cadence: 'burst',
+    source: 'url',
+    drag: false,
+    dpr: 1,
+  },
+  {
+    name: 'smooth.burst.bitmap.dpr1',
+    row: 'burst-bitmap',
+    cadence: 'burst',
+    source: 'bitmap',
+    drag: false,
+    dpr: 1,
+  },
+  {
+    name: 'smooth.stream.dpr1',
+    row: 'stream',
+    cadence: 'stream',
+    source: 'url',
+    drag: false,
+    dpr: 1,
+  },
+  {
+    name: 'smooth.double.dpr1',
+    row: 'double-swap',
+    cadence: 'double',
+    source: 'url',
+    drag: false,
+    dpr: 1,
+  },
+  {
+    name: 'smooth.burst.drag.dpr1',
+    row: 'burst-drag',
+    cadence: 'burst',
+    source: 'url',
+    drag: true,
+    dpr: 1,
+  },
+  {
+    name: 'smooth.burst.url.dpr2',
+    row: 'burst-url@dpr2',
+    cadence: 'burst',
+    source: 'url',
+    drag: false,
+    dpr: 2,
+  },
+  {
+    name: 'smooth.stream.dpr2',
+    row: 'stream@dpr2',
+    cadence: 'stream',
+    source: 'url',
+    drag: false,
+    dpr: 2,
+  },
 ]
+
+/** The rows that mount the 6×5 grid; `idle` needs it on screen, `sequential` must not have it. */
+function hasViews(cadence: Cadence): boolean {
+  return cadence !== 'sequential'
+}
 
 /** How long the cadence itself takes to issue its swaps — the floor `idealMs` cannot go under. */
 function issueSpanMs(cadence: Cadence): number {
@@ -416,19 +533,38 @@ interface StormRequest {
 
 let swapCounter = 0
 
-/** The playground's swap for a URL; the same composition spelled out for a pinned bitmap. */
-function swap(stage: BlitStage, view: View, target: string | ImageBitmap): PromiseLike<unknown> {
-  if (typeof target === 'string') return view.swapTo(target, { duration: SWAP_DURATION_MS })
+/**
+ * The playground's swap for a URL; the same composition spelled out for a pinned bitmap. Every
+ * sprite a **successful** run produced is pushed into `sprites`, which is where `distinctRects`
+ * comes from: for a bitmap the `stage.add` promise hands it over directly (so a row where 29 of 30
+ * adds fail counts one sprite, not one view), and for a URL `view.swapTo` resolves to `undefined`
+ * (`SwapResult`), so the sprite is read off the view once the run has settled.
+ */
+function swap(
+  stage: BlitStage,
+  view: View,
+  target: string | ImageBitmap,
+  sprites: Sprite[],
+): PromiseLike<unknown> {
+  if (typeof target === 'string') {
+    return view.swapTo(target, { duration: SWAP_DURATION_MS }).then((r) => {
+      const s = view.sprite
+      if (!(r instanceof Error) && !isAborted(r) && s !== null) sprites.push(s)
+      return r
+    })
+  }
   swapCounter += 1
   const pending = stage.add(target, { key: `bitmap:${String(swapCounter)}`, pin: true })
+  void pending.then((s) => {
+    if (!(s instanceof Error) && !isAborted(s)) sprites.push(s)
+  })
   return view.crumpleTo(pending, { duration: SWAP_DURATION_MS })
 }
 
-function rectKey(view: View): string | null {
-  const f = view.frame
-  if (f === null) return null
-  const a = f.artwork
-  return `${a.x},${a.y},${a.w},${a.h}@${f.box.w}x${f.box.h}`
+/** `sprite.rect` — the silhouette's box in source pixels; 30 artworks must give 30 of these. */
+function rectKey(sprite: Sprite): string {
+  const r = sprite.rect
+  return `${r.x},${r.y},${r.w},${r.h}`
 }
 
 async function runStorm(o: StormRequest): Promise<StormResult> {
@@ -476,11 +612,35 @@ async function runStorm(o: StormRequest): Promise<StormResult> {
   performance.mark(MARK_START)
   const t0 = performance.now()
   const runs: PromiseLike<unknown>[] = []
+  const sprites: Sprite[] = []
   const issueWave = (wave: Wave): void => {
-    for (let i = 0; i < cells.length; i++) runs.push(swap(stage, cells[i].view, wave[i]))
+    for (let i = 0; i < cells.length; i++) runs.push(swap(stage, cells[i].view, wave[i], sprites))
   }
   if (spec.cadence === 'idle') {
     await sleep(IDLE_MS)
+  } else if (spec.cadence === 'sequential') {
+    // The ideal: one awaited `stage.add` after another, no views, nothing overlapping. Each
+    // sprite is removed once it is measured, so the 64 MiB budget never evicts anything and the
+    // per-add median is the cost of the ingest alone.
+    const perAdd: number[] = []
+    const wave = waves[0]
+    for (let i = 0; i < wave.length; i++) {
+      swapCounter += 1
+      const key = `sequential:${String(swapCounter)}`
+      const target = wave[i]
+      const t = performance.now()
+      const sprite =
+        typeof target === 'string'
+          ? await stage.add(target, { key })
+          : await stage.add(target, { key, pin: true })
+      perAdd.push(performance.now() - t)
+      runs.push(Promise.resolve(sprite))
+      if (!(sprite instanceof Error) && !isAborted(sprite)) {
+        sprites.push(sprite)
+        stage.remove(key)
+      }
+    }
+    acc.sequentialMedianMs = quantiles(perAdd).p50
   } else if (spec.cadence === 'burst') {
     issueWave(waves[0])
   } else if (spec.cadence === 'double') {
@@ -495,7 +655,7 @@ async function runStorm(o: StormRequest): Promise<StormResult> {
       cells.forEach((c, i) => {
         setTimeout(() => {
           late = Math.max(late, performance.now() - t0 - i * STREAM_PERIOD_MS)
-          runs.push(swap(stage, c.view, waves[0][i]))
+          runs.push(swap(stage, c.view, waves[0][i], sprites))
           issued += 1
           if (issued === cells.length) resolve()
         }, i * STREAM_PERIOD_MS)
@@ -535,12 +695,12 @@ async function runStorm(o: StormRequest): Promise<StormResult> {
     } else if (isAborted(v)) aborted += 1
     else ok += 1
   }
-  const rects = new Set<string>()
+  // `distinctRects` is over the sprites the successful adds produced (`sprite.rect`), so it counts
+  // the adds and not the views: 29 failed adds leave one sprite even though thirty views exist.
+  const rects = new Set(sprites.map(rectKey))
   const pixels = new Set<string>()
   cells.forEach((c, i) => {
     if (c.view.sprite === before[i]) return
-    const k = rectKey(c.view)
-    if (k !== null) rects.add(k)
     const h = pixelHash(c.canvas)
     if (h !== null) pixels.add(h)
   })
@@ -553,19 +713,25 @@ async function runStorm(o: StormRequest): Promise<StormResult> {
     messages: [...messages].slice(0, 3),
   }
   const isIdle = spec.cadence === 'idle'
+  // The two rows with no `view.on('end')` to close the window on: `idle` is the window, and
+  // `sequential` ends when its last awaited add returns.
+  const noViews = !hasViews(spec.cadence)
   const lastBuild = acc.buildLastEndAt ?? 0
   const ingestStormMs = isIdle ? 0 : Math.max(0, lastBuild - t0)
+  // One ingest per image the row actually wanted: 30 for every row, `double`'s second wave
+  // included — its first wave is what "wasted" means.
+  const wantedIngests = isIdle ? 0 : VIEWS
   return {
     iteration: o.iteration,
-    stormMs: isIdle ? tEnd - t0 : lastEndAt - t0,
+    stormMs: isIdle || noViews ? tEnd - t0 : lastEndAt - t0,
     ingestStormMs,
-    lastAdoptMs: isIdle ? 0 : lastAdoptAt - t0,
+    lastAdoptMs: isIdle || noViews ? 0 : lastAdoptAt - t0,
     stormRatio: isIdle || !(o.idealMs > 0) ? 0 : ingestStormMs / o.idealMs,
     swaps: runs.length,
     completed,
     errors: o.errors.length - errorsBefore,
     adds,
-    wastedIngests: isIdle ? 0 : Math.max(0, (acc.sourceCalls ?? 0) - cells.length),
+    wastedIngests: isIdle ? 0 : Math.max(0, (acc.sourceCalls ?? 0) - wantedIngests),
     longTasks: rec.longTasks,
     tasks: taskStats(trace),
     frames: rec.frames,
@@ -583,15 +749,29 @@ async function runStorm(o: StormRequest): Promise<StormResult> {
 
 // --- the row -----------------------------------------------------------------------------------
 
-function verdictFor(s: StormResult, views: number): Verdict {
+/**
+ * The plan's eight thresholds, plus `probe` in front of them. `probe` is what stops a check from
+ * passing on nothing: a trace that returned no tasks would leave `taskMax` falling back to the
+ * `longtask` observer's `0`, an input driver that never connected would leave no latency samples,
+ * and a storm that issued nothing would have neither. Its value is the number of preconditions
+ * that failed; `0` is the only passing value.
+ */
+function verdictFor(s: StormResult, spec: RowSpec, views: number): Verdict {
   const check = (name: string, value: number, limit: number, pass: boolean): Check => ({
     name,
     value,
     limit,
     pass,
   })
+  const expectedRuns = spec.cadence === 'double' ? 2 * views : views
+  const missing =
+    (s.tasks.source === 'tracing' ? 0 : 1) +
+    (s.input.handled >= MIN_INPUT_EVENTS ? 0 : 1) +
+    (s.frames.n >= MIN_FRAME_INTERVALS ? 0 : 1) +
+    (s.swaps === expectedRuns ? 0 : 1)
   const taskMax = s.tasks.source === 'tracing' ? s.tasks.max : s.longTasks.maxMs
   const checks: Check[] = [
+    check('probe', missing, 0, missing === 0),
     check(
       'task max',
       taskMax,
@@ -618,9 +798,21 @@ function verdictFor(s: StormResult, views: number): Verdict {
       THRESHOLDS.stormRatio,
       s.stormRatio <= THRESHOLDS.stormRatio,
     ),
-    check('adds failed', s.adds.failed, 0, s.adds.failed === 0 && s.adds.ok === views),
-    check('fronts short', views - s.adds.distinctPixels, 0, s.adds.distinctPixels === views),
+    // "30/30 ok with 30 distinct rects" is the plan's `burst-bitmap` line, applied to every
+    // swapping row: a row that quietly stopped swapping must not pass on smoothness alone.
+    check('adds ok', s.adds.ok, views, s.adds.failed === 0 && s.adds.ok === views),
+    check('distinct rects', s.adds.distinctRects, views, s.adds.distinctRects === views),
   ]
+  // The pixel twin of `distinct rects`, where there are canvases to read it off.
+  if (hasViews(spec.cadence)) {
+    checks.push(
+      check('fronts short', views - s.adds.distinctPixels, 0, s.adds.distinctPixels === views),
+    )
+  }
+  // "30 `ABORTED` adds, 30 completed runs" — the supersession row's own line.
+  if (spec.cadence === 'double') {
+    checks.push(check('aborted', s.adds.aborted, views, s.adds.aborted === views))
+  }
   return { pass: checks.every((c) => c.pass), checks }
 }
 
@@ -708,16 +900,23 @@ async function decodeSlice(k: number): Promise<ImageBitmap[] | Error> {
   return out
 }
 
-/** One `stage.add` alone on the idle stage, the row's source kind: the per-swap ingest. */
-async function isolatedIngest(
+/**
+ * The plan's `sequential` measured for one source kind: `count` awaited `stage.add`s, one after
+ * another, no sleeps between them, each removed once it is timed so the budget never evicts
+ * anything mid-probe. Returns the **median** per-add time; `views ×` it is `sequentialIdealMs`.
+ * Run on the stage as the row has it — with the grid mounted and idle for a swapping row, on a
+ * stage with no views at all for the `sequential` row itself.
+ */
+async function sequentialProbe(
   stage: BlitStage,
   kind: SourceKind,
   urls: readonly string[],
   bitmaps: readonly ImageBitmap[],
+  count: number,
 ): Promise<number> {
   const times: number[] = []
-  for (let i = 0; i < ISOLATED_ADDS; i++) {
-    const key = `isolated:${kind}:${String(i)}`
+  for (let i = 0; i < count; i++) {
+    const key = `probe:${kind}:${String(i)}`
     const t = performance.now()
     const sprite =
       kind === 'url'
@@ -725,9 +924,49 @@ async function isolatedIngest(
         : await stage.add(bitmaps[i], { key, pin: true })
     times.push(performance.now() - t)
     if (!(sprite instanceof Error) && !isAborted(sprite)) stage.remove(key)
-    await sleep(50)
   }
   return quantiles(times).p50
+}
+
+/** The plan's flat contract, over the row's better timed storm. See `RowSummary`. */
+function summarise(spec: RowSpec, s: StormResult, sequentialIdealMs: number): RowSummary {
+  const p = s.phases
+  const build = p.buildMs ?? p.buildWallMs ?? 0
+  const draw = p.drawMs ?? 0
+  const blit = p.blitMs ?? 0
+  return {
+    row: spec.row,
+    backend: BACKEND,
+    stormMs: s.stormMs,
+    sequentialIdealMs,
+    stormRatio: s.stormRatio,
+    longestTaskMs: s.tasks.source === 'tracing' ? s.tasks.max : s.longTasks.maxMs,
+    longTasks50: s.tasks.source === 'tracing' ? s.tasks.over50 : s.longTasks.count,
+    taskP95Ms: s.tasks.p95,
+    frameP50Ms: s.frames.p50,
+    frameP95Ms: s.frames.p95,
+    frameMaxMs: s.frames.max,
+    dropped: s.frames.dropped,
+    inputP50Ms: s.input.latency.p50,
+    inputP95Ms: s.input.latency.p95,
+    inputMaxMs: s.input.latency.max,
+    inputGapMaxMs: s.input.longestGapMs,
+    phases: {
+      source: p.sourceWallMs ?? 0,
+      build,
+      draw,
+      blit,
+      other: Math.max(0, s.tasks.totalMs - (build + draw + blit)),
+    },
+    outcomes: {
+      ok: s.adds.ok,
+      error: s.adds.failed,
+      aborted: s.adds.aborted,
+      distinctRects: s.adds.distinctRects,
+      distinctPixels: s.adds.distinctPixels,
+      wastedIngests: s.wastedIngests,
+    },
+  }
 }
 
 async function runRow(spec: RowSpec): Promise<RowResult | Error> {
@@ -789,7 +1028,7 @@ async function runRow(spec: RowSpec): Promise<RowResult | Error> {
   const mountedAt = performance.now()
   const cells: Cell[] = []
   let frontSize = ''
-  for (let i = 0; i < VIEWS; i++) {
+  for (let i = 0; hasViews(spec.cadence) && i < VIEWS; i++) {
     const view = await stage.mount({
       key: `v${i}`,
       src: pool[0][i],
@@ -813,19 +1052,32 @@ async function runRow(spec: RowSpec): Promise<RowResult | Error> {
   const mountMs = performance.now() - mountedAt
   await sleep(SETTLE_MS)
 
-  // The isolated ingest, both kinds, from the last slice (never a storm target).
-  const isolatedSlice = pool.length - 1
-  const isolatedBitmaps = await decodeSlice(isolatedSlice)
-  if (isolatedBitmaps instanceof Error) {
+  // The sequential probe, from the last slice (never a storm target): `VIEWS` awaited adds of the
+  // row's own source kind — the plan's `sequential` ideal for this row — and a short one of the
+  // other kind, kept only so the two ingest costs stay comparable in the printed table.
+  const probeSlice = pool.length - 1
+  const probeBitmaps = await decodeSlice(probeSlice)
+  if (probeBitmaps instanceof Error) {
     stage.dispose()
     cleanup()
-    return isolatedBitmaps
+    return probeBitmaps
   }
-  owned.push(...isolatedBitmaps)
-  const ingestUrlMs = await isolatedIngest(stage, 'url', pool[isolatedSlice], isolatedBitmaps)
-  const ingestBitmapMs = await isolatedIngest(stage, 'bitmap', pool[isolatedSlice], isolatedBitmaps)
-  const ingestMs = spec.source === 'url' ? ingestUrlMs : ingestBitmapMs
-  const idealMs = Math.max(issueSpanMs(spec.cadence), VIEWS * ingestMs)
+  owned.push(...probeBitmaps)
+  const ownKind = spec.source
+  const otherKind: SourceKind = ownKind === 'url' ? 'bitmap' : 'url'
+  const ownMs = await sequentialProbe(stage, ownKind, pool[probeSlice], probeBitmaps, VIEWS)
+  const otherMs = await sequentialProbe(
+    stage,
+    otherKind,
+    pool[probeSlice],
+    probeBitmaps,
+    SHORT_PROBE,
+  )
+  const ingestUrlMs = ownKind === 'url' ? ownMs : otherMs
+  const ingestBitmapMs = ownKind === 'bitmap' ? ownMs : otherMs
+  const ingestMs = ownMs
+  const sequentialIdealMs = VIEWS * ingestMs
+  const idealMs = Math.max(issueSpanMs(spec.cadence), sequentialIdealMs)
   await sleep(SETTLE_MS)
 
   const storms: StormResult[] = []
@@ -893,6 +1145,12 @@ async function runRow(spec: RowSpec): Promise<RowResult | Error> {
     errors.length === 0
       ? undefined
       : `${errors.length} error events (${distinct.length} distinct): ${distinct.slice(0, 2).join(' | ')}`
+  const verdict =
+    REAL_GPU && spec.cadence !== 'idle' ? verdictFor(storms[best], spec, VIEWS) : undefined
+  const summary: RowSummary = {
+    ...summarise(spec, storms[best], sequentialIdealMs),
+    ...(verdict === undefined ? {} : { pass: verdict.pass }),
+  }
   return {
     name: spec.name,
     cadence: spec.cadence,
@@ -908,10 +1166,12 @@ async function runRow(spec: RowSpec): Promise<RowResult | Error> {
     ingestMs,
     ingestUrlMs,
     ingestBitmapMs,
+    sequentialIdealMs,
     idealMs,
     storms,
     best,
-    ...(REAL_GPU && spec.cadence !== 'idle' ? { verdict: verdictFor(storms[best], VIEWS) } : {}),
+    ...(verdict === undefined ? {} : { verdict }),
+    summary,
     ...(note === undefined ? {} : { note }),
   }
 }
@@ -936,9 +1196,11 @@ describe('smooth', () => {
       expect(row).not.toBeInstanceOf(Error)
       if (row instanceof Error) return
       rows.push(row)
-      if (GATE && row.verdict !== undefined) {
+      if (CHECK && row.verdict !== undefined) {
         expect(
-          row.verdict.checks.filter((c) => !c.pass).map((c) => `${c.name} ${c.value} > ${c.limit}`),
+          row.verdict.checks
+            .filter((c) => !c.pass)
+            .map((c) => `${c.name} ${String(c.value)} (limit ${String(c.limit)})`),
           `${row.name} verdict`,
         ).toEqual([])
       }
