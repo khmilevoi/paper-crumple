@@ -44,9 +44,9 @@ describe('nextTurn() — the platform yield (spec §8.10)', () => {
 
 describe('nextTurn({ delay }) — the back-off turn (spec §8.10)', () => {
   it("adds delay to postTask's options when one is given", async () => {
-    const postTask = vi.fn((fn: () => void, _o: { priority: string; delay?: number }) => {
+    const postTask = vi.fn((fn: () => void, o: { priority: string; delay?: number }) => {
       setTimeout(fn, 0)
-      return Promise.resolve()
+      return Promise.resolve(o.priority)
     })
     vi.stubGlobal('scheduler', { postTask })
     await nextTurn({ delay: 4 })
@@ -55,9 +55,9 @@ describe('nextTurn({ delay }) — the back-off turn (spec §8.10)', () => {
   })
 
   it('leaves the no-delay options object byte-identical: no delay key for (), ({}) or ({ delay: 0 })', async () => {
-    const postTask = vi.fn((fn: () => void, _o: { priority: string; delay?: number }) => {
+    const postTask = vi.fn((fn: () => void, o: { priority: string; delay?: number }) => {
       setTimeout(fn, 0)
-      return Promise.resolve()
+      return Promise.resolve(o.priority)
     })
     vi.stubGlobal('scheduler', { postTask })
     await nextTurn()
