@@ -41,9 +41,12 @@ path before the program's first use.
 exported `PaperRenderer`, `Resampler` and `SdfBuilder` interfaces of `@paper-crumple/paper`, to
 `Program` on `@paper-crumple/core/unstable`, and `createSdfBuilder(ctx, pool, programs?)` gains an
 optional third parameter (the four field programs, shared across builders; omitted, it links its
-own as before). `nextTurn()` is the platform yield `@paper-crumple/core/unstable` already exports
-for the ingest lane (spec 8.10); the deferred link polls on it, and that is not the deferral spec
-7.1 forbids — nothing on the gesture path waits, only the asynchronous ingest path, which was a
-promise already. A `/unstable` consumer driving `PaperRenderer`, `Resampler` or `SdfBuilder`
+own as before). `nextTurn()` on `@paper-crumple/core/unstable` is the platform yield shared with
+the ingest lane (S1; identical file on both branches); the deferred link polls on it, and that is
+not the deferral spec 7.1 forbids — nothing on the gesture path waits, only the asynchronous
+ingest path, which was a promise already. `raceAbort(promise, signal)` (new on
+`@paper-crumple/core/unstable`) is the cancellable wait on a shared promise every slot's
+asynchronous path races its readiness wait with. A `/unstable` consumer driving `PaperRenderer`,
+`Resampler` or `SdfBuilder`
 directly should await `ready()` before the first draw, or accept that the first draw blocks on the
 link exactly as `mount()` used to.

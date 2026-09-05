@@ -24,16 +24,19 @@ function bytesFetch(): typeof globalThis.fetch {
   }) as typeof globalThis.fetch
 }
 
+type LinkOutcome = InstanceType<typeof GlError> | undefined
+
 /**
- * A `GlContext` whose `program()` hands back a program with the given `ready()` outcome. The `gl`
- * answers every enum with a number and every call with nothing, which is all `mount()`'s fibre
- * upload asks of it.
+ * A `GlContext` whose `program()` hands back a program whose `ready()` is `link` — an outcome, or
+ * a promise the test settles itself. The `gl` answers every enum with a number and every call
+ * with nothing, which is all `mount()`'s fibre upload asks of it.
  */
-function fakeContext(linkOutcome: InstanceType<typeof GlError> | undefined): {
+function fakeContext(link: LinkOutcome | Promise<LinkOutcome>): {
   readonly ctx: GlContext
   readonly calls: { ready: number }
 } {
   const calls = { ready: 0 }
+  const linkOutcome = link instanceof Promise ? link : Promise.resolve(link)
   const gl = new Proxy({} as Record<string, unknown>, {
     get(_, prop) {
       if (typeof prop !== 'string') return undefined
@@ -47,7 +50,7 @@ function fakeContext(linkOutcome: InstanceType<typeof GlError> | undefined): {
     uniformLocation: () => null,
     ready() {
       calls.ready += 1
-      return Promise.resolve(linkOutcome)
+      return linkOutcome
     },
     dispose() {},
   }
@@ -110,14 +113,42 @@ describe('load() and the deferred sheet program link (P7, spec 5.2 amendment)', 
     source.dispose()
   })
 
-  it('honours a signal that fired during the wait, before handing a clip out', async () => {
-    const { ctx } = fakeContext(undefined)
+  it('resolves ABORTED the moment the signal fires while the link is still pending, and the next load() succeeds once it links', async () => {
+    let settleLink!: (outcome: LinkOutcome) => void
+    let linkSettled = false
+    const link = new Promise<LinkOutcome>((resolve) => {
+      settleLink = (outcome) => {
+        linkSettled = true
+        resolve(outcome)
+      }
+    })
+    const { ctx, calls } = fakeContext(link)
     const source = bakedMotion({ packs: [pack2x3], fetch: bytesFetch() })
     expect(source.mount(ctx)).toBeUndefined()
     const controller = new AbortController()
     const pending = source.load(fitFor(source), { signal: controller.signal })
+    // Let the pack fetch resolve and load() reach the readiness wait; the link stays pending.
+    await new Promise<void>((r) => setTimeout(r, 20))
+    expect(calls.ready).toBe(1)
+    expect(linkSettled).toBe(false)
     controller.abort()
-    expect(isAborted(await pending)).toBe(true)
+    const r = await pending
+    expect(isAborted(r)).toBe(true)
+    expect(linkSettled).toBe(false)
+    // The shared link was left alone; once it settles, the next load() hands the clip out.
+    settleLink(undefined)
+    const clip = await source.load(fitFor(source))
+    expect(clip instanceof Error || isAborted(clip)).toBe(false)
+    source.dispose()
+  })
+
+  it('honours a signal already aborted at the call', async () => {
+    const { ctx } = fakeContext(undefined)
+    const source = bakedMotion({ packs: [pack2x3], fetch: bytesFetch() })
+    expect(source.mount(ctx)).toBeUndefined()
+    const controller = new AbortController()
+    controller.abort()
+    expect(isAborted(await source.load(fitFor(source), { signal: controller.signal }))).toBe(true)
     source.dispose()
   })
 

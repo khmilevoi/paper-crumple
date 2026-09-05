@@ -40,6 +40,7 @@ import {
   hullCacheKey,
   KNOB_REFERENCE_PX,
   overscanRadius,
+  raceAbort,
   uploadBytes,
 } from '@paper-crumple/core/unstable'
 import type { GlContext, ScratchPools, Texture } from '@paper-crumple/core/unstable'
@@ -901,29 +902,6 @@ export function paperSheet(options?: PaperSheetOptions): PaperSheet {
     return signal !== undefined && signal.aborted
   }
 
-  /**
-   * `promise`'s value, or `ABORTED` the moment `signal` fires — whichever comes first (P7). The
-   * listener is `once` and removed on either outcome, so a wait that ends normally leaves nothing
-   * on the signal; the promise itself is untouched, because a program link is shared by every
-   * caller and must keep going for the next one. `Program.ready()` never rejects (§10.8), so the
-   * fulfilment handler is the only one there is.
-   */
-  function raceAbort<T>(
-    promise: Promise<T>,
-    signal: AbortSignal | undefined,
-  ): Promise<T | Aborted> {
-    if (signal === undefined) return promise
-    if (signal.aborted) return Promise.resolve(ABORTED)
-    return new Promise<T | Aborted>((resolve) => {
-      const onAbort = (): void => resolve(ABORTED)
-      signal.addEventListener('abort', onAbort, { once: true })
-      void promise.then((value) => {
-        signal.removeEventListener('abort', onAbort)
-        resolve(value)
-      })
-    })
-  }
-
   async function source(
     bitmap: ImageBitmap,
     o: SourceOptions,
@@ -959,6 +937,9 @@ export function paperSheet(options?: PaperSheetOptions): PaperSheet {
     if (mounted !== m) {
       return new SheetError('paperSheet: dispose() ran while source() waited for the program link')
     }
+    // An abort that landed in the microtask gap after the race's listener came off is honoured
+    // here, still before any GPU work (§10.5).
+    if (signalAborted(o.signal)) return ABORTED
 
     // §6.3 — the hull cache key is "every knob at or above 'hull'", so the trace runs at the
     // hull-tier values the caller projected for the sprite, over this factory's defaults. The
