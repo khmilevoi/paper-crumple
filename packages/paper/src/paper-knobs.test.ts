@@ -179,6 +179,37 @@ describe('defaultsFor (design 2026-09-05 §2.4)', () => {
     expect(defaultsFor(spec('smooth', 'clean', 'percent')).edgeWidth).toBe(5.9)
     expect(defaultsFor(spec('smooth', 'clean', 'px')).edgeWidth).toBe(47)
   })
+
+  /**
+   * `paper-renderer.ts`'s `EDGE_DEFAULTS` reads the WIDEST cell's bag (`torn`/`paper`) and uses it
+   * as ruling R3's fallback for every cell, on the stated ground that `descriptorsFor` composes the
+   * same descriptor objects into all four cells so no default varies by cell — except `edgeWidth`,
+   * which the renderer never reads because the width arrives pre-resolved as `widthRef`.
+   *
+   * That ground is an assumption about THIS file, and this is the assertion that keeps it true. If
+   * a future edit here gives a knob two per-cell defaults, the renderer starts uploading the wrong
+   * one silently, and R3's whole correctness argument goes with it: split `EDGE_DEFAULTS` per cell
+   * at that point rather than deleting this test.
+   */
+  it('gives every key but edgeWidth the same default in every cell (paper-renderer EDGE_DEFAULTS)', () => {
+    const seen = new Map<string, unknown>()
+    for (const s of allSpecs()) {
+      for (const [key, value] of Object.entries(defaultsFor(s))) {
+        if (key === 'edgeWidth') continue
+        if (seen.has(key)) expect([key, value]).toEqual([key, seen.get(key)])
+        else seen.set(key, value)
+      }
+    }
+    // Not vacuous: the sweep really did visit the shape- and finish-only knobs, not just the
+    // twenty common ones.
+    for (const key of ['tearFreq', 'tearAngular', 'chew', 'tearMix', 'fiberLen', 'deckleWidth']) {
+      expect(seen.has(key), `${key} was never seen`).toBe(true)
+    }
+    // And `edgeWidth` genuinely is the exception the renderer's comment claims it is.
+    expect(defaultsFor(spec('torn', 'paper', 'px')).edgeWidth).not.toBe(
+      defaultsFor(spec('torn', 'paper', 'percent')).edgeWidth,
+    )
+  })
 })
 
 describe('edgeParamsFrom (design 2026-09-05 §4.1)', () => {

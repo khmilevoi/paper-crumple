@@ -186,7 +186,7 @@ function scene() {
  * polygon built) or `null` (no polygon — `smooth` then falls back to `r.tight` and the sheet is
  * the artwork alpha, ruling R28).
  */
-function renderInto(spec: EdgeSpec, withPaperField: boolean, widthRef = WIDTH_REF) {
+function renderInto(spec: EdgeSpec, withPaperField: boolean) {
   const built = scene()
   if (GlError.is(built)) return built
   const { ctx, artwork, tight, loose, tiles, builder, paperMask, paperField } = built
@@ -211,7 +211,7 @@ function renderInto(spec: EdgeSpec, withPaperField: boolean, widthRef = WIDTH_RE
     loose,
     paperField: withPaperField ? paperField : null,
     edgeSpec: spec,
-    widthRef,
+    widthRef: WIDTH_REF,
     values: defaultsFor(spec),
     descriptors: descriptorsFor(spec),
   })
@@ -332,19 +332,6 @@ interface UniformScene {
 }
 
 /**
- * A scene that can be asked what the renderer UPLOADED, not only what it drew.
- *
- * Two things make this more than `renderInto` with a spy. `createPaperRenderer` keeps its
- * `Program` private, and a uniform location is a per-program object — a second
- * `ctx.program(FULLSCREEN_VS, PAPER_FS)` would hand back locations that never equal the ones
- * `renderFront` uploads through — so the context is spread with one method replaced (the idiom
- * `paper-shader-early-out.gl.test.ts` uses) to keep a reference to the renderer's OWN program.
- * And `Program.uniformLocation` memoises `null` as eagerly as it memoises a location
- * (`gl-context.ts`'s `locations` map), so asking before the link has completed poisons every name
- * for the life of the program: `await renderer.ready()` before the first `uniformLocation` call is
- * what keeps this capture from being vacuous.
- */
-/**
  * The whole program, every path compiled in (`PAPER_FRONT_BUILD 0`) — the same test-only string
  * replace `paper-shader-early-out.gl.test.ts` uses.
  *
@@ -359,6 +346,22 @@ const PAPER_FS_WHOLE = PAPER_FS.replace(
   '#define PAPER_FRONT_BUILD 0',
 )
 
+/**
+ * A scene that can be asked what the renderer UPLOADED, not only what it drew.
+ *
+ * Two things make this more than `renderInto` with a spy. `createPaperRenderer` keeps its
+ * `Program` private, and a uniform location is a per-program object — a second
+ * `ctx.program(FULLSCREEN_VS, PAPER_FS)` would hand back locations that never equal the ones
+ * `renderFront` uploads through — so the context is spread with one method replaced (the idiom
+ * `paper-shader-early-out.gl.test.ts` uses) to keep a reference to the renderer's OWN program.
+ * And `Program.uniformLocation` memoises `null` as eagerly as it memoises a location
+ * (`gl-context.ts`'s `locations` map), so asking before the link has completed poisons every name
+ * for the life of the program: `await renderer.ready()` before the first `uniformLocation` call is
+ * what keeps this capture from being vacuous.
+ *
+ * `fs` compiles a variant of `PAPER_FS` in the renderer's place — used by the one test that needs
+ * a uniform the front build optimises away (see `PAPER_FS_WHOLE`).
+ */
 async function uniformScene(fs: string | null = null): Promise<Err | UniformScene> {
   const built = scene()
   if (GlError.is(built)) return built

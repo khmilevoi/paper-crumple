@@ -46,7 +46,7 @@ import {
   sdfResFor,
   uploadBytes,
 } from '@paper-crumple/core/unstable'
-import type { CoreGlContext, ScratchPools } from '@paper-crumple/core/unstable'
+import type { CoreGlContext, EdgeSpec, ScratchPools } from '@paper-crumple/core/unstable'
 import {
   HOLES_FIXTURE,
   IDENTITY_SRC,
@@ -56,7 +56,6 @@ import {
 import { createGlFixture, type PaperGlFixture } from './testing/gl-fixture.js'
 import { createSdfBuilder, SDF_POOL_SLOTS, sigmaFor } from './gl-sdf.js'
 import { defaultsFor, descriptorsFor } from './paper-knobs.js'
-import type { EdgeSpec } from '@paper-crumple/core/unstable'
 import { createPaperRenderer } from './paper-renderer.js'
 import { PAPER_FS } from './paper-shader.js'
 import { mountNeutralTiles } from './paper-tiles.js'
@@ -432,6 +431,36 @@ describe('PAPER_FS early-outs on the bench-style front (renderFront, explicit fi
     }
   })
 
+  /**
+   * The proof that every loop below sweeps four cells rather than rendering one cell four times.
+   *
+   * This suite spent a whole task green over a renderer that uploaded nothing: `loc('thickness')`
+   * resolved through a `PAPER_UNIFORMS` key that no longer existed, `gl-context.ts` cached the
+   * `null`, `uEdgeWidth` / `uBaseBias` / `uEdgeFinish` all read 0, and its three mode strings
+   * rendered the same `edgeWidth = 0` front three times — every byte-identity assertion in the
+   * file still passed. A byte comparison between two renders is only worth what the two renders
+   * differ by, so the file has to establish that difference itself rather than borrow it from a
+   * sibling suite.
+   */
+  it('renders a different front in each of the four cells (design 2026-09-05 §6)', () => {
+    const scene = frontScene(256)
+    expect(scene).not.toBeInstanceOf(Error)
+    if (scene instanceof Error) return
+    const fronts = RENDER_CELLS.map(([name, spec]) => [name, scene.render(spec, null)] as const)
+    for (let i = 0; i < fronts.length; i++) {
+      for (let j = i + 1; j < fronts.length; j++) {
+        const a = fronts[i]
+        const b = fronts[j]
+        if (a === undefined || b === undefined) continue
+        expect(
+          firstDifferences(a[1], b[1], scene.front),
+          `${a[0]} and ${b[0]} rendered the same front`,
+        ).not.toEqual([])
+      }
+    }
+    scene.dispose()
+  }, 120_000)
+
   for (const [name, spec] of RENDER_CELLS) {
     it(`renders byte-identical fronts through the front build and the whole program (P7) — ${name}`, () => {
       const scene = frontScene(256)
@@ -458,8 +487,9 @@ describe('PAPER_FS early-outs on the bench-style front (renderFront, explicit fi
 
       // Not vacuous: both branches fire on this artwork, and together they cover a substantial
       // share of the front (the bench silhouette is mostly margin and mostly opaque interior).
-      // Measured on SwiftShader: hull 13.4 % / 83.1 %, torn 15.3 % / 22.5 % (deep-inside /
-      // far-outside).
+      // The per-mode figures this comment used to quote were measured on the deleted `hull` /
+      // `torn` mode ints at the old uniform set; the bounds below are what the assertion actually
+      // holds to, and they hold in all four cells of design 2026-09-05 §6.
       const sentinel = scene.render(spec, PAPER_FS_SENTINEL)
       const texels = scene.front * scene.front
       const deepInside = countTexels(sentinel, SENTINEL_A_RGBA)

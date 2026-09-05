@@ -270,6 +270,9 @@ export function createPaperRenderer(ctx: GlContext): Err | PaperRenderer {
     // zeroing the amplitudes are the same decision and are taken here together.
     const tearAngular = smooth ? 0 : edgeNum('tearAngular')
     const chewRef = smooth ? 0 : edgeNum('chew')
+    // Read twice below — `uFiberLen` and `uFlapReach`'s fringe term — so it is bound once here for
+    // the same reason `chewRef` is: two resolutions of one knob are two chances to disagree.
+    const fiberLenRef = edgeNum('fiberLen')
     const amps = smooth
       ? NO_TEAR
       : tearAmpsFor({
@@ -356,7 +359,7 @@ export function createPaperRenderer(ctx: GlContext): Err | PaperRenderer {
       // the derivation block above for why that pair is not optional.
       gl.uniform1f(loc('tearAngular'), tearAngular)
       gl.uniform1f(loc('fiberDens'), edgeNum('fibers'))
-      gl.uniform1f(loc('fiberLen'), edgePx('fiberLen'))
+      gl.uniform1f(loc('fiberLen'), fiberLenRef * pxs)
       gl.uniform1f(loc('grain'), rawNum('grain', 0.09))
       gl.uniform1f(loc('deckleWidth'), edgePx('deckleWidth'))
       gl.uniform1f(loc('deckleLight'), edgeNum('deckleLight'))
@@ -396,7 +399,7 @@ export function createPaperRenderer(ctx: GlContext): Err | PaperRenderer {
       // jitter rotation swings the far end of a flap through, plus the slack.
       gl.uniform1f(
         loc('flapReach'),
-        (tearReach + (finishOn ? edgeNum('fiberLen') * 4 : 0) + 30) * pxs +
+        (tearReach + (finishOn ? fiberLenRef * 4 : 0) + 30) * pxs +
           (jitterRadians * 0.8 + slack) * r.front.h,
       )
       // The front build always renders pose 0's fill, 0 (edge.js:86) — the 3D layer owns the
