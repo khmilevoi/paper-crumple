@@ -32,13 +32,32 @@ export interface SheetMesh {
   dispose(): void
 }
 
+/**
+ * §8.4's twelve preconfigured VAOs for one bucket, built from the pack's frame blocks as stored.
+ *
+ * **`read` — the error flag through the context's accounting (S7, §7.3, §8.1).** The build ends
+ * with one read of the sticky error flag, the way it always has. Given `read`, the library's own
+ * caller binds it to `GlContext.checkAllocations()`, and the flag is read twice through it: once
+ * BEFORE the first buffer and once after the VAOs. The first read settles whatever another slot
+ * left unchecked — the sheet's allocation batch, aborted at its yield with an `OUT_OF_MEMORY` of
+ * its own still on the flag — so that flag fails and releases that batch, by order, instead of
+ * being read here and discarded as a VAO error while an unbacked resident lives on under its
+ * key. The second read then has nothing unchecked to blame and is this mesh's own: a refused
+ * block fails the mesh exactly as before. Without `read` the mesh reads `gl.getError()` itself,
+ * once, after the VAOs — the signature that shipped, kept for callers outside the library.
+ */
 export function createSheetMesh(
   gl: WebGL2RenderingContext,
   pack: Pack,
+  read?: () => InstanceType<typeof GlError> | number,
 ): InstanceType<typeof GlError> | SheetMesh {
   const buffers: WebGLBuffer[] = []
   const vaos: WebGLVertexArrayObject[] = []
   let bytes = 0
+
+  // Given a reader, the first read is another batch's settle (doc comment above); its outcome
+  // is that batch's, and the mesh has allocated nothing yet.
+  if (read !== undefined) read()
 
   const fail = (message: string): InstanceType<typeof GlError> => {
     for (const vao of vaos) gl.deleteVertexArray(vao)
@@ -102,7 +121,15 @@ export function createSheetMesh(
   gl.bindBuffer(gl.ARRAY_BUFFER, null)
   gl.bindBuffer(gl.ELEMENT_ARRAY_BUFFER, null)
 
-  const err = gl.getError()
+  // This mesh's own read: with a reader, nothing is unchecked by now (the read above settled
+  // it), so a fatal flag comes back as a number and is the VAOs' — the same outcome, the same
+  // wording, as the raw read without one.
+  const err = read === undefined ? gl.getError() : read()
+  if (GlError.is(err)) {
+    return fail(
+      `GL error while building the VAOs (an allocation batch failed with it: ${err.message})`,
+    )
+  }
   if (err !== gl.NO_ERROR) return fail(`GL error 0x${err.toString(16)} while building the VAOs`)
 
   const indexCount = pack.indexCount

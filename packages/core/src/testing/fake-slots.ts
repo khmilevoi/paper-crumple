@@ -54,6 +54,9 @@ export function fakeGlContext(caps?: Partial<GlCaps>): FakeGlContext {
     program: () => new GlError('fakeGlContext compiles no programs'),
     texture: () => new GlError('fakeGlContext allocates no textures'),
     target: () => new GlError('fakeGlContext allocates no targets'),
+    allocations: (fn) => fn(),
+    checkAllocations: () => 0,
+    alive: () => false,
     scope(fn) {
       scopes += 1
       return fn(scope)

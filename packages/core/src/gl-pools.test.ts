@@ -12,17 +12,21 @@ import { createFakeTimers, type FakeTimers } from './testing/fake-timers.js'
 function fakeFactory(refuse?: (d: TextureDesc) => boolean): {
   texture: (d: TextureDesc) => InstanceType<typeof GlError> | Texture
   target: (t: Texture) => InstanceType<typeof GlError> | Target
+  alive: (t: Texture) => boolean
+  /** The context released `t` behind the pool's back (a failed allocation batch). */
+  kill: (t: Texture) => void
   live: () => number
   liveTargets: () => number
 } {
   let live = 0
   let liveTargets = 0
+  const dead = new WeakSet<Texture>()
   return {
     texture(d: TextureDesc) {
       // A driver that refuses: the pool must be exactly as it was, and say so through `key()`.
       if (refuse?.(d) === true) return new GlError(`fake factory refused ${d.width}x${d.height}`)
       live += 1
-      return {
+      const texture: Texture = {
         handle: {} as WebGLTexture,
         width: d.width,
         height: d.height,
@@ -30,9 +34,17 @@ function fakeFactory(refuse?: (d: TextureDesc) => boolean): {
         bytes: textureBytes(d),
         label: d.label ?? d.format,
         dispose() {
+          // Idempotent, as the context's tracked release is: a second dispose frees nothing.
+          if (dead.has(texture)) return
+          dead.add(texture)
           live -= 1
         },
       }
+      return texture
+    },
+    alive: (t) => !dead.has(t),
+    kill(t) {
+      t.dispose()
     },
     // A framebuffer over a texture, with no GL behind it either: the pool owns the pair for its
     // size-keyed slots, and what these tests pin is that both halves are released together.
@@ -62,16 +74,23 @@ function setup(refuse?: (d: TextureDesc) => boolean): {
   timers: FakeTimers
   live: () => number
   liveTargets: () => number
+  kill: (t: Texture) => void
 } {
   const factory = fakeFactory(refuse)
   const timers = createFakeTimers(0)
   const pools = createScratchPools({
-    gl: { texture: factory.texture, target: factory.target },
+    gl: { texture: factory.texture, target: factory.target, alive: factory.alive },
     timers,
     artwork: ARTWORK,
     sdfRes: SDF_RES,
   })
-  return { pools, timers, live: factory.live, liveTargets: factory.liveTargets }
+  return {
+    pools,
+    timers,
+    live: factory.live,
+    liveTargets: factory.liveTargets,
+    kill: factory.kill,
+  }
 }
 
 describe('the two pools are two, because their sizing laws differ (§8.1)', () => {
@@ -530,5 +549,83 @@ describe("Pool B's idle release outlives the artwork slot's retention (§8.1, §
     expect(pools.poolA.bytes()).toBe(0)
     expect(pools.poolB.bytes()).toBe(0)
     expect(timers.pending).toBe(0)
+  })
+})
+
+describe("residents released behind the pool's back — a failed allocation batch (gl-context.ts, §7.3, §8.1)", () => {
+  const desc = { width: 64, height: 64, format: 'RGBA8' } as const
+
+  it('an exclusive slot whose texture the context released is reallocated, never handed back', () => {
+    const { pools, live, kill } = setup()
+    const first = pools.poolA.acquire('sdf.inA', desc)
+    expect(first).not.toBeInstanceOf(GlError)
+    if (GlError.is(first)) return
+    kill(first)
+    expect(live()).toBe(0)
+    const second = pools.poolA.acquire('sdf.inA', desc)
+    expect(second).not.toBe(first)
+    expect(live()).toBe(1)
+    // The dead resident's bytes left the accounting with it.
+    expect(pools.poolA.bytes()).toBe(textureBytes(desc))
+  })
+
+  it('a size-keyed resident that died is reallocated, target and all, and stops counting', () => {
+    const { pools, live, liveTargets, kill } = setup()
+    const first = pools.poolA.acquireSized('sdf.tight', desc)
+    expect(first).not.toBeInstanceOf(GlError)
+    if (GlError.is(first)) return
+    kill(first.texture)
+    const second = pools.poolA.acquireSized('sdf.tight', desc)
+    expect(second).not.toBe(first)
+    expect(live()).toBe(1)
+    expect(liveTargets()).toBe(1)
+    expect(pools.poolA.bytes()).toBe(textureBytes(desc))
+  })
+
+  it("the artwork slot's key goes with its texture: a dead artwork is no longer resident (§8.5)", () => {
+    const { pools, kill } = setup()
+    const held = pools.poolA.holdArtwork('shirt', desc)
+    expect(held).not.toBeInstanceOf(GlError)
+    if (GlError.is(held)) return
+    expect(pools.poolA.artworkKey()).toBe('shirt')
+    kill(held)
+    // A slot whose texture is gone holds nobody's artwork: `build()` must expire and the core
+    // re-source, not render from an empty replacement.
+    expect(pools.poolA.artworkKey()).toBeNull()
+    expect(pools.poolA.bytes()).toBe(0)
+  })
+
+  it('Pool B staging that died is reallocated, even for the same key and source size', () => {
+    const { pools, live, kill } = setup()
+    const first = pools.poolB.acquire('a', SOURCE)
+    expect(first).not.toBeInstanceOf(GlError)
+    if (GlError.is(first)) return
+    kill(first)
+    expect(pools.poolB.bytes()).toBe(0)
+    const second = pools.poolB.acquire('a', SOURCE)
+    expect(second).not.toBe(first)
+    expect(live()).toBe(1)
+    expect(pools.poolB.key()).toBe('a')
+  })
+
+  it('dead residents go before live ones are evicted for room', () => {
+    const { pools, live, kill } = setup()
+    // Two framings that fit together (2 x 640 000 B under the 1 466 512 B budget), the newer
+    // one dead; a third that does not fit beside both.
+    const older = { width: 400, height: 400, format: 'RGBA8', label: 'older' } as const
+    const newer = { width: 400, height: 400, format: 'RG16F', label: 'newer' } as const
+    const third = { width: 400, height: 400, format: 'R16F', label: 'third' } as const
+    const a = pools.poolA.acquireSized('sdf.tight', older)
+    const b = pools.poolA.acquireSized('sdf.tight', newer)
+    expect(a).not.toBeInstanceOf(GlError)
+    expect(b).not.toBeInstanceOf(GlError)
+    if (GlError.is(a) || GlError.is(b)) return
+    kill(b.texture)
+    const c = pools.poolA.acquireSized('sdf.tight', third)
+    expect(c).not.toBeInstanceOf(GlError)
+    // Least-recently-used would have dropped the live `older` first; the dead `newer` cost
+    // nothing to drop and made the room.
+    expect(pools.poolA.acquireSized('sdf.tight', older)).toBe(a)
+    expect(live()).toBe(2)
   })
 })

@@ -2420,3 +2420,149 @@ describe('async field readback (spec §8.10)', () => {
     sheet.dispose()
   })
 })
+
+describe('S7 — allocation batches (spec 7.3, 8.1, 10.8): one getError per phase, after the yield', () => {
+  /** `readPixels` called through, and the number of `getError` reads made before it recorded. */
+  function readsBeforeIssue(ctx: GlContext, getError: { mock: { calls: unknown[] } }) {
+    const gl = ctx.gl
+    const original = gl.readPixels.bind(gl)
+    const at = { reads: -1 }
+    const spy = vi.spyOn(gl, 'readPixels').mockImplementation(((...args: unknown[]) => {
+      if (at.reads < 0) at.reads = getError.mock.calls.length
+      ;(original as (...a: unknown[]) => void)(...args)
+    }) as typeof gl.readPixels)
+    return { at, restore: () => spy.mockRestore() }
+  }
+
+  it('source() reads the flag once, in the completion after the fence poll and never before the readback is issued; build() once at its end; neither asks for completeness', async () => {
+    const ctx = open()
+    const sheet = paperSheet()
+    sheet.mount(ctx)
+    // The first sprite primes the pools; the second, at another size, allocates a fresh field
+    // set (Pool A's size-keyed slots), the source-sized copy and the artwork — the case S7 was
+    // measured on: a gallery of differing sizes, 5.4 `texStorage2D` per add, each of which used
+    // to read the flag on its own and the first of which stalled behind the storm's draws.
+    const first = await compactSprite(64, 64)
+    const primed = await sheet.source(first, { maxSize: 128, exact: false })
+    first.close()
+    expect(primed instanceof Error || isAborted(primed)).toBe(false)
+    const second = await compactSprite(80, 48)
+    const getError = vi.spyOn(ctx.gl, 'getError')
+    const fbStatus = vi.spyOn(ctx.gl, 'checkFramebufferStatus')
+    const texStorage2D = vi.spyOn(ctx.gl, 'texStorage2D')
+    const issue = readsBeforeIssue(ctx, getError)
+    const handle = await sheet.source(second, { maxSize: 128, exact: false })
+    second.close()
+    const sourceReads = getError.mock.calls.length
+    const sourceStores = texStorage2D.mock.calls.length
+    issue.restore()
+    expect(handle instanceof Error || isAborted(handle)).toBe(false)
+    if (handle instanceof Error || isAborted(handle)) return
+    expect(sourceStores, 'a real batch: several allocations').toBeGreaterThan(1)
+    expect(issue.at.reads, 'no read before the readback is issued').toBe(0)
+    expect(sourceReads).toBe(1)
+    expect(fbStatus).not.toHaveBeenCalled()
+
+    getError.mockClear()
+    texStorage2D.mockClear()
+    const front = sheet.build(handle, handle.front, defaultsFor('hull') as never)
+    const buildReads = getError.mock.calls.length
+    const buildStores = texStorage2D.mock.calls.length
+    getError.mockRestore()
+    fbStatus.mockRestore()
+    texStorage2D.mockRestore()
+    expect(front instanceof Error).toBe(false)
+    if (front instanceof Error) return
+    // The loose and blur fields, the hull mask, the hull field and the front: one read for all.
+    expect(buildStores).toBeGreaterThan(1)
+    expect(buildReads).toBe(1)
+    expect(fbStatus).not.toHaveBeenCalled()
+    sheet.releaseFront(front)
+    sheet.dispose()
+  })
+
+  it('a driver that refuses the third allocation of source(): the call fails with the batch error after its yield, every allocation of the call is released, and the next call recovers to the golden', async () => {
+    const ctx = open()
+    const sheet = paperSheet()
+    sheet.mount(ctx)
+    const bitmap = await sprite()
+    // The third `texStorage2D` of the call — the artwork slot, after the source-sized copy and
+    // Pool B's staging — is skipped, leaving the texture without storage: the resample into it
+    // raises INVALID_FRAMEBUFFER_OPERATION, which is the batch's own to read. Nothing reads the
+    // flag before the readback is issued, and the settle after the fence finds it.
+    const gl = ctx.gl
+    const originalStore = gl.texStorage2D.bind(gl)
+    let stores = 0
+    const texStorage2D = vi.spyOn(gl, 'texStorage2D').mockImplementation(((
+      ...args: Parameters<typeof gl.texStorage2D>
+    ) => {
+      stores += 1
+      if (stores !== 3) originalStore(...args)
+    }) as typeof gl.texStorage2D)
+    const getError = vi.spyOn(gl, 'getError')
+    const createTexture = vi.spyOn(gl, 'createTexture')
+    const deleteTexture = vi.spyOn(gl, 'deleteTexture')
+    const createFramebuffer = vi.spyOn(gl, 'createFramebuffer')
+    const deleteFramebuffer = vi.spyOn(gl, 'deleteFramebuffer')
+    const issue = readsBeforeIssue(ctx, getError)
+    const failed = await sheet.source(bitmap, { maxSize: 128, exact: false })
+    issue.restore()
+    texStorage2D.mockRestore()
+    expect(GlError.is(failed), String((failed as Error)?.message)).toBe(true)
+    if (!GlError.is(failed)) return
+    expect(failed.message).toMatch(/^allocation batch of \d+ textures and \d+ targets failed/)
+    expect(stores).toBeGreaterThanOrEqual(3)
+    expect(issue.at.reads).toBe(0)
+    // Every texture and framebuffer the call created is gone again — the ones that succeeded
+    // included — so nothing of a batch that failed can be drawn with or read from.
+    expect(createTexture.mock.calls.length).toBeGreaterThan(3)
+    expect(deleteTexture.mock.calls.length).toBe(createTexture.mock.calls.length)
+    expect(deleteFramebuffer.mock.calls.length).toBe(createFramebuffer.mock.calls.length)
+    getError.mockRestore()
+    createTexture.mockRestore()
+    deleteTexture.mockRestore()
+    createFramebuffer.mockRestore()
+    deleteFramebuffer.mockRestore()
+
+    // The next call finds the pools empty of what died (`gl-pools.ts`), resamples — the artwork
+    // is vouched for no longer — and lands on the very bytes a clean run does.
+    const handle = await sheet.source(bitmap, { maxSize: 128, exact: false })
+    bitmap.close()
+    expect(GlError.is(handle) || SheetError.is(handle) || isAborted(handle)).toBe(false)
+    if (GlError.is(handle) || SheetError.is(handle) || isAborted(handle)) return
+    expect(handle.frontRect).toEqual(READBACK_GOLDEN['ellipse/hull'].frontRect)
+    expect(hullDigest(handle.hull)).toBe(READBACK_GOLDEN['ellipse/hull'].hull)
+    const front = sheet.build(handle, handle.front, defaultsFor('hull') as never)
+    expect(front instanceof Error, String((front as Error)?.message)).toBe(false)
+    if (!(front instanceof Error)) sheet.releaseFront(front)
+    sheet.dispose()
+  })
+
+  it('asks for the implementation read format once per field format: two getParameter reads on the first sprite, none on the second', async () => {
+    const ctx = open()
+    const sheet = paperSheet()
+    sheet.mount(ctx)
+    const gl = ctx.gl
+    // Counted by pname: the fixture's context is injected, so every outermost scope captures
+    // §5.1's set through `getParameter` as well, and those reads are not the ones in question.
+    const readFormat = (p: unknown) =>
+      p === gl.IMPLEMENTATION_COLOR_READ_FORMAT || p === gl.IMPLEMENTATION_COLOR_READ_TYPE
+    const getParameter = vi.spyOn(gl, 'getParameter')
+    const first = await compactSprite(64, 64)
+    const a = await sheet.source(first, { maxSize: 128, exact: false })
+    first.close()
+    const firstReads = getParameter.mock.calls.filter(([p]) => readFormat(p)).length
+    getParameter.mockClear()
+    // Another size, the same field format: the pair is remembered, not asked again.
+    const second = await compactSprite(80, 48)
+    const b = await sheet.source(second, { maxSize: 128, exact: false })
+    second.close()
+    const secondReads = getParameter.mock.calls.filter(([p]) => readFormat(p)).length
+    getParameter.mockRestore()
+    expect(a instanceof Error || isAborted(a)).toBe(false)
+    expect(b instanceof Error || isAborted(b)).toBe(false)
+    expect(firstReads).toBe(2)
+    expect(secondReads).toBe(0)
+    sheet.dispose()
+  })
+})

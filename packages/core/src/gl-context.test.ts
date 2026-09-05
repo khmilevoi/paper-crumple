@@ -19,11 +19,17 @@ interface FakeGl {
   /**
    * What `checkFramebufferStatus`, `getError`, `LINK_STATUS`, `COMPILE_STATUS` (per stage) and
    * `COMPLETION_STATUS_KHR` (false for the next `pendingPolls` reads, then true) answer; a test
-   * flips these to fail a path or to keep a link pending.
+   * flips these to fail a path or to keep a link pending. `error` is a sticky flag the way GL's
+   * is — one read returns it and clears it — and `errors` is a FIFO of flags read before it, for
+   * a driver holding several at once (GL ES 3.0 §2.5). `failStoreAt` N: the N-th `texStorage2D`
+   * since the last `reset()` raises OUT_OF_MEMORY — the fake driver that fails one allocation of
+   * a batch.
    */
   readonly answers: {
     framebufferStatus: string
     error: string
+    errors: string[]
+    failStoreAt: number
     linkStatus: boolean
     compileStatus: { VERTEX_SHADER: boolean; FRAGMENT_SHADER: boolean }
     pendingPolls: number
@@ -39,6 +45,8 @@ function fakeGl(o: { parallel?: boolean } = {}): FakeGl {
   const answers = {
     framebufferStatus: 'FRAMEBUFFER_COMPLETE',
     error: 'NO_ERROR',
+    errors: [] as string[],
+    failStoreAt: 0,
     linkStatus: true,
     compileStatus: { VERTEX_SHADER: true, FRAGMENT_SHADER: true },
     pendingPolls: 0,
@@ -101,8 +109,18 @@ function fakeGl(o: { parallel?: boolean } = {}): FakeGl {
         return { kind: name, id: nextId++, type: names.get(args[0] as number) }
       case 'checkFramebufferStatus':
         return enumValue(answers.framebufferStatus)
-      case 'getError':
-        return enumValue(answers.error)
+      case 'getError': {
+        const queued = answers.errors.shift()
+        if (queued !== undefined) return enumValue(queued)
+        const flag = answers.error
+        answers.error = 'NO_ERROR'
+        return enumValue(flag)
+      }
+      case 'texStorage2D':
+        if (answers.failStoreAt > 0 && counts.get(name) === answers.failStoreAt) {
+          answers.errors.push('OUT_OF_MEMORY')
+        }
+        return undefined
       case 'createProgram':
       case 'createTexture':
       case 'createFramebuffer':
@@ -515,5 +533,200 @@ describe('program(): the deferred link (P7, §5.2 amendment)', () => {
     expect(f.calls('getProgramParameter')).toBe(0)
     program.dispose()
     expect(f.calls('deleteProgram')).toBe(0)
+  })
+})
+
+describe('allocation batches (§7.3, §8.1, §10.8): one sticky-flag read per batch', () => {
+  const desc = { width: 8, height: 8, format: 'RGBA8' } as const
+
+  it('reads no status inside allocations(), and exactly one getError at checkAllocations()', () => {
+    const f = fakeGl()
+    const ctx = createGlContext(f.gl)
+    f.reset()
+    const made = ctx.allocations(() => {
+      const textures = [1, 2, 3, 4, 5].map((i) =>
+        ctx.texture({ ...desc, width: 8 * i, label: `t${i}` }),
+      )
+      const targets = textures.slice(0, 3).map((t) => (GlError.is(t) ? t : ctx.target(t)))
+      return { textures, targets }
+    })
+    for (const t of [...made.textures, ...made.targets]) expect(t).not.toBeInstanceOf(GlError)
+    // Five texStorage2D and three framebuffers, and not one round trip among them.
+    expect(f.calls('texStorage2D')).toBe(5)
+    expect(f.calls('createFramebuffer')).toBe(3)
+    expect(f.calls('getError')).toBe(0)
+    expect(f.calls('checkFramebufferStatus')).toBe(0)
+    expect(ctx.checkAllocations()).toBe(f.gl.NO_ERROR)
+    expect(f.calls('getError')).toBe(1)
+    expect(f.calls('deleteTexture')).toBe(0)
+    for (const t of made.textures) if (!GlError.is(t)) expect(ctx.alive(t)).toBe(true)
+    // Settled: a second check reads the flag again and has nothing to release.
+    expect(ctx.checkAllocations()).toBe(f.gl.NO_ERROR)
+    expect(f.calls('getError')).toBe(2)
+    expect(f.calls('deleteTexture')).toBe(0)
+  })
+
+  it('a driver that fails the third allocation of a batch: the check returns the error, every allocation of the batch is released, nothing is left to use', () => {
+    const f = fakeGl()
+    const ctx = createGlContext(f.gl)
+    f.reset()
+    f.answers.failStoreAt = 3
+    const made = ctx.allocations(() => {
+      const textures = [1, 2, 3, 4].map((i) =>
+        ctx.texture({ ...desc, width: 8 * i, label: `t${i}` }),
+      )
+      const first = textures[0]!
+      const target = GlError.is(first) ? first : ctx.target(first)
+      return { textures, target }
+    })
+    // Inside the batch nothing is read, so even the failed allocation looks like a success: the
+    // batch's contract is that nothing it handed out is trusted before checkAllocations().
+    for (const t of made.textures) expect(t).not.toBeInstanceOf(GlError)
+    expect(made.target).not.toBeInstanceOf(GlError)
+    expect(f.calls('getError')).toBe(0)
+    const outcome = ctx.checkAllocations()
+    expect(outcome).toBeInstanceOf(GlError)
+    expect((outcome as InstanceType<typeof GlError>).message).toMatch(
+      /^allocation batch of 4 textures and 1 target failed, GL error 0x[0-9a-f]+/,
+    )
+    // Every allocation of the batch — the three that succeeded included — is released, and the
+    // flag is drained: OUT_OF_MEMORY, then NO_ERROR.
+    expect(f.calls('deleteTexture')).toBe(4)
+    expect(f.calls('deleteFramebuffer')).toBe(1)
+    expect(f.calls('getError')).toBe(2)
+    for (const t of made.textures) if (!GlError.is(t)) expect(ctx.alive(t)).toBe(false)
+    // Reported once: a later check finds a clean flag and releases nothing more.
+    expect(ctx.checkAllocations()).toBe(f.gl.NO_ERROR)
+    expect(f.calls('deleteTexture')).toBe(4)
+    // An allocation's own dispose() after the batch's release is a no-op, not a second delete.
+    for (const t of made.textures) if (!GlError.is(t)) t.dispose()
+    if (!GlError.is(made.target)) made.target.dispose()
+    expect(f.calls('deleteTexture')).toBe(4)
+    expect(f.calls('deleteFramebuffer')).toBe(1)
+  })
+
+  it('reads every flag: an OUT_OF_MEMORY queued behind another flag still fails the batch', () => {
+    const f = fakeGl()
+    const ctx = createGlContext(f.gl)
+    f.reset()
+    const t = ctx.allocations(() => ctx.texture(desc))
+    // A draw into the unbacked target raised its own flag ahead of the storage failure.
+    f.answers.errors.push('INVALID_OPERATION', 'OUT_OF_MEMORY')
+    expect(ctx.checkAllocations()).toBeInstanceOf(GlError)
+    expect(f.calls('getError')).toBe(3)
+    expect(f.calls('deleteTexture')).toBe(1)
+    if (!GlError.is(t)) expect(ctx.alive(t)).toBe(false)
+  })
+
+  it('a flag no allocation can raise does not fail the batch: checkAllocations() returns it and keeps every allocation', () => {
+    const f = fakeGl()
+    const ctx = createGlContext(f.gl)
+    f.reset()
+    const t = ctx.allocations(() => ctx.texture(desc))
+    f.answers.errors.push('INVALID_OPERATION')
+    expect(ctx.checkAllocations()).toBe(f.gl.INVALID_OPERATION)
+    expect(f.calls('deleteTexture')).toBe(0)
+    if (!GlError.is(t)) expect(ctx.alive(t)).toBe(true)
+    // INVALID_FRAMEBUFFER_OPERATION is an allocation's own: a target of the batch is incomplete.
+    const u = ctx.allocations(() => ctx.texture({ ...desc, label: 'u' }))
+    f.answers.errors.push('INVALID_FRAMEBUFFER_OPERATION')
+    expect(ctx.checkAllocations()).toBeInstanceOf(GlError)
+    expect(f.calls('deleteTexture')).toBe(1)
+    if (!GlError.is(u)) expect(ctx.alive(u)).toBe(false)
+    if (!GlError.is(t)) expect(ctx.alive(t)).toBe(true)
+  })
+
+  it('an allocation outside any batch settles what is unchecked: a clean read proves it, a fatal one releases it and is reported at the next check', () => {
+    const f = fakeGl()
+    const ctx = createGlContext(f.gl)
+    f.reset()
+    const a = ctx.allocations(() => ctx.texture({ ...desc, label: 'a' }))
+    // Clean: the unbatched allocation's own read proves `a` too — no second read.
+    const b = ctx.texture({ ...desc, label: 'b' })
+    expect(b).not.toBeInstanceOf(GlError)
+    expect(f.calls('getError')).toBe(1)
+    expect(ctx.checkAllocations()).toBe(f.gl.NO_ERROR)
+    expect(f.calls('deleteTexture')).toBe(0)
+    // Fatal: `c` is unchecked when `d`'s own read finds OUT_OF_MEMORY. `d` fails on the call,
+    // `c` is released with it, and the batch's owner learns at its own check — the flag is never
+    // read and discarded between two readers.
+    const c = ctx.allocations(() => ctx.texture({ ...desc, label: 'c' }))
+    f.answers.error = 'OUT_OF_MEMORY'
+    const d = ctx.texture({ ...desc, label: 'd' })
+    expect(d).toBeInstanceOf(GlError)
+    expect(f.calls('deleteTexture')).toBe(2)
+    if (!GlError.is(c)) expect(ctx.alive(c)).toBe(false)
+    expect(ctx.checkAllocations()).toBeInstanceOf(GlError)
+    expect(ctx.checkAllocations()).toBe(f.gl.NO_ERROR)
+    if (!GlError.is(a)) expect(ctx.alive(a)).toBe(true)
+  })
+
+  it('a batch inside a batch joins it: one read for both', () => {
+    const f = fakeGl()
+    const ctx = createGlContext(f.gl)
+    f.reset()
+    const made = ctx.allocations(() => {
+      const outer = ctx.texture({ ...desc, label: 'outer' })
+      const inner = ctx.allocations(() => ctx.texture({ ...desc, label: 'inner' }))
+      // The inner batch's exit reads nothing: the outer owner's check covers it.
+      const after = ctx.texture({ ...desc, label: 'after' })
+      return [outer, inner, after]
+    })
+    expect(f.calls('getError')).toBe(0)
+    expect(ctx.checkAllocations()).toBe(f.gl.NO_ERROR)
+    expect(f.calls('getError')).toBe(1)
+    for (const t of made) expect(t).not.toBeInstanceOf(GlError)
+  })
+
+  it('target() inside a batch asks for no completeness status, and proves nothing for later targets', () => {
+    const f = fakeGl()
+    const ctx = createGlContext(f.gl)
+    const t = ctx.texture(desc)
+    if (GlError.is(t)) return
+    f.reset()
+    const target = ctx.allocations(() => ctx.target(t))
+    expect(target).not.toBeInstanceOf(GlError)
+    expect(f.calls('checkFramebufferStatus')).toBe(0)
+    expect(ctx.checkAllocations()).toBe(f.gl.NO_ERROR)
+    // An incomplete target in a batch is caught by the draws into it
+    // (INVALID_FRAMEBUFFER_OPERATION), not by a status query, so a clean batch is no proof of
+    // the combination: the first unbatched target of it still asks.
+    expect(ctx.target(t)).not.toBeInstanceOf(GlError)
+    expect(f.calls('checkFramebufferStatus')).toBe(1)
+  })
+
+  it('alive(): true for a texture this context holds, false once anyone released it', () => {
+    const f = fakeGl()
+    const ctx = createGlContext(f.gl)
+    const t = ctx.texture(desc)
+    if (GlError.is(t)) return
+    expect(ctx.alive(t)).toBe(true)
+    t.dispose()
+    expect(ctx.alive(t)).toBe(false)
+    const u = ctx.texture(desc)
+    if (GlError.is(u)) return
+    ctx.dispose()
+    expect(ctx.alive(u)).toBe(false)
+  })
+
+  it('a failure another reader found releases what the next batch allocated too: the owner is told once, and nothing of its batch survives the failed settle', () => {
+    const f = fakeGl()
+    const ctx = createGlContext(f.gl)
+    f.reset()
+    const a = ctx.allocations(() => ctx.texture({ ...desc, label: 'a' }))
+    // An unbatched allocation's own read finds the fatal flag: `a` goes, the failure is kept.
+    f.answers.error = 'OUT_OF_MEMORY'
+    expect(ctx.texture({ ...desc, label: 'b' })).toBeInstanceOf(GlError)
+    expect(f.calls('deleteTexture')).toBe(2)
+    // A new batch before the owner's check — `build()`'s front, say — settles into that kept
+    // failure: the contract that a failed settle releases every unchecked allocation holds here
+    // too, or the caller returns the error and the front outlives it, owned by nobody.
+    const front = ctx.allocations(() => ctx.texture({ ...desc, label: 'front' }))
+    expect(front).not.toBeInstanceOf(GlError)
+    expect(ctx.checkAllocations()).toBeInstanceOf(GlError)
+    if (!GlError.is(front)) expect(ctx.alive(front)).toBe(false)
+    expect(f.calls('deleteTexture')).toBe(3)
+    expect(ctx.checkAllocations()).toBe(f.gl.NO_ERROR)
+    if (!GlError.is(a)) expect(ctx.alive(a)).toBe(false)
   })
 })
