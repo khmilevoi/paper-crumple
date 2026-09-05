@@ -30,6 +30,12 @@ export interface GlContext {
    * costs performance and never correctness.
    */
   readonly exactByteFetch: boolean
+  /**
+   * Compiles and links. The synchronous `GlError` covers what can be detected without waiting
+   * for the driver (object creation); with `KHR_parallel_shader_compile` the link itself is
+   * deferred and its outcome — a compile or link failure included — is `Program.ready()`'s
+   * (§5.2 amendment, P7). Without the extension the link is checked here, as it always was.
+   */
   program(vs: string, fs: string, label: string): InstanceType<typeof GlError> | Program
   texture(d: TextureDesc): InstanceType<typeof GlError> | Texture
   target(t: Texture): InstanceType<typeof GlError> | Target

@@ -16,16 +16,33 @@ interface FakeGl {
   /** The enum names `getParameter` was asked for since the last `reset()`, in order. */
   parameters(): string[]
   reset(): void
-  /** What `checkFramebufferStatus` and `getError` answer; a test flips these to fail a path. */
-  readonly answers: { framebufferStatus: string; error: string }
+  /**
+   * What `checkFramebufferStatus`, `getError`, `LINK_STATUS`, `COMPILE_STATUS` (per stage) and
+   * `COMPLETION_STATUS_KHR` (false for the next `pendingPolls` reads, then true) answer; a test
+   * flips these to fail a path or to keep a link pending.
+   */
+  readonly answers: {
+    framebufferStatus: string
+    error: string
+    linkStatus: boolean
+    compileStatus: { VERTEX_SHADER: boolean; FRAGMENT_SHADER: boolean }
+    pendingPolls: number
+  }
 }
 
-function fakeGl(): FakeGl {
+/** `parallel`: the fake offers `KHR_parallel_shader_compile`, so the link is deferred (P7). */
+function fakeGl(o: { parallel?: boolean } = {}): FakeGl {
   const counts = new Map<string, number>()
   const enums = new Map<string, number>()
   const names = new Map<number, string>()
   const parameters: string[] = []
-  const answers = { framebufferStatus: 'FRAMEBUFFER_COMPLETE', error: 'NO_ERROR' }
+  const answers = {
+    framebufferStatus: 'FRAMEBUFFER_COMPLETE',
+    error: 'NO_ERROR',
+    linkStatus: true,
+    compileStatus: { VERTEX_SHADER: true, FRAGMENT_SHADER: true },
+    pendingPolls: 0,
+  }
   let nextId = 1
 
   const enumValue = (name: string): number => {
@@ -43,6 +60,11 @@ function fakeGl(): FakeGl {
     counts.set(name, (counts.get(name) ?? 0) + 1)
     switch (name) {
       case 'getExtension':
+        if (args[0] === 'KHR_parallel_shader_compile') {
+          return o.parallel === true
+            ? { COMPLETION_STATUS_KHR: enumValue('COMPLETION_STATUS_KHR') }
+            : null
+        }
         return args[0] === 'EXT_color_buffer_float' ? {} : null
       case 'getParameter': {
         const pname = names.get(args[0] as number) ?? String(args[0])
@@ -54,14 +76,33 @@ function fakeGl(): FakeGl {
       }
       case 'isEnabled':
         return false
-      case 'getShaderParameter':
-      case 'getProgramParameter':
+      case 'getShaderParameter': {
+        const pname = names.get(args[1] as number)
+        if (pname !== 'COMPILE_STATUS') return true
+        const stage = (args[0] as { type?: 'VERTEX_SHADER' | 'FRAGMENT_SHADER' }).type
+        return stage === undefined ? true : answers.compileStatus[stage]
+      }
+      case 'getProgramParameter': {
+        const pname = names.get(args[1] as number)
+        if (pname === 'LINK_STATUS') return answers.linkStatus
+        if (pname === 'COMPLETION_STATUS_KHR') {
+          if (answers.pendingPolls > 0) {
+            answers.pendingPolls -= 1
+            return false
+          }
+          return true
+        }
         return true
+      }
+      case 'getShaderInfoLog':
+      case 'getProgramInfoLog':
+        return 'fake log'
+      case 'createShader':
+        return { kind: name, id: nextId++, type: names.get(args[0] as number) }
       case 'checkFramebufferStatus':
         return enumValue(answers.framebufferStatus)
       case 'getError':
         return enumValue(answers.error)
-      case 'createShader':
       case 'createProgram':
       case 'createTexture':
       case 'createFramebuffer':
@@ -240,5 +281,129 @@ describe('status queries off the hot path', () => {
     f.reset()
     expect(ctx.target(good)).not.toBeInstanceOf(GlError)
     expect(f.calls('checkFramebufferStatus')).toBe(1)
+  })
+})
+
+describe('program(): the deferred link (P7, §5.2 amendment)', () => {
+  const VS = 'void main() {}'
+  const FS = 'void main() {}'
+
+  it('without KHR_parallel_shader_compile compiles both shaders and links, then reads the three statuses inside program(), and ready() resolves at once', async () => {
+    const f = fakeGl()
+    const ctx = createGlContext(f.gl)
+    f.reset()
+    const program = ctx.program(VS, FS, 'sync')
+    expect(program).not.toBeInstanceOf(GlError)
+    if (GlError.is(program)) return
+    // Both compiles and the link are issued first; then two COMPILE_STATUS reads and one
+    // LINK_STATUS read, inside program() itself.
+    expect(f.calls('compileShader')).toBe(2)
+    expect(f.calls('linkProgram')).toBe(1)
+    expect(f.calls('getShaderParameter')).toBe(2)
+    expect(f.calls('getProgramParameter')).toBe(1)
+    expect(f.calls('deleteShader')).toBe(2)
+    f.reset()
+    expect(await program.ready()).toBeUndefined()
+    expect(f.calls('getProgramParameter')).toBe(0)
+    program.dispose()
+    expect(f.calls('deleteProgram')).toBe(1)
+
+    f.answers.linkStatus = false
+    const broken = ctx.program(VS, FS, 'bad')
+    expect(broken).toBeInstanceOf(GlError)
+    expect((broken as InstanceType<typeof GlError>).message).toBe(
+      'bad: program did not link: fake log',
+    )
+  })
+
+  it('with the extension reads no status inside program(), and ready() polls COMPLETION_STATUS_KHR once per turn until the link is done', async () => {
+    const f = fakeGl({ parallel: true })
+    const ctx = createGlContext(f.gl)
+    f.reset()
+    f.answers.pendingPolls = 3
+    const program = ctx.program(VS, FS, 'deferred')
+    expect(program).not.toBeInstanceOf(GlError)
+    if (GlError.is(program)) return
+    // mount() returns here; nothing has waited on the driver.
+    expect(f.calls('linkProgram')).toBe(1)
+    expect(f.calls('getShaderParameter')).toBe(0)
+    expect(f.calls('getProgramParameter')).toBe(0)
+    expect(f.calls('deleteShader')).toBe(0)
+
+    const first = program.ready()
+    const second = program.ready()
+    expect(second).toBe(first) // one wait, however many callers
+    expect(await first).toBeUndefined()
+    // Three "still compiling" polls, one "done", then the one LINK_STATUS read — and the shader
+    // status reads, which need the shaders alive until now.
+    expect(f.calls('getProgramParameter')).toBe(5)
+    expect(f.calls('getShaderParameter')).toBe(2)
+    expect(f.calls('deleteShader')).toBe(2)
+    expect(f.answers.pendingPolls).toBe(0)
+    // Settled: a later ready() re-polls nothing.
+    f.reset()
+    expect(await program.ready()).toBeUndefined()
+    expect(f.calls('getProgramParameter')).toBe(0)
+    program.dispose()
+    expect(f.calls('deleteProgram')).toBe(1)
+  })
+
+  it('delivers a compile or link failure through ready(), worded as the synchronous path worded it', async () => {
+    const f = fakeGl({ parallel: true })
+    const ctx = createGlContext(f.gl)
+
+    f.answers.compileStatus.FRAGMENT_SHADER = false
+    const compileFailed = ctx.program(VS, FS, 'bad')
+    expect(compileFailed).not.toBeInstanceOf(GlError)
+    if (GlError.is(compileFailed)) return
+    f.reset()
+    const outcome = await compileFailed.ready()
+    expect(outcome).toBeInstanceOf(GlError)
+    expect(outcome?.message).toBe('bad: fragment shader did not compile: fake log')
+    // The failed program is released by the poll, as the synchronous path released it.
+    expect(f.calls('deleteProgram')).toBe(1)
+    expect(f.calls('deleteShader')).toBe(2)
+    compileFailed.dispose()
+    expect(f.calls('deleteProgram')).toBe(1)
+
+    f.answers.compileStatus.FRAGMENT_SHADER = true
+    f.answers.linkStatus = false
+    const linkFailed = ctx.program(VS, FS, 'worse')
+    if (GlError.is(linkFailed)) return
+    const linkOutcome = await linkFailed.ready()
+    expect(linkOutcome?.message).toBe('worse: program did not link: fake log')
+  })
+
+  it('defers the deleteProgram of a dispose() during the wait to the poll, and ready() reports it', async () => {
+    const f = fakeGl({ parallel: true })
+    const ctx = createGlContext(f.gl)
+    f.answers.pendingPolls = 2
+    const program = ctx.program(VS, FS, 'gone')
+    if (GlError.is(program)) return
+    f.reset()
+    program.dispose()
+    // ANGLE's deleteProgram resolves the link first — the very block the deferral removes — so
+    // the program is only deleted once the driver reports completion.
+    expect(f.calls('deleteProgram')).toBe(0)
+    const outcome = await program.ready()
+    expect(outcome?.message).toBe('gone: program disposed before its link completed')
+    expect(f.calls('deleteProgram')).toBe(1)
+    expect(f.calls('deleteShader')).toBe(2)
+    // Never twice.
+    program.dispose()
+    expect(f.calls('deleteProgram')).toBe(1)
+  })
+
+  it('ctx.dispose() during a wait follows the same path: nothing blocks, the poll cleans up', async () => {
+    const f = fakeGl({ parallel: true })
+    const ctx = createGlContext(f.gl)
+    f.answers.pendingPolls = 1
+    const program = ctx.program(VS, FS, 'ctx')
+    if (GlError.is(program)) return
+    f.reset()
+    ctx.dispose()
+    expect(f.calls('deleteProgram')).toBe(0)
+    expect(await program.ready()).toBeInstanceOf(GlError)
+    expect(f.calls('deleteProgram')).toBe(1)
   })
 })

@@ -40,6 +40,7 @@ import {
   hullCacheKey,
   KNOB_REFERENCE_PX,
   overscanRadius,
+  raceAbort,
   uploadBytes,
 } from '@paper-crumple/core/unstable'
 import type { GlContext, ScratchPools, Texture } from '@paper-crumple/core/unstable'
@@ -48,7 +49,8 @@ import type { Resampler } from './artwork.js'
 import { cpuSdfFromAlpha } from './field.js'
 import { growBox, scaleBox, sheetRectFromExtent, signedFieldExtent } from './extent.js'
 import type { AlphaBox } from './mask.js'
-import { createSdfBuilder, sigmaFor, SDF_POOL_SLOTS } from './gl-sdf.js'
+import { createSdfBuilder, createSdfPrograms, sigmaFor, SDF_POOL_SLOTS } from './gl-sdf.js'
+import type { SdfPrograms } from './gl-sdf.js'
 import type { Field, LooseField, SdfBuilder } from './gl-sdf.js'
 import {
   checkReserve,
@@ -213,6 +215,8 @@ interface Mounted {
   poolsSize: { artwork: Size; sdfRes: number } | null
   readonly resampler: Resampler
   readonly renderer: PaperRenderer
+  /** The field programs, linked once at `mount()` and shared by every `sdf` builder (P7). */
+  readonly sdfPrograms: SdfPrograms
   readonly cache: HullCache
   tiles: MountedTiles
   /** Every front texture `build()` handed out and the core has not yet released, so `dispose()`
@@ -419,7 +423,7 @@ function ensurePools(
   m.lastFieldBuild = null
 
   const pools = createScratchPools({ gl: m.ctx, artwork, sdfRes })
-  const sdf = createSdfBuilder(m.ctx, pools.poolA)
+  const sdf = createSdfBuilder(m.ctx, pools.poolA, m.sdfPrograms)
   if (GlError.is(sdf)) {
     pools.dispose()
     return sdf
@@ -799,8 +803,18 @@ export function paperSheet(options?: PaperSheetOptions): PaperSheet {
       return renderer
     }
 
+    // The field programs, linked here rather than with the first scratch pools (P7): their link
+    // starts at mount, alongside the paper program's, and source() waits for both in one place.
+    const sdfPrograms = createSdfPrograms(ctx)
+    if (GlError.is(sdfPrograms)) {
+      renderer.dispose()
+      resampler.dispose()
+      return sdfPrograms
+    }
+
     const neutral = mountNeutralTiles(ctx)
     if (GlError.is(neutral)) {
+      sdfPrograms.dispose()
       renderer.dispose()
       resampler.dispose()
       return neutral
@@ -813,6 +827,7 @@ export function paperSheet(options?: PaperSheetOptions): PaperSheet {
       poolsSize: null,
       resampler,
       renderer,
+      sdfPrograms,
       cache: hullCache(),
       tiles: neutral,
       liveFronts: new Set<Texture>(),
@@ -899,6 +914,33 @@ export function paperSheet(options?: PaperSheetOptions): PaperSheet {
     // Abort check point 1 (§10.5): on entry, before any GPU work is spent.
     if (signalAborted(o.signal)) return ABORTED
 
+    // P7 (spec 5.2 amendment): `mount()` issued the programs' compile and link without waiting
+    // for the driver, so this is where the paper shader's link — 42–48 s cold on ANGLE/D3D11
+    // before P7, seconds after — is waited for, off the main thread, and where a failed link
+    // surfaces: as this call's error, observed (§10.6), on the ingest path §7.1's ban on deferral
+    // does not cover. Every `build()` needs a handle from a `source()` that passed this point,
+    // so `build()` never meets a pending program. Two `source()` calls issued during one link
+    // resume here in call order (one promise, listeners in registration order). The wait is
+    // raced against the signal (§10.5's check point "after a program-readiness wait"): a
+    // superseded swap or a `stage.dispose()` returns `ABORTED` the moment it fires rather than
+    // holding the ingest lane's slot for the rest of the link, which is shared and carries on
+    // for the next caller. A wait that ends normally re-checks the mount: still before any GPU
+    // work.
+    const ready = await raceAbort(
+      Promise.all([m.renderer.ready(), m.resampler.ready(), m.sdfPrograms.ready()]).then(
+        (outcomes) => outcomes.find((outcome) => outcome !== undefined),
+      ),
+      o.signal,
+    )
+    if (ready === ABORTED) return ABORTED
+    if (ready !== undefined) return ready
+    if (mounted !== m) {
+      return new SheetError('paperSheet: dispose() ran while source() waited for the program link')
+    }
+    // An abort that landed in the microtask gap after the race's listener came off is honoured
+    // here, still before any GPU work (§10.5).
+    if (signalAborted(o.signal)) return ABORTED
+
     // §6.3 — the hull cache key is "every knob at or above 'hull'", so the trace runs at the
     // hull-tier values the caller projected for the sprite, over this factory's defaults. The
     // reserve, `p` and the artwork size derived below stay at the defaults (`valuesFor`'s own doc
@@ -942,6 +984,9 @@ export function paperSheet(options?: PaperSheetOptions): PaperSheet {
 
     // Step 5: pools, sized at { artwork, sdfRes } — created lazily here, reused across sprites,
     // re-created (with disposal) when a later sprite needs a bigger Pool A.
+    // No wait between here and the passes (P7): the builder draws with `m.sdfPrograms`, linked
+    // at mount and awaited above, so a concurrent source() of another size re-sizes the pools
+    // only between two calls' synchronous runs from the pools to the fields — as before.
     const ensured = ensurePools(m, artwork, sdfRes)
     if (GlError.is(ensured)) return ensured
     const { pools, sdf } = ensured
@@ -1558,6 +1603,7 @@ export function paperSheet(options?: PaperSheetOptions): PaperSheet {
     m.renderer.dispose()
     m.resampler.dispose()
     m.sdf?.dispose()
+    m.sdfPrograms.dispose()
     m.pools?.dispose()
     m.cache.clear()
   }

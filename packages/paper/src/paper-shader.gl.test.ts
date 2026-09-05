@@ -27,16 +27,40 @@ describe('PAPER_FS', () => {
     program.dispose()
   })
 
-  it('resolves every name PAPER_UNIFORMS declares', () => {
+  it('resolves every name PAPER_UNIFORMS declares in the whole program, and all but the fold and crumple ones in the front build (P7)', () => {
     const ctx = open()
-    const program = ctx.program(FULLSCREEN_VS, PAPER_FS, 'paper')
-    expect(GlError.is(program), GlError.is(program) ? program.message : '').toBe(false)
-    if (GlError.is(program)) return
-    const missing = Object.values(PAPER_UNIFORMS).filter(
-      (name) => program.uniformLocation(name) === null,
+    const missingIn = (fs: string): string[] | Error => {
+      const program = ctx.program(FULLSCREEN_VS, fs, 'paper')
+      if (GlError.is(program)) return program
+      const missing = Object.values(PAPER_UNIFORMS).filter(
+        (name) => program.uniformLocation(name) === null,
+      )
+      program.dispose()
+      return missing
+    }
+    // The whole program (edits 1-8) reaches every uniform.
+    const whole = missingIn(
+      PAPER_FS.replace('#define PAPER_FRONT_BUILD 1', '#define PAPER_FRONT_BUILD 0'),
     )
-    expect(missing).toEqual([])
-    program.dispose()
+    expect(whole).toEqual([])
+    // The shipped front build compiles the fold loops, the flap shadow and the crumple mosaic
+    // out, so the uniforms only they read are optimised away — and `renderFront`'s uploads to
+    // them are the no-ops WebGL defines for a null location. The set is pinned so that a guard
+    // moved by a later edit shows up here rather than as a silently dropped upload.
+    const front = missingIn(PAPER_FS)
+    expect(front).toEqual([
+      'uFolds',
+      'uFoldJitter',
+      'uCreaseDark',
+      'uCreaseWidth',
+      'uSlack',
+      'uFlapReach',
+      'uCrumpleDepth',
+      'uCrumpleCells',
+      'uPhotoCrumple',
+      'uBallR',
+      'uCrumpleBite',
+    ])
   })
 
   it('reads the artwork with texelFetch and never with LINEAR (spec 7.4.1)', () => {

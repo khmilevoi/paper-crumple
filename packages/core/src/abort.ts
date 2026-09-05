@@ -65,3 +65,32 @@ export function isAborted(x: unknown): x is Aborted {
   }
   return false
 }
+
+/**
+ * `promise`'s value, or `ABORTED` the moment `signal` fires — whichever comes first (§5.2
+ * amendment, P7; §10.5's check point "after a program-readiness wait").
+ *
+ * A slot's asynchronous path waits on a shared promise it does not own — a program link that
+ * every caller of the context shares, a fetch another caller started — and a cancelled caller
+ * must leave that promise alone and leave *now*: a superseded swap that sat out a 2–3 s cold
+ * D3D11 compile would hold the ingest lane's one slot for the whole of it. So the listener is
+ * `once` and is removed when the wait ends normally, the promise is never touched, and the
+ * result is the promise's value or the sentinel. `promise` must never reject (§10.8: a promise
+ * that fails resolves to an Error), so the fulfilment handler is the only one there is. No
+ * `signal`: the promise as it is. Already aborted: the sentinel, without subscribing.
+ */
+export function raceAbort<T>(
+  promise: Promise<T>,
+  signal: AbortSignal | undefined,
+): Promise<T | Aborted> {
+  if (signal === undefined) return promise
+  if (signal.aborted) return Promise.resolve(ABORTED)
+  return new Promise<T | Aborted>((resolve) => {
+    const onAbort = (): void => resolve(ABORTED)
+    signal.addEventListener('abort', onAbort, { once: true })
+    void promise.then((value) => {
+      signal.removeEventListener('abort', onAbort)
+      resolve(value)
+    })
+  })
+}

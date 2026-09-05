@@ -8,8 +8,18 @@
  * `compile` and `createTarget` are the two boundaries `eslint.boundaries.js` names. They are
  * module-private here and they never throw: they wrap the GL calls that can fail and return a
  * `GlError` (§10.8), which is why this file is not in `boundaryFiles`.
+ *
+ * **The link is deferred where the driver allows it (P7, §5.2 amendment).** With
+ * `KHR_parallel_shader_compile` present, `compile` issues the compile and the link and returns a
+ * `Program` without reading `LINK_STATUS` — that read is where ANGLE's D3D11 backend blocked the
+ * main thread for the whole HLSL compile (42–48 s cold for the paper shader before P7, seconds
+ * after) — and the outcome is delivered by `Program.ready()`, which polls `COMPLETION_STATUS_KHR`
+ * once per `nextTurn()` and only then reads `LINK_STATUS`. Without the extension both shaders are
+ * compiled and the program linked, then the three statuses are read before `program()` returns,
+ * and `ready()` resolves at once.
  */
 import { GlError } from './errors.js'
+import { nextTurn } from './next-turn.js'
 import {
   FLOAT_FORMATS,
   INTEGER_FORMATS,
@@ -84,52 +94,150 @@ function isPositiveInteger(n: number): boolean {
   return Number.isInteger(n) && n > 0
 }
 
-function compileShader(
+/** `KHR_parallel_shader_compile`: the one enum the deferred link polls. */
+interface ParallelCompile {
+  readonly COMPLETION_STATUS_KHR: number
+}
+
+/** A shader object with its source set and its compile issued — its status is not read here. */
+function createShader(
   gl: WebGL2RenderingContext,
   type: number,
   source: string,
   label: string,
 ): Err | WebGLShader {
-  const stage = type === gl.VERTEX_SHADER ? 'vertex' : 'fragment'
   const shader: WebGLShader | null = gl.createShader(type)
   if (shader === null) return new GlError(`${label}: createShader returned null`)
   gl.shaderSource(shader, source)
   gl.compileShader(shader)
-  if (gl.getShaderParameter(shader, gl.COMPILE_STATUS) !== true) {
-    const log = gl.getShaderInfoLog(shader) ?? '(no info log)'
-    gl.deleteShader(shader)
-    return new GlError(`${label}: ${stage} shader did not compile: ${log}`)
-  }
   return shader
 }
 
-/** One of the two boundaries `eslint.boundaries.js` names, wrapped so it returns instead. */
-function compile(gl: WebGL2RenderingContext, vs: string, fs: string, label: string): Err | Program {
-  const vertex = compileShader(gl, gl.VERTEX_SHADER, vs, label)
+/**
+ * The outcome of a link whose work is done: the first failure in compile order, worded as the
+ * synchronous path always worded it, or `undefined`. `COMPILE_STATUS` and `LINK_STATUS` block
+ * until the driver has finished, so this runs either right after `linkProgram` (no extension) or
+ * once `COMPLETION_STATUS_KHR` has reported completion (with it).
+ */
+function linkOutcome(
+  gl: WebGL2RenderingContext,
+  handle: WebGLProgram,
+  vertex: WebGLShader,
+  fragment: WebGLShader,
+  label: string,
+): Err | undefined {
+  for (const [stage, shader] of [
+    ['vertex', vertex],
+    ['fragment', fragment],
+  ] as const) {
+    if (gl.getShaderParameter(shader, gl.COMPILE_STATUS) !== true) {
+      const log = gl.getShaderInfoLog(shader) ?? '(no info log)'
+      return new GlError(`${label}: ${stage} shader did not compile: ${log}`)
+    }
+  }
+  if (gl.getProgramParameter(handle, gl.LINK_STATUS) !== true) {
+    const log = gl.getProgramInfoLog(handle) ?? '(no info log)'
+    return new GlError(`${label}: program did not link: ${log}`)
+  }
+  return undefined
+}
+
+/**
+ * One of the two boundaries `eslint.boundaries.js` names, wrapped so it returns instead.
+ *
+ * With `parallel` the link is deferred (module header): the shaders stay attached and alive
+ * until `ready()` has read their status, because a status query needs the object, and the
+ * program is not deleted while its link is in flight — ANGLE's `deleteProgram` resolves the link
+ * first, which is the very block this exists to avoid — so a `dispose()` during the wait marks
+ * the program and the poll deletes it on completion.
+ */
+function compile(
+  gl: WebGL2RenderingContext,
+  vs: string,
+  fs: string,
+  label: string,
+  parallel: ParallelCompile | null,
+): Err | Program {
+  const vertex = createShader(gl, gl.VERTEX_SHADER, vs, label)
   if (GlError.is(vertex)) return vertex
-  const fragment = compileShader(gl, gl.FRAGMENT_SHADER, fs, label)
+  const fragment = createShader(gl, gl.FRAGMENT_SHADER, fs, label)
   if (GlError.is(fragment)) {
     gl.deleteShader(vertex)
     return fragment
   }
 
-  const handle: WebGLProgram | null = gl.createProgram()
-  if (handle === null) {
+  const created: WebGLProgram | null = gl.createProgram()
+  if (created === null) {
     gl.deleteShader(vertex)
     gl.deleteShader(fragment)
     return new GlError(`${label}: createProgram returned null`)
   }
+  // Narrowed once here: the closures below would otherwise see `WebGLProgram | null` again.
+  const handle: WebGLProgram = created
 
   gl.attachShader(handle, vertex)
   gl.attachShader(handle, fragment)
   gl.linkProgram(handle)
-  gl.deleteShader(vertex)
-  gl.deleteShader(fragment)
 
-  if (gl.getProgramParameter(handle, gl.LINK_STATUS) !== true) {
-    const log = gl.getProgramInfoLog(handle) ?? '(no info log)'
+  /** The shaders are released once, when the outcome has been read. */
+  function releaseShaders(): void {
+    gl.deleteShader(vertex)
+    gl.deleteShader(fragment)
+  }
+
+  if (parallel === null) {
+    // Without the extension: both shaders are compiled and the program linked above, and only
+    // now are the three statuses read, inside `program()` — the synchronous path since P7 (it
+    // used to read each shader's status before compiling the next). Same outcome, same wording.
+    const failed = linkOutcome(gl, handle, vertex, fragment, label)
+    releaseShaders()
+    if (failed !== undefined) {
+      gl.deleteProgram(handle)
+      return failed
+    }
+  }
+
+  /** True until the deferred outcome has been read; false from the start without the extension. */
+  let pending = parallel !== null
+  let disposed = false
+  let released = false
+  let readiness: Promise<Err | undefined> | null = null
+
+  /** The one `deleteProgram`, whether a failed link, a dispose or both ask for it. */
+  function release(): void {
+    if (released) return
+    released = true
     gl.deleteProgram(handle)
-    return new GlError(`${label}: program did not link: ${log}`)
+  }
+
+  function settle(): Err | undefined {
+    pending = false
+    if (disposed) {
+      releaseShaders()
+      release()
+      return new GlError(`${label}: program disposed before its link completed`)
+    }
+    const failed = linkOutcome(gl, handle, vertex, fragment, label)
+    releaseShaders()
+    if (failed !== undefined) release()
+    return failed
+  }
+
+  async function awaitLink(): Promise<Err | undefined> {
+    // `false` is "still compiling"; `true` is done, and `null` is a lost context, whose
+    // LINK_STATUS then reads as a failure — either way the wait ends.
+    while (
+      parallel !== null &&
+      gl.getProgramParameter(handle, parallel.COMPLETION_STATUS_KHR) === false
+    ) {
+      await nextTurn()
+    }
+    return settle()
+  }
+
+  function ready(): Promise<Err | undefined> {
+    if (readiness === null) readiness = pending ? awaitLink() : Promise.resolve(undefined)
+    return readiness
   }
 
   const locations = new Map<string, WebGLUniformLocation | null>()
@@ -140,8 +248,17 @@ function compile(gl: WebGL2RenderingContext, vs: string, fs: string, label: stri
       if (!locations.has(name)) locations.set(name, gl.getUniformLocation(handle, name))
       return locations.get(name) ?? null
     },
+    ready,
     dispose() {
-      gl.deleteProgram(handle)
+      if (disposed) return
+      disposed = true
+      if (pending) {
+        // Deleted by the poll once the driver is done with it; a wait nobody started yet is
+        // started here so that happens.
+        void ready()
+        return
+      }
+      release()
     },
   }
 }
@@ -221,6 +338,10 @@ export function createGlContext(
   })
 
   const exactByteFetch = probeExactByteFetch(gl)
+
+  // The deferred link (module header). Asked for once; a driver that has it keeps it for the
+  // context's lifetime.
+  const parallel = gl.getExtension('KHR_parallel_shader_compile') as ParallelCompile | null
 
   /**
    * The state every outermost scope on an owned context restores to. Read after the pins and
@@ -302,7 +423,7 @@ export function createGlContext(
     exactByteFetch,
 
     program(vs, fs, label) {
-      const program = compile(gl, vs, fs, label)
+      const program = compile(gl, vs, fs, label, parallel)
       if (GlError.is(program)) return program
       return { ...program, dispose: tracked(() => program.dispose()) }
     },
