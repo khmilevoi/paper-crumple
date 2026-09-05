@@ -34,7 +34,9 @@ function viaChannel(resolve: () => void): void {
       waiting.shift()?.()
     }
     // Node keeps its event loop alive for a started port; a library's idle channel must not.
-    // Browsers have no `unref`, and there the question does not arise.
+    // Browsers have no `unref`, and there the question does not arise. The price is that a bare
+    // Node script whose only pending work is `await nextTurn()` may exit before it resolves;
+    // under Vitest, the bench and any browser something else always holds the loop open.
     ;(channel.port1 as MessagePort & { unref?: () => void }).unref?.()
   }
   waiting.push(resolve)
