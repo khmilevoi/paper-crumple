@@ -65,7 +65,6 @@ import type { Field, LooseField } from './gl-sdf.js'
 import type { PaperEdgeMode } from './paper-knobs.js'
 import {
   FIBRE_TILE_PX,
-  LOOSE_PUSH,
   MAX_FOLDS,
   PAPER_FS,
   PAPER_UNIFORMS,
@@ -180,9 +179,10 @@ export function createPaperRenderer(ctx: GlContext): Err | PaperRenderer {
     const tightField: Field = both ? hullField : r.tight
     const looseTexture = both ? hullField.target.texture : r.loose.target.texture
     const looseDecode = both ? hullField.decode : r.loose.decode
-    // `edge.js:104-110`: `renderAsset.loose` becomes the hull field for 'both', which carries no
-    // `sigmaPx`; `paper.js:2191`'s `?? 0` then zeroes `uLoosePush`.
-    const uLoosePushValue = (both ? 0 : r.loose.sigmaPx) * LOOSE_PUSH
+    // TASK 5 left this deliberately incomplete: `uLoosePush` no longer exists (design 2026-09-05
+    // §6.1 item 2 zeroes the push in every cell), so the value that fed it is gone with it. The
+    // remaining `edgeMode` / `thickness` / `looseness` uploads below are Task 6's to replace with
+    // `edgeWidth` / `baseBias` / `edgeFinish` — they resolve to no location in the meantime.
 
     const pxs = pxScaleOf(r.front.h)
 
@@ -242,10 +242,6 @@ export function createPaperRenderer(ctx: GlContext): Err | PaperRenderer {
       gl.uniform1f(loc('sheetTile'), SHEET_TILE_PX * pxs)
 
       gl.uniform1f(loc('looseness'), rawNum('looseness', 0.5))
-      // Blurring an SDF with sigma pulls its zero level set inward by roughly half a sigma on
-      // anything with curvature. LOOSE_PUSH puts it back, and a little more, which is what turns
-      // "smoothed silhouette" into "scrap the artwork sits inside".
-      gl.uniform1f(loc('loosePush'), uLoosePushValue)
       gl.uniform1f(loc('thickness'), scaled('thickness', 22))
       gl.uniform1f(loc('tearFreq'), rawNum('tearFreq', 9))
       gl.uniform1f(loc('tearAmp'), scaled('tearAmp', 44))

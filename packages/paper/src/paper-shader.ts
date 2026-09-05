@@ -67,9 +67,6 @@ export const MAX_FOLDS = 12
  * (hull-mode relief, `uSheetTile`). */
 export const SHEET_TILE_PX = 1100
 
-/** `paper.js:31`. Fraction of the pass B sigma added back as an outward offset (`uLoosePush`). */
-export const LOOSE_PUSH = 0.45
-
 /** Reference px one tile of the fibre photograph spans (`paper.js:1523`'s literal `300.0`,
  * `:1704-1705`'s literal `120.0` / `60.0`) — the fibre-tile analogue of `SHEET_TILE_PX`. Not a
  * spike export: the spike leaves this one inline. A later task imports it to keep the tile's
@@ -126,9 +123,24 @@ uniform float uPxScale;
 // --- backing ---------------------------------------------------------------
 // Every "px" below is a WORKING-TEXTURE pixel. The knob it comes from is quoted in reference
 // pixels and has already been multiplied by uPxScale on the JS side.
-uniform float uLooseness;    // 0 hugs the silhouette, 1 is a loose scrap
-uniform float uLoosePush;    // source px; undoes the shrink the pass B blur causes
-uniform float uThickness;    // source px the paper extends past the silhouette
+// W, working px: how far the paper reaches past the artwork. The ONE value that decides whether
+// there is a border at all — every border-only decoration rides edgeK(), which reads this and
+// nothing else (design 2026-09-05 §6, §7).
+uniform float uEdgeWidth;
+// Working px added to the contour source, in scrapUnguarded's 'd +=', tearFloor's floor and
+// farOutside's floor test. NOT the same number as uEdgeWidth, and deliberately so.
+//
+// CORRECTION TO THE SPEC (design 2026-09-05 §6's table, controller ruling R12). That table gives
+// the single thickness uniform this pair replaces the value W in all four cells. It is wrong, and
+// this is the plan's sixth correction to the spec.
+// The bias is what pushes the contour source outward from the artwork's own silhouette, so it is
+// W only when the source IS that silhouette — i.e. under 'edgeShape: 'torn'', where the renderer
+// binds the artwork's tight/loose pair. Under 'edgeShape: 'smooth'' the renderer binds the hull
+// polygon's own field to both, and that polygon ALREADY sits at W(1 +/- v); biasing it again by W
+// would put the sheet out at 2W. The tear floor 'tight + 0.4 * uBaseBias' is the same bias in
+// disguise — under 'smooth', 'tight' IS the polygon field, so a non-zero floor would inflate the
+// contour by 0.4 W. So: 0 under 'smooth', W under 'torn'. Do not "restore" the spec's version.
+uniform float uBaseBias;
 uniform float uTearFreq;     // low-octave facets per image width
 uniform float uTearAmp;      // low octave, source px
 uniform float uMidAmp;       // mid octave (scallops and bites), source px
@@ -173,16 +185,17 @@ uniform float uPhotoFibre;     // how much of the surface grain comes from the p
 uniform float uBallR;          // the ball's nominal radius, in plane units (from the fold polygon)
 uniform float uCrumpleBite;   // how far a rim plate sticks out or sits back, as a fraction of uBallR
 
-// --- edge mode ---------------------------------------------------------------
-// 0 = torn: the procedural tear on the tight/loose fields, everything above.
-// 1 = hull: the sheet is a CPU-built polygon around the silhouette (src/hull.js), delivered as
-//     its own signed field. No tear, no fibres, no deckle — a cut sheet, not a torn one.
-// 2 = hull with minDist = maxDist = 0: the sheet IS the artwork alpha, and uPaperField carries the
-//     tight field so the fold loop has a distance to work with.
-uniform int uEdgeMode;
-uniform sampler2D uPaperField;   // padded-texture uv, same decode contract as the other fields
+// --- edge finish -------------------------------------------------------------
+// 0 = clean: a plain cut. No deckle band, no fibres, no tear shadow.
+// 1 = paper: the deckle band, the fibre fringe and the tear shadow (design 2026-09-05 §2.3).
+// The CONTOUR is not encoded here at all: it is expressed by which textures the renderer binds
+// (design §6), so this shader never asks where its base field came from.
+uniform int uEdgeFinish;
+// The polygon's own field, bound as the contour source under 'edgeShape: 'smooth'' and read by
+// the fold loop's mirrored lookups. Padded-texture uv, same decode contract as the other fields.
+uniform sampler2D uPaperField;
 uniform vec2 uDecodePaper;
-uniform float uSheetCrumple;     // hull mode: amplitude of the sheet's relief, 0..1
+uniform float uSheetCrumple;     // amplitude of the flat sheet's own relief, 0..1
 uniform float uSheetTile;        // working px per tile of the crumple photograph on the sheet
 
 uniform int uDebug;
@@ -197,16 +210,19 @@ const float FACET_TILT = 1.15;    // how steeply a fold normal is read as a face
 // crushed sheet is crinkled everywhere — visibly, but never dominantly. One knob cannot be both.
 const float CRINKLE_AMT = 0.05;
 
-// Edge width master ramp. uThickness is the ONE knob that decides whether there is a torn
-// border at all: every border-only decoration — the loose envelope's push-out, the tear
-// octaves, the pixel teeth, the fibres, the deckle band — is multiplied by edgeK(), which ramps
-// from 0 at thickness 0 to 1 at EDGE_K_PX (reference px, so it scales with the sprite like the
-// knob itself). Below the ramp's top the individual knobs still fine-tune the look; at exactly
-// zero the paper mask IS the artwork alpha, antialiased by the usual 0.6 rendered px and nothing
-// else. The ramp is a smoothstep rather than a step so dragging the slider through zero never
-// pops. Everything here is uniform-only, so the compiler hoists it out of the pixel.
+// Edge width master ramp. uEdgeWidth is the ONE value that decides whether there is a border at
+// all: every border-only decoration — the tear octaves, the pixel teeth, the fibres, the deckle
+// band — is multiplied by edgeK(), which ramps from 0 at width 0 to 1 at EDGE_K_PX (reference px,
+// so it scales with the sprite like the knob itself). It reads uEdgeWidth and NOT uBaseBias: the
+// ramp is a master gate on the decorations, which exist in every cell, while the bias is only the
+// outward offset of the contour source and is 0 under a polygon contour (see uBaseBias). Below the
+// ramp's top the individual knobs still fine-tune the look; at exactly zero the paper mask IS the
+// artwork alpha, antialiased by the usual 0.6 rendered px and nothing else — design §7's "the
+// sheet IS the artwork". The ramp is a smoothstep rather than a step so dragging the slider
+// through zero never pops. Everything here is uniform-only, so the compiler hoists it out of the
+// pixel.
 const float EDGE_K_PX = 6.0;
-float edgeK() { return smoothstep(0.0, EDGE_K_PX * uPxScale, uThickness); }
+float edgeK() { return smoothstep(0.0, EDGE_K_PX * uPxScale, uEdgeWidth); }
 
 // Ball compaction, in ball radii (uBallR == 1). See the "ball compaction" block in main.
 //   BALL_GROW  radius the hole-filling body has grown to by fill 1 — past the plate outline
@@ -356,15 +372,15 @@ vec2 toUv(vec2 p) { return p / vec2(uAspect, 1.0) + 0.5; }
  * A union of the tight field and the pushed-out blurred one. Being a union is what makes the
  * result usable as a base:
  *
- *   - it always CONTAINS the silhouette dilated by uThickness, so there is a continuous
- *     margin of paper all the way round the artwork, and
+ *   - it always CONTAINS the contour source dilated by uBaseBias, so under 'edgeShape: 'torn''
+ *     there is a continuous margin of paper all the way round the artwork, and
  *   - the blurred envelope can only ever ADD to that, filling concavities and throwing out
  *     the empty wedges, never eating into a sleeve.
  *
- * Blurring an SDF shrinks it, and shrinks it unevenly — a straight edge is untouched, a thin
- * sleeve is eaten, a gap between two limbs is filled in — so uLoosePush puts the scale back
- * before the union. Without the push the "loose" term is strictly tighter than the tight one
- * everywhere it matters and the looseness knob appears to do nothing.
+ * Under 'edgeShape: 'smooth'' the renderer binds the polygon's own field to BOTH uSdfTight and
+ * uSdfLoose and uploads uBaseBias = 0, so this collapses to max(pf, pf) + 0 = pf — the polygon
+ * field itself, border guard and all (design 2026-09-05 §6). There is no mode int for that; it
+ * is expressed entirely by the binding.
  *
  * Thresholded at zero this is a single connected blob. Everything the noise does downstream
  * is a bounded perturbation of THIS contour, which is what keeps the scrap in one piece.
@@ -374,14 +390,17 @@ vec2 toUv(vec2 p) { return p / vec2(uAspect, 1.0) + 0.5; }
 // about; scrapBase is this minus the guard, operation for operation as before.
 float scrapUnguarded(vec2 uv, out float tight) {
   tight = sampleTight(uv);
-  float d = max(tight, sampleLoose(uv) + uLoosePush);
-  // The loose envelope collapses onto the tight field as the edge width goes to zero. Scaling
-  // uLoosePush alone would not do it: a blurred SDF is HIGHER than the tight one inside every
-  // concavity, so max(tight, loose) still bridges the gap between two sleeves with the push at
-  // zero. The blend is skipped at k == 1 so the default render stays bit-identical.
+  // Design 2026-09-05 §6.1 item 2: the outward push that used to be added to the loose sample
+  // here is gone. The loose field's own reach is what the redesign budgets, and re-inflating it
+  // by a fraction of the blur sigma made "how far does the sheet reach" unanswerable.
+  float d = max(tight, sampleLoose(uv));
+  // The loose envelope collapses onto the tight field as the edge width goes to zero: a blurred
+  // SDF is HIGHER than the tight one inside every concavity, so max(tight, loose) still bridges
+  // the gap between two sleeves on its own. The blend is skipped at k == 1 so the default render
+  // stays bit-identical.
   float k = edgeK();
   if (k < 1.0) d = tight + (d - tight) * k;
-  d += uThickness;
+  d += uBaseBias;
   return d;
 }
 float scrapBase(vec2 uv) {
@@ -393,7 +412,14 @@ float scrapBase(vec2 uv) {
   return d - smoothstep(0.482, 0.5, max(q.x, q.y)) * 1e4;
 }
 
-/** Hull mode: the polygon's own signed field, in working px, > 0 is paper. Same border guard. */
+/**
+ * The polygon's own signed field, in working px, > 0 is paper. Same border guard as scrapBase.
+ *
+ * Since the redesign this is NOT the base sheet field in any cell — every cell goes through
+ * scrapBase, and under 'edgeShape: 'smooth'' the renderer binds this same polygon field to
+ * uSdfTight and uSdfLoose so scrapBase reproduces it exactly. It survives for the fold loop's own
+ * mirrored lookups, which read uPaperField directly (design 2026-09-05 §6).
+ */
 float samplePaper(vec2 uv) {
   float d = textureLod(uPaperField, uv, 0.0).r * uDecodePaper.x + uDecodePaper.y;
   vec2 q = abs(uv - 0.5);
@@ -402,12 +428,13 @@ float samplePaper(vec2 uv) {
 
 /**
  * The ONE base sheet field every consumer goes through — the visible mask, the drop shadow and
- * the fold loop's mirrored lookups. In torn mode it is the noise-free scrap the tear decorates;
- * in hull mode it is the polygon's field and there is nothing to decorate. The fold, crumple and
- * compaction code above and below never asks which.
+ * the fold loop's mirrored lookups. Which contour it describes is decided by the BINDING
+ * (design 2026-09-05 §6): the artwork's tight/loose pair under 'edgeShape: 'torn'', the polygon's
+ * own field bound to both slots under 'edgeShape: 'smooth''. The fold, crumple and compaction
+ * code never asks which.
  */
 float baseField(vec2 uv) {
-  return (uEdgeMode == 0) ? scrapBase(uv) : samplePaper(uv);
+  return scrapBase(uv);
 }
 
 /**
@@ -425,10 +452,14 @@ float baseField(vec2 uv) {
 // clamps against, so both read it from here.
 float gateReach() {
   float k = edgeK();
-  float reach = uThickness + (uTearAmp * k) * 0.6 * uLooseness + (uMidAmp * k);
-  // At thickness 0 the reach is exactly zero and smoothstep(0, 0, x) is undefined — on D3D it
-  // came out as NaN, which leaked through the mask into the alpha of every pixel outside the
-  // artwork. The floor is far below any thickness that draws a border, so it changes nothing else.
+  // Design 2026-09-05 §6.1 item 3: the low octave's looseness factor is gone here too, so this
+  // reach is the amplitude Task 3's 'tearAmpsFor' actually budgeted for. Removing a factor in
+  // [0, 1] can only GROW the reach, which is the safe direction — see the P7 proof block.
+  float reach = uBaseBias + (uTearAmp * k) * 0.6 + (uMidAmp * k);
+  // At uBaseBias 0 with no octaves the reach is exactly zero and smoothstep(0, 0, x) is undefined
+  // — on D3D it came out as NaN, which leaked through the mask into the alpha of every pixel
+  // outside the artwork. The floor is far below any bias that draws a border, so it changes
+  // nothing else.
   return max(reach, 0.01);
 }
 float noiseGate(float base) {
@@ -438,12 +469,19 @@ float noiseGate(float base) {
 
 // The tear's floor (P6a): tearOf never returns less than this, in source px — see its last two
 // lines. The deep-inside early-out rests on that being an exact lower bound of paperField.
-float tearFloor(vec2 uv) { return sampleTight(uv) + uThickness * 0.4; }
+// uBaseBias, not uEdgeWidth: this floor is the outward bias in disguise (see uBaseBias). Under
+// 'edgeShape: 'smooth'' sampleTight IS the polygon field, which already sits at W(1 +/- v), so a
+// floor of 0.4 * W there would inflate the contour by 0.4 W. At uBaseBias 0 the floor is exactly
+// the contour source, which is what a polygon contour wants.
+float tearFloor(vec2 uv) { return sampleTight(uv) + uBaseBias * 0.4; }
 
 // Lattice of the angular base: cells per tear-frequency cell, and the lattice's rotation off
 // the image axes (so its three edge directions never line up with the sprite's).
 const float ANG_FREQ = 1.2;
 // Smooth-mode scallop amplitude per unit of uMidAmp: 26 px of notch depth is 4.7 px of scallop.
+// SYNC (ruling R11): mirrored in TS as 'MID_LOW_SMOOTH' in edge-derive.ts, which is
+// '1.25 * MID_SCALLOP' — the 1.25 is midSmooth's own coefficient below, so MID_LOW_SMOOTH is not
+// this literal but a product of it. If this constant moves, MID_LOW_SMOOTH moves with it.
 const float MID_SCALLOP = 0.18;
 const float ANG_ROT = 0.37;
 
@@ -466,8 +504,17 @@ const float ANG_ROT = 0.37;
  * Also returns the gradient DIRECTION of the triangle's plane, which is free, so the edge frame
  * (fibres, band, shadow) can face the actual run rather than the smooth field's normal.
  *
- * The blend rides the edge-width ramp: at thickness 0 the base is the artwork's own outline and
+ * The blend rides the edge-width ramp: at edge width 0 the base is the artwork's own outline and
  * polygonising THAT would cut the corners off the garment.
+ *
+ * THE ONE INVARIANT THAT IS NOT VISIBLE LOCALLY (design 2026-09-05 §6, Task 6 owns the line).
+ * This block is gated on 'uTearAngular * edgeK()', an ANGULARITY, not on an amplitude — so
+ * zeroing uTearAmp / uMidAmp / uChew under 'edgeShape: 'smooth'' does NOT switch it off. Left on,
+ * it would polygonise the polygon's own field on a uPlanePx / (uTearFreq * ANG_FREQ) lattice
+ * (~93 texels at the defaults), and since the interpolant of a convex SDF exceeds it outside every
+ * reflex vertex, every concavity of the hull would be chamfered at an 80 % blend. Today's 'hull'
+ * never entered here at all. THE RENDERER MUST UPLOAD uTearAngular = 0 UNDER 'smooth'; every other
+ * "the octaves are off" invariant is checkable from inside this file, and this one is not.
  */
 vec2 angCornerUv(vec2 c, float F) {
   return rot2((c - uSeed * 1.7) / F, -ANG_ROT) / vec2(uAspect, 1.0);
@@ -544,6 +591,8 @@ float tearOf(vec2 uv, float base, float baseAng, out float shaped) {
   // uMidAmp is quoted as a notch depth (26 px by default). The smooth scallops were tuned at
   // 4.5 px, so the smooth term is scaled by MID_SCALLOP to keep the old look at tearAngular 0.
   vec2 midQ = rot2(nUv * uTearFreq * 1.8, 1.13) + uSeed * 3.1;
+  // SYNC (ruling R11): '1.25 * MID_SCALLOP' is what edge-derive.ts mirrors as 'MID_LOW_SMOOTH'.
+  // The two must move together — see MID_SCALLOP's own note above.
   float midSmooth = (noiseLinear(midQ) * 2.0 - 1.0) * 1.25 * MID_SCALLOP;
   float mid = midSmooth;
   if (uTearAngular > 0.0) {
@@ -552,6 +601,8 @@ float tearOf(vec2 uv, float base, float baseAng, out float shaped) {
     vec2 tq = rot2(nUv * uTearFreq * 2.1, 2.05) + uSeed * 4.9;
     float tab = max(noiseTri(tq) - 0.74, 0.0) / 0.26;
     // Depth in units of uMidAmp; the smooth version's scallops are only 1.25 units wide.
+    // SYNC (ruling R11): edge-derive.ts mirrors the 1.0 on -bite as 'MID_LOW_ANGULAR' and
+    // edge-derive.ts mirrors the 0.55 on +tab as 'MID_HIGH_ANGULAR'; all four must move together.
     float midAng = -bite * 1.0 + tab * 0.55;
     mid = mix(midSmooth, midAng, uTearAngular);
   }
@@ -570,7 +621,10 @@ float tearOf(vec2 uv, float base, float baseAng, out float shaped) {
   // out in open space.
   // The gate stays on the SMOOTH base: it is a connectivity guard, and the polygonised field
   // can only ever sit within one lattice cell of the smooth one.
-  shaped = baseAng + (low * tearAmp * uLooseness + mid * midAmp) * noiseGate(base);
+  // Design 2026-09-05 §6.1 item 3: the low octave carried a looseness factor here. It is
+  // gone — the amplitude the CPU budgets in 'tearAmpsFor' is the amplitude the shader applies,
+  // which is what makes "the inward reach is W(1 - v)" a measurable claim at all.
+  shaped = baseAng + (low * tearAmp + mid * midAmp) * noiseGate(base);
 
   // The teeth are applied last and confined to a narrow band around the contour they are
   // chewing. Isotropic teeth at this amplitude flip isolated pixels over the threshold out in
@@ -582,15 +636,17 @@ float tearOf(vec2 uv, float base, float baseAng, out float shaped) {
   // two or three hundred pixels perfectly smooth and then breaks up for fifty. Same argument as
   // the fringe, which is patchy for the same reason. The clump lattice is deliberately coarse —
   // about 180 reference px — so a clean run lasts long enough to be read as clean.
+  // SYNC (ruling R11): the 1.6 is mirrored in edge-derive.ts as 'CHEW_REACH', and again at the
+  // second GLSL site ('teeth = (uChew * k) * 1.6' in farOutside). All three must move together.
   float teeth = chew * 1.6;
   float band = 1.0 - smoothstep(0.0, max(teeth * 1.8, 0.5), abs(shaped));
   float toothClump = smoothstep(0.30, 0.66, noiseSmooth(nUv * 5.5 + uSeed * 2.7));
   float d = shaped + high * teeth * band * toothClump;
 
-  // Floor: whatever the tear does, the paper still covers the silhouette dilated by a quarter
-  // of the thickness. A 42 px inward bite is deeper than the margin in places, and without
-  // this the tear occasionally cuts back past the artwork's own edge and exposes it.
-  // 0.4 of the thickness rather than the earlier quarter: the V notches bite deeper than the
+  // Floor: whatever the tear does, the paper still covers the contour source dilated by a
+  // quarter of the outward bias. A 42 px inward bite is deeper than the margin in places, and
+  // without this the tear occasionally cuts back past the artwork's own edge and exposes it.
+  // 0.4 of the bias rather than the earlier quarter: the V notches bite deeper than the
   // old scallops did, and where they hit the floor the band needs a few pixels of sheet under
   // it or the core rim becomes an outline drawn straight onto the print.
   float floorD = tearFloor(uv);
@@ -711,13 +767,6 @@ float fringeTerm(vec2 pPx, float shaped, float chewed, vec2 g, float k) {
  * scrapBase taps, and the deckle band, the fibers and the tear shadow all need that answer.
  */
 float paperField(vec2 uv, out float fringe, out vec2 nrm) {
-  if (uEdgeMode != 0) {
-    // Hull: a cut edge. No tear, no teeth, no fibre, and the band and tear shadow are skipped
-    // downstream.
-    fringe = 0.0;
-    nrm = vec2(0.0, 1.0);
-    return samplePaper(uv);
-  }
   float base = scrapBase(uv);
   vec2 angDir;
   float baseAng = baseAngular(uv, base, angDir);
@@ -735,17 +784,25 @@ float paperField(vec2 uv, out float fringe, out vec2 nrm) {
   // that want it — the fibers, the deckle band, the tear shadow — live within a band of the
   // contour. Paying for it over the whole canvas cost about a millisecond a pose for nothing.
   // Only textureLod is used underneath, so this is safe under non-uniform control flow.
+  //
+  // The outer test is uEdgeFinish, and it is a separate, UNIFORM branch rather than a '&&' with
+  // the band test (design 2026-09-05 §6): under 'edgeFinish: 'clean'' there is no fringe, no
+  // band and no tear shadow, so the whole frame — four extra scrapBase taps and the reach that
+  // bounds them — is skipped for every fragment at once, and every line that touches a finish
+  // decoration provably sits under a uEdgeFinish test.
   float k = edgeK();
-  float reach = max(uFiberLen * STRAND_MULT * k, (uDeckleWidth * k) * 3.0) + 4.0;
-  if (abs(shaped) < reach) {
-    // The smooth field's normal, tilted toward the run's own direction by the angular blend, so
-    // the frame follows the polyline rather than the garment underneath it.
-    vec2 nS = edgeNormal(uv);
-    float ang = uTearAngular * k;
-    vec2 n = (ang > 0.0 && dot(angDir, angDir) > 0.5) ? normalize(mix(nS, angDir, ang)) : nS;
-    nrm = n;
-    vec2 pPx = uv * vec2(uAspect, 1.0) * uPlanePx;
-    fringe = fringeTerm(pPx, shaped, chewed, n, k);
+  if (uEdgeFinish == 1) {
+    float reach = max(uFiberLen * STRAND_MULT * k, (uDeckleWidth * k) * 3.0) + 4.0;
+    if (abs(shaped) < reach) {
+      // The smooth field's normal, tilted toward the run's own direction by the angular blend, so
+      // the frame follows the polyline rather than the garment underneath it.
+      vec2 nS = edgeNormal(uv);
+      float ang = uTearAngular * k;
+      vec2 n = (ang > 0.0 && dot(angDir, angDir) > 0.5) ? normalize(mix(nS, angDir, ang)) : nS;
+      nrm = n;
+      vec2 pPx = uv * vec2(uAspect, 1.0) * uPlanePx;
+      fringe = fringeTerm(pPx, shaped, chewed, n, k);
+    }
   }
   return chewed;
 }
@@ -757,13 +814,14 @@ float paperField(vec2 uv, out float fringe, out vec2 nrm) {
  * mirrored, rotated flap.
  */
 float paperFieldFast(vec2 uv) {
-  if (uEdgeMode != 0) return samplePaper(uv);
   float base = scrapBase(uv);
   vec2 angDir;
   float baseAng = baseAngular(uv, base, angDir);
   vec2 nUv = uv * vec2(uAspect, 1.0);
   float low = tearLow(nUv);
-  return baseAng + low * (uTearAmp * edgeK()) * uLooseness * noiseGate(base);
+  // Design 2026-09-05 §6.1 item 3: the looseness factor is gone here too, so the cheap mask and
+  // the full field agree on the low octave's amplitude as they must.
+  return baseAng + low * (uTearAmp * edgeK()) * noiseGate(base);
 }
 
 /** Reflection of p across the line dot(p,n) = c. */
@@ -1570,15 +1628,16 @@ vec3 fieldViz(float d) {
 //   - the hair blend is the ONLY remaining write to front, and it runs only if fringe > 0.0.
 //   So a = 1.0, premul = img.rgb, outA = 1.0, rgb = img.rgb / 1.0, and the full path writes
 //   vec4(img.rgb, 1.0) — this early-out, identical at the RGBA8 byte level — unless fringe > 0.0
-//   and sheetA < 1.0. In hull mode
-//   paperField sets fringe = 0.0 outright. In torn mode fringeTerm returns 0.0 whenever
+//   and sheetA < 1.0. Under uEdgeFinish == 0
+//   paperField never enters the fringe block, so fringe = 0.0 outright. Under uEdgeFinish == 1
+//   fringeTerm returns 0.0 whenever
 //   't < -uAaPx' with t = -chewed, i.e. whenever chewed > uAaPx, and tearOf's last line makes
 //   chewed = max(d, floorD) >= floorD = tearFloor(uv) exactly (max returns one of its operands).
 //   deepInside() therefore asks tearFloor(uv) > uAaPx + one tight-field texel: the expression
 //   the full path itself evaluates, plus a texel of margin for any contraction or reassociation
-//   difference between the two call sites. In hull mode the same shape is kept
-//   (samplePaper(uv) > uAaPx + one paper-field texel) although the derivation no longer needs a
-//   field test there. A texel with 0 < img.a < 1 never takes (a).
+//   difference between the two call sites. There is no second shape for a polygon contour any
+//   more: every cell goes through scrapBase, so deepInside is this one test in all four cells.
+//   A texel with 0 < img.a < 1 never takes (a).
 //
 // (b) FAR OUTSIDE — img.a == 0.0 and farOutside(uv, aa). With img.a == 0.0: sheetCov =
 //   max(paperMask, 0.0) = paperMask; front = mix(sheet, img.rgb, 0.0) = sheet, and the
@@ -1587,12 +1646,14 @@ vec3 fieldViz(float d) {
 //   'outA > 1e-4' test fails) and the full path writes vec4(0.0) — this early-out. paperMask
 //   is 0.0 exactly when sheetA == 0.0 (field <= -aa: smoothstep's clamp lands t on 0.0) and
 //   fringe == 0.0.
-//   Hull mode: field is samplePaper(uv) (uEdgeMode 1) or the alpha distance
-//   -max(aa, 0.5) <= -aa (uEdgeMode 2), and fringe = 0.0. farOutside asks
-//   samplePaper(uv) < -uAaPx, below -aa = -0.6 * uAaPx with 0.4 * uAaPx >= 0.2 px to spare.
-//   Torn mode. Let u = scrapUnguarded(uv, tight) and base = scrapBase(uv) = u - guard <= u.
+//   ONE path, all four cells (design 2026-09-05 §6): there is no mode int and no samplePaper
+//   branch here any more. Under 'edgeShape: 'smooth'' the renderer binds the polygon field to
+//   uSdfTight AND uSdfLoose with uBaseBias = 0, so scrapUnguarded returns max(pf, pf) + 0 = pf and
+//   every line below reads as a statement about the polygon's own field; under 'edgeFinish:
+//   'clean'' fringe is 0.0 outright and step 5's strandLen term is slack, not load-bearing.
+//   Let u = scrapUnguarded(uv, tight) and base = scrapBase(uv) = u - guard <= u.
 //   tearOf builds, with k = edgeK():
-//     shaped = baseAng + (low * tearAmp * uLooseness + mid * midAmp) * noiseGate(base)
+//     shaped = baseAng + (low * tearAmp + mid * midAmp) * noiseGate(base)
 //     shaped = max(shaped, floorD)
 //     chewed = max(shaped + high * teeth * band * toothClump, floorD)
 //   and paperField returns chewed; below k == 1 main then mixes it with the alpha distance.
@@ -1612,8 +1673,10 @@ vec3 fieldViz(float d) {
 //      quantisation step (R16F: 1 px below 2048 px; byte mode: uDecode.x / 255). So
 //      baseAng <= max(base, v) <= u + cell / sqrt(2) + slop; when ang <= 0.0 baseAngular returns
 //      base and the cell term is 0.
-//   3. floorD = tearFloor(uv) = tight + 0.4 * uThickness <= u - 0.6 * uThickness <= u, since
-//      max(tight, ...) >= tight. farOutside tests it explicitly all the same.
+//   3. floorD = tearFloor(uv) = tight + 0.4 * uBaseBias <= u - 0.6 * uBaseBias <= u, since
+//      max(tight, ...) >= tight and uBaseBias >= 0. At uBaseBias == 0 (the polygon contour) the
+//      two ends meet — floorD = tight <= u — and the bound still holds. farOutside tests it
+//      explicitly all the same.
 //   4. band = 1.0 - smoothstep(0.0, max(teeth * 1.8, 0.5), abs(shaped)) is exactly 0.0 once
 //      abs(shaped) >= 1.8 * teeth (teeth = 1.6 * uChew * k), so the teeth add (finite) * 0.0 and
 //      chewed = max(shaped, floorD) = shaped.
@@ -1628,6 +1691,15 @@ vec3 fieldViz(float d) {
 //   max would do — the surplus is margin). The gate's reach is NOT added to the edge terms: past
 //   -gateReach() the octaves it gates are exactly zero, so the tear amplitudes cannot move the
 //   contour there at all.
+//
+//   WHY THE EDGE REDESIGN DOES NOT MOVE THIS CONCLUSION, and why no early-out test needs a new
+//   tolerance (design 2026-09-05 §6.1). Two terms changed. gateReach lost its looseness factor,
+//   so its reach is now 0.6 * tearAmp where it was 0.6 * looseness * tearAmp with looseness in
+//   [0, 1]: THE GATE'S REACH ONLY GREW, the outer max() therefore only grew, and farOutside fires
+//   strictly LESS often than it did — sound, by the same argument, with margin to spare. And the
+//   old thickness uniform became uBaseBias in step 3 and in farOutside's own floor test, which is
+//   the same quantity under a new name plus the new 'smooth' case uBaseBias == 0, covered in
+//   step 3. Nothing here got tighter, so nothing here needs re-proving downward.
 //
 // CONTROL FLOW. Both early-outs 'return' under a per-fragment condition, which puts the rest of
 // main() in non-uniform control flow for the fragments that stay. The one derivative the front
@@ -1692,12 +1764,10 @@ bool frontFastPath() {
 }
 
 bool deepInside(vec2 uv) {
-  if (uEdgeMode != 0) return samplePaper(uv) > uAaPx + paperTexelPx();
   return tearFloor(uv) > uAaPx + tightTexelPx();
 }
 
 bool farOutside(vec2 uv, float aa) {
-  if (uEdgeMode != 0) return samplePaper(uv) < -uAaPx;
   float tight;
   float u = scrapUnguarded(uv, tight);
   float k = edgeK();
@@ -1709,10 +1779,12 @@ bool farOutside(vec2 uv, float aa) {
   // cell / sqrt(2): the furthest a triangle's corners can be, barycentrically weighted, from a
   // point inside it (proof block, step 2).
   float angTerm = cell * 0.70710678;
+  // SYNC (ruling R11): the 1.6 is edge-derive.ts's 'CHEW_REACH', and this is the SECOND of the two
+  // GLSL sites (the first is tearOf's own 'teeth = chew * 1.6'). All three must move together.
   float teeth = (uChew * k) * 1.6;
   float strandLen = (uFiberLen * k) * STRAND_MULT;
   float edge = angTerm + slop + 2.0 * teeth + strandLen * 1.05 + aa;
-  return u < -max(gateReach(), edge) && tight + uThickness * 0.4 < -edge;
+  return u < -max(gateReach(), edge) && tight + uBaseBias * 0.4 < -edge;
 }
 
 void main() {
@@ -1786,14 +1858,13 @@ void main() {
   // mask is smoothstep(0, 1, alpha): 1 on every opaque pixel, 0 on every empty one, an S-curve
   // through the antialiased edge, and nothing else. The blend is skipped at k == 1 so the
   // default render stays bit-identical.
-  if (uEdgeMode == 0) {
-    float edgeRamp = edgeK();
-    if (edgeRamp < 1.0) field = mix((img.a - 0.5) * 2.0 * max(aa, 0.5), field, edgeRamp);
-  } else if (uEdgeMode == 2) {
-    // Hull at minDist = maxDist = 0: the sheet is the artwork itself, so the mask is the alpha
-    // read as a distance — the same expression the torn ramp bottoms out at.
-    field = (img.a - 0.5) * 2.0 * max(aa, 0.5);
-  }
+  //
+  // At edgeWidth 0 the ramp bottoms out HERE, which is design 2026-09-05 §7's "the sheet IS the
+  // artwork"; there is no separate branch for it. The old degenerate hull arm wrote exactly this
+  // expression and is deleted rather than re-pointed — edgeK() == 0 makes the mix return its
+  // first operand, which is that same expression, in every cell.
+  float edgeRamp = edgeK();
+  if (edgeRamp < 1.0) field = mix((img.a - 0.5) * 2.0 * max(aa, 0.5), field, edgeRamp);
   float sheetA = smoothstep(-aa, aa, field);
   // The fringe hairs lie OUTSIDE the sheet's own edge and are translucent, so they go over the
   // background with their own alpha rather than into the field: a hair is not more paper, it is
@@ -1829,10 +1900,11 @@ void main() {
   //
   // Note that neither gate is 'remaining': a flap with slack lives past the fold lines that
   // cut the sheet under it, and those overhangs are the ball's protruding points.
-  // In hull mode the envelope is the polygon's own field: nothing reaches past it but the
-  // jitter arc and the slack, which is what uFlapReach is set to there.
+  // Under 'edgeShape: 'smooth'' uSdfLoose is the polygon's own field (the renderer binds it to
+  // both slots, design 2026-09-05 §6), so this one expression is the polygon's envelope there:
+  // nothing reaches past it but the jitter arc and the slack, which is what uFlapReach is set to.
 #if !PAPER_FRONT_BUILD
-  float envelope = (uEdgeMode == 0) ? (sampleLoose(uv) + uLoosePush) : samplePaper(uv);
+  float envelope = sampleLoose(uv);
   bool flapPossible =
     uFoldCount > 0 &&
     survivesAfter(p, -1, uSlack) &&
@@ -1897,8 +1969,8 @@ void main() {
   // stroke, and with a smooth inner edge as a vignette; the ragged boundary is what makes it
   // read as a layer that has been pulled away.
   float deckleK = edgeK();
-  // Torn-only: in hull mode a cut edge has no core band and throws no tear shadow.
-  float deckleWidth = (uEdgeMode == 0) ? uDeckleWidth * deckleK : 0.0;
+  // Finish-only: a clean cut has no core band and throws no tear shadow (design 2026-09-05 §2.3).
+  float deckleWidth = (uEdgeFinish == 1) ? uDeckleWidth * deckleK : 0.0;
   vec2 pPx = nUv * uPlanePx;
   vec2 tang = vec2(-edgeN.y, edgeN.x);
   vec2 footD = pPx - edgeN * field;
@@ -1921,7 +1993,7 @@ void main() {
   // print is composited and gated by (1 - alpha) on top of that: nothing of it may reach an
   // opaque artwork pixel, and at alpha 1 the multiplier is exactly 1.
   float tearShade = 0.0;
-  if (uEdgeMode == 0 && uTearShadow > 0.0 && deckleK > 0.0) {
+  if (uEdgeFinish == 1 && uTearShadow > 0.0 && deckleK > 0.0) {
     float inner = bandWidth;
     float soft = max(2.4 * uPxScale, 0.5);
     float rise = smoothstep(inner - 1.5 * uPxScale, inner + 0.5 * uPxScale, field);
@@ -1950,7 +2022,7 @@ void main() {
   // Handling wear belongs to the SHEET, so it is applied before the artwork is composited over
   // it. Applied afterwards it draws straight lines across the garment, which reads as a scratched
   // photograph rather than as a print lying on creased paper. The tear shadow rides here for the
-  // same reason; it is exactly 0 in hull mode and at alpha 1.
+  // same reason; it is exactly 0 under uEdgeFinish == 0 and at alpha 1.
   vec3 sheet = uPaperColor * grainFactor * relief * (1.0 + wear * uCreases) * (1.0 - tearShade);
   // The print lies on the sheet. Where the sheet covers the whole pixel that is a plain mix —
   // and it is kept as exactly that expression, because it is what every opaque artwork pixel
@@ -2241,7 +2313,7 @@ void main() {
 
   // --- 4. outer drop shadow ------------------------------------------------
   // P6a (D2): the front build passes uShadow = 0 and the whole of this step used to be dead work
-  // — two field fetches (one in hull mode) per fragment, multiplied by 0.0 at the end. It is
+  // — two field fetches per fragment, multiplied by 0.0 at the end. It is
   // skipped exactly when that multiplication is a finite number times 0.0: shadowMask is a
   // smoothstep of dS, which is finite (both base fields are finite samples plus finite uniforms,
   // the border guard included) provided uShadowBlur > 0.0 — at uShadowBlur == 0.0 the smoothstep
@@ -2336,8 +2408,8 @@ void main() {
     return;
   }
   if (uDebug == 7) {
-    // The base sheet field the mask, the shadow and the fold loop all read: the polygon's
-    // field in hull mode, the noise-free scrap in torn mode.
+    // The base sheet field the mask, the shadow and the fold loop all read: the noise-free scrap
+    // over whatever contour source the renderer bound (design 2026-09-05 §6).
     outColor = vec4(fieldViz(baseField(uv)), 1.0);
     return;
   }
@@ -2364,9 +2436,8 @@ export const PAPER_UNIFORMS = Object.freeze({
   planePx: 'uPlanePx',
   aaPx: 'uAaPx',
   pxScale: 'uPxScale',
-  looseness: 'uLooseness',
-  loosePush: 'uLoosePush',
-  thickness: 'uThickness',
+  edgeWidth: 'uEdgeWidth',
+  baseBias: 'uBaseBias',
   tearFreq: 'uTearFreq',
   tearAmp: 'uTearAmp',
   midAmp: 'uMidAmp',
@@ -2407,7 +2478,7 @@ export const PAPER_UNIFORMS = Object.freeze({
   photoFibre: 'uPhotoFibre',
   ballR: 'uBallR',
   crumpleBite: 'uCrumpleBite',
-  edgeMode: 'uEdgeMode',
+  edgeFinish: 'uEdgeFinish',
   paperField: 'uPaperField',
   decodePaper: 'uDecodePaper',
   sheetCrumple: 'uSheetCrumple',

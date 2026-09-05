@@ -140,7 +140,6 @@ export type {
 export {
   DEBUG_MODES,
   FIBRE_TILE_PX,
-  LOOSE_PUSH,
   MAX_FOLDS,
   PAPER_FS,
   PAPER_UNIFORMS,
