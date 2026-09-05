@@ -1,11 +1,12 @@
 import { afterEach, describe, expect, it } from 'vitest'
 import { GlError, KNOB_REFERENCE_PX } from '@paper-crumple/core'
 import { createScratchPools, drawTargetFor, FULLSCREEN_VS } from '@paper-crumple/core/unstable'
+import type { EdgeSpec } from '@paper-crumple/core/unstable'
 import { createGlFixture, type PaperGlFixture } from './testing/gl-fixture.js'
 import { silhouetteBytes } from './testing/silhouette.js'
-import { createSdfBuilder, sigmaFor } from './gl-sdf.js'
+import { createSdfBuilder, SDF_POOL_SLOTS, sigmaFor } from './gl-sdf.js'
 import { tearAmpsFor } from './edge-derive.js'
-import { WIDTH_PX_KNOB, VARIANCE_KNOB } from './paper-knobs.js'
+import { defaultsFor } from './paper-knobs.js'
 import { mountNeutralTiles } from './paper-tiles.js'
 import { MAX_FOLDS, PAPER_FS, PAPER_UNIFORMS, SHEET_TILE_PX } from './paper-shader.js'
 
@@ -45,22 +46,18 @@ describe('PAPER_FS', () => {
       program.dispose()
       return missing
     }
-    // The whole program (edits 1-8) reaches every uniform BUT the polygon-field pair.
+    // The whole program (edits 1-8) reaches every uniform.
     //
-    // `uPaperField` / `uDecodePaper` lost their last reader in the edge redesign (design
-    // 2026-09-05 §6): `samplePaper` was called from `baseField`, `paperField`, `paperFieldFast`,
+    // It did not, for one round: the edge redesign left `uPaperField` / `uDecodePaper` with no
+    // reader at all — `samplePaper` was called from `baseField`, `paperField`, `paperFieldFast`,
     // `deepInside`, `farOutside` and the flap envelope, and every one of those now goes through
-    // `scrapBase` instead — under `edgeShape: 'smooth'` the renderer binds the polygon's own field
-    // to `uSdfTight` AND `uSdfLoose`, which reproduces it exactly. The fold loop reads
-    // `paperFieldFast`, not `uPaperField`, so the plan's "they survive for the fold loop's own
-    // lookups" does not hold today. Task 5's brief nonetheless mandates keeping both declared, and
-    // `PAPER_UNIFORMS` keeps mapping them, so the renderer's bind survives for Task 6 to decide
-    // on. They are pinned HERE, in the expected-missing list, rather than deleted, so that a later
-    // task giving them a reader again shows up as a failure of this case rather than silently.
+    // `scrapBase`, while the fold loop reads `paperFieldFast` rather than `uPaperField`. The plan's
+    // "they survive for the fold loop's own lookups" was simply false. They are deleted, so this
+    // list is empty again and a future dead uniform shows up here rather than in a comment.
     const whole = missingIn(
       PAPER_FS.replace('#define PAPER_FRONT_BUILD 1', '#define PAPER_FRONT_BUILD 0'),
     )
-    expect(whole).toEqual(['uPaperField', 'uDecodePaper'])
+    expect(whole).toEqual([])
     // The shipped front build compiles the fold loops, the flap shadow and the crumple mosaic
     // out, so the uniforms only they read are optimised away — and `renderFront`'s uploads to
     // them are the no-ops WebGL defines for a null location. The set is pinned so that a guard
@@ -78,10 +75,6 @@ describe('PAPER_FS', () => {
       'uPhotoCrumple',
       'uBallR',
       'uCrumpleBite',
-      // Declared, mapped and bound, but read by nothing since the edge redesign — see the
-      // whole-program list above.
-      'uPaperField',
-      'uDecodePaper',
     ])
   })
 
@@ -139,16 +132,34 @@ const FIELD = 128
 /** Working px per reference px at this front, i.e. `pxScale(FRONT.h)`. */
 const PXS = FRONT.h / KNOB_REFERENCE_PX
 
-/** The design's own defaults for the four numbers the measurements are quoted against. */
-const W_REF = numberDefault(WIDTH_PX_KNOB.default)
-const VARIANCE = numberDefault(VARIANCE_KNOB.default)
-const TEAR_ANGULAR = 0.8
-const TEAR_MIX = 0.7
-const CHEW_REF = 1.8
+/** The cell every measurement below is quoted against. */
+const TORN_PAPER_SPEC: EdgeSpec = { shape: 'torn', finish: 'paper', widthUnit: 'px' }
+const TORN_PAPER_DEFAULTS = defaultsFor(TORN_PAPER_SPEC)
 
-function numberDefault(v: unknown): number {
-  return typeof v === 'number' ? v : 0
+/**
+ * One knob's default, read out of the knob table — or `NaN`.
+ *
+ * Ruling R3's shape, applied here. A silent `?? 0` (which is what this helper used to be) would
+ * quietly measure the `edgeWidth = 0` cell and report the numbers as "the defaults"; Task 4 had
+ * exactly that pattern removed from `paper-knobs.ts` for exactly that reason. `NaN` is the loud
+ * value: it is not a legal edge width, it poisons every uniform it reaches, and
+ * `MEASURED_KNOBS`'s own case below names the key that went missing before any measurement runs.
+ * It does not throw — spec §10.8 bans that outside `eslint.boundaries.js`, test files included.
+ */
+function knobDefault(key: string): number {
+  const v: unknown = TORN_PAPER_DEFAULTS[key]
+  return typeof v === 'number' && Number.isFinite(v) ? v : Number.NaN
 }
+
+// Every one of these comes from the descriptors, never from a literal, so the measurements follow
+// the knob table rather than a snapshot of it. (They did not, for one round: `tearMix` was
+// hard-coded here as 0.7 while the table already said 0.6.)
+const MEASURED_KNOBS = ['edgeWidth', 'edgeVariance', 'tearAngular', 'tearMix', 'chew'] as const
+const W_REF = knobDefault('edgeWidth')
+const VARIANCE = knobDefault('edgeVariance')
+const TEAR_ANGULAR = knobDefault('tearAngular')
+const TEAR_MIX = knobDefault('tearMix')
+const CHEW_REF = knobDefault('chew')
 
 /** A convex control: a centred opaque square, as tightly packed `RGBA8UI` bytes. */
 function squareBytes(w: number, h: number, r: number): Uint8Array {
@@ -167,10 +178,13 @@ function squareBytes(w: number, h: number, r: number): Uint8Array {
 
 type Sample = 'figure' | 'square'
 
+/** Half-width of the `square` sample, in artwork px — which are front texels here, 1:1. */
+const SQUARE_R = ARTWORK.w * 0.3
+
 function bytesFor(sample: Sample): Uint8Array {
   return sample === 'figure'
     ? silhouetteBytes(ARTWORK.w, ARTWORK.h)
-    : squareBytes(ARTWORK.w, ARTWORK.h, ARTWORK.w * 0.3)
+    : squareBytes(ARTWORK.w, ARTWORK.h, SQUARE_R)
 }
 
 interface DrawOptions {
@@ -183,6 +197,12 @@ interface DrawOptions {
   readonly midAmpRef: number
   readonly chewRef: number
   readonly tearAngular: number
+  /**
+   * The `edgeShape: 'smooth'` binding (design 2026-09-05 §6): the polygon's own field goes to
+   * `uSdfTight` AND `uSdfLoose`, and no loose blur is built at all. Requires `openScene`'s
+   * `polygonRadius`.
+   */
+  readonly bindPolygonToBoth?: boolean
 }
 
 interface Scene {
@@ -194,8 +214,13 @@ interface Scene {
  * One context, one program, one artwork, one tight field — and a `draw` that rebuilds only the
  * loose field (which depends on `looseness`) before uploading the whole uniform set and reading
  * the front back as RGBA8 bytes.
+ *
+ * `polygonRadius` (artwork px, i.e. front texels) builds a SECOND field from a square mask of that
+ * half-width, standing in for the hull polygon `hull.ts` builds under `edgeShape: 'smooth'`. It is
+ * deliberately LARGER than the artwork, so a contour measured against it cannot be confounded by
+ * `sheetCov = max(paperMask, img.a)`'s artwork-alpha floor.
  */
-function openScene(sample: Sample): Err | Scene {
+function openScene(sample: Sample, polygonRadius?: number): Err | Scene {
   const fixture = createGlFixture(8, 8)
   expect(fixture.gl, 'no WebGL2 context — check the SwiftShader launch flags (§11)').not.toBeNull()
   const ctx = fixture.ctx
@@ -229,6 +254,43 @@ function openScene(sample: Sample): Err | Scene {
     sourceLongSide: FRONT.w,
   })
   if (GlError.is(tight)) return tight
+
+  // The stand-in hull polygon: a square mask `polygonRadius` from the centre, run through the same
+  // pass A (`BuildFieldOptions.artwork`'s own doc comment: pass A does not care whether its
+  // `RGBA8UI` source is the artwork or a hull mask), into its own pool slot so it never displaces
+  // `tight`'s target.
+  let polygon: typeof tight | null = null
+  if (polygonRadius !== undefined) {
+    const mask = ctx.texture({
+      width: ARTWORK.w,
+      height: ARTWORK.h,
+      format: 'RGBA8UI',
+      filter: 'NEAREST',
+      label: 'polygon-mask',
+    })
+    if (GlError.is(mask)) return mask
+    ctx.scope(() => {
+      const { gl } = ctx
+      gl.bindTexture(gl.TEXTURE_2D, mask.handle)
+      // prettier-ignore
+      gl.texSubImage2D(
+        gl.TEXTURE_2D, 0, 0, 0, ARTWORK.w, ARTWORK.h,
+        gl.RGBA_INTEGER, gl.UNSIGNED_BYTE, squareBytes(ARTWORK.w, ARTWORK.h, polygonRadius),
+      )
+    })
+    const built = builder.buildField({
+      artwork: mask,
+      artworkUv: [scale, scale, -p, -p],
+      width: FIELD,
+      height: FIELD,
+      sourceLongSide: FRONT.w,
+      slot: SDF_POOL_SLOTS.hullField,
+    })
+    mask.dispose()
+    if (GlError.is(built)) return built
+    polygon = built
+  }
+
   const tiles = mountNeutralTiles(ctx)
   if (GlError.is(tiles)) return tiles
   const program = ctx.program(FULLSCREEN_VS, PAPER_FS, 'paper-measure')
@@ -249,12 +311,28 @@ function openScene(sample: Sample): Err | Scene {
   const out = new Uint8Array(FRONT.w * FRONT.h * 4)
 
   const draw = (o: DrawOptions): Err | Uint8Array => {
-    const loose = builder.blurField({
-      field: tight,
-      sigmaPx: sigmaFor(o.looseness, FRONT.w),
-      frontLongSide: FRONT.w,
-    })
-    if (GlError.is(loose)) return loose
+    // `edgeShape: 'smooth'`: one field into both slots, no blur at all. `edgeShape: 'torn'`: the
+    // artwork's tight field and its blur.
+    let tightSrc = tight
+    let looseTex = tight.target.texture
+    let looseDecode: readonly [number, number] = tight.decode
+    if (o.bindPolygonToBoth === true) {
+      if (polygon === null) {
+        return new GlError('paper-shader.gl.test: bindPolygonToBoth without a polygonRadius')
+      }
+      tightSrc = polygon
+      looseTex = polygon.target.texture
+      looseDecode = polygon.decode
+    } else {
+      const loose = builder.blurField({
+        field: tight,
+        sigmaPx: sigmaFor(o.looseness, FRONT.w),
+        frontLongSide: FRONT.w,
+      })
+      if (GlError.is(loose)) return loose
+      looseTex = loose.target.texture
+      looseDecode = loose.decode
+    }
     const failed = ctx.scope((s): Err | undefined => {
       const { gl } = ctx
       gl.useProgram(program.handle)
@@ -269,16 +347,15 @@ function openScene(sample: Sample): Err | Scene {
         gl.uniform1i(loc(key), unit)
       }
       bind(0, artwork.handle, 'image')
-      bind(1, tight.target.texture.handle, 'sdfTight')
-      bind(2, loose.target.texture.handle, 'sdfLoose')
-      bind(3, tight.target.texture.handle, 'paperField')
+      bind(1, tightSrc.target.texture.handle, 'sdfTight')
+      bind(2, looseTex.handle, 'sdfLoose')
+      // Unit 3 is free since `uPaperField` was deleted (design 2026-09-05 §6).
       bind(4, tiles.crumpleR.handle, 'crumpleR')
       bind(5, tiles.crumpleG.handle, 'crumpleG')
       bind(6, tiles.crumpleA.handle, 'crumpleA')
       bind(7, tiles.fibreA.handle, 'fibreA')
-      gl.uniform2f(loc('decodeTight'), tight.decode[0], tight.decode[1])
-      gl.uniform2f(loc('decodeLoose'), loose.decode[0], loose.decode[1])
-      gl.uniform2f(loc('decodePaper'), tight.decode[0], tight.decode[1])
+      gl.uniform2f(loc('decodeTight'), tightSrc.decode[0], tightSrc.decode[1])
+      gl.uniform2f(loc('decodeLoose'), looseDecode[0], looseDecode[1])
       gl.uniform4f(loc('tightUv'), 1, 1, 0, 0)
       gl.uniform2f(loc('frontSize'), FRONT.w, FRONT.h)
       // prettier-ignore
@@ -412,6 +489,105 @@ function displacements(on: Uint8Array, off: Uint8Array): number[] {
 
 const mean = (xs: readonly number[]): number =>
   xs.length === 0 ? Number.NaN : xs.reduce((a, b) => a + b, 0) / xs.length
+
+/**
+ * The contour's mean radius along the four axes, in front texels. For the centred square sample
+ * every axis reads the same half-width, so averaging them only cancels the ray walk's own rounding.
+ */
+function axisRadius(pixels: Uint8Array): number {
+  const rs = [0, 0.5, 1, 1.5].map((q) => contourRadius(pixels, q * Math.PI))
+  expect(rs.some(Number.isNaN), 'a ray found no paper at all').toBe(false)
+  return mean(rs)
+}
+
+const W_WORKING = W_REF * PXS
+/** The stand-in hull polygon sits exactly one edge width outside the artwork, as `hullBandFor` puts it. */
+const POLYGON_R = SQUARE_R + W_WORKING
+/** Field quantisation, the jump flood's own error, the 0.6 px alpha ramp and the ray walk's rounding. */
+const RADIUS_TOL = 2
+
+/**
+ * The `edgeShape: 'smooth'` binding, and the two halves of the uniform split it exists to protect.
+ *
+ * This is the regression case for **ruling R12**. The design document's own §6 table says the
+ * width uniform is `W` in all four cells; the plan corrects that to `uBaseBias = 0` under
+ * `smooth`, because the polygon already sits at `W (1 +/- v)` and biasing it again reaches `2W`.
+ * Before this case existed, someone "restoring the spec" by uploading `uBaseBias = W` under
+ * `smooth` — or by making `scrapUnguarded` add `uEdgeWidth` instead — broke nothing in this
+ * repository. Case A vs case B is exactly that difference, measured.
+ *
+ * The setup is what Task 6 must implement: ONE field (a square standing in for the hull polygon,
+ * built one edge width outside the artwork) bound to `uSdfTight` AND `uSdfLoose`, no blur, and
+ * `uBaseBias = 0`. `scrapUnguarded` then returns `max(pf, pf) + 0 = pf`.
+ */
+describe('PAPER_FS — the smooth binding and the uniform split (design 2026-09-05 §6, ruling R12)', () => {
+  let scenes: Scene[] = []
+  afterEach(() => {
+    for (const s of scenes) s.dispose()
+    scenes = []
+  })
+
+  /**
+   * Every number the cases below and the §11 measurements are quoted against comes out of
+   * `defaultsFor(torn/paper/px)`. If the knob table drops or renames one, this fails first and
+   * names it, rather than a measurement silently reporting the `edgeWidth = 0` cell (ruling R3).
+   */
+  it('resolves every measured knob default from the knob table', () => {
+    for (const key of MEASURED_KNOBS) {
+      expect(Number.isFinite(knobDefault(key)), `no finite default for knob '${key}'`).toBe(true)
+    }
+  })
+
+  const SMOOTH = {
+    looseness: 0,
+    edgeWidthRef: W_REF,
+    baseBiasRef: 0,
+    edgeFinish: 0,
+    seed: 3,
+    tearAmpRef: 0,
+    midAmpRef: 0,
+    chewRef: 0,
+    tearAngular: 0,
+    bindPolygonToBoth: true,
+  } as const satisfies DrawOptions
+
+  it('puts the contour at the polygon, not at twice the width', () => {
+    const scene = expectOk(openScene('square', POLYGON_R))
+    scenes.push(scene)
+
+    // A. The smooth cell as the redesign specifies it: the polygon's own contour, untouched.
+    const a = axisRadius(expectOk(scene.draw(SMOOTH)))
+    expect(a).toBeGreaterThan(POLYGON_R - RADIUS_TOL)
+    expect(a).toBeLessThan(POLYGON_R + RADIUS_TOL)
+
+    // B. The spec's version of the table, i.e. the bug R12 forbids: bias the polygon by W again.
+    // The contour lands a whole edge width further out — at the artwork plus 2W. This half is
+    // what makes A's assertion mean something: the bias demonstrably CAN move the contour, so A
+    // pins that it does not.
+    const b = axisRadius(expectOk(scene.draw({ ...SMOOTH, baseBiasRef: W_REF })))
+    expect(b - a).toBeGreaterThan(W_WORKING - RADIUS_TOL)
+    expect(b - a).toBeLessThan(W_WORKING + RADIUS_TOL)
+    expect(b).toBeGreaterThan(SQUARE_R + 2 * W_WORKING - RADIUS_TOL)
+
+    // C. edgeK() reads uEdgeWidth, NOT uBaseBias. Under `smooth` the bias is 0, so if the master
+    // ramp read it the octaves would be gated off entirely and a large tearAmp would do nothing.
+    // It reads the width, which is W here, so the ramp is at its top and the tear moves the
+    // contour. (`smooth` uploads zero amplitudes in production — this drives them by hand
+    // precisely because the uniform they are gated by is what is under test.)
+    const c = expectOk(scene.draw({ ...SMOOTH, tearAmpRef: 40, tearAngular: 0 }))
+    const moved = displacements(c, expectOk(scene.draw(SMOOTH)))
+    expect(Math.max(...moved.map(Math.abs))).toBeGreaterThan(1)
+
+    // D. edgeWidth 0 bottoms the ramp out at the artwork's own alpha — design §7's "the sheet IS
+    // the artwork", which is where the deleted `uEdgeMode == 2` branch went. The polygon field is
+    // still bound to both slots and the tear amplitude is still large; neither reaches the mask.
+    const d = axisRadius(
+      expectOk(scene.draw({ ...SMOOTH, edgeWidthRef: 0, tearAmpRef: 40, tearAngular: 0 })),
+    )
+    expect(d).toBeGreaterThan(SQUARE_R - RADIUS_TOL)
+    expect(d).toBeLessThan(SQUARE_R + RADIUS_TOL)
+  })
+})
 
 describe('PAPER_FS — the design §11 measurements (ruling R13: measurements, not gates)', () => {
   let scenes: Scene[] = []

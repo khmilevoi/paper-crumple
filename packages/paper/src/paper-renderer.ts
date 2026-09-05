@@ -11,10 +11,10 @@
  *     `DrawTarget`, this module never allocates one (spec 7.3: a slot never chooses its
  *     destination and never clears the default framebuffer — the front is the caller's own
  *     offscreen target, so clearing it here is legal, spec 7.3).
- *   - The spike's two RGBA tile binds become four `R8` plane binds (spec 14), so the eight
- *     texture units this shader needs are `0 uImage, 1 uSdfTight, 2 uSdfLoose, 3 uPaperField,
- *     4 uCrumpleR, 5 uCrumpleG, 6 uCrumpleA, 7 uFibreA` — `uPaperField` moved to unit 3 to make
- *     room for the two extra tile planes.
+ *   - The spike's two RGBA tile binds become four `R8` plane binds (spec 14), so the texture units
+ *     this shader needs are `0 uImage, 1 uSdfTight, 2 uSdfLoose, 4 uCrumpleR, 5 uCrumpleG,
+ *     6 uCrumpleA, 7 uFibreA`. Unit 3 held `uPaperField` until Task 5 deleted it (design
+ *     2026-09-05 §6) and is now free.
  *
  * **The front's parameters are fixed by `edge.js:86`, and are not negotiable**: `pose: 0,
  * shadow: 0, crumpleFill: 0, debug: 0`. That is why `renderFront` forces `uFoldCount = 0`,
@@ -28,16 +28,15 @@
  * `(1, 1, 0, 0)` here; the spike's own line computing it from `asset.tight.uvScale ?? [1, 1]`
  * would be dead code in this port and is dropped rather than carried across unused.
  *
- * **`uEdgeMode` and `edge.js`'s third mode.** `paper.js:2157-2163`: `hullMode = edgeMode !==
- * 'torn'`; `edgeMode = hullMode ? (paperField === null ? 2 : 1) : 0`; `uPaperField` is bound to
- * `paperField ?? tight`. For `'both'` — the hull polygon as the silhouette, decorated by the
- * torn shader path — `edge.js:104-110`'s trick is reproduced by choosing which textures are
- * bound, never by editing the shader: both `uSdfTight` and `uSdfLoose` point at the hull's own
- * field (`paperField ?? tight`), which collapses `scrapBase`'s tight/loose union to the
- * polygon's own contour, and `uEdgeMode` is forced to 0 (the torn path) so the tear, fibre,
- * deckle and shadow maths switch on. `edge.js`'s `renderAsset.loose = hullField` carries no
- * `sigmaPx` (a `Field`, not a `LooseField`), so `paper.js:2191`'s `(asset.loose.sigmaPx ?? 0) *
- * LOOSE_PUSH` collapses to `uLoosePush = 0` for `'both'`, exactly as here.
+ * **THIS BLOCK IS STALE FROM TASK 5 AND TASK 6 REWRITES IT.** The shader no longer has
+ * `uEdgeMode`, `uThickness`, `uLooseness`, `uLoosePush`, `uPaperField` or `samplePaper` (design
+ * 2026-09-05 §6): the contour is expressed by which textures are bound and by nothing else. The
+ * `'both'` trick this paragraph described is now the ONLY mechanism, and it is what
+ * `edgeShape: 'smooth'` is — bind the polygon's own field to `uSdfTight` AND `uSdfLoose`, upload
+ * `uBaseBias = 0`, and `scrapUnguarded` returns `max(pf, pf) + 0 = pf`, the polygon's contour
+ * exactly, border guard included. The three uploads below that no longer resolve (`edgeMode`,
+ * `looseness`, `thickness`) are the three lines Task 6 replaces with `edgeWidth`, `baseBias` and
+ * `edgeFinish`.
  *
  * **Every px-valued knob passes through `scaleKnob(descriptor, value, front.h)`** (spec 6.4),
  * which is `value * front.h / KNOB_REFERENCE_PX` for a `reference: 'sprite-px'` descriptor and
@@ -205,13 +204,14 @@ export function createPaperRenderer(ctx: GlContext): Err | PaperRenderer {
       bind(0, r.artwork.handle, 'image')
       bind(1, tightField.target.texture.handle, 'sdfTight')
       bind(2, looseTexture.handle, 'sdfLoose')
-      bind(3, hullField.target.texture.handle, 'paperField')
+      // Unit 3 is free: `uPaperField` / `uDecodePaper` and `samplePaper` were deleted in Task 5
+      // (design 2026-09-05 §6). Under `edgeShape: 'smooth'` the polygon's own field goes to
+      // `sdfTight` AND `sdfLoose` — a third slot carrying the same texture had no reader.
       bind(4, tiles.crumpleR.handle, 'crumpleR')
       bind(5, tiles.crumpleG.handle, 'crumpleG')
       bind(6, tiles.crumpleA.handle, 'crumpleA')
       bind(7, tiles.fibreA.handle, 'fibreA')
 
-      gl.uniform2f(loc('decodePaper'), hullField.decode[0], hullField.decode[1])
       gl.uniform1i(loc('edgeMode'), uEdgeModeValue)
       gl.uniform2f(loc('decodeTight'), tightField.decode[0], tightField.decode[1])
       gl.uniform2f(loc('decodeLoose'), looseDecode[0], looseDecode[1])

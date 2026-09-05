@@ -191,10 +191,10 @@ uniform float uCrumpleBite;   // how far a rim plate sticks out or sits back, as
 // The CONTOUR is not encoded here at all: it is expressed by which textures the renderer binds
 // (design §6), so this shader never asks where its base field came from.
 uniform int uEdgeFinish;
-// The polygon's own field, bound as the contour source under 'edgeShape: 'smooth'' and read by
-// the fold loop's mirrored lookups. Padded-texture uv, same decode contract as the other fields.
-uniform sampler2D uPaperField;
-uniform vec2 uDecodePaper;
+// There is no separate polygon-field sampler any more. Under 'edgeShape: 'smooth'' the renderer
+// binds the polygon's own field to uSdfTight AND uSdfLoose, which is what makes scrapUnguarded
+// return max(pf, pf) + 0 = pf; a third slot carrying the same texture had no reader left and was
+// deleted with samplePaper (design 2026-09-05 §6). Bind the polygon to the two uSdf* slots.
 uniform float uSheetCrumple;     // amplitude of the flat sheet's own relief, 0..1
 uniform float uSheetTile;        // working px per tile of the crumple photograph on the sheet
 
@@ -413,25 +413,13 @@ float scrapBase(vec2 uv) {
 }
 
 /**
- * The polygon's own signed field, in working px, > 0 is paper. Same border guard as scrapBase.
+ * The noise-free base sheet field, for the consumers that want it WITHOUT the tear: the drop
+ * shadow and the 'paper field' debug view. The visible mask goes through paperField and the fold
+ * loop through paperFieldFast; all three bottom out in the same scrapBase.
  *
- * Since the redesign this is NOT the base sheet field in any cell — every cell goes through
- * scrapBase, and under 'edgeShape: 'smooth'' the renderer binds this same polygon field to
- * uSdfTight and uSdfLoose so scrapBase reproduces it exactly. It survives for the fold loop's own
- * mirrored lookups, which read uPaperField directly (design 2026-09-05 §6).
- */
-float samplePaper(vec2 uv) {
-  float d = textureLod(uPaperField, uv, 0.0).r * uDecodePaper.x + uDecodePaper.y;
-  vec2 q = abs(uv - 0.5);
-  return d - smoothstep(0.482, 0.5, max(q.x, q.y)) * 1e4;
-}
-
-/**
- * The ONE base sheet field every consumer goes through — the visible mask, the drop shadow and
- * the fold loop's mirrored lookups. Which contour it describes is decided by the BINDING
- * (design 2026-09-05 §6): the artwork's tight/loose pair under 'edgeShape: 'torn'', the polygon's
- * own field bound to both slots under 'edgeShape: 'smooth''. The fold, crumple and compaction
- * code never asks which.
+ * Which contour it describes is decided by the BINDING (design 2026-09-05 §6): the artwork's
+ * tight/loose pair under 'edgeShape: 'torn'', the polygon's own field bound to BOTH uSdf* slots
+ * under 'edgeShape: 'smooth''. The fold, crumple and compaction code never asks which.
  */
 float baseField(vec2 uv) {
   return scrapBase(uv);
@@ -1754,10 +1742,6 @@ float tightTexelPx() {
 float looseTexelPx() {
   return fieldTexelPx(vec2(uPlanePx * uAspect, uPlanePx), textureSize(uSdfLoose, 0));
 }
-float paperTexelPx() {
-  return fieldTexelPx(vec2(uPlanePx * uAspect, uPlanePx), textureSize(uPaperField, 0));
-}
-
 bool frontFastPath() {
   return uShadow == 0.0 && uShadowBlur > 0.0 && uFoldCount == 0 && uCrumpleFill == 0.0 &&
          uDebug == 0;
@@ -2479,8 +2463,6 @@ export const PAPER_UNIFORMS = Object.freeze({
   ballR: 'uBallR',
   crumpleBite: 'uCrumpleBite',
   edgeFinish: 'uEdgeFinish',
-  paperField: 'uPaperField',
-  decodePaper: 'uDecodePaper',
   sheetCrumple: 'uSheetCrumple',
   sheetTile: 'uSheetTile',
   debug: 'uDebug',

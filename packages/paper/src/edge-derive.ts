@@ -6,9 +6,11 @@
  * `uMidAmp`, which cease to be knobs (§2.2).
  *
  * The tear's displacement is NOT a symmetric `+-tearAmp`. `tearLow` clamps to `[-1, 1]`
- * (`paper-shader.ts:346`), the mid term is `+-0.225 * midAmp` on the smooth branch but
- * `[-1, +0.55] * midAmp` on the angular one — bites and tabs are not symmetric — and the teeth
- * add `+-1.6 * chew` independently of the width (`paper-shader.ts:544-558`, `:588`). Normalising
+ * (`paper-shader.ts`, `tearLow`'s own last line), the mid term is `+-0.225 * midAmp` on the smooth
+ * branch (`midSmooth`) but `[-1, +0.55] * midAmp` on the angular one (`midAng`) — bites and tabs
+ * are not symmetric — and the teeth add `+-1.6 * chew` independently of the width (`tearOf`'s
+ * `teeth`, and `farOutside`'s second `teeth`). Cited by identifier, not by line: ruling R11, and
+ * the edge redesign moved every line number in that region. Normalising
  * the mid amplitude by `midLow` is what pins the LOWER reach at exactly `W (1 - v)`; the upper
  * reach then lands inside `W (1 + v)`, which is the direction the reserve can afford.
  *

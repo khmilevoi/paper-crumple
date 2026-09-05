@@ -1688,17 +1688,20 @@ export function paperSheet(options?: PaperSheetOptions): PaperSheet {
       )
     } else {
       box = boundsExtent(bounds, field.w, field.h)
-      // Finding F1. `extent.ts:5-7` says the polygon's vertices already sit `maxDist` past the
-      // silhouette, so the polygon's own box is the sheet's extent. That holds for `hull` and
-      // fails for `both`: there the torn path draws outward FROM the contour, by exactly the
-      // terms `overscanRadius` collects as `r_both - maxDist`: the leading `thickness`, the tear
-      // bracket `[thickness + 0.6*looseness*tearAmp + midAmp]*edgeK`, four fibre lengths and the
-      // slop — roughly 111 reference px at this package's own knob defaults (22 + 61.2 + 16 + 12),
-      // against roughly 36 from `SHEET_MARGIN_FRAC`'s 4 %. Derived from the same function the frozen
-      // reserve is derived from, so the two can never drift apart. Until the hull polygon became
-      // a real field this was invisible, because `both` never reached the polygon at all. For
-      // `hull` the same expression is the slop alone (`r_hull - maxDist`): the antialiasing the
-      // reach carries past the polygon, which the rect leaves to `sheetRect`'s 4 %.
+      // Finding F1. `extent.ts`'s header says the polygon's vertices already sit at the band's far
+      // edge, so the polygon's own box is the sheet's extent — for a contour with nothing drawn
+      // past it. The finish decorations DO draw past it, by exactly the terms core's
+      // `overscanRadius` collects beyond the band: four fibre lengths, the deckle width and the
+      // slop. Derived from the same function the frozen reserve is derived from, so the two can
+      // never drift apart.
+      //
+      // STALE FROM TASK 5 — Task 7 owns the repair. This block still reads `edgeParams.maxDist`
+      // and still branches on `edgeMode === 'both'`, and its earlier arithmetic quoted a
+      // `0.6*looseness*tearAmp` tear bracket and a `0.45*sigma` blur lead. Both terms are gone:
+      // `gateReach` lost its looseness factor (design 2026-09-05 §6.1 item 3) and `uLoosePush`
+      // was deleted (§6.1 item 2), and core's `overscanRadius` is now
+      // `W(1 + v) + 4*fiberLen + deckleWidth + e`. The numbers that used to be quoted here were
+      // computed from the old formula and would be wrong to repeat, so they are not repeated.
       const beyond = (overscanRadius(edgeParams) - edgeParams.maxDist) * k
       if (edgeMode === 'both') box = growBox(box, beyond, field.w, field.h)
       reach = reachRect(bounds, beyond, field, front)
@@ -1806,10 +1809,14 @@ export function paperSheet(options?: PaperSheetOptions): PaperSheet {
     // Fix round 1, finding 2 (was wrong): a previous version pinned every field-tier knob
     // (`looseness`, `sdfRes`) back to this factory's default before deriving `edgeParams`, on the
     // theory that `checkReserve` is a "front-class slider" guard and `looseness` is field-tier.
-    // That is false: core's own `overscanRadius` (`overscan.ts`) takes the LIVE `looseness` as a
-    // real term of `r_torn`/`r_both` (the `0.45*sigma` blur lead and the `0.6*looseness*tearAmp`
-    // tear bracket) — pinning it silently disabled the one guard `overscanHeadroom` exists to be
-    // the escape hatch from. `checkReserve` gets the sprite's live `knobValues` verbatim, exactly
+    // That is false for the same reason it is still false today, though the terms have changed:
+    // `checkReserve` must see the LIVE knob values, or it silently disables the one guard
+    // `overscanHeadroom` exists to be the escape hatch from. (The specific terms it used to name —
+    // a `0.45*sigma` blur lead and a `0.6*looseness*tearAmp` tear bracket — are gone with
+    // `uLoosePush` and the looseness multiplier, design 2026-09-05 §6.1 items 2 and 3; core's
+    // `overscanRadius` is now `W(1 + v) + 4*fiberLen + deckleWidth + e`, whose live terms are
+    // `edgeWidth`, `edgeVariance`, `fiberLen` and `deckleWidth`.) `checkReserve` gets the sprite's
+    // live `knobValues` verbatim, exactly
     // as the brief's own step 4 states; a caller who genuinely needs to drag `looseness` past the
     // frozen reserve gets the "re-add required" `SheetError` this check exists to produce, and one
     // who needs the room reserves it up front with a larger `overscanHeadroom` (spec 8.6).

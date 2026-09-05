@@ -49,8 +49,17 @@ describe('PAPER_FS — the edge uniforms (design 2026-09-05 §6)', () => {
    *
    * Exempt, by shape rather than by name: comments, the uniform declarations themselves, and
    * `fringeTerm`'s own definition (a definition is not an application).
+   *
+   * The POLARITY is asserted, not just the token: `uEdgeFinish == 1` must be what gates the
+   * decoration, and a `!=`, a `< / >` or an `== 0` in the same condition disqualifies it. Matching
+   * the identifier alone would pass a block gated exactly the wrong way round — `edgeFinish:
+   * 'clean'` drawing the deckle and `'paper'` skipping it — which is the one mistake this case
+   * exists to catch.
    */
   it('gates every finish decoration on uEdgeFinish (design 2026-09-05 §6, ruling R14)', () => {
+    const POSITIVE = /uEdgeFinish\s*==\s*1(?![0-9.])/
+    const WRONG_WAY = /uEdgeFinish\s*(?:!=|<|>)|uEdgeFinish\s*==\s*0(?![0-9.])/
+    const gates = (text: string): boolean => POSITIVE.test(text) && !WRONG_WAY.test(text)
     const lines = PAPER_FS.split('\n')
     // Stack of the enclosing `if (...)` conditions, keyed by the brace depth each opened at.
     const openIfs: { depth: number; cond: string }[] = []
@@ -69,8 +78,8 @@ describe('PAPER_FS — the edge uniforms (design 2026-09-05 §6)', () => {
         /uDeckleWidth|uTearShadow|fringeTerm/.test(line)
       ) {
         checked++
-        const gated = /uEdgeFinish/.test(line) || openIfs.some((f) => /uEdgeFinish/.test(f.cond))
-        expect(gated, `ungated finish decoration: ${trimmed}`).toBe(true)
+        const gated = gates(line) || openIfs.some((f) => gates(f.cond))
+        expect(gated, `finish decoration not gated on uEdgeFinish == 1: ${trimmed}`).toBe(true)
       }
       const opens = (line.match(/\{/g) ?? []).length
       const closes = (line.match(/\}/g) ?? []).length
