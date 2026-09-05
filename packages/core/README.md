@@ -139,6 +139,29 @@ decide whether a duplicate core is a startup failure or a logged degradation —
 `prefers-reduced-motion` needs no API of its own. The branch in the install block above is the whole
 accommodation.
 
+## Prefetching the next swap
+
+`view.swapTo(url)` in the install block above is `add()` + `crumpleTo(pending)` behind one call, and
+its `add()` starts at the click. When you already know what comes next, start it earlier: every
+asynchronous ingest runs through one stage-wide, prioritised lane, `add()` is its **background**
+class, and a background job is promoted to the head of the lane the moment a `crumpleTo` holds the
+promise it returned. Prefetching can only have finished first — it never makes the click slower.
+
+```ts
+// At idle, once the current page is on screen.
+for (const n of nextPage) void stage.add(n.url, { key: n.id, signal })
+
+// At the click. `stage.get` is synchronous and answers `undefined` for anything not yet resident,
+// so the fallback is the ordinary swap.
+const ready = stage.get(next.id)
+const run =
+  ready !== undefined ? view.crumpleTo(ready, { signal }) : view.swapTo(next.url, { signal })
+```
+
+A superseded `swapTo` aborts the `add()` it started, and an aborted `add()` frees its key, so
+clicking through five pages costs one ingest rather than five. `docs/USAGE.md` §9 has the whole
+story, budget included.
+
 ## CDN and playgrounds
 
 There is no single `esm.sh/paper-crumple` URL, and that is a real cost rather than an oversight:

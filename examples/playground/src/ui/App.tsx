@@ -334,9 +334,9 @@ export function App(): ReactNode {
   const swapControllerRef = useRef<AbortController | null>(null)
 
   const swapTo = useCallback(
-    async (src: string, label: string): Promise<void> => {
+    async (src: string, label: string, key?: string): Promise<void> => {
       const view = live?.view
-      if (view === null || view === undefined) return
+      if (live === null || view === null || view === undefined) return
 
       swapControllerRef.current?.abort()
       const controller = new AbortController()
@@ -346,10 +346,16 @@ export function App(): ReactNode {
       // the one the library will use.
       const duration = audio.beginSequence(swapSpec(view.pose, dwells))
       setDirection('folding')
-      const run = view.swapTo(src, {
-        duration: duration ?? SWAP_DURATION_MS,
-        signal: controller.signal,
-      })
+      const options = { duration: duration ?? SWAP_DURATION_MS, signal: controller.signal }
+      // `prefetchSamples` put the other samples on the stage at idle under their own ids
+      // (`stage.ts`), so the sprite this click wants may already exist: `crumpleTo` then folds
+      // straight to it and the swap pays no ingest at all. Everything with no prefetched sprite
+      // behind it — the deliberately broken URL, a dropped file, a prefetch that failed or that
+      // the LRU evicted — falls back to `swapTo`, which is `add` + `crumpleTo(pending)` and does
+      // exactly what this panel did before. Both settle the same `SwapResult`, so nothing below
+      // has to know which one ran.
+      const ready = key === undefined ? undefined : live.built.stage.get(key)
+      const run = ready === undefined ? view.swapTo(src, options) : view.crumpleTo(ready, options)
       runRef.current = run
       const r = await run
       audio.endSequence()
@@ -364,7 +370,7 @@ export function App(): ReactNode {
       // the old sprite back on a step of its own, and costs one redraw otherwise.
       reframe()
       if (r instanceof Error) {
-        onObserved('view.swapTo', r)
+        onObserved(ready === undefined ? 'view.swapTo' : 'view.crumpleTo', r)
         setStatus({
           ok: false,
           text: `swap failed, rolled back to the previous sprite: ${r.message}`,
@@ -382,7 +388,10 @@ export function App(): ReactNode {
     const target =
       swapTarget === BROKEN_ID ? BROKEN_SAMPLE : SAMPLES.find((s) => s.id === swapTarget)
     if (target === undefined) return
-    void swapTo(target.url, target.id).then(() => {
+    // The id is the label *and* the prefetch key: `prefetchSamples` registers every sample under
+    // its own id. The broken entry is not a sample and was never prefetched, so its key finds
+    // nothing and the rollback path is reached exactly as before.
+    void swapTo(target.url, target.id, target.id).then(() => {
       if (swapTarget === BROKEN_ID) return
       // NOT `setSample`: that is the rebuild trigger, and a rebuild here would throw away the
       // sprite the swap just animated into place, reload it unanimated, and reset the pose, the
