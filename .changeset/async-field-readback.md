@@ -10,10 +10,12 @@ ahead of it (every step draw, the previous sprite's build). `source()` now issue
 `readPixels` into a `PIXEL_PACK_BUFFER`, fences it, polls the fence once per platform turn
 (`nextTurn()` from `@paper-crumple/core/unstable`: `scheduler.postTask` → `MessageChannel` →
 `setTimeout(0)`) and copies the bytes out with `getBufferSubData` once it has signalled. The
-decode, the hull and both rects are byte-identical to the synchronous path (pinned by goldens);
-the CPU-field fallback decision stays synchronous, `getError` right after `readPixels`, and a
-wait that fails (`WAIT_FAILED`, a lost context) takes the same CPU fallback. Torn mode reads the
-field once per add where it read it twice. Abort check point 2 (spec §10.5) is the fence wait: a
+decode, the hull and both rects are byte-identical to the synchronous path (pinned by goldens).
+A `readPixels` the driver refuses is read once the fence signals — one `getError` after the
+copy, before any decode — and falls to the same CPU field it always did, turns later; a wait
+that fails (`WAIT_FAILED`, a lost context) takes that fallback too, and a `dispose()` while the
+readback is in flight answers a `SheetError` instead of a handle. Torn mode reads the field once
+per add where it read it twice. Abort check point 2 (spec §10.5) is the fence wait: a
 signal fired while the readback is in flight answers `ABORTED` on the next turn, with the fence
 deleted and no pack buffer left bound.
 
