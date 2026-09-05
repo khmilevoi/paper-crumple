@@ -174,7 +174,8 @@ export interface PaperSheet extends SheetRenderer<Knobs, PaperSheetHandle> {
    * the `await` that check point 2 sits behind — the only way to make an abort land inside that
    * window without a race, since no yield of this call falls inside it (fix round 1, finding 2:
    * the level-2 suite had no way to reach this check point at all before this hook existed;
-   * S12's split yields one phase EARLIER, which is `__afterArtworkForTest`'s own window). A name no consumer could mistake for API, by the same convention as
+   * S12's split yields one phase EARLIER, which is `__afterArtworkForTest`'s own window). A name no
+   * consumer could mistake for API, by the same convention as
    * `__afterHullForTest`.
    */
   __afterFieldForTest?: () => void
@@ -839,7 +840,8 @@ async function awaitFieldReadback(
  * decision moved here from right after `readPixels` (see `issueFieldReadback` for the
  * measurement that moved it): a refused allocation of this sprite is the call's `GlError`; a
  * refused read, a refused `bufferData`, a failed copy all answer `null`, and the recorded buffer
- * size goes with it so the next call sizes the buffer again. Then the decode loops VERBATIM from `readBackField` — the
+ * size goes with it so the next call sizes the buffer again. Then the decode loops VERBATIM from
+ * `readBackField` — the
  * `(v * d0 + d1) / texelPx` order is an identity contract (`sheet.gl.test.ts`'s readback goldens
  * pin it to the byte). The pack buffer is unbound before returning, for the reason
  * `issueFieldReadback` gives.
@@ -1224,7 +1226,8 @@ export function paperSheet(options?: PaperSheetOptions): PaperSheet {
 
   // A function, not the inlined `o.signal?.aborted === true` it wraps: `aborted` can flip between
   // any two of `source()`'s check points — 1, 1b (S12's split), 2 and 3 — (an abort mid-trace is
-  // the entire reason there are four, not one), but TS's CFA does not know that — having seen one `=== true` check rule the
+  // the entire reason there are four, not one), but TS's CFA does not know that — having seen one
+  // `=== true` check rule the
   // property out, it treats a second textually-identical check on the same reference as
   // unreachable. A fresh call each time is a fresh expression, so nothing narrows across calls
   // (same idiom as `core/runner.ts`'s own `signalAborted`).
@@ -1403,7 +1406,7 @@ export function paperSheet(options?: PaperSheetOptions): PaperSheet {
     // has certainly landed by the time the check below reads the signal.
     afterArtworkForTest?.()
 
-    // **The split (S12; §8.10's own phase list — "upload and field").** The 4 MB artwork upload,
+    // **The split (S12; inside §8.10's first phase, "upload and field").** The 4 MB artwork upload,
     // the resample draw and the field passes issued behind them were ONE task: ~10 ms in a
     // thirty-view burst on the reference GPU (D3D11, Iris Xe), and that task was the whole of what
     // held `bench:smooth`'s task p95 at 9.6–10.4 ms against its limit of 10. One turn between the
