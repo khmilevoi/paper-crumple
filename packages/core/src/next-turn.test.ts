@@ -41,3 +41,56 @@ describe('nextTurn() — the platform yield (spec §8.10)', () => {
     expect(postTask.mock.calls[0]?.[1]).toEqual({ priority: 'user-visible' })
   })
 })
+
+describe('nextTurn({ delay }) — the back-off turn (spec §8.10)', () => {
+  it("adds delay to postTask's options when one is given", async () => {
+    const postTask = vi.fn((fn: () => void, _o: { priority: string; delay?: number }) => {
+      setTimeout(fn, 0)
+      return Promise.resolve()
+    })
+    vi.stubGlobal('scheduler', { postTask })
+    await nextTurn({ delay: 4 })
+    expect(postTask).toHaveBeenCalledTimes(1)
+    expect(postTask.mock.calls[0]?.[1]).toEqual({ priority: 'user-visible', delay: 4 })
+  })
+
+  it('leaves the no-delay options object byte-identical: no delay key for (), ({}) or ({ delay: 0 })', async () => {
+    const postTask = vi.fn((fn: () => void, _o: { priority: string; delay?: number }) => {
+      setTimeout(fn, 0)
+      return Promise.resolve()
+    })
+    vi.stubGlobal('scheduler', { postTask })
+    await nextTurn()
+    await nextTurn({})
+    await nextTurn({ delay: 0 })
+    expect(postTask).toHaveBeenCalledTimes(3)
+    for (const call of postTask.mock.calls) {
+      expect(call[1]).toEqual({ priority: 'user-visible' })
+      expect('delay' in call[1]).toBe(false)
+    }
+  })
+
+  it('falls back to setTimeout(delay) — not the MessageChannel, which cannot delay — when postTask is absent', async () => {
+    const real = globalThis.setTimeout
+    const delays: Array<number | undefined> = []
+    vi.stubGlobal('scheduler', {})
+    vi.stubGlobal('setTimeout', (fn: () => void, ms?: number) => {
+      delays.push(ms)
+      return real(fn, ms)
+    })
+    await nextTurn({ delay: 3 })
+    expect(delays).toEqual([3])
+  })
+
+  it('still takes the MessageChannel route with no delay and no postTask', async () => {
+    const real = globalThis.setTimeout
+    const delays: Array<number | undefined> = []
+    vi.stubGlobal('scheduler', {})
+    vi.stubGlobal('setTimeout', (fn: () => void, ms?: number) => {
+      delays.push(ms)
+      return real(fn, ms)
+    })
+    await nextTurn()
+    expect(delays).toEqual([])
+  })
+})

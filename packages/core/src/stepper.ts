@@ -1,5 +1,5 @@
 import type { Step } from './dwell.js'
-import { nextTurn } from './next-turn.js'
+import { nextTurn, type YieldOptions } from './next-turn.js'
 
 /**
  * # The absolute-deadline stepper (§7.2)
@@ -38,8 +38,13 @@ export interface Timers {
    * its budget: resolves in a later macrotask so the browser can paint and dispatch input in
    * between. `nextTurn()` on the system clock; a microtask on the test clock (§11), because every
    * lane guarantee holds by construction of the queue and none by a task boundary.
+   *
+   * `{ delay }` is the back-off form a long wait polls on (a fence, §8.10 and §5.2's `source()`):
+   * a later task no sooner than `delay` ms. The system clock hands it to `postTask`/`setTimeout`;
+   * the test clock advances itself by `delay`, since its yield is a microtask and its time is
+   * whatever it says it is.
    */
-  yield(): Promise<void>
+  yield(o?: YieldOptions): Promise<void>
 }
 
 /** The real clock. `performance.now()` and not `Date.now()`: deadlines want a monotonic clock. */

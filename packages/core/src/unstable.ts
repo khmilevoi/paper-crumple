@@ -120,8 +120,10 @@ export { gradeAttributes } from './surface-grade.js'
 export type { AttributeGrade } from './surface-grade.js'
 export { batchBySortKey } from './draw-batch.js'
 
-// --- S1: the platform yield (§8.10) — what a slot's asynchronous readback polls its fence on ---
+// --- S1: the platform yield (§8.10) — what a slot's asynchronous readback polls its fence on;
+// S9 added its one option, the back-off delay a long fence wait polls on ---
 export { nextTurn } from './next-turn.js'
+export type { YieldOptions } from './next-turn.js'
 
 // --- P7: the cancellable wait on a shared promise (§5.2 amendment, §10.5) — what a slot's
 // asynchronous path races its program-readiness wait with ---
