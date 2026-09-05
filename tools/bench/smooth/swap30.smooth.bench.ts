@@ -31,8 +31,13 @@
  *   - `stream` (`smooth.stream.dpr1`) — one swap every 100 ms, 30 of them (a gallery cycling).
  *   - `double-swap` (`smooth.double.dpr1`) — every view `swapTo(a)` then `swapTo(b)`, the second
  *     wave 50 ms after the first: supersession. The first wave's runs settle `ABORTED`; every
- *     `sheet.source` call beyond one per view is a **wasted ingest** (`wastedIngests`), which is
- *     what the lane must drive to 0 — the aborted count is 30 both before and after.
+ *     `sheet.source` call beyond one per view is a **wasted ingest** (`wastedIngests`, the raw
+ *     call count). A job already inside `source()` when the second wave lands is cancelled at
+ *     its next check point (1b/2, spec §10.5) and still counts there — one or two per storm, by
+ *     construction — so the gated figure is the **completed** waste
+ *     (`completedWastedIngests`): `source()` calls that ran to their end and returned a handle,
+ *     beyond one per view — an ingest for a superseded sprite nobody adopted, which is what the
+ *     lane must drive to 0. The aborted count is 30 both before and after.
  *   - Also: `idle` — 2 s of nothing, the control that calibrates the recorders and shows machine
  *     contention; `burst-drag` — the URL burst while a draw-class knob is written on one view every
  *     frame (`view.set`); `burst-url@dpr2` and `stream@dpr2` at DPR 2
@@ -74,7 +79,8 @@
  * window included. Outcomes: ok / failed (rolled back) / aborted (superseded); `distinctRects` =
  * distinct `${rect.x},${rect.y},${rect.w},${rect.h}` over the sprites the **successful** adds
  * produced, `distinctPixels` = distinct FNV-1a hashes of the swapped canvases as its robust twin;
- * `wastedIngests`. Wrapped-method phase timers — `sheet.source` and `build`, `motion.draw`, the 2D
+ * `wastedIngests` (raw calls) and `completedWastedIngests` (calls that returned a handle), printed
+ * as `waste raw/completed`. Wrapped-method phase timers — `sheet.source` and `build`, `motion.draw`, the 2D
  * `drawImage` blit, `getBoundingClientRect`, `readPixels`, texture uploads, shader link,
  * `createImageBitmap` — as the in-page side of the phase breakdown the profile completes.
  *
@@ -87,7 +93,8 @@
  *   - no input gap > 100 ms;
  *   - storm ≤ 1.5 × `sequentialIdealMs`;
  *   - `burst-bitmap` 30/30 ok with 30 distinct rects;
- *   - `double-swap` 30 aborted + 30 ok.
+ *   - `double-swap` 30 aborted + 30 ok, and 0 completed wasted ingests (the raw count is
+ *     reported beside it, never gated: a job cancelled inside `source()` is one by construction).
  * SwiftShader is report-only (raster-bound; spec §11). `BENCH_CHECK=1` makes the run exit non-zero
  * when any D3D11 row misses (`--check`; `BENCH_GATE` / `--gate` is the old spelling and still
  * works). The `30/30 ok` and `30 distinct rects` checks are applied to **every** swapping row, not
@@ -319,7 +326,10 @@ type Acc = Record<string, number>
 /**
  * Wraps `target[method]` so `acc` accumulates the milliseconds inside it: `<key>Ms` for a
  * synchronous return, `<key>WallMs` (awaits included) for a promise, `<key>Calls` either way,
- * and `<key>LastEndAt` — the `performance.now()` the last call returned or settled at.
+ * and `<key>LastEndAt` — the `performance.now()` the last call returned or settled at. With
+ * `completed`, a promise whose value satisfies it also counts as `<key>Completed` — for
+ * `sheet.source`, a call that ran to its end and returned a handle rather than answering
+ * `ABORTED` at a check point or failing.
  */
 function wrap<T extends object>(
   target: T,
@@ -327,6 +337,7 @@ function wrap<T extends object>(
   acc: Acc,
   key: string,
   restore: (() => void)[],
+  completed?: (value: unknown) => boolean,
 ): void {
   const holder = target as Record<string, unknown>
   const original = holder[method] as ((this: unknown, ...args: unknown[]) => unknown) | undefined
@@ -336,7 +347,15 @@ function wrap<T extends object>(
     const r = original.apply(this, args)
     acc[`${key}Calls`] = (acc[`${key}Calls`] ?? 0) + 1
     if (r instanceof Promise) {
-      return r.finally(() => {
+      // `then` with no rejection handler passes a rejection through untouched.
+      const counted =
+        completed === undefined
+          ? r
+          : r.then((value: unknown) => {
+              if (completed(value)) acc[`${key}Completed`] = (acc[`${key}Completed`] ?? 0) + 1
+              return value
+            })
+      return counted.finally(() => {
         const now = performance.now()
         acc[`${key}WallMs`] = (acc[`${key}WallMs`] ?? 0) + (now - t)
         acc[`${key}LastEndAt`] = now
@@ -359,7 +378,7 @@ function wrap<T extends object>(
  */
 function installPhaseTimers(sheet: object, motion: object, acc: Acc): () => void {
   const restore: (() => void)[] = []
-  wrap(sheet, 'source', acc, 'source', restore)
+  wrap(sheet, 'source', acc, 'source', restore, (v) => !(v instanceof Error) && !isAborted(v))
   wrap(sheet, 'build', acc, 'build', restore)
   wrap(motion, 'draw', acc, 'draw', restore)
   wrap(motion, 'load', acc, 'load', restore)
@@ -755,6 +774,10 @@ async function runStorm(o: StormRequest): Promise<StormResult> {
     errors: o.errors.length - errorsBefore,
     adds,
     wastedIngests: isIdle ? 0 : Math.max(0, (acc.sourceCalls ?? 0) - wantedIngests),
+    // The gated figure: only the `source()` calls that ran to their end (`wrap`'s `completed`),
+    // beyond one per wanted image. A call the second wave cancelled at a check point inside
+    // `source()` is in the raw count above and not here.
+    completedWastedIngests: isIdle ? 0 : Math.max(0, (acc.sourceCompleted ?? 0) - wantedIngests),
     longTasks: rec.longTasks,
     tasks: taskStats(trace),
     stalls: trace?.stalls ?? NO_STALLS,
@@ -834,9 +857,15 @@ function verdictFor(s: StormResult, spec: RowSpec, views: number): Verdict {
       check('fronts short', views - s.adds.distinctPixels, 0, s.adds.distinctPixels === views),
     )
   }
-  // "30 `ABORTED` adds, 30 completed runs" — the supersession row's own line.
+  // "30 `ABORTED` adds, 30 completed runs" — the supersession row's own line — and no ingest
+  // that ran to its end for a sprite nobody adopted. The raw `wastedIngests` is not gated: a
+  // job the second wave finds inside `source()` is cancelled at its next check point and still
+  // counts as a call, so the raw figure is one or two by construction.
   if (spec.cadence === 'double') {
     checks.push(check('aborted', s.adds.aborted, views, s.adds.aborted === views))
+    checks.push(
+      check('completed waste', s.completedWastedIngests, 0, s.completedWastedIngests === 0),
+    )
   }
   return { pass: checks.every((c) => c.pass), checks }
 }
@@ -990,6 +1019,7 @@ function summarise(spec: RowSpec, s: StormResult, sequentialIdealMs: number): Ro
       distinctRects: s.adds.distinctRects,
       distinctPixels: s.adds.distinctPixels,
       wastedIngests: s.wastedIngests,
+      completedWastedIngests: s.completedWastedIngests,
     },
   }
 }
