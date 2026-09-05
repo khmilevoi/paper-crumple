@@ -309,4 +309,52 @@ describe('the ingest lane at stage level (spec §8.10)', () => {
     expect(stage.usage().fronts).toBe(2)
     stage.dispose()
   })
+
+  it('replace() while a re-source of the same key is in flight leaks neither the handle nor the front (spec §8.5/§8.8)', async () => {
+    const g = sourceGate()
+    const sheet = fakeSheet({ gate: g.gate })
+    const timers = createFakeTimers()
+    const stage = await createStage({ ...base(), sheet, present: 'blit' }, stageEnv({ timers }))
+    if (stage instanceof Error || isAborted(stage)) return expect.fail('stage refused')
+    const a = await stage.add('/a.png', { key: 'a' })
+    const b = await stage.add(asBitmap(fakeBitmap({ width: 70 })), { key: 'b', pin: true })
+    if (a instanceof Error || isAborted(a) || b instanceof Error || isAborted(b))
+      return expect.fail('add refused')
+    // `b` holds the one artwork slot; the budget drops `a`'s front, so any demand on `a` has to
+    // re-source it — §8.5's "artwork slot taken by another sprite" row.
+    stage.budget({ bytes: 1 })
+    expect(stage.usage().fronts).toBe(1)
+    const releasedFronts = sheet.calls.releaseFront.length
+
+    g.close()
+    const prep = stage.prepare('a')
+    await flush()
+    // The re-source is suspended inside `source()`: the fake records the call before the gate,
+    // and only mints the handle after it, so no third handle exists yet.
+    expect(g.pending).toBe(1)
+    expect(sheet.calls.source).toHaveLength(3)
+
+    const replaced = stage.replace('a', '/other.png')
+    await flush()
+    g.open()
+    const [prepared, sprite] = await Promise.all([prep, replaced])
+    expect(prepared instanceof Error || isAborted(prepared)).toBe(false)
+    if (sprite instanceof Error || isAborted(sprite)) return expect.fail('replace refused')
+    expect(sprite.key).toBe('a')
+
+    // Four handles were sourced — `a`, `b`, the re-source of `a`, `replace`'s — and the fake
+    // numbers them 1..4 in `source()` COMPLETION order, so the re-source is #3 (the lane runs it
+    // ahead of `replace`'s job, which was enqueued behind it) and `replace`'s is #4. Only `b`'s
+    // and the replacement's are still anybody's. The re-source's must have gone back, or §8.5's
+    // per-key live-handle count for `a` never reaches zero, the sheet never busts the hull entry,
+    // and the next `add('a', ...)` serves the stale polygon (D3).
+    const sourced = sheet.calls.source.map((_, i) => i + 1)
+    expect(sourced).toHaveLength(4)
+    const released = new Set(sheet.calls.release.map((h) => h.id))
+    expect(sourced.filter((id) => !released.has(id))).toEqual([2, 4])
+    // The front the re-source built and `replace` then overwrote went back to the slot too.
+    expect(sheet.calls.releaseFront.length - releasedFronts).toBe(1)
+    expect(stage.usage().fronts).toBe(2)
+    stage.dispose()
+  })
 })

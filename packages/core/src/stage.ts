@@ -1894,9 +1894,13 @@ function buildStage(p: StageParts): BuiltStage {
     src: SpriteSource,
     o?: { signal?: AbortSignal; exact?: boolean },
   ): Promise<Sprite | AddError | Aborted> {
+    // A helper rather than a repeated `o?.signal?.aborted === true`, for `createStage`'s reason:
+    // the drain below waits, the signal can flip live across that wait, and a `readonly` property
+    // TypeScript has no visible write to narrows as if it never changes — a call defeats that.
+    const signalAborted = (): boolean => o?.signal?.aborted === true
     const gone = dead()
     if (gone !== undefined) return p.policy.returned(gone, null)
-    if (o?.signal?.aborted === true) return ABORTED
+    if (signalAborted()) return ABORTED
     const record = p.sprites.get(key)
     if (record === undefined) {
       return p.policy.returned(
@@ -1915,6 +1919,37 @@ function buildStage(p: StageParts): BuiltStage {
         ),
         null,
       )
+    }
+
+    // §8.5/§8.8 — drain the re-source of this key before touching anything. A re-source in
+    // flight owns `record.handle`, and when it lands it installs its own handle and front on the
+    // SAME record: its liveness test is the record's identity (`p.sprites.get(key) === record`)
+    // and `replace` never changes that. Release and overwrite underneath it and the pair it
+    // installed is left unreleased — §8.5's per-key live-handle count never reaches zero, so the
+    // sheet never busts the hull entry the release exists to bust, and a later `add(key, other)`
+    // serves the stale polygon (D3). `paperSheet.release` is idempotent, so the double release
+    // the interleave also produces is harmless; the leak is not.
+    //
+    // Waiting is what `prepare()` already does with this same promise (§8.5.1) — it is stored in
+    // `resourcing` precisely because it never rejects — and it costs little here: the lane runs
+    // one job at a time (§8.10), so `buildSprite` below would have queued behind that re-source
+    // anyway. A loop rather than one await: the rebuild that ends a re-source can find the
+    // artwork slot taken again and schedule the next one before the first settles.
+    let inFlight = resourcing.get(key)
+    while (inFlight !== undefined) {
+      await inFlight
+      const disposed = dead()
+      if (disposed !== undefined) return p.policy.returned(disposed, null)
+      if (signalAborted()) return ABORTED
+      // Removed while we waited: `remove()` has already handed this record's halves back, so
+      // there is nothing left to replace and nothing of ours to release.
+      if (p.sprites.get(key) !== record) {
+        return p.policy.returned(
+          new SheetError(`replace('${key}') has no sprite under that key; add() it instead`),
+          null,
+        )
+      }
+      inFlight = resourcing.get(key)
     }
 
     // D3 — the order is the contract. `release(handle)` is where the sheet slot busts the hull
