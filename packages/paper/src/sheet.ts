@@ -604,11 +604,17 @@ const READBACK_FAST_POLLS = 8
 
 /**
  * The back-off turn's delay in milliseconds past the fast phase (spec §8.10). One millisecond is
- * the smallest delay worth asking for, and the browser's own timer clamp is the real floor
- * (4 ms once timers nest past the fifth, which a long poll does), so a fence is noticed between
- * 1 and 4 ms after it signals rather than within a turn: up to +4 ms on a single add's
- * `sourceMs`, against ~20 ms (D3D11) to ~700 ms (SwiftShader) of a core no longer spinning.
- * `scheduler.postTask`, where it exists, has no such clamp and answers nearer the 1 ms.
+ * the smallest delay worth asking for and the browser's own timer clamp is the real floor: the
+ * first five nested timers cost ~0 ms and every one after that ~4 ms (measured in the level-2
+ * browser over 200 chained turns: median 5.0 ms headless, 5.3 ms in a visible window). So a fence
+ * is noticed about a clamp after it signals rather than within a turn — a few milliseconds on a
+ * single add's `sourceMs`, against ~20 ms (D3D11) to ~700 ms (SwiftShader) of a core no longer
+ * spinning.
+ *
+ * The delay's route is `setTimeout`, not `scheduler.postTask`'s own `delay` option, and that is
+ * `nextTurn`'s decision, not this constant's: a delayed `postTask` wakes on the next frame
+ * (measured median 15.5 ms headless, 4.6 ms visible), which would have made the notice cost three
+ * times this one on every bench and CI run. `nextTurn`'s header carries the numbers.
  */
 const READBACK_SLOW_DELAY_MS = 1
 

@@ -16,12 +16,18 @@
  * 3. `setTimeout(fn, 0)` where neither exists.
  *
  * An optional `{ delay }` (milliseconds) makes it a **back-off** turn instead: still a later task,
- * but not the next one. Only two of the three routes can carry it — `postTask`'s own `delay`
- * option, else `setTimeout(fn, delay)`; the `MessageChannel` has no delay to give and is skipped.
+ * but not the next one. It has ONE route — `setTimeout(fn, delay)`. The `MessageChannel` has no
+ * delay to give, and `postTask`'s own `delay` option is deliberately not used: measured in the
+ * level-2 browser, 200 samples each, a `postTask` delayed by 1 ms wakes at a **median of 15.5 ms**
+ * headless and 4.6 ms in a visible window — its delayed queue is frame-aligned — while a chained
+ * `setTimeout(fn, 1)` wakes at 5.0 ms headless and 5.3 ms visible, the platform's own nesting
+ * clamp (~0 ms for the first five nested timers, ~4 ms after). Same cost where it matters, three
+ * times cheaper where the benches and CI run.
+ *
  * The sheet's fence poll (§8.10, §5.2's `source()`) is the caller: polling a 20–700 ms fence once
  * per undelayed turn spins a core at ~47 µs a turn, so after a short fast phase it backs off to
  * `{ delay: 1 }` and pays the timer clamp instead of the CPU. No delay, or `0`, is the original
- * function to the byte — the options object handed to `postTask` gains no key.
+ * function to the byte — same route, same options object, no key added.
  *
  * `systemTimers.yield` is this function. A test's `FakeTimers.yield` is a microtask (§11), because
  * every lane guarantee holds by construction of the queue and none by a task boundary; it takes
@@ -29,15 +35,15 @@
  */
 
 interface SchedulerLike {
-  postTask(fn: () => void, o: { priority: 'user-visible'; delay?: number }): unknown
+  postTask(fn: () => void, o: { priority: 'user-visible' }): unknown
 }
 
 /** The one option of the platform yield: how long to wait before the later task (spec §8.10). */
 export interface YieldOptions {
   /**
-   * Milliseconds to wait before the turn. Omitted or `0` is the plain next turn. A positive
-   * value is subject to the platform's own floor (`setTimeout`'s 4 ms clamp past the fifth
-   * nested timer; `postTask` has none), so it is a lower bound, not a promise.
+   * Milliseconds to wait before the turn. Omitted or `0` is the plain next turn. A positive value
+   * goes to `setTimeout` and is subject to its nesting clamp (~4 ms once timers nest past the
+   * fifth, which any long poll does), so it is a lower bound, not a promise.
    */
   readonly delay?: number
 }
@@ -69,22 +75,22 @@ function viaChannel(resolve: () => void): void {
 export function nextTurn(o?: YieldOptions): Promise<void> {
   const delay = o?.delay ?? 0
   return new Promise<void>((resolve) => {
-    const scheduler = (globalThis as { scheduler?: Partial<SchedulerLike> }).scheduler
-    if (typeof scheduler?.postTask === 'function') {
-      // The no-delay options object is the original one, key for key: a delay of 0 is the next
-      // turn, and `postTask` is entitled to treat `{ delay: 0 }` as a timer route instead.
-      void scheduler.postTask(
-        resolve,
-        delay > 0 ? { priority: 'user-visible', delay } : { priority: 'user-visible' },
-      )
+    // A back-off turn is a timer, and only a timer: neither of the two faster routes can wait
+    // for a millisecond without being frame-aligned (`postTask`'s delay) or unable to wait at
+    // all (the channel). See the header for the measurement.
+    if (delay > 0) {
+      setTimeout(resolve, delay)
       return
     }
-    // The channel is a task boundary and nothing more — it cannot wait — so a back-off turn
-    // skips it for the one route left that can.
-    if (delay <= 0 && typeof MessageChannel === 'function') {
+    const scheduler = (globalThis as { scheduler?: Partial<SchedulerLike> }).scheduler
+    if (typeof scheduler?.postTask === 'function') {
+      void scheduler.postTask(resolve, { priority: 'user-visible' })
+      return
+    }
+    if (typeof MessageChannel === 'function') {
       viaChannel(resolve)
       return
     }
-    setTimeout(resolve, delay)
+    setTimeout(resolve, 0)
   })
 }

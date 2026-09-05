@@ -43,15 +43,24 @@ describe('nextTurn() — the platform yield (spec §8.10)', () => {
 })
 
 describe('nextTurn({ delay }) — the back-off turn (spec §8.10)', () => {
-  it("adds delay to postTask's options when one is given", async () => {
-    const postTask = vi.fn((fn: () => void, o: { priority: string; delay?: number }) => {
-      setTimeout(fn, 0)
+  it('goes to setTimeout(delay) and NOT to postTask, even where postTask exists (its delayed queue is frame-aligned)', async () => {
+    const real = globalThis.setTimeout
+    const delays: Array<number | undefined> = []
+    const postTask = vi.fn((fn: () => void, o: { priority: string }) => {
+      real(fn, 0)
       return Promise.resolve(o.priority)
     })
     vi.stubGlobal('scheduler', { postTask })
+    vi.stubGlobal('setTimeout', (fn: () => void, ms?: number) => {
+      delays.push(ms)
+      return real(fn, ms)
+    })
     await nextTurn({ delay: 4 })
-    expect(postTask).toHaveBeenCalledTimes(1)
-    expect(postTask.mock.calls[0]?.[1]).toEqual({ priority: 'user-visible', delay: 4 })
+    expect(delays).toEqual([4])
+    expect(
+      postTask,
+      'a back-off turn is a timer, not a task the scheduler delays',
+    ).not.toHaveBeenCalled()
   })
 
   it('leaves the no-delay options object byte-identical: no delay key for (), ({}) or ({ delay: 0 })', async () => {
@@ -70,7 +79,7 @@ describe('nextTurn({ delay }) — the back-off turn (spec §8.10)', () => {
     }
   })
 
-  it('falls back to setTimeout(delay) — not the MessageChannel, which cannot delay — when postTask is absent', async () => {
+  it('takes setTimeout(delay) — not the MessageChannel, which cannot delay — when postTask is absent too', async () => {
     const real = globalThis.setTimeout
     const delays: Array<number | undefined> = []
     vi.stubGlobal('scheduler', {})

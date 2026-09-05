@@ -2000,27 +2000,49 @@ const READBACK_GOLDEN: Record<string, ReadbackGolden> = {
 
 interface PostTaskOptions {
   readonly priority: 'user-visible'
-  readonly delay?: number
 }
 interface SchedulerLike {
   postTask(fn: () => void, o: PostTaskOptions): unknown
 }
 
+/** The sheet's own `READBACK_SLOW_DELAY_MS`; a module constant there, restated here on purpose. */
+const READBACK_SLOW_DELAY_MS_FOR_TEST = 1
+
 /**
- * Every platform turn taken while it is installed, as its delay in milliseconds: `0` for a fast
- * turn, the back-off for a delayed one (spec §8.10). `nextTurn()` prefers `scheduler.postTask`,
- * which the level-2 suite's Chromium has — the spy calls through, so the turns still happen.
+ * Every platform turn taken while it is installed, in order, as its delay in milliseconds: `0`
+ * for a fast turn, the back-off for a delayed one (spec §8.10). A fast turn is
+ * `scheduler.postTask` — the route `nextTurn()` prefers, and the level-2 suite's Chromium has it
+ * — and a back-off turn is `setTimeout`, the only route that can wait. Both spies call through,
+ * so the turns still happen; the timer spy records only the sheet's own back-off delay, so a
+ * timer some other part of the page arms is not counted as a poll.
  */
 function watchTurns() {
+  const seq: number[] = []
   const g = globalThis as unknown as { scheduler?: Partial<SchedulerLike> }
   expect(
     typeof g.scheduler?.postTask,
     'this browser has no scheduler.postTask, so the turn spy would be reading the wrong route',
   ).toBe('function')
-  const post = vi.spyOn(g.scheduler as SchedulerLike, 'postTask')
+  const scheduler = g.scheduler as SchedulerLike
+  const realPost = scheduler.postTask.bind(scheduler)
+  const post = vi.spyOn(scheduler, 'postTask').mockImplementation((fn, o) => {
+    seq.push(0)
+    return realPost(fn, o)
+  })
+  const realTimeout = globalThis.setTimeout
+  const timer = vi.spyOn(globalThis, 'setTimeout').mockImplementation(((
+    fn: () => void,
+    ms?: number,
+  ) => {
+    if (ms === READBACK_SLOW_DELAY_MS_FOR_TEST) seq.push(ms)
+    return realTimeout(fn, ms)
+  }) as unknown as typeof setTimeout)
   return {
-    delays: (): number[] => post.mock.calls.map((c) => c[1]?.delay ?? 0),
-    restore: () => post.mockRestore(),
+    delays: (): number[] => seq,
+    restore: () => {
+      post.mockRestore()
+      timer.mockRestore()
+    },
   }
 }
 
