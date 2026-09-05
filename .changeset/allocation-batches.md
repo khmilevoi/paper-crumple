@@ -1,7 +1,7 @@
 ---
 '@paper-crumple/core': minor
 '@paper-crumple/paper': patch
-'@paper-crumple/motion': patch
+'@paper-crumple/motion': minor
 ---
 
 **One `getError` per allocation batch, read after the ingest's yield** (the `/unstable` GL seam,
