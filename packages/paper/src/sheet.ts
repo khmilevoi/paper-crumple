@@ -1248,6 +1248,10 @@ export function paperSheet(options?: PaperSheetOptions): PaperSheet {
      * equivalent rather than mirrored or margin-shifted, and nothing downstream is told which
      * (fix round 1, findings 1 and 4).
      *
+     * A `dispose()` that lands inside the yield answers a `SheetError` (the same convention as
+     * the readiness wait in `mount()`): nothing is written to the dead mount and no CPU field is
+     * spent on it.
+     *
      * The yield inside is check point 2 (§10.5): the fence poll when a readback is pending — its
      * `ABORTED` answer is the check point — and one platform turn otherwise, the signal read
      * after it. A refused read is known once the fence signals (`completeFieldReadback`), and
@@ -1256,12 +1260,16 @@ export function paperSheet(options?: PaperSheetOptions): PaperSheet {
      * yields (the scratch is consumed in the task that fills it — `decodeScratch`'s own doc
      * comment).
      */
-    const readField = async (): Promise<InstanceType<typeof GlError> | Aborted | Float32Array> => {
+    const disposedDuringSource = () => new SheetError('paperSheet: disposed during source()')
+    const readField = async (): Promise<
+      InstanceType<typeof SheetError> | InstanceType<typeof GlError> | Aborted | Float32Array
+    > => {
       if (m.readbackBusy) {
         const sync = readBackField(m.ctx, tight, texel)
         const own = sync === null ? null : sync.slice()
         await nextTurn()
         if (signalAborted(o.signal)) return ABORTED
+        if (mounted !== m) return disposedDuringSource()
         return own ?? cpuFieldFallback(bitmap, tight.width, tight.height, placement, front)
       }
       const pending = issueFieldReadback(m, tight)
@@ -1269,12 +1277,16 @@ export function paperSheet(options?: PaperSheetOptions): PaperSheet {
         // No pack buffer or no fence to be had: the yield still happens, then the CPU field.
         await nextTurn()
         if (signalAborted(o.signal)) return ABORTED
+        if (mounted !== m) return disposedDuringSource()
         return cpuFieldFallback(bitmap, tight.width, tight.height, placement, front)
       }
       m.readbackBusy = true
       const awaited = await awaitFieldReadback(m, pending, o.signal)
       m.readbackBusy = false
       if (isAborted(awaited)) return ABORTED
+      // `dispose()` landed inside the wait (20–700 ms): the mount is dead, its cache and handle
+      // count with it, and the CPU fallback would spend ~120 ms on a sheet nobody can build on.
+      if (mounted !== m) return disposedDuringSource()
       const copied = awaited === 'ready' ? completeFieldReadback(m, pending, texel) : null
       return copied ?? cpuFieldFallback(bitmap, tight.width, tight.height, placement, front)
     }
@@ -1292,11 +1304,12 @@ export function paperSheet(options?: PaperSheetOptions): PaperSheet {
     if (needField) {
       const got = await readField()
       if (isAborted(got)) return ABORTED
-      if (GlError.is(got)) return got
+      if (got instanceof Error) return got
       cpu = got
     } else {
       await nextTurn()
       if (signalAborted(o.signal)) return ABORTED
+      if (mounted !== m) return disposedDuringSource()
     }
 
     // Step 9: the CPU signed field for the hull trace, then buildHull, then the rect, then the
@@ -1311,7 +1324,7 @@ export function paperSheet(options?: PaperSheetOptions): PaperSheet {
         // outside): read the field now, the same way.
         const got = await readField()
         if (isAborted(got)) return ABORTED
-        if (GlError.is(got)) return got
+        if (got instanceof Error) return got
         cpu = got
       }
 
@@ -1366,7 +1379,7 @@ export function paperSheet(options?: PaperSheetOptions): PaperSheet {
       if (cpu === null) {
         const got = await readField()
         if (isAborted(got)) return ABORTED
-        if (GlError.is(got)) return got
+        if (got instanceof Error) return got
         cpu = got
       }
       const raw = signedFieldExtent(cpu, field.w, field.h)

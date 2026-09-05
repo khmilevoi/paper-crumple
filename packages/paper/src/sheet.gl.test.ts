@@ -2235,4 +2235,42 @@ describe('async field readback (spec §8.10)', () => {
     fenceSync.mockRestore()
     sheet.dispose()
   })
+
+  it('answers a SheetError, not a handle, when the sheet is disposed while the fence is pending: no CPU fallback, and the sheet mounts again', async () => {
+    const ctx = open()
+    const sheet = paperSheet()
+    sheet.mount(ctx)
+    const bitmap = await sprite()
+    // The hook fires after pass A and before the issue; its microtask runs at the first `await`
+    // — the readback issued, the fence pending — so the dispose lands inside the wait.
+    sheet.__afterFieldForTest = () => queueMicrotask(() => sheet.dispose())
+    const getBufferSubData = vi.spyOn(ctx.gl, 'getBufferSubData')
+    const deleteSync = vi.spyOn(ctx.gl, 'deleteSync')
+    // `cpuFieldFallback` is the only 2D-canvas user on this path (the resample takes the GPU
+    // branch on this context), so a 2D context asked for after this line is the fallback running.
+    const getContext = vi.spyOn(OffscreenCanvas.prototype, 'getContext')
+    const r = await sheet.source(bitmap, { maxSize: 128, exact: false })
+    expect(SheetError.is(r), String((r as Error)?.message)).toBe(true)
+    expect(String((r as Error).message)).toContain('disposed')
+    expect(getBufferSubData, 'nothing is decoded for a dead mount').not.toHaveBeenCalled()
+    expect(getContext, 'the CPU fallback must not run for a dead mount').not.toHaveBeenCalled()
+    expect(deleteSync, 'the fence is still deleted').toHaveBeenCalledTimes(1)
+    expect(ctx.scope(() => ctx.gl.getParameter(ctx.gl.PIXEL_PACK_BUFFER_BINDING))).toBeNull()
+    getBufferSubData.mockRestore()
+    deleteSync.mockRestore()
+    getContext.mockRestore()
+    // Nothing leaked into the dead mount that a live one could see: a fresh mount on the same
+    // context sources the same bitmap to the golden, tracing it anew.
+    sheet.__afterFieldForTest = undefined
+    expect(sheet.mount(ctx)).toBeUndefined()
+    const readPixels = vi.spyOn(ctx.gl, 'readPixels')
+    const again = await sheet.source(bitmap, { maxSize: 128, exact: false })
+    bitmap.close()
+    expect(GlError.is(again) || SheetError.is(again) || isAborted(again)).toBe(false)
+    if (GlError.is(again) || SheetError.is(again) || isAborted(again)) return
+    expect(readPixels, 'a fresh mount has no cached hull').toHaveBeenCalledTimes(1)
+    expect(hullDigest(again.hull)).toBe(READBACK_GOLDEN['ellipse/hull'].hull)
+    readPixels.mockRestore()
+    sheet.dispose()
+  })
 })
