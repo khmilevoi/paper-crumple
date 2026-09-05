@@ -307,6 +307,8 @@ interface Mounted {
   readbackBuffer: WebGLBuffer | null
   readbackBytes: number
   readbackBusy: boolean
+  /** `readChannelsFor`'s memory: the implementation read format, per field format (S7). */
+  readonly readChannels: Map<string, 1 | 4>
 }
 
 /**
@@ -512,6 +514,31 @@ function settleAllocations(m: Mounted): InstanceType<typeof GlError> | number {
 }
 
 /**
+ * How many channels a float readback of `field` transfers: one when the driver reports
+ * RED/FLOAT as its implementation read format for the field's attachment ("a quarter of the
+ * transfer and what ANGLE reports for an R16F target"), four otherwise. The pair
+ * `IMPLEMENTATION_COLOR_READ_FORMAT` / `_TYPE` is a property of the read framebuffer's colour
+ * attachment format (GL ES 3.0 §4.3.2), so it is asked once per field format and remembered on
+ * the mount (S7): in Chromium both are GPU-process round trips
+ * (`GLES2Implementation::GetIntegerv` answers neither from its client-side state), and they
+ * were the last synchronous calls `source()` made before its yield — 3–12 ms each in a burst,
+ * queued behind the storm's own draws. `READ_FRAMEBUFFER` must be bound to the field's target
+ * when this asks, as both callers have it.
+ */
+function readChannelsFor(m: Mounted, field: Field): 1 | 4 {
+  const format = field.target.texture.format
+  const known = m.readChannels.get(format)
+  if (known !== undefined) return known
+  const { gl } = m.ctx
+  const single =
+    gl.getParameter(gl.IMPLEMENTATION_COLOR_READ_FORMAT) === gl.RED &&
+    gl.getParameter(gl.IMPLEMENTATION_COLOR_READ_TYPE) === gl.FLOAT
+  const channels: 1 | 4 = single ? 1 : 4
+  m.readChannels.set(format, channels)
+  return channels
+}
+
+/**
  * Ports `engine.js:#readBackField` whole (task 11 brief): reads pass A's own output back to the
  * CPU, in field TEXELS — a field-sized `readPixels`, 147 456 B at `sdfRes` 192, which §8.1 budgets
  * explicitly. Float targets read as RED/FLOAT when the driver reports that as its implementation
@@ -560,10 +587,8 @@ function readBackField(
     if (GlError.is(settled)) return settled
     let out: Float32Array | null = null
     if (ctx.caps.floatRT) {
-      const single =
-        gl.getParameter(gl.IMPLEMENTATION_COLOR_READ_FORMAT) === gl.RED &&
-        gl.getParameter(gl.IMPLEMENTATION_COLOR_READ_TYPE) === gl.FLOAT
-      const channels = single ? 1 : 4
+      const channels = readChannelsFor(m, field)
+      const single = channels === 1
       const buf = floatReadbackScratch(w * h * channels)
       gl.readPixels(0, 0, w, h, single ? gl.RED : gl.RGBA, gl.FLOAT, buf)
       // Not a drain: this read IS the CPU-fallback decision, and it is only trustworthy because
@@ -710,10 +735,7 @@ function issueFieldReadback(m: Mounted, field: Field): PendingReadback | null {
     let kind: 'float' | 'byte' = 'byte'
     if (m.ctx.caps.floatRT) {
       kind = 'float'
-      const single =
-        gl.getParameter(gl.IMPLEMENTATION_COLOR_READ_FORMAT) === gl.RED &&
-        gl.getParameter(gl.IMPLEMENTATION_COLOR_READ_TYPE) === gl.FLOAT
-      channels = single ? 1 : 4
+      channels = readChannelsFor(m, field)
     }
     const bytes = w * h * channels * (kind === 'float' ? 4 : 1)
     if (m.readbackBuffer === null) {
@@ -1127,6 +1149,7 @@ export function paperSheet(options?: PaperSheetOptions): PaperSheet {
       readbackBuffer: null,
       readbackBytes: 0,
       readbackBusy: false,
+      readChannels: new Map(),
     }
 
     tilesReadyState = makeDeferred<InstanceType<typeof GlError> | true>()

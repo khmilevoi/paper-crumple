@@ -415,8 +415,7 @@ export function createGlContext(
    * answer: the tracked release behind every texture this context handed out.
    */
   let batching = 0
-  const unchecked: Array<{ readonly kind: 'texture' | 'target'; readonly release: () => void }> =
-    []
+  const unchecked: Array<{ readonly kind: 'texture' | 'target'; readonly release: () => void }> = []
   let pendingFailure: Err | null = null
   const releaseOf = new WeakMap<Texture, () => void>()
 
