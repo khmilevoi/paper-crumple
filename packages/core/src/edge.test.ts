@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest'
 import { KnobError } from './errors.js'
 import { percentWidthReserve } from './edge.js'
-import { overscanFromRadius } from './overscan.js'
+import { EDGE_SLOP_REFERENCE_PX, overscanFromRadius, RADIUS_CAP_REFERENCE_PX } from './overscan.js'
 
 // R14: mirrors the local `number` unwrap helper at `overscan.test.ts:31` — a new file, same
 // pattern rather than a fresh import surface for one assertion.
@@ -42,25 +42,45 @@ describe('percentWidthReserve (design 2026-09-05 §4.3)', () => {
               finishTerms: F,
               headroom: eta,
             })
-            expect(r.radius).toBeCloseTo((1 + eta) * ((1 + v) * r.widthRef + F + 12), 9)
+            expect(r.radius).toBeCloseTo(
+              (1 + eta) * ((1 + v) * r.widthRef + F + EDGE_SLOP_REFERENCE_PX),
+              9,
+            )
           }
         }
       }
     }
   })
 
-  it('is monotone in the aspect, so R(c = 1) is a ceiling', () => {
-    let previous = -Infinity
-    for (const c of [0.1, 0.25, 0.5, 0.75, 1]) {
-      const r = percentWidthReserve({
-        pct: 0.059,
-        aspect: c,
-        variance: 0.53,
-        finishTerms: 23,
-        headroom: 0.25,
-      })
-      expect(r.radius).toBeGreaterThan(previous)
-      previous = r.radius
+  // Fix round 1: `dR/dkappa`'s sign is `S - 2(1 + eta)(F + e)`, positive exactly when
+  // `(1 + eta)(F + e) < RADIUS_CAP_REFERENCE_PX` (see edge.ts's doc comment for the identity).
+  // A single `(v, F, eta)` point proves nothing about the general claim, so this sweeps the same
+  // grid `pct`/`(v, F)`/`eta` combinations the self-consistency test above uses — the range this
+  // library can actually reach — checking both the precondition and the monotonicity it implies.
+  it('is monotone in the aspect for every (v, F, eta) this library can build, so R(c = 1) is a ceiling', () => {
+    for (const [v, F] of [
+      [0, 0],
+      [0.53, 0],
+      [0.53, 23],
+      [1, 40],
+    ]) {
+      for (const eta of [0, 0.25, 1]) {
+        // The precondition the doc comment derives: clears the cap by a wide margin for every
+        // combination this library builds, which is why the ceiling holds below, not the reverse.
+        expect((1 + eta) * (F + EDGE_SLOP_REFERENCE_PX)).toBeLessThan(RADIUS_CAP_REFERENCE_PX)
+        let previous = -Infinity
+        for (const c of [0.1, 0.25, 0.5, 0.75, 1]) {
+          const r = percentWidthReserve({
+            pct: 0.059,
+            aspect: c,
+            variance: v,
+            finishTerms: F,
+            headroom: eta,
+          })
+          expect(r.radius, `v ${v} F ${F} eta ${eta} c ${c}`).toBeGreaterThan(previous)
+          previous = r.radius
+        }
+      }
     }
   })
 
@@ -72,10 +92,12 @@ describe('percentWidthReserve (design 2026-09-05 §4.3)', () => {
       finishTerms: 0,
       headroom: 0,
     })
-    // Deviation from the brief's literal (46.978, 3): the true value is 46.97850136…, which is
-    // 0.0000014 short of the toBeCloseTo(46.978, 3) boundary of 0.0005 and fails it. The
-    // pre-flight scan's own figure (46.9785) is exact here, so the pinned literal moves to it at
-    // one more digit of precision rather than "improving" the closure to hit a slightly-off target.
+    // Deviation from the brief's literal (46.978, 3), adjudicated in this task's favour on fix
+    // round 1: the true value is 46.97850136…, so |46.97850136 - 46.978| = 0.00050136, which is
+    // 1.4e-6 OVER the toBeCloseTo(46.978, 3) boundary of 0.0005 — the brief's own truncation was
+    // short of the correct 3-digit value, 46.979. The pre-flight scan's figure (46.9785) is exact
+    // here, so the pinned literal moves to it at one more digit of precision rather than
+    // "improving" the closure to hit a slightly-off target.
     expect(r.widthRef).toBeCloseTo(46.9785, 4)
     expect(r.radius).toBeCloseTo(83.8771, 4)
   })
@@ -89,6 +111,6 @@ describe('percentWidthReserve (design 2026-09-05 §4.3)', () => {
       headroom: 0,
     })
     expect(r.widthRef).toBe(0)
-    expect(r.radius).toBeCloseTo(12, 9)
+    expect(r.radius).toBeCloseTo(EDGE_SLOP_REFERENCE_PX, 9)
   })
 })

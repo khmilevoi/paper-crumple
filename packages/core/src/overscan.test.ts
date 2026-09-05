@@ -76,10 +76,12 @@ describe('overscanRadius (design 2026-09-05 §4.1)', () => {
   })
 
   it('composes with overscanFromRadius through overscanFor', () => {
-    expect(number(overscanFor(cleanParams))).toBeCloseTo(
-      number(overscanFromRadius(overscanRadius(cleanParams))),
-      12,
-    )
+    // Fix round 1: this compared overscanFor(cleanParams) against its own definition and could
+    // never fail for a real reason. Pin the composition against the independently-computed
+    // number too: R = 47*1.53+12 = 83.91, p = 83.91/(1000-2*83.91) ~= 0.10083.
+    const composed = number(overscanFor(cleanParams))
+    expect(composed).toBeCloseTo(number(overscanFromRadius(overscanRadius(cleanParams))), 12)
+    expect(composed).toBeCloseTo(0.10083, 5)
   })
 })
 

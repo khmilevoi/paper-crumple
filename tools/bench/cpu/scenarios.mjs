@@ -16,7 +16,6 @@ import {
   defaultsFor,
   descriptorsFor,
   DISTANCE_WAVELENGTH_PX,
-  edgeParamsFrom,
   extractContours,
   fillHullMask,
   freezeOverscan,
@@ -52,6 +51,20 @@ import { createBenchTimers } from './timers.mjs'
 /** `sheet.ts`'s own `HULL_SAMPLE_PX` — module-private there, restated here. */
 const HULL_SAMPLE_PX = 4
 const EDGE_MODE = 'hull'
+
+/**
+ * Fix round 1 (Task 2): core's `EdgeParams` is now the single-radius shape (design 2026-09-05
+ * §4.1) — `edgeParamsFrom` (paper-knobs.ts) still builds the OLD `{ mode, maxDist, ... }` shape
+ * and is itself Task 4/7's rebuild, so this bench cannot route through it any more. This file has
+ * no edge-width/variance/finish knob to read from yet (Tasks 3-4 land those), so it reproduces the
+ * plan's own library defaults — `widthRef 47`, `variance 0.53`, zero finish terms under a clean
+ * finish — the same reserve `paperSheet()`'s defaults build once Task 7 rewires it. Task 7 should
+ * revisit this once `edgeParamsFrom` exists in the new vocabulary, so the bench derives its params
+ * the same way the library does rather than restating the plan's defaults here.
+ */
+function benchEdgeParams() {
+  return { widthRef: 47, variance: 0.53, fiberLen: 0, deckleWidth: 0 }
+}
 
 // ---------------------------------------------------------------------------------------------
 // Shared inputs, built once and memoised across scenarios.
@@ -168,7 +181,7 @@ function resampleScenario(name, art, note) {
     note,
     setup: () => {
       const a = art()
-      const reserve = freezeOverscan(edgeParamsFrom(EDGE_MODE, defaultsFor(EDGE_MODE)), 0)
+      const reserve = freezeOverscan(benchEdgeParams(), 0)
       const framing = frontForArtwork({
         overscan: reserve.overscan,
         srcW: a.width,
@@ -247,7 +260,7 @@ function frontRectToSourceRect(frontRect, placement, src) {
 function ingestSetup(srcSize, maxSize) {
   const knobDescriptors = descriptorsFor(EDGE_MODE)
   const values = defaultsFor(EDGE_MODE)
-  const reserve = freezeOverscan(edgeParamsFrom(EDGE_MODE, values), 0)
+  const reserve = freezeOverscan(benchEdgeParams(), 0)
   const framing = frontForArtwork({
     overscan: reserve.overscan,
     srcW: srcSize,
@@ -301,7 +314,7 @@ function ingestSetup(srcSize, maxSize) {
  */
 function ingestOp(c, cpuBranch) {
   const { values, knobDescriptors, front, artwork, field, placement, texel } = c
-  const edgeParams = edgeParamsFrom(EDGE_MODE, values)
+  const edgeParams = benchEdgeParams()
   const spriteKey = `paper:${c.counter++}`
   const srcW = c.srcSize
   const srcH = c.srcSize
@@ -337,7 +350,12 @@ function ingestOp(c, cpuBranch) {
   }
   const bounds = hullBounds(hull)
   let box = boundsExtent(bounds, field.w, field.h)
-  const beyond = (overscanRadius(edgeParams) - edgeParams.maxDist) * k
+  // Fix round 1: the old `EdgeParams.maxDist` subtraction assumed the hull's own trace already
+  // reached `maxDist` and only the slop was left over (design pre-2026-09-05's `r_hull =
+  // maxDist + slop`). The new radius has no `maxDist` term at all (design 2026-09-05 §2.3: W
+  // replaces `thickness`, and the hull trace is no longer part of the margin formula), so the
+  // whole reserved radius is the margin beyond the traced bounds now.
+  const beyond = overscanRadius(edgeParams) * k
   const reach = reachRect(bounds, beyond, field, front)
   const frontBox = scaleBox(box, texel)
   const frontRect = sheetRectFromExtent(frontBox, front.w, front.h)
@@ -373,7 +391,7 @@ function ingestOp(c, cpuBranch) {
   const size = { w: Math.ceil(fit.sheetW), h: Math.ceil(fit.sheetH) }
 
   // build(), CPU half: steps 4-6b.
-  const reserveCheck = checkReserve(c.reserve, edgeParamsFrom(EDGE_MODE, values))
+  const reserveCheck = checkReserve(c.reserve, benchEdgeParams())
   if (reserveCheck !== undefined) return reserveCheck
   const buildField = dimsForLongSide(handle.sdfRes, size.w, size.h, 2)
   const buildPlacement = artworkPlacement(size, handle.artwork)

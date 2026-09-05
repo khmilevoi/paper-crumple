@@ -5,7 +5,7 @@
  * each changes the set of other knobs (spec §6.5); the width is a KNOB, because "no edge" has to
  * be reachable by animating a value to zero without a rebuild.
  */
-import { EDGE_SLOP_REFERENCE_PX, GUARD_MARGIN_G, KNOB_REFERENCE_PX } from './overscan.js'
+import { EDGE_SLOP_REFERENCE_PX, RADIUS_CAP_REFERENCE_PX } from './overscan.js'
 
 export type EdgeShape = 'smooth' | 'torn'
 export type EdgeFinish = 'clean' | 'paper'
@@ -54,13 +54,31 @@ export interface PercentWidth {
  * (`front.h / A.h = 1000 / (1000(1 - 2g) - 2R)`), not the spec's own — the spec's is short by the
  * guard shortfall and would make the rendered border about 1 % wider than the number on the slider.
  *
- * `dR/dkappa` is proportional to `S - 2 (1 + eta)(F + e)`, positive for every reserve this library
- * can build, so `R(c = 1)` is a true ceiling for every aspect (design §4.4).
+ * `dR/dkappa` is proportional to `S - 2 (1 + eta)(F + e)`, and `R(c = 1)` is therefore a true
+ * ceiling over the aspect, `c`, exactly when that is positive:
+ *
+ * ```
+ * (1 + eta)(F + e) < RADIUS_CAP_REFERENCE_PX
+ * ```
+ *
+ * `S` cancels to this form because `S = 1000(1 - 2g)` is EXACTLY `2 * RADIUS_CAP_REFERENCE_PX`
+ * (`RADIUS_CAP_REFERENCE_PX = KNOB_REFERENCE_PX * (0.5 - g)`, so doubling it is `1000(1 - 2g)`,
+ * the same `S` above — not an approximation): `S - 2(1 + eta)(F + e) > 0
+ * <=> (1 + eta)(F + e) < S / 2 = RADIUS_CAP_REFERENCE_PX`. Task 1's cap on the radius `r` itself
+ * (design §4.2, ruling R2) and this bound on `(1 + eta)(F + e)` are two different conditions, but
+ * they share the identical threshold — 482 reference px is where the guard margin diverges either
+ * way. Every `(v, F, eta)` this library can actually build clears the bound by a wide margin
+ * (`edge.test.ts`'s sweep goes as high as `eta = 1`, `F = 40`, for `(1 + eta)(F + e) = 104`,
+ * well under the 482 line), so the ceiling is total for anything this library constructs, not
+ * merely for the points sampled — but the identity above, not the sample, is why.
  */
 export function percentWidthReserve(o: PercentWidthInput): PercentWidth {
   const e = o.slop ?? EDGE_SLOP_REFERENCE_PX
   const eta = Number.isFinite(o.headroom) && o.headroom > 0 ? o.headroom : 0
-  const s = KNOB_REFERENCE_PX * (1 - 2 * GUARD_MARGIN_G)
+  // S = 1000(1 - 2g), computed as 2 * RADIUS_CAP_REFERENCE_PX (see the doc comment above for why
+  // that doubling is exact) so the monotonicity ceiling's own threshold is read from the same
+  // constant this function's radius is built from, not re-derived independently of it.
+  const s = 2 * RADIUS_CAP_REFERENCE_PX
   const kappa = (1 + o.variance) * o.pct * o.aspect
   const radius = ((1 + eta) * (s * kappa + o.finishTerms + e)) / (1 + 2 * (1 + eta) * kappa)
   const widthRef = o.pct * o.aspect * (s - 2 * radius)
