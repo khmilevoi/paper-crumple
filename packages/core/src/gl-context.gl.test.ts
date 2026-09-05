@@ -1,10 +1,10 @@
 import { afterEach, describe, expect, it } from 'vitest'
 import { GlError } from './errors.js'
-import { GL_ATTRIBUTES } from './gl-context.js'
+import { createGlContext, GL_ATTRIBUTES } from './gl-context.js'
 import { drawTargetFor } from './gl-resources.js'
 import { captureGlState } from './gl-state.js'
 import { FULLSCREEN_VS } from './gl-shaders.js'
-import { createGlFixture, type GlFixture } from './testing/gl-fixture.js'
+import { createGlFixture, createRawGl, type GlFixture } from './testing/gl-fixture.js'
 
 let fixture: GlFixture | null = null
 
@@ -17,6 +17,23 @@ afterEach(() => {
 function open(): GlFixture {
   fixture = createGlFixture(8, 8)
   expect(fixture.gl, 'no WebGL2 context — check the SwiftShader launch flags (§11)').not.toBeNull()
+  return fixture
+}
+
+/** The stage's normal case (§4.0): a context nothing but the library writes to. */
+function openOwned(): GlFixture {
+  const raw = createRawGl(8, 8)
+  expect(raw.gl, 'no WebGL2 context — check the SwiftShader launch flags (§11)').not.toBeNull()
+  const ctx = createGlContext(raw.gl, { owned: true })
+  fixture = {
+    canvas: raw.canvas,
+    gl: raw.gl,
+    ctx,
+    dispose() {
+      ctx.dispose()
+      raw.dispose()
+    },
+  }
   return fixture
 }
 
@@ -170,6 +187,44 @@ describe('target (§5.1)', () => {
   })
 })
 
+describe('allocating inside a scope (§5.1)', () => {
+  it('leaves the slot’s bindings on the active unit and the draw framebuffer as they were', () => {
+    const { ctx, gl } = open()
+    const bound = ctx.texture({ width: 4, height: 4, format: 'RGBA8', label: 'bound' })
+    expect(bound).not.toBeInstanceOf(GlError)
+    if (GlError.is(bound)) return
+    const fbo = ctx.target(bound)
+    expect(fbo).not.toBeInstanceOf(GlError)
+    if (GlError.is(fbo)) return
+
+    ctx.scope(() => {
+      // A slot mid-draw: unit 1 active with a texture on it, an offscreen draw target bound, a
+      // viewport of its own. An allocation in the middle of this must not move any of it.
+      gl.activeTexture(gl.TEXTURE1)
+      gl.bindTexture(gl.TEXTURE_2D, bound.handle)
+      gl.bindFramebuffer(gl.DRAW_FRAMEBUFFER, fbo.framebuffer)
+      gl.viewport(1, 2, 3, 4)
+      const before = captureGlState(gl)
+
+      const fresh = ctx.texture({ width: 8, height: 8, format: 'R8', label: 'fresh' })
+      expect(fresh).not.toBeInstanceOf(GlError)
+      if (GlError.is(fresh)) return
+      const target = ctx.target(fresh)
+      expect(target).not.toBeInstanceOf(GlError)
+      if (GlError.is(target)) return
+
+      expect(gl.getParameter(gl.ACTIVE_TEXTURE)).toBe(gl.TEXTURE1)
+      expect(gl.getParameter(gl.TEXTURE_BINDING_2D)).toBe(bound.handle)
+      expect(gl.getParameter(gl.DRAW_FRAMEBUFFER_BINDING)).toBe(fbo.framebuffer)
+      expect(captureGlState(gl)).toEqual(before)
+      target.dispose()
+      fresh.dispose()
+    })
+    fbo.dispose()
+    bound.dispose()
+  })
+})
+
 describe('scope (§5.1)', () => {
   it('restores the enumerated set after a slot has churned it, and passes the value through', () => {
     const { ctx, gl } = open()
@@ -187,21 +242,49 @@ describe('scope (§5.1)', () => {
     expect(captureGlState(gl)).toEqual(before)
   })
 
-  it('saves and restores again when nested, because §5.1 scopes and §7.3 batches', () => {
+  it('neither saves nor restores when nested: the outermost scope is the one save/restore (§7.3)', () => {
     const { ctx, gl } = open()
     const outer = captureGlState(gl)
     ctx.scope(() => {
       ctx.gl.viewport(0, 0, 3, 3)
-      const inner = captureGlState(gl)
-      ctx.scope(() => {
+      ctx.scope((s) => {
         ctx.gl.viewport(0, 0, 5, 5)
+        s.enable('BLEND', true)
       })
-      // The inner scope restored the outer scope's viewport, not the context's original one.
-      expect(captureGlState(gl)).toEqual(inner)
+      // The nested scope left its writes in place: a nested scope is a no-op around its body,
+      // the way §7.3 says a nested `stage.batch` is, so a batch of draws pays one capture.
+      expect(Array.from(gl.getParameter(gl.VIEWPORT) as Int32Array)).toEqual([0, 0, 5, 5])
+      expect(gl.isEnabled(gl.BLEND)).toBe(true)
     })
+    // The outermost scope's restore covers everything the nested one wrote.
     expect(captureGlState(gl)).toEqual(outer)
-    // stage.batch(fn)'s "a nested batch is a no-op rather than a double save" is P9's, built on
-    // top of this. scope() itself always saves.
+  })
+
+  it('unwinds the nesting when a nested body fails, so the next scope saves again', () => {
+    const { ctx, gl } = open()
+    const boom = (): never => JSON.parse('{') as never
+    ctx.scope(() => {
+      expect(() =>
+        ctx.scope(() => {
+          ctx.gl.viewport(1, 1, 2, 2)
+          return boom()
+        }),
+      ).toThrow()
+      // Still inside the outer scope: the failed nested scope restored nothing.
+      expect(Array.from(gl.getParameter(gl.VIEWPORT) as Int32Array)).toEqual([1, 1, 2, 2])
+    })
+    // A failure that escapes the outermost scope must not leave the context believing a scope is
+    // still live, or every later scope would skip its save and restore.
+    expect(() =>
+      ctx.scope(() => {
+        ctx.scope(() => boom())
+      }),
+    ).toThrow()
+    ctx.gl.viewport(2, 2, 3, 3)
+    ctx.scope(() => {
+      ctx.gl.viewport(0, 0, 7, 7)
+    })
+    expect(Array.from(gl.getParameter(gl.VIEWPORT) as Int32Array)).toEqual([2, 2, 3, 3])
   })
 
   it('restores even when the body fails, so one bad slot cannot poison the next', () => {
@@ -288,5 +371,33 @@ describe('dispose', () => {
     const { ctx, gl } = open()
     ctx.dispose()
     expect(gl.isContextLost()).toBe(false)
+  })
+})
+
+describe('an owned context (§4.0)', () => {
+  it('restores the pinned baseline at every scope exit, without asking the driver what it holds', () => {
+    const { ctx, gl } = openOwned()
+    const baseline = captureGlState(gl)
+    ctx.scope((s) => {
+      s.enable('BLEND', true)
+      ctx.gl.viewport(1, 1, 2, 2)
+      ctx.gl.depthFunc(gl.GREATER)
+    })
+    expect(captureGlState(gl)).toEqual(baseline)
+  })
+
+  it('undoes a write made outside any scope at the next scope exit, because nothing but the library writes to it', () => {
+    const { ctx, gl } = openOwned()
+    const baseline = captureGlState(gl)
+    // On an injected context this write would be honoured (see "the escape hatch" above); on an
+    // owned one there is no consumer whose state could be there, so the baseline is what comes
+    // back. This is the semantics, pinned so that it is a decision and not an accident.
+    ctx.gl.viewport(1, 1, 2, 2)
+    ctx.scope(() => {
+      ctx.gl.viewport(3, 3, 4, 4)
+    })
+    expect(Array.from(gl.getParameter(gl.VIEWPORT) as Int32Array)).toEqual(
+      Array.from(baseline.viewport),
+    )
   })
 })

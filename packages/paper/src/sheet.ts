@@ -40,6 +40,7 @@ import {
   hullCacheKey,
   KNOB_REFERENCE_PX,
   overscanRadius,
+  raceAbort,
   uploadBytes,
 } from '@paper-crumple/core/unstable'
 import type { GlContext, ScratchPools, Texture } from '@paper-crumple/core/unstable'
@@ -48,7 +49,8 @@ import type { Resampler } from './artwork.js'
 import { cpuSdfFromAlpha } from './field.js'
 import { growBox, scaleBox, sheetRectFromExtent, signedFieldExtent } from './extent.js'
 import type { AlphaBox } from './mask.js'
-import { createSdfBuilder, sigmaFor, SDF_POOL_SLOTS } from './gl-sdf.js'
+import { createSdfBuilder, createSdfPrograms, sigmaFor, SDF_POOL_SLOTS } from './gl-sdf.js'
+import type { SdfPrograms } from './gl-sdf.js'
 import type { Field, LooseField, SdfBuilder } from './gl-sdf.js'
 import {
   checkReserve,
@@ -167,7 +169,7 @@ export interface PaperSheet extends SheetRenderer<Knobs, PaperSheetHandle> {
   /**
    * **Test-only**, and never assigned by production code. The level-2 suite installs this to
    * drive `source()`'s SECOND abort check point (§10.5) deterministically: `source()` calls it
-   * synchronously right after the two field passes (`buildField`/`blurField`) succeed and BEFORE
+   * synchronously right after pass A (`buildField`) succeeds and BEFORE
    * the `await` that check point 2 sits behind — the only way to make an abort land inside that
    * window without a race, since nothing else in this call ever yields before it (fix round 1,
    * finding 2: the level-2 suite had no way to reach this check point at all before this hook
@@ -213,6 +215,8 @@ interface Mounted {
   poolsSize: { artwork: Size; sdfRes: number } | null
   readonly resampler: Resampler
   readonly renderer: PaperRenderer
+  /** The field programs, linked once at `mount()` and shared by every `sdf` builder (P7). */
+  readonly sdfPrograms: SdfPrograms
   readonly cache: HullCache
   tiles: MountedTiles
   /** Every front texture `build()` handed out and the core has not yet released, so `dispose()`
@@ -235,9 +239,13 @@ interface Mounted {
   /**
    * Task 12's own addition: what the last `buildField`/`blurField` call (from either `source()`
    * or `build()`) left the shared Pool A field slots holding. `buildField`/`blurField` write into
-   * one shared `sdf.tight` / `sdf.loose` slot apiece (§8.1) — there is no per-sprite storage for a
-   * field — so a later `build()` call can only skip pass A (the jump flood) when it is asking for
-   * exactly what this record already holds: the same sprite, at the same requested size. `null`
+   * one shared `sdf.tight` / `sdf.loose` slot apiece (§8.1; size-keyed, so a slot keeps one
+   * resident per framing, but a later build at the same framing overwrites it) — there is no
+   * per-sprite storage for a field — so a later `build()` call can only skip pass A (the jump
+   * flood) when it is asking for exactly what this record already holds: the same sprite, at the
+   * same requested size. The record's own fields are never evicted from under it: `gl-sdf.ts`'s
+   * module doc does the §8.1 arithmetic (the record's framing plus the one being built always
+   * fit; eviction removes only framings no record refers to). `null`
    * until the first `source()`/`build()` call, and reset to `null` whenever `ensurePools` disposes
    * and rebuilds the pools this record's `Field`s point into (a size a later sprite needs that
    * this mount's Pool A was not sized for).
@@ -260,10 +268,25 @@ interface Mounted {
    */
   lastFieldBuild: {
     readonly spriteKey: string
+    /**
+     * The front the fields are framed on. `source()` records its own reserve-sized `front`;
+     * `build()` records the `size` it was asked for. Framing is everything about a field except
+     * the artwork — the texel grid (`fieldDimsFor`), the artwork's placement and `pxScale` — so
+     * the record is reusable exactly when the two agree, and a `build()` at any other `size`
+     * (the ordinary case: the stage builds at the bucket-shaped `fit.frontSize`, which equals
+     * `handle.front` only for a sprite whose reserve-sized front is itself bucket-shaped) starts
+     * from pass A again.
+     */
     readonly size: Size
     readonly tight: Field
     readonly looseness: number
-    readonly loose: LooseField
+    /**
+     * `null` after `source()`, which builds no loose field: nothing reads one before `build()`
+     * — `acquireCpuField` reads `tight` — and the first `build()` blurs at its own framing, so a
+     * source-time blur was two draws and two Pool A slots spent on a field nobody sampled.
+     * `build()` fills it, and a later `build()` at the same framing and `looseness` reuses it.
+     */
+    readonly loose: LooseField | null
     /**
      * The hull polygon's own field (design §4), cached under the same `spriteKey` + requested
      * `size` key as `tight`, and sound under it for the same reason: a hull-tier knob cannot move
@@ -393,14 +416,14 @@ function ensurePools(
   m.pools = null
   m.sdf = null
   m.poolsSize = null
-  // Whatever `build()` last cached in `lastFieldBuild` points at Targets the disposed `SdfBuilder`
-  // owned (`gl-sdf.ts`'s own `targetsBySlot`); a fresh `SdfBuilder` below re-acquires new ones at
-  // the same pool slots, so the cache would otherwise hand a later `build()` call a `Field` whose
-  // framebuffer no longer exists.
+  // Whatever `build()` last cached in `lastFieldBuild` points at field targets the disposed pools
+  // owned (`ArtworkPool.acquireSized`: texture and framebuffer alike); fresh pools below hand out
+  // new ones at the same slots, so the cache would otherwise hand a later `build()` call a `Field`
+  // whose texture and framebuffer no longer exist.
   m.lastFieldBuild = null
 
   const pools = createScratchPools({ gl: m.ctx, artwork, sdfRes })
-  const sdf = createSdfBuilder(m.ctx, pools.poolA)
+  const sdf = createSdfBuilder(m.ctx, pools.poolA, m.sdfPrograms)
   if (GlError.is(sdf)) {
     pools.dispose()
     return sdf
@@ -413,6 +436,46 @@ function ensurePools(
 }
 
 /**
+ * `readBackField`'s three per-call buffers, held across calls instead of allocated per add: the
+ * `readPixels` destination (float or byte flavour) and the decoded field. At `sdfRes` 192 that is
+ * 147 KB for the decoded field plus 147 KB (RED/FLOAT) or 590 KB (RGBA/FLOAT) for the destination,
+ * per add; at the bench's 512² it is a megabyte each.
+ *
+ * Safe only because every one of them is **consumed before the next call can start**. The decoded
+ * field goes to `buildHull` (which reads it and returns a `PackedHull` of its own points) or to
+ * `signedFieldExtent` (which returns four numbers), both synchronous, both on the same statement as
+ * the `acquireCpuField` call that produced it; `cpuFieldFallback`'s field is a fresh array and is
+ * never one of these. The `readPixels` buffers never leave this function. Nothing retains them, so
+ * nothing can observe the reuse.
+ *
+ * Grow-only, handed out as a `subarray` of the exact length asked for, so a smaller field after a
+ * larger one reuses the same storage rather than reallocating (and never sees stale tail texels:
+ * both the `readPixels` fill and the decode loop write every element of the view they are given).
+ * Module-level and bounded by the largest field ever read back, so the standing cost is of the same
+ * order as the three scratch slots `contours.ts` already holds. Deliberately not tied to a sheet's
+ * `dispose()`: the buffers belong to the decode, not to any one renderer, and two mounted sheets
+ * would otherwise drop each other's.
+ */
+let decodeBuf = new Float32Array(0)
+let floatReadBuf = new Float32Array(0)
+let byteReadBuf = new Uint8Array(0)
+
+function decodeScratch(n: number): Float32Array {
+  if (decodeBuf.length < n) decodeBuf = new Float32Array(n)
+  return decodeBuf.length === n ? decodeBuf : decodeBuf.subarray(0, n)
+}
+
+function floatReadbackScratch(n: number): Float32Array {
+  if (floatReadBuf.length < n) floatReadBuf = new Float32Array(n)
+  return floatReadBuf.length === n ? floatReadBuf : floatReadBuf.subarray(0, n)
+}
+
+function byteReadbackScratch(n: number): Uint8Array {
+  if (byteReadBuf.length < n) byteReadBuf = new Uint8Array(n)
+  return byteReadBuf.length === n ? byteReadBuf : byteReadBuf.subarray(0, n)
+}
+
+/**
  * Ports `engine.js:#readBackField` whole (task 11 brief): reads pass A's own output back to the
  * CPU, in field TEXELS — a field-sized `readPixels`, 147 456 B at `sdfRes` 192, which §8.1 budgets
  * explicitly. Float targets read as RED/FLOAT when the driver reports that as its implementation
@@ -422,16 +485,34 @@ function ensurePools(
  *
  * `READ_FRAMEBUFFER` is bound explicitly: `DrawScope.bindTarget` only ever binds
  * `DRAW_FRAMEBUFFER`, so a caller that skipped this would silently read the canvas backbuffer.
+ *
+ * **Replica:** `tools/bench/cpu/scenarios.mjs`'s `readbackDecode` (and its `decodeScratch`) is a
+ * copy of the decode loop and its buffer below, standing in for the GL read so `cpu.ingest.1024`
+ * and `cpu.readback.decode.512` can be measured in node. Keep the two in step — a change here
+ * that is not mirrored there leaves the benchmark measuring code that no longer ships.
  */
 function readBackField(ctx: GlContext, field: Field, texelPx: number): Float32Array | null {
   const { gl } = ctx
   const w = field.width
   const h = field.height
   const decode = field.decode
+  // Hoisted out of the decode loop: `field.decode` is a tuple, so `decode[0]` inside the loop is an
+  // element load per texel. Same two doubles, same `* d0 + d1` then `/ texelPx` — the division is
+  // deliberately NOT folded into the multiply, which would change the result by an ulp and an ulp
+  // is a behaviour change here (hull vertices land on texel boundaries).
+  const d0 = decode[0]
+  const d1 = decode[1]
   return ctx.scope((): Float32Array | null => {
     gl.bindFramebuffer(gl.READ_FRAMEBUFFER, field.target.framebuffer)
     // Stale-error drain, verbatim from engine.js: a prior call's error must not be misread as
-    // this readback's own failure.
+    // this readback's own failure. The LOOP is load-bearing and a single read would not do:
+    // GL ES 3.0 §2.5 lets an implementation keep several error flags at once, `getError` returns
+    // and clears an arbitrary one of them, and the spec's own instruction is to call it repeatedly
+    // until it reports `NO_ERROR` — Blink adds to that by queueing its own synthesised errors
+    // ahead of the driver's. With two flags pending, one would survive a single read and the
+    // post-`readPixels` check below would blame `readPixels` for it, dropping the add into the CPU
+    // fallback for no reason. When nothing is pending — the case that actually runs — the loop
+    // costs exactly one `getError`, which is why the ingest call counts are unchanged either way.
     while (gl.getError() !== gl.NO_ERROR) {
       // drain
     }
@@ -441,21 +522,30 @@ function readBackField(ctx: GlContext, field: Field, texelPx: number): Float32Ar
         gl.getParameter(gl.IMPLEMENTATION_COLOR_READ_FORMAT) === gl.RED &&
         gl.getParameter(gl.IMPLEMENTATION_COLOR_READ_TYPE) === gl.FLOAT
       const channels = single ? 1 : 4
-      const buf = new Float32Array(w * h * channels)
+      const buf = floatReadbackScratch(w * h * channels)
       gl.readPixels(0, 0, w, h, single ? gl.RED : gl.RGBA, gl.FLOAT, buf)
+      // Not a drain: this read IS the CPU-fallback decision, and it is only trustworthy because
+      // the loop above emptied every flag first. `sheet.gl.test.ts` forces exactly this read
+      // non-zero to reach `cpuFieldFallback`.
       if (gl.getError() === gl.NO_ERROR) {
-        out = new Float32Array(w * h)
-        for (let i = 0, p = 0; i < out.length; i++, p += channels) {
-          out[i] = (buf[p] * decode[0] + decode[1]) / texelPx
+        out = decodeScratch(w * h)
+        // Split rather than strided: on the RED/FLOAT path (`channels === 1`) `p` IS `i`, and one
+        // induction variable is measurably cheaper than two. Same expression, same order.
+        if (channels === 1) {
+          for (let i = 0; i < out.length; i++) out[i] = (buf[i] * d0 + d1) / texelPx
+        } else {
+          for (let i = 0, p = 0; i < out.length; i++, p += channels) {
+            out[i] = (buf[p] * d0 + d1) / texelPx
+          }
         }
       }
     } else {
-      const buf = new Uint8Array(w * h * 4)
+      const buf = byteReadbackScratch(w * h * 4)
       gl.readPixels(0, 0, w, h, gl.RGBA, gl.UNSIGNED_BYTE, buf)
       if (gl.getError() === gl.NO_ERROR) {
-        out = new Float32Array(w * h)
+        out = decodeScratch(w * h)
         for (let i = 0, p = 0; i < out.length; i++, p += 4) {
-          out[i] = ((buf[p] / 255) * decode[0] + decode[1]) / texelPx
+          out[i] = ((buf[p] / 255) * d0 + d1) / texelPx
         }
       }
     }
@@ -713,8 +803,18 @@ export function paperSheet(options?: PaperSheetOptions): PaperSheet {
       return renderer
     }
 
+    // The field programs, linked here rather than with the first scratch pools (P7): their link
+    // starts at mount, alongside the paper program's, and source() waits for both in one place.
+    const sdfPrograms = createSdfPrograms(ctx)
+    if (GlError.is(sdfPrograms)) {
+      renderer.dispose()
+      resampler.dispose()
+      return sdfPrograms
+    }
+
     const neutral = mountNeutralTiles(ctx)
     if (GlError.is(neutral)) {
+      sdfPrograms.dispose()
       renderer.dispose()
       resampler.dispose()
       return neutral
@@ -727,6 +827,7 @@ export function paperSheet(options?: PaperSheetOptions): PaperSheet {
       poolsSize: null,
       resampler,
       renderer,
+      sdfPrograms,
       cache: hullCache(),
       tiles: neutral,
       liveFronts: new Set<Texture>(),
@@ -813,6 +914,33 @@ export function paperSheet(options?: PaperSheetOptions): PaperSheet {
     // Abort check point 1 (§10.5): on entry, before any GPU work is spent.
     if (signalAborted(o.signal)) return ABORTED
 
+    // P7 (spec 5.2 amendment): `mount()` issued the programs' compile and link without waiting
+    // for the driver, so this is where the paper shader's link — 42–48 s cold on ANGLE/D3D11
+    // before P7, seconds after — is waited for, off the main thread, and where a failed link
+    // surfaces: as this call's error, observed (§10.6), on the ingest path §7.1's ban on deferral
+    // does not cover. Every `build()` needs a handle from a `source()` that passed this point,
+    // so `build()` never meets a pending program. Two `source()` calls issued during one link
+    // resume here in call order (one promise, listeners in registration order). The wait is
+    // raced against the signal (§10.5's check point "after a program-readiness wait"): a
+    // superseded swap or a `stage.dispose()` returns `ABORTED` the moment it fires rather than
+    // holding the ingest lane's slot for the rest of the link, which is shared and carries on
+    // for the next caller. A wait that ends normally re-checks the mount: still before any GPU
+    // work.
+    const ready = await raceAbort(
+      Promise.all([m.renderer.ready(), m.resampler.ready(), m.sdfPrograms.ready()]).then(
+        (outcomes) => outcomes.find((outcome) => outcome !== undefined),
+      ),
+      o.signal,
+    )
+    if (ready === ABORTED) return ABORTED
+    if (ready !== undefined) return ready
+    if (mounted !== m) {
+      return new SheetError('paperSheet: dispose() ran while source() waited for the program link')
+    }
+    // An abort that landed in the microtask gap after the race's listener came off is honoured
+    // here, still before any GPU work (§10.5).
+    if (signalAborted(o.signal)) return ABORTED
+
     // §6.3 — the hull cache key is "every knob at or above 'hull'", so the trace runs at the
     // hull-tier values the caller projected for the sprite, over this factory's defaults. The
     // reserve, `p` and the artwork size derived below stay at the defaults (`valuesFor`'s own doc
@@ -856,6 +984,9 @@ export function paperSheet(options?: PaperSheetOptions): PaperSheet {
 
     // Step 5: pools, sized at { artwork, sdfRes } — created lazily here, reused across sprites,
     // re-created (with disposal) when a later sprite needs a bigger Pool A.
+    // No wait between here and the passes (P7): the builder draws with `m.sdfPrograms`, linked
+    // at mount and awaited above, so a concurrent source() of another size re-sizes the pools
+    // only between two calls' synchronous runs from the pools to the fields — as before.
     const ensured = ensurePools(m, artwork, sdfRes)
     if (GlError.is(ensured)) return ensured
     const { pools, sdf } = ensured
@@ -908,31 +1039,29 @@ export function paperSheet(options?: PaperSheetOptions): PaperSheet {
     })
     if (GlError.is(tight)) return tight
 
-    // Step 8: blurField — sigma off `looseness`, which a `hull`-only sheet does not even declare
-    // as a knob (`numKnob` falls back to 0, the field's own no-blur floor).
+    // Step 8 — no blur here. Pass B (`blurField`) used to run at this point, sigma off the
+    // `looseness` knob, and nothing ever sampled its result: `acquireCpuField` below reads
+    // `tight`, and `build()` blurs at its own framing (below). It was two draws and two Pool A
+    // slots per add for a field nobody read. `looseness` is still recorded so a `build()` that
+    // asks for exactly this framing at the same knob can tell it has no loose field yet — a
+    // `hull`-only sheet does not even declare the knob (`numKnob` falls back to 0).
     const looseness = numKnob(values, 'looseness', 0)
-    const blurred = sdf.blurField({
-      field: tight,
-      sigmaPx: sigmaFor(looseness, frontLongSide),
-      frontLongSide,
-    })
-    if (GlError.is(blurred)) return blurred
 
-    // Fix round 1, finding 3 (the doubled pass B): `m.lastFieldBuild` used to start `null` and
-    // stay that way until `build()`'s own first call — so the very passes just run above were
-    // thrown away and `build()`'s first call for this sprite always redid both, unconditionally,
-    // even though its own `size` is `front` (this call's own front dims) on the ordinary path
-    // (source() then build() at the size just sourced). Recording them here means that first
-    // `build()` call sees a cache hit instead: `tightReusable` requires the SAME spriteKey and the
-    // SAME `size` (§8.1's shared-slot rule this record exists to serve), which a `build()` call
-    // for a DIFFERENT requested size, or a different sprite having taken the slot since, correctly
-    // fails — falling through to a fresh `buildField`/`blurField`, exactly as before this change.
+    // Recorded so the first `build()` can reuse pass A — but only when it asks for exactly this
+    // framing: `tightReusable` requires the SAME spriteKey and the SAME `size`. That holds when
+    // `build()` is called at `handle.front` (the level-2 suite's own path), and it does NOT hold
+    // on the stage's ordinary path, which builds at the bucket-shaped `fit.frontSize` (§8.6): a
+    // bucket pads any sprite whose reserve-sized front is not itself bucket-shaped, the field's
+    // texel grid, placement and `pxScale` all move with the front, and `build()` correctly starts
+    // from pass A again. (An earlier comment here claimed the first `build()` always saw a cache
+    // hit; it did so only for `fit.frontSize === handle.front`.) The stage cannot supply the
+    // bucket size to `source()`, because `fit` is derived from the hull rect `source()` returns.
     m.lastFieldBuild = {
       spriteKey,
       size: { w: front.w, h: front.h },
       tight,
       looseness,
-      loose: blurred,
+      loose: null,
       paperField: null,
     }
 
@@ -943,7 +1072,7 @@ export function paperSheet(options?: PaperSheetOptions): PaperSheet {
     // stack frame.
     afterFieldForTest?.()
 
-    // Abort check point 2 (§10.5): after the resample and the two field passes, before the CPU
+    // Abort check point 2 (§10.5): after the resample and pass A, before the CPU
     // hull trace — the boundary between work already paid for and the one genuinely
     // interruptible step. The `await` is what makes this point (and the third one, below)
     // observable from outside a synchronous call: without it nothing here would ever yield.
@@ -1185,6 +1314,12 @@ export function paperSheet(options?: PaperSheetOptions): PaperSheet {
     })
     if (GlError.is(artworkTexture)) return artworkTexture
 
+    // A `GlError` out of any pass below ends this call — and ends the record too. The record's
+    // fields are safe from eviction only while they are the framing being built or the one
+    // before it (`gl-sdf.ts`'s module doc); an allocation at a new framing that failed part-way
+    // may already have evicted them to make room for what failed, so a record left pointing at
+    // them could hand the next `build()` a disposed texture. The cost is one pass A more on the
+    // call after a failure, which is nothing against the failure itself.
     let tight: Field
     if (tightReusable) {
       tight = cachedField.tight
@@ -1196,13 +1331,19 @@ export function paperSheet(options?: PaperSheetOptions): PaperSheet {
         height: field.h,
         sourceLongSide: frontLongSide,
       })
-      if (GlError.is(built)) return built
+      if (GlError.is(built)) {
+        m.lastFieldBuild = null
+        return built
+      }
       tight = built
     }
 
     const looseness = numKnob(knobValues, 'looseness', 0)
     let loose: LooseField
-    if (tightReusable && cachedField.looseness === looseness) {
+    // `cachedField.loose` is `null` after `source()`, which builds none: this is where the first
+    // loose field for a framing is made, from the very tight field `source()` left (same inputs
+    // as the blur `source()` used to run, so the same bytes).
+    if (tightReusable && cachedField.loose !== null && cachedField.looseness === looseness) {
       loose = cachedField.loose
     } else {
       const blurred = sdf.blurField({
@@ -1210,7 +1351,10 @@ export function paperSheet(options?: PaperSheetOptions): PaperSheet {
         sigmaPx: sigmaFor(looseness, frontLongSide),
         frontLongSide,
       })
-      if (GlError.is(blurred)) return blurred
+      if (GlError.is(blurred)) {
+        m.lastFieldBuild = null
+        return blurred
+      }
       loose = blurred
     }
 
@@ -1311,6 +1455,9 @@ export function paperSheet(options?: PaperSheetOptions): PaperSheet {
         })
         mask.dispose()
         if (GlError.is(builtField)) {
+          // Same reason as the two returns above: the hull field's allocation may have evicted
+          // what `fieldRecord` (already published) points at.
+          m.lastFieldBuild = null
           return new SheetError(
             `paperSheet: build() could not build the hull field for sprite ${handle.spriteKey}`,
             { cause: builtField },
@@ -1456,6 +1603,7 @@ export function paperSheet(options?: PaperSheetOptions): PaperSheet {
     m.renderer.dispose()
     m.resampler.dispose()
     m.sdf?.dispose()
+    m.sdfPrograms.dispose()
     m.pools?.dispose()
     m.cache.clear()
   }

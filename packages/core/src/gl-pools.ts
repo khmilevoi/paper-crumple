@@ -12,6 +12,16 @@
  * the hull mask, the hull field and the hull canvas belong to P8 and P10. Slots are opaque
  * strings here; what this module owns is that their total never passes `poolABytes`.
  *
+ * **Two kinds of slot.** An *exclusive* slot (`acquire`, `holdArtwork`) holds one texture and
+ * reallocates whenever its description changes — right for the artwork, which has one size per
+ * sprite, and for scratch that is sized once. A *size-keyed* slot (`acquireSized`) keeps every
+ * description it has been asked for resident, so a caller that alternates between two framings
+ * finds both waiting instead of reallocating each on every call; residency is bounded by the
+ * same §8.1 budget through least-recently-used eviction. The thrash this exists to end: every
+ * `stage.add` builds its field twice at two framings (`source()`'s reserve-sized front, then
+ * `build()`'s bucket-sized one), and an exclusive slot reallocated seven textures and seven
+ * framebuffers on every flip, forever.
+ *
  * `exact: true` allocates a **dedicated, non-pooled** set straight from `ctx.texture` and releases
  * it synchronously at the end of the build. It must never grow either pool, or one tap on a
  * thumbnail permanently sizes the stage's scratch to ~39 MB and §8.9's grid budget stops being
@@ -21,7 +31,7 @@ import { poolABytes, poolBBytes } from './bytes.js'
 import { GlError } from './errors.js'
 import type { Size } from './geometry.js'
 import type { GlContext } from './gl.js'
-import { INTEGER_FORMATS, type Texture, type TextureDesc } from './gl-resources.js'
+import { INTEGER_FORMATS, type Target, type Texture, type TextureDesc } from './gl-resources.js'
 import { systemTimers, type TimerHandle, type Timers } from './stepper.js'
 
 /**
@@ -41,22 +51,47 @@ export const POOL_B_IDLE_MS = 10_000
 
 type Err = InstanceType<typeof GlError>
 
-/** The half of `GlContext` a pool needs. Everything else about the context is irrelevant here. */
-export type TextureFactory = Pick<GlContext, 'texture'>
+/**
+ * The two halves of `GlContext` a pool needs: `texture` for every slot, and `target` for the
+ * size-keyed slots whose framebuffer the pool owns with the texture (`acquireSized`). Everything
+ * else about the context is irrelevant here.
+ */
+export type TextureFactory = Pick<GlContext, 'texture' | 'target'>
 
 /** Pool A — artwork, JFA ping-pong, fields, hull mask, hull field, hull canvas. */
 export interface ArtworkPool {
   /** `poolABytes(artwork, sdfRes)` — §8.1's figure, read from P5 and never restated. */
   readonly budget: number
-  /** Live bytes across every slot. */
+  /** Live bytes across every slot, exclusive and size-keyed. */
   bytes(): number
   /**
-   * Take, or reuse, the slot named `slot`. Reuses the existing texture when `d` describes the
-   * same thing; reallocates and re-prices it otherwise. A `GlError` when the pool would pass its
-   * budget, naming the pool.
+   * Take, or reuse, the exclusive slot named `slot`. Reuses the existing texture when `d`
+   * describes the same thing; reallocates and re-prices it otherwise. A `GlError` when the pool
+   * would pass its budget even with every size-keyed resident evicted, naming the pool.
    */
   acquire(slot: string, d: TextureDesc): Err | Texture
-  /** Drop one slot and release its texture. A no-op for a slot the pool does not hold. */
+  /**
+   * Take, or reuse, the render target of the **size-keyed** slot `slot` at exactly `d`. Where
+   * `acquire` keeps one texture per slot and reallocates on any change, a size-keyed slot keeps
+   * one resident per distinct description (size, format, sampling), so a caller that alternates
+   * between two framings reallocates neither. A size the slot already holds costs a map lookup
+   * and allocates nothing — the property every warm `stage.add` depends on.
+   *
+   * Residency is bounded by the same §8.1 budget: when a new size would pass it, the
+   * least-recently-used size-keyed residents — of any size-keyed slot — are dropped first, oldest
+   * first, and only a size that would not fit with every one of them gone is refused. Exclusive
+   * slots are never evicted. The memory cost is therefore never more than §8.1 already prices; what
+   * changes is that the budget's headroom is *used*, by the framings most recently built, instead
+   * of being paid back to the driver and borrowed again on every call.
+   *
+   * The pool owns the target as well as the texture and drops the two together, which is what
+   * lets a caller hold no framebuffer cache of its own that eviction could leave stale.
+   */
+  acquireSized(slot: string, d: TextureDesc): Err | Target
+  /**
+   * Drop one slot — its exclusive texture and every size-keyed resident under that name — and
+   * release them. A no-op for a slot the pool does not hold.
+   */
   release(slot: string): void
   /**
    * The one artwork slot, keyed by sprite (§8.5). Displacing a key is what lets Pool B's idle
@@ -67,12 +102,27 @@ export interface ArtworkPool {
   artworkKey(): string | null
 }
 
-/** Pool B — source staging, one slot, released after an idle interval. */
+/**
+ * Pool B — source staging, **one** resident source-sized slot, released after an idle interval.
+ * §8.1 prices Pool B as exactly that slot, and that figure is binding: the `RGBA8UI` copy of the
+ * source the resample reads (`artwork.ts`) lives for the one call that needs it and never in this
+ * pool, so `bytes()` never passes `budgetFor(source)`.
+ */
 export interface StagingPool {
   bytes(): number
-  /** `poolBBytes(source)` — sized by the source alone. */
+  /** `poolBBytes(source)` — §8.1's staging figure, sized by the source alone. */
   budgetFor(source: Size): number
-  /** Take the one slot for `key`. A different key displaces the previous one immediately. */
+  /**
+   * Take the staging texture for `key`. A different key takes it at once — reusing the texture
+   * when the source size is unchanged, reallocating it when it is not — so a grid of same-sized
+   * sources uploads into one texture instead of allocating one per sprite.
+   *
+   * **Handing a same-sized texture to a new sprite without clearing it is correct only because
+   * the caller always re-uploads before it reads**: `uploadViaByteFetch` runs `texSubImage2D`
+   * over the whole staging rect on every resample (`@paper-crumple/paper`, `artwork.ts`), so the
+   * previous sprite's bytes are gone before the first fetch. A future "the size matches, skip
+   * the upload" would hand one sprite's pixels out under another sprite's key.
+   */
   acquire(key: string, source: Size): Err | Texture
   /** Arm the idle release for `key`. A no-op while Pool A's artwork slot still holds `key`. */
   releaseIdle(key: string): void
@@ -100,6 +150,13 @@ export interface ScratchPoolsOptions {
 interface Slot {
   readonly texture: Texture
   readonly desc: TextureDesc
+}
+
+interface SizedSlot {
+  readonly slot: string
+  readonly target: Target
+  /** `clock` at the last acquisition — the least-recently-used resident has the smallest. */
+  stamp: number
 }
 
 /** The slot `holdArtwork` keeps the sprite in. Named once, because `release` must know it too. */
@@ -134,11 +191,23 @@ function sameDesc(a: TextureDesc, b: TextureDesc): boolean {
   )
 }
 
+/** The size-keyed residents' key: everything `sameDesc` compares, under the slot's name. */
+function sizedKey(slot: string, d: TextureDesc): string {
+  return `${slot}|${d.width}x${d.height}|${d.format}|${effectiveFilter(d)}|${effectiveWrap(d)}`
+}
+
+function disposeOwned(t: Target): void {
+  t.dispose()
+  t.texture.dispose()
+}
+
 export function createScratchPools(o: ScratchPoolsOptions): ScratchPools {
   const timers = o.timers ?? systemTimers
   const budgetA = poolABytes(o.artwork, o.sdfRes)
 
   const slots = new Map<string, Slot>()
+  const sized = new Map<string, SizedSlot>()
+  let clock = 0
   let artworkKey: string | null = null
 
   let staging: Slot | null = null
@@ -147,10 +216,51 @@ export function createScratchPools(o: ScratchPoolsOptions): ScratchPools {
   /** Set by `releaseIdle` while Pool A still holds the key; consumed when Pool A displaces it. */
   let idleDeferredFor: string | null = null
 
-  function bytesA(): number {
+  function bytesExclusive(): number {
     let total = 0
     for (const slot of slots.values()) total += slot.texture.bytes
     return total
+  }
+
+  function bytesSized(): number {
+    let total = 0
+    for (const s of sized.values()) total += s.target.texture.bytes
+    return total
+  }
+
+  function bytesA(): number {
+    return bytesExclusive() + bytesSized()
+  }
+
+  function overBudget(total: number, slot: string): Err {
+    return new GlError(
+      `Pool A would grow to ${total} bytes for slot "${slot}", past its §8.1 budget of ` +
+        `${budgetA} (artwork ${o.artwork.w}x${o.artwork.h}, sdfRes ${o.sdfRes}), even with ` +
+        `every size-keyed resident evicted. An exact-path build allocates a dedicated, ` +
+        `non-pooled set instead.`,
+    )
+  }
+
+  /**
+   * Drop least-recently-used size-keyed residents until `total` — the bytes the pool would hold
+   * after the pending allocation — fits the budget. The caller has already established that it
+   * can: `total` minus every size-keyed resident is within the budget.
+   */
+  function evictUntilFits(total: number): void {
+    while (total > budgetA && sized.size > 0) {
+      let oldestKey: string | undefined
+      let oldest: SizedSlot | undefined
+      for (const [key, s] of sized) {
+        if (oldest === undefined || s.stamp < oldest.stamp) {
+          oldestKey = key
+          oldest = s
+        }
+      }
+      if (oldestKey === undefined || oldest === undefined) return
+      total -= oldest.target.texture.bytes
+      disposeOwned(oldest.target)
+      sized.delete(oldestKey)
+    }
   }
 
   function dropStaging(): void {
@@ -195,25 +305,55 @@ export function createScratchPools(o: ScratchPoolsOptions): ScratchPools {
       // Allocate first, then check, then release: the budget is still measured on the texture
       // the factory actually produced, never on a guess about what it will cost — but the slot
       // being replaced is not destroyed until its replacement is known to fit. A rejected
-      // replacement leaves the pool exactly as it found it.
+      // replacement leaves the pool exactly as it found it, size-keyed residents included:
+      // nothing is evicted for an allocation that could not fit anyway.
       const texture = o.gl.texture(d)
       if (GlError.is(texture)) return texture
 
       const total = bytesA() - (held?.texture.bytes ?? 0) + texture.bytes
-      if (total > budgetA) {
+      if (total - bytesSized() > budgetA) {
         texture.dispose()
-        return new GlError(
-          `Pool A would grow to ${total} bytes for slot "${slot}", past its §8.1 budget of ` +
-            `${budgetA} (artwork ${o.artwork.w}x${o.artwork.h}, sdfRes ${o.sdfRes}). ` +
-            `An exact-path build allocates a dedicated, non-pooled set instead.`,
-        )
+        return overBudget(total, slot)
       }
+      evictUntilFits(total)
       if (held !== undefined) held.texture.dispose()
       slots.set(slot, { texture, desc: d })
       return texture
     },
 
+    acquireSized(slot, d) {
+      const key = sizedKey(slot, d)
+      const hit = sized.get(key)
+      if (hit !== undefined) {
+        hit.stamp = ++clock
+        return hit.target
+      }
+
+      // Same order as `acquire`: allocate, prove it can fit at all, and only then evict — the
+      // residents a rejected allocation would have evicted are still serving their callers.
+      const texture = o.gl.texture(d)
+      if (GlError.is(texture)) return texture
+      const total = bytesA() + texture.bytes
+      if (total - bytesSized() > budgetA) {
+        texture.dispose()
+        return overBudget(total, slot)
+      }
+      const target = o.gl.target(texture)
+      if (GlError.is(target)) {
+        texture.dispose()
+        return target
+      }
+      evictUntilFits(total)
+      sized.set(key, { slot, target, stamp: ++clock })
+      return target
+    },
+
     release(slot) {
+      for (const [key, s] of sized) {
+        if (s.slot !== slot) continue
+        disposeOwned(s.target)
+        sized.delete(key)
+      }
       const held = slots.get(slot)
       if (held === undefined) return
       held.texture.dispose()
@@ -244,20 +384,33 @@ export function createScratchPools(o: ScratchPoolsOptions): ScratchPools {
     budgetFor: (source) => poolBBytes(source),
 
     acquire(key, source) {
-      if (stagingKey === key && staging !== null) {
-        cancelIdle()
-        idleDeferredFor = null
+      // Whatever idle interval or deferral the previous key had is void: a different sprite takes
+      // the slot at once, never on a timer — and takes the *texture* with it when the source size
+      // is unchanged, because a staging texture holds nothing worth keeping once the resample that
+      // read it has run (`artwork.ts`), so re-keying loses nothing.
+      cancelIdle()
+      idleDeferredFor = null
+      if (
+        staging !== null &&
+        (staging.desc.width !== source.w || staging.desc.height !== source.h)
+      ) {
+        staging.texture.dispose()
+        staging = null
+      }
+      // `stagingKey` names the sprite whose staging the pool HOLDS, so it moves only once there
+      // is a texture behind it: a refused allocation below leaves `key()` `null`, never the
+      // newcomer's name over nothing.
+      if (staging !== null) {
+        stagingKey = key
         return staging.texture
       }
-      // One slot, keyed by sprite. A different sprite takes it at once, not on a timer.
-      cancelIdle()
-      dropStaging()
+      stagingKey = null
       const d: TextureDesc = {
         width: source.w,
         height: source.h,
         format: 'RGBA8',
         filter: 'NEAREST',
-        label: `staging:${key}`,
+        label: `staging:${source.w}x${source.h}`,
       }
       const texture = o.gl.texture(d)
       if (GlError.is(texture)) return texture
@@ -283,11 +436,13 @@ export function createScratchPools(o: ScratchPoolsOptions): ScratchPools {
   return {
     poolA,
     poolB,
-    peak: () => bytesA() + (staging?.texture.bytes ?? 0),
+    peak: () => bytesA() + poolB.bytes(),
     dispose() {
       cancelIdle()
       for (const slot of slots.values()) slot.texture.dispose()
       slots.clear()
+      for (const s of sized.values()) disposeOwned(s.target)
+      sized.clear()
       artworkKey = null
       dropStaging()
     },

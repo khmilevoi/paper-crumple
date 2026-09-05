@@ -30,10 +30,22 @@ export interface GlContext {
    * costs performance and never correctness.
    */
   readonly exactByteFetch: boolean
+  /**
+   * Compiles and links. The synchronous `GlError` covers what can be detected without waiting
+   * for the driver (object creation); with `KHR_parallel_shader_compile` the link itself is
+   * deferred and its outcome — a compile or link failure included — is `Program.ready()`'s
+   * (§5.2 amendment, P7). Without the extension the link is checked here, as it always was.
+   */
   program(vs: string, fs: string, label: string): InstanceType<typeof GlError> | Program
   texture(d: TextureDesc): InstanceType<typeof GlError> | Texture
   target(t: Texture): InstanceType<typeof GlError> | Target
-  /** Runs `fn` with a scoped GL state; restores exactly what the scope touched. */
+  /**
+   * Runs `fn` with a scoped GL state. The outermost scope restores §5.1's enumerated set at its
+   * exit; a scope entered while another is live on this context restores **nothing** at its own
+   * exit — the outermost one restores everything, the way §7.3's nested `batch` is a no-op rather
+   * than a double save. So a slot sets every piece of state it relies on inside its own body and
+   * never counts on a sibling's scope having put it back.
+   */
   scope<T>(fn: (s: DrawScope) => T): T
   /** Escape hatch. Legal only inside `scope()`; documented as unstable. */
   readonly gl: WebGL2RenderingContext

@@ -109,3 +109,23 @@ describe('invalidationOf', () => {
     expect(registry.invalidationOf({ 'sheet.nope': 1 })).toBeUndefined()
   })
 })
+
+describe('memoisation', () => {
+  it('builds the defaults once and hands out the same frozen object', () => {
+    const a = registry.defaults()
+    const b = registry.defaults()
+    // Rebuilt per call it was 12 % of a scheduler tick, for a value no `set()` can move: the
+    // descriptors' own defaults are fixed at mount. Frozen, because it is now shared.
+    expect(a).toBe(b)
+    expect(Object.isFrozen(a)).toBe(true)
+  })
+
+  it('builds one projector per slot rather than one per call', () => {
+    // `stage.ts` called `projector(slot)` on the draw path, which rebuilt the key/path pair list
+    // from the whole descriptor set on every draw. The closure is what is memoised; the bag it
+    // returns is still fresh per call (the case above).
+    expect(registry.projector('sheet')).toBe(registry.projector('sheet'))
+    expect(registry.projector('motion')).toBe(registry.projector('motion'))
+    expect(registry.projector('sheet')).not.toBe(registry.projector('motion'))
+  })
+})

@@ -1,5 +1,5 @@
 import { KnobError } from './errors.js'
-import { maxInvalidation } from './invalidation.js'
+import { invalidationRank, maxInvalidation } from './invalidation.js'
 import { validateKnobValue } from './knob-validate.js'
 import { SHARED_KNOBS } from './shared-knobs.js'
 import type { Invalidates, KnobDescriptor, Knobs } from './knobs.js'
@@ -40,15 +40,21 @@ export interface KnobRegistry {
     patch: Readonly<Record<string, unknown>>,
     scope: readonly Invalidates[],
   ): KnobValues | Fault
-  /** Every descriptor's own default, under its namespaced path. */
+  /**
+   * Every descriptor's own default, under its namespaced path. **Built once at mount and frozen**:
+   * the descriptor list cannot move after construction, so the object cannot either, and the
+   * per-draw rebuild it used to pay for was 12 % of a scheduler tick over 64 views.
+   */
   defaults(): KnobValues
   /** The strongest level a namespaced delta touches, or `undefined` if it touches nothing. */
   invalidationOf(delta: KnobValues): Invalidates | undefined
   /**
    * §5.5's filtered view, **built once at mount and reused**: the returned function closes over
-   * this slot's key list and does no per-draw scan of the other slot's descriptors. It allocates
-   * a fresh bag per call rather than reusing one, because a slot that retains the bag would be an
-   * invisible aliasing bug and the contract cannot forbid retention.
+   * this slot's key list and does no per-draw scan of the other slot's descriptors. One closure
+   * per slot, memoised, because the draw path asks for it by slot name every draw and rebuilding
+   * the key/path pair list there was a third of the projection's cost. It allocates a fresh bag
+   * per call rather than reusing one, because a slot that retains the bag would be an invisible
+   * aliasing bug and the contract cannot forbid retention.
    */
   projector(slot: SlotName): (values: KnobValues) => Knobs
 }
@@ -164,34 +170,69 @@ export function createKnobRegistry(slots: {
     return out
   }
 
-  const defaults = (): KnobValues => {
-    const out: Record<string, KnobPrimitive> = {}
-    for (const t of targets) out[t.path] = t.descriptor.default
-    return out
+  // Built here rather than in the accessor: nothing after construction can change what a
+  // descriptor's default is, so a per-call rebuild answered a question that was already settled.
+  // Frozen because the object is now shared with every caller.
+  const defaultValues: KnobValues = Object.freeze(
+    ((): Record<string, KnobPrimitive> => {
+      const out: Record<string, KnobPrimitive> = {}
+      for (const t of targets) out[t.path] = t.descriptor.default
+      return out
+    })(),
+  )
+  const defaults = (): KnobValues => defaultValues
+
+  // Written as one pass rather than `Object.keys(...).flatMap(...)` into `maxInvalidation`: a
+  // stage-level `set()` asks this once per sprite, and the two intermediate arrays per sprite were
+  // the whole of its allocation. The loop below therefore restates `maxInvalidation`'s ranking
+  // deliberately: both walk `invalidationRank` and keep the highest, and they must stay in step,
+  // but only this one gets to do it without materialising a level per key first.
+  const invalidationOf = (delta: KnobValues): Invalidates | undefined => {
+    let best: Invalidates | undefined
+    for (const path of Object.keys(delta)) {
+      const target = byPath.get(path)
+      if (target === undefined) continue
+      const level = target.descriptor.invalidates
+      if (best === undefined || invalidationRank(level) > invalidationRank(best)) best = level
+    }
+    return best
   }
 
-  const invalidationOf = (delta: KnobValues): Invalidates | undefined =>
-    maxInvalidation(
-      Object.keys(delta).flatMap((path) => {
-        const target = byPath.get(path)
-        return target === undefined ? [] : [target.descriptor.invalidates]
-      }),
-    )
-
-  const projector = (slot: SlotName): ((values: KnobValues) => Knobs) => {
+  const buildProjector = (slot: SlotName): ((values: KnobValues) => Knobs) => {
     // Core first, then the slot: "core defaults -> slot defaults", so a slot's own key wins on a
-    // collision with a shared one. Built here, at mount, and never rebuilt.
-    const pairs: Array<readonly [string, string]> = []
-    for (const t of targets) if (t.scope === 'core') pairs.push([t.descriptor.key, t.path])
-    for (const t of targets) if (t.scope === slot) pairs.push([t.descriptor.key, t.path])
+    // collision with a shared one. Two parallel arrays rather than an array of pairs, so the hot
+    // loop indexes twice instead of destructuring a boxed tuple per key.
+    const keys: string[] = []
+    const paths: string[] = []
+    for (const t of targets) {
+      if (t.scope !== 'core') continue
+      keys.push(t.descriptor.key)
+      paths.push(t.path)
+    }
+    for (const t of targets) {
+      if (t.scope !== slot) continue
+      keys.push(t.descriptor.key)
+      paths.push(t.path)
+    }
     return (values) => {
       const bag: Record<string, KnobPrimitive> = {}
-      for (const [key, path] of pairs) {
-        const value = values[path]
-        if (value !== undefined) bag[key] = value
+      for (let i = 0; i < keys.length; i += 1) {
+        const value = values[paths[i] as string]
+        if (value !== undefined) bag[keys[i] as string] = value
       }
       return bag
     }
+  }
+
+  // One closure per slot, made on first ask. `stage.ts` calls `projector(slot)` on the draw path,
+  // where rebuilding the two arrays above from the whole descriptor set was pure waste.
+  const projectors = new Map<SlotName, (values: KnobValues) => Knobs>()
+  const projector = (slot: SlotName): ((values: KnobValues) => Knobs) => {
+    const made = projectors.get(slot)
+    if (made !== undefined) return made
+    const fresh = buildProjector(slot)
+    projectors.set(slot, fresh)
+    return fresh
   }
 
   return {
@@ -212,8 +253,10 @@ export function createKnobRegistry(slots: {
  */
 export function resolveKnobValues(layers: readonly KnobValues[]): KnobValues {
   const out: Record<string, KnobPrimitive> = {}
-  for (const layer of layers) {
-    for (const [path, value] of Object.entries(layer)) out[path] = value
-  }
+  // `Object.assign` rather than `for (const [path, value] of Object.entries(layer))`: the values
+  // are `KnobPrimitive` under string paths, so the two copy the same own enumerable properties in
+  // the same order, and the entries form allocated one boxed `[path, value]` pair per key per
+  // layer — ~220 arrays for one draw of the built-in slot pair, and this ran per draw per view.
+  for (const layer of layers) Object.assign(out, layer)
   return out
 }

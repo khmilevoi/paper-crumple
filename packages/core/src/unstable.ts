@@ -78,7 +78,7 @@ export type { CountedBuffer, HandleFacts, ScratchBytes, ScratchRequest } from '.
 // are already exported above by P2 and are not re-exported here; P6 gave the last four their
 // members in `./gl-resources.ts` and `./forward.ts` re-exports them from there.
 export { createGlContext, GL_ATTRIBUTES } from './gl-context.js'
-export type { CoreGlContext } from './gl-context.js'
+export type { CoreGlContext, GlContextOptions } from './gl-context.js'
 
 // The resource tables §8.7 decides, so a slot prices a texture the way the budget does.
 export {
@@ -119,3 +119,10 @@ export { EXACT_BYTE_FETCH_FS, FULLSCREEN_VS, RESAMPLE_FS, RESAMPLE_UNIFORMS } fr
 export { gradeAttributes } from './surface-grade.js'
 export type { AttributeGrade } from './surface-grade.js'
 export { batchBySortKey } from './draw-batch.js'
+
+// --- S1: the platform yield (§8.10) — what a slot's asynchronous readback polls its fence on ---
+export { nextTurn } from './next-turn.js'
+
+// --- P7: the cancellable wait on a shared promise (§5.2 amendment, §10.5) — what a slot's
+// asynchronous path races its program-readiness wait with ---
+export { raceAbort } from './abort.js'

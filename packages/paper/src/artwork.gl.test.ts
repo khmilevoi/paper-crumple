@@ -1,4 +1,4 @@
-import { afterEach, describe, expect, it } from 'vitest'
+import { afterEach, describe, expect, it, vi } from 'vitest'
 import { GlError } from '@paper-crumple/core'
 import { createScratchPools, identityResample, poolABytes } from '@paper-crumple/core/unstable'
 import type { ScratchPools } from '@paper-crumple/core/unstable'
@@ -225,6 +225,66 @@ describe('the artwork slot', () => {
       r.dispose()
     },
   )
+})
+
+describe('the resample reuses the staging across sprites of one source size (spec 8.1)', () => {
+  it('spends only the RGBA8UI transient on a second same-sized source, keeps Pool B inside its budget, and lands the same bytes', async () => {
+    const artwork = { w: SRC.w, h: SRC.h }
+    const { ctx, pools: p } = open(artwork)
+    const r = createResampler(ctx)
+    expect(GlError.is(r)).toBe(false)
+    if (GlError.is(r)) return
+    const srcRect = { x: 0, y: 0, w: SRC.w, h: SRC.h }
+    const first = r.resample({
+      spriteKey: 'a',
+      bitmap: await sourceBitmap(),
+      srcRect,
+      artwork,
+      poolA: p.poolA,
+      poolB: p.poolB,
+    })
+    expect(GlError.is(first)).toBe(false)
+    if (GlError.is(first)) return
+
+    // The real observables behind the per-add cost: `texStorage2D` for the staging and for the
+    // `RGBA8UI` copy of the source (one each, per add, before this change), `createFramebuffer`
+    // for the copy's target, and the `getError` each allocation reads (`gl-context.ts`). The
+    // staging is now reused across sprites of one source size; the copy stays a per-call
+    // transient because §8.1 prices Pool B as one resident source-sized slot (`artwork.ts`'s
+    // header) — so exactly one of each remains.
+    const texStorage2D = vi.spyOn(ctx.gl, 'texStorage2D')
+    const createFramebuffer = vi.spyOn(ctx.gl, 'createFramebuffer')
+    const getError = vi.spyOn(ctx.gl, 'getError')
+    const second = r.resample({
+      spriteKey: 'b',
+      bitmap: await sourceBitmap(),
+      srcRect,
+      artwork,
+      poolA: p.poolA,
+      poolB: p.poolB,
+    })
+    const stores = texStorage2D.mock.calls.length
+    const framebuffers = createFramebuffer.mock.calls.length
+    const errors = getError.mock.calls.length
+    texStorage2D.mockRestore()
+    createFramebuffer.mockRestore()
+    getError.mockRestore()
+    expect(GlError.is(second)).toBe(false)
+    if (GlError.is(second)) return
+
+    expect(stores).toBe(1)
+    expect(framebuffers).toBe(1)
+    expect(errors).toBe(1)
+    expect(p.poolB.key()).toBe('b')
+    expect(p.poolA.artworkKey()).toBe('b')
+    // One resident source-sized slot, as §8.1 prices Pool B — the transient never lands in it.
+    expect(p.poolB.bytes()).toBeLessThanOrEqual(p.poolB.budgetFor(SRC))
+    // Reuse changed no byte: the second sprite's artwork is the identity of its own source.
+    expect(Array.from(readArtwork(ctx, second.texture, SRC.w, SRC.h))).toEqual(
+      Array.from(sourceBytes()),
+    )
+    r.dispose()
+  })
 })
 
 describe('the ambient state a byte depends on (spec 7.4.1)', () => {

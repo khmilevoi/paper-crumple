@@ -18,7 +18,7 @@
  * defaulting to `tiles: null`. The knob, the uniform and the sampler are wired throughout, so
  * supplying a tile later is a value change and not a redesign.
  */
-import { AssetError, GlError, KNOB_REFERENCE_PX, PackError } from '@paper-crumple/core'
+import { ABORTED, AssetError, GlError, KNOB_REFERENCE_PX, PackError } from '@paper-crumple/core'
 import type {
   Aborted,
   DrawArgs,
@@ -28,7 +28,7 @@ import type {
   Rect,
   Size,
 } from '@paper-crumple/core'
-import { hexToRgb, uploadBytes } from '@paper-crumple/core/unstable'
+import { hexToRgb, raceAbort, uploadBytes } from '@paper-crumple/core/unstable'
 import type {
   GlContext,
   MotionClip,
@@ -253,6 +253,29 @@ export function bakedMotion(o: BakedMotionOptions): BakedMotion {
       if (disposed) return new AssetError('bakedMotion: loaded after dispose')
       if (pack instanceof Error) return pack
       if (typeof pack === 'symbol') return pack
+
+      // P7 (spec 5.2 amendment): `mount()` issued the sheet program's compile and link without
+      // waiting for the driver, and this is the slot's asynchronous path, so the link is waited
+      // for here — before the program's first use in `draw`, whose `GlError` would otherwise be
+      // the only place a broken shader could surface, and only on a draw. `LoadError` carries no
+      // `GlError` (spec 5.3), so a failed link is an `AssetError` with the driver's message as
+      // its `cause`. The wait is raced against the signal (`raceAbort`, §10.5's check point
+      // "after a program-readiness wait"): an aborted caller leaves the moment the signal fires,
+      // and the shared link carries on for the next one. A `dispose()` during the wait is honoured
+      // first, and an abort that landed in the gap after the race is honoured too.
+      const m = mounted
+      if (m !== null) {
+        const linked = await raceAbort(m.program.ready(), opts?.signal)
+        if (disposed) return new AssetError('bakedMotion: loaded after dispose')
+        if (linked === ABORTED || opts?.signal?.aborted === true) {
+          store.release(fit.bucket)
+          return ABORTED
+        }
+        if (linked !== undefined) {
+          store.release(fit.bucket)
+          return new AssetError('bakedMotion: the sheet program did not link', { cause: linked })
+        }
+      }
 
       // An override set while this pack was not resident is checked against it here, where a
       // `PackError` has a legal slot in `LoadError`. The reference `acquire` took is handed back:

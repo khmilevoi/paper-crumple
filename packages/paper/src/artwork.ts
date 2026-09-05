@@ -10,7 +10,7 @@
  * costs 4 B/texel, so the slot is exactly `frontBytes(artwork)` — Pool A's artwork term,
  * unchanged.
  *
- * **Getting the source bytes into an integer texture, and the one transient it costs.**
+ * **Getting the source bytes into an integer texture, and the second texture it costs.**
  * `RESAMPLE_FS` reads a `usampler2D`, and WebGL2 forbids a `TexImageSource` upload into an
  * integer internal format (§8.5.3: `RGBA8UI` with `RGBA_INTEGER` raises `INVALID_OPERATION` from
  * every `ImageBitmap` overload). Two branches, on `ctx.exactByteFetch`:
@@ -21,17 +21,20 @@
  * - **Probe red** — `drawImage` the bitmap into an `OffscreenCanvas`, `getImageData`, and
  *   `uploadBytes` those bytes straight into the same source-sized `RGBA8UI`. Slower (§8.5.3
  *   prices it at 4–8 ms against 0.7–2.0), and correct on a driver whose unorm-to-float
- *   conversion drifts. Pool B is unused on this branch.
+ *   conversion drifts. The staging is unused on this branch.
  *
  * That source-sized `RGBA8UI` is a **dedicated, non-pooled allocation released synchronously at
- * the end of the call**, on the mechanism §8.1 already blesses for `exact: true`. It exists
- * because `poolB.acquire` hard-codes `format: 'RGBA8'` and neither pool's budget has room for a
- * second source-sized texture. §8.5.3 claims that with the probe green "the `RGBA8UI` texture
- * and the `ArrayBufferView` disappear from the runtime entirely"; the `ArrayBufferView` and the
- * CPU staging canvas do, and the integer texture does not, because `RESAMPLE_FS`'s own signature
- * requires one at both ends. **A `sampler2D`-source variant of the resample shader — which is
- * P6's to write, not this plan's, since §7.4.1 makes the reference and its GLSL twin two plans'
- * work on purpose — would delete this transient.**
+ * the end of the call**, on the mechanism §8.1 already blesses for `exact: true`. It cannot be
+ * pooled: §8.1 prices Pool B as ONE resident source-sized slot — the `RGBA8` staging — and that
+ * figure is binding, so a second source-sized texture may live for the duration of one add and
+ * never through Pool B's idle window (it was briefly Pool B's second slot; the review returned it
+ * here). The staging beside it IS reused across sprites of one source size (`gl-pools.ts`), so a
+ * warm add's resample costs this one texture and its framebuffer, not two. §8.5.3 claims that with
+ * the probe green "the `RGBA8UI` texture and the `ArrayBufferView` disappear from the runtime
+ * entirely"; the `ArrayBufferView` and the CPU staging canvas do, and the integer texture does
+ * not, because `RESAMPLE_FS`'s own signature requires one at both ends. **A `sampler2D`-source
+ * variant of the resample shader — which is P6's to write, not this plan's, since §7.4.1 makes
+ * the reference and its GLSL twin two plans' work on purpose — would delete this transient.**
  *
  * **Pool ownership.** `resample()` calls `poolA.holdArtwork(spriteKey, desc)` for the output, so
  * §8.5's "the pool keeps one artwork slot, keyed by sprite" is enforced by the pool and not by
@@ -84,6 +87,12 @@ export interface ResampleOptions {
 
 export interface Resampler {
   resample(o: ResampleOptions): Err | ArtworkSlot
+  /**
+   * Resolves once both programs have linked — `undefined`, or the first link failure (P7,
+   * `Program.ready()`). `source()` awaits it before the first `resample`, so a resample never
+   * blocks on a pending link and a failed one is that `source()`'s error.
+   */
+  ready(): Promise<Err | undefined>
   dispose(): void
 }
 
@@ -143,7 +152,7 @@ function uploadViaByteFetch(
 
 /**
  * `drawImage` the bitmap into an `OffscreenCanvas`, `getImageData`, and `uploadBytes` those bytes
- * straight into `dedicated`. Probe-red branch — Pool B is unused.
+ * straight into `dedicated`. Probe-red branch — the staging is unused.
  */
 function uploadViaCanvas(
   ctx: GlContext,
@@ -224,6 +233,8 @@ export function createResampler(ctx: GlContext): Err | Resampler {
     const { spriteKey, bitmap, srcRect, artwork, poolA, poolB } = o
     const { gl } = ctx
 
+    // The source-sized `RGBA8UI` copy — dedicated and released at the end of this call, never
+    // pooled (the header's "the second texture it costs": §8.1's one-slot Pool B is binding).
     const dedicated = ctx.texture({
       width: srcRect.w,
       height: srcRect.h,
@@ -257,12 +268,14 @@ export function createResampler(ctx: GlContext): Err | Resampler {
     })
     if (GlError.is(artworkTexture)) {
       dedicated.dispose()
+      poolB.releaseIdle(spriteKey)
       return artworkTexture
     }
 
     const target = acquireArtworkTarget(artworkTexture)
     if (GlError.is(target)) {
       dedicated.dispose()
+      poolB.releaseIdle(spriteKey)
       return target
     }
 
@@ -291,6 +304,10 @@ export function createResampler(ctx: GlContext): Err | Resampler {
 
   return {
     resample,
+    async ready() {
+      const outcomes = await Promise.all([byteFetch.ready(), resampleProgram.ready()])
+      return outcomes.find((o) => o !== undefined)
+    },
     dispose() {
       byteFetch.dispose()
       resampleProgram.dispose()

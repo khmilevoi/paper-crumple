@@ -12,6 +12,7 @@ import {
 } from './hull.js'
 import type { HullCanvas, HullRasterContext } from './hull.js'
 import { hullComponent, hullComponentCount, hullVertexCount, packPolygons } from './hull-shape.js'
+import { makeRandom } from './random.js'
 import { annulusAlpha, discAlpha } from './test-fixtures.js'
 
 const W = 64
@@ -553,5 +554,150 @@ describe('fillHullMask', () => {
     // The unshifted span `[2, 10) x [1, 5)` is empty now: the mask moved rather than grew.
     expect(alphaAt(bytes, w, 4, 2)).toBe(0)
     expect(alphaAt(bytes, w, 6, 6)).toBe(255)
+  })
+
+  /**
+   * `fillHullMask` as it stood before the active-edge list (perf package P4): every row tested
+   * against every edge, in edge order. Kept here, and only here, as the identity oracle the
+   * randomised case below judges the shipped fill against — the winding oracle above proves the
+   * *rule*, this proves the rewrite did not change a single byte of it.
+   */
+  function fillHullMaskAllEdges(
+    hull: ReturnType<typeof packPolygons>,
+    w: number,
+    h: number,
+    sx: number,
+    sy: number,
+    tx = 0,
+    ty = 0,
+  ): Uint8Array | undefined {
+    let edgeCount = 0
+    for (let c = 0; c + 1 < hull.offsets.length; c++) {
+      const count = hull.offsets[c + 1] - hull.offsets[c]
+      if (count >= 3) edgeCount += count
+    }
+    if (edgeCount === 0) return undefined
+    const edges = new Float64Array(edgeCount * 4)
+    let yMin = Infinity
+    let yMax = -Infinity
+    let e = 0
+    for (let c = 0; c + 1 < hull.offsets.length; c++) {
+      const start = hull.offsets[c]
+      const end = hull.offsets[c + 1]
+      if (end - start < 3) continue
+      for (let v = start; v < end; v++) {
+        const u = v + 1 < end ? v + 1 : start
+        const ay = hull.points[v * 2 + 1] * sy + ty
+        edges[e++] = hull.points[v * 2] * sx + tx
+        edges[e++] = ay
+        edges[e++] = hull.points[u * 2] * sx + tx
+        edges[e++] = hull.points[u * 2 + 1] * sy + ty
+        if (ay < yMin) yMin = ay
+        if (ay > yMax) yMax = ay
+      }
+    }
+    const rowStart = Math.max(0, Math.ceil(yMin))
+    const rowEnd = Math.min(h, Math.ceil(yMax))
+    const bytes = new Uint8Array(w * h * 4)
+    const xs = new Float64Array(edgeCount)
+    const dirs = new Int8Array(edgeCount)
+    let filled = false
+    for (let y = rowStart; y < rowEnd; y++) {
+      let n = 0
+      for (let i = 0; i < edgeCount; i++) {
+        const ax = edges[i * 4]
+        const ay = edges[i * 4 + 1]
+        const bx = edges[i * 4 + 2]
+        const by = edges[i * 4 + 3]
+        let dir: number
+        if (ay <= y && y < by) dir = 1
+        else if (by <= y && y < ay) dir = -1
+        else continue
+        const x = ax + ((y - ay) * (bx - ax)) / (by - ay)
+        let k = n
+        while (k > 0 && xs[k - 1] > x) {
+          xs[k] = xs[k - 1]
+          dirs[k] = dirs[k - 1]
+          k--
+        }
+        xs[k] = x
+        dirs[k] = dir
+        n++
+      }
+      let winding = 0
+      let spanStart = 0
+      for (let k = 0; k < n; k++) {
+        const was = winding
+        winding += dirs[k]
+        if (was === 0 && winding !== 0) {
+          spanStart = xs[k]
+        } else if (was !== 0 && winding === 0) {
+          const xa = Math.max(0, Math.ceil(spanStart))
+          const xb = Math.min(w, Math.ceil(xs[k]))
+          if (xa < xb) {
+            bytes.fill(255, (y * w + xa) * 4, (y * w + xb) * 4)
+            filled = true
+          }
+        }
+      }
+    }
+    return filled ? bytes : undefined
+  }
+
+  it('fills byte for byte what the all-edges scan filled, over 200 random multi-component hulls', () => {
+    const rand = makeRandom(4242)
+    const w = 48
+    const h = 40
+    let nonEmpty = 0
+    for (let trial = 0; trial < 200; trial++) {
+      const components: [number, number][][] = []
+      const count = 1 + Math.floor(rand() * 3)
+      for (let c = 0; c < count; c++) {
+        // A star-shaped ring with a jittered radius: concave, self-touching between components,
+        // and — deliberately — some vertices on integer coordinates, so ties in `x` and rows that
+        // land exactly on a vertex are actually exercised rather than avoided.
+        const cx = rand() * w
+        const cy = rand() * h
+        const vertices = 3 + Math.floor(rand() * 9)
+        const loop: [number, number][] = []
+        for (let v = 0; v < vertices; v++) {
+          const a = (v / vertices) * Math.PI * 2 + rand() * 0.2
+          const r = 2 + rand() * 14
+          const quantise = rand() < 0.35
+          const px = cx + Math.cos(a) * r
+          const py = cy + Math.sin(a) * r
+          loop.push(quantise ? [Math.round(px), Math.round(py)] : [px, py])
+        }
+        // Half the components run clockwise, so winding can cancel as well as accumulate.
+        components.push(rand() < 0.5 ? loop.reverse() : loop)
+      }
+      const hull = packPolygons(components, 0, 1)
+      const sx = 0.6 + rand() * 1.6
+      const sy = 0.6 + rand() * 1.6
+      const tx = (rand() - 0.5) * 10
+      const ty = (rand() - 0.5) * 10
+      const got = fillHullMask(hull, w, h, sx, sy, tx, ty)
+      const want = fillHullMaskAllEdges(hull, w, h, sx, sy, tx, ty)
+      if (want === undefined) {
+        expect(got, `trial ${trial}: both must refuse the same hull`).toBeUndefined()
+        continue
+      }
+      nonEmpty++
+      expect(
+        got,
+        `trial ${trial}: the active-edge list must fill what the all-edges scan filled`,
+      ).toBeDefined()
+      if (got === undefined) continue
+      // `toEqual` on a megabyte of bytes reports uselessly, so find the first difference itself.
+      let diff = -1
+      for (let i = 0; i < want.length; i++) {
+        if (got[i] !== want[i]) {
+          diff = i
+          break
+        }
+      }
+      expect(diff, `trial ${trial}: first differing byte`).toBe(-1)
+    }
+    expect(nonEmpty, 'most trials must actually fill something').toBeGreaterThan(150)
   })
 })

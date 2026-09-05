@@ -9,6 +9,8 @@ coverage/
 .claude/worktrees/
 test-results/
 playwright-report/
+# Benchmark output (tools/bench/cpu writes cpu.json and .cpuprofile files here).
+tools/bench/out/
 .playwright-mcp
 .vitest-attachments/
 
@@ -16,3 +18,7 @@ playwright-report/
 # ported from and are not this repository's to redistribute, so the whole folder stays local:
 # the demo probes for it, degrades to silence when it is absent, and says so in the inspector.
 examples/playground/public/audio/
+
+# The GL bench writes its JSON and CPU profiles here (`pnpm bench:gl`, BENCH_OUT).
+tools/bench/out/
+.superpowers

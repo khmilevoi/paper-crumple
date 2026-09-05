@@ -1,10 +1,20 @@
 import { describe, expect, it, vi } from 'vitest'
 import { isAborted } from './abort.js'
 import { KnobError } from './errors.js'
+import { INVALIDATION_ORDER } from './invalidation.js'
+import { createKnobRegistry, resolveKnobValues, type KnobValues } from './knob-registry.js'
+import type { Knobs } from './knobs.js'
 import { createStage, type StageEnv } from './stage.js'
 import { createFakeTimers } from './testing/fake-timers.js'
 import { asBitmap, fakeBitmap } from './testing/fake-source.js'
-import { fakeMotion, fakeSheet, stageEnv, type FakeSheetOptions } from './testing/fake-slots.js'
+import {
+  fakeMotion,
+  fakeSheet,
+  stageEnv,
+  type FakeMotion,
+  type FakeSheet,
+  type FakeSheetOptions,
+} from './testing/fake-slots.js'
 
 // A forced deviation from the plan's literal test code: `KnobPatch`, `ViewKnobPatch` and
 // `SpriteKnobPatch` are instantiated here at the widest slot type (`readonly KnobDescriptor[]`,
@@ -487,5 +497,188 @@ describe('a hull-tier set() re-sources at the current knob values (§6.3)', () =
     expect(sheet.calls.build.at(-1)?.knobs.sheetHull).toBe(0.8)
     expect(seen).toEqual([])
     stage.dispose()
+  })
+})
+
+/**
+ * C1 — the resolved bags are cached per (record, view) behind a version counter on each of the
+ * three layers. A cache is only allowed here if what reaches `build()` and `draw()` is what a
+ * from-scratch resolution would have produced, so that is what these compare against: a second
+ * registry over the same descriptors, resolving §6.6's ladder with no cache at all.
+ */
+describe('the cached knob bags (§6.6)', () => {
+  function reference(
+    s: { sheet: FakeSheet; motion: FakeMotion },
+    slot: 'sheet' | 'motion',
+    layers: ReadonlyArray<Readonly<Record<string, unknown>>>,
+  ): Knobs {
+    const registry = createKnobRegistry({ sheet: s.sheet.knobs, motion: s.motion.knobs })
+    const resolved: KnobValues[] = [registry.defaults()]
+    for (const patch of layers) {
+      const normalised = registry.normalise(patch, INVALIDATION_ORDER)
+      if (KnobError.is(normalised)) return expect.fail(normalised.message)
+      resolved.push(normalised)
+    }
+    return registry.projector(slot)(resolveKnobValues(resolved))
+  }
+
+  it('hands build() and draw() what a fresh resolution would, after a patch at each scope', async () => {
+    const s = await scene()
+    const built = (): Knobs => s.sheet.calls.build.at(-1)?.knobs as Knobs
+    const drawn = (): Knobs => s.motion.calls.draw.at(-1)?.knobs as Knobs
+
+    expect(built()).toEqual(reference(s, 'sheet', []))
+    expect(drawn()).toEqual(reference(s, 'motion', []))
+
+    const stagePatch = { sheetEdge: 0.9, motionTilt: 0.5 }
+    expect(s.stage.set(stagePatch as never)).toBeUndefined()
+    expect(built()).toEqual(reference(s, 'sheet', [stagePatch]))
+    expect(drawn()).toEqual(reference(s, 'motion', [stagePatch]))
+
+    const spritePatch = { sheetEdge: 0.3, sheetTint: 0.2 }
+    expect(s.sprite.set(spritePatch as never)).toBeUndefined()
+    expect(built()).toEqual(reference(s, 'sheet', [stagePatch, spritePatch]))
+    expect(drawn()).toEqual(reference(s, 'motion', [stagePatch, spritePatch]))
+
+    const viewPatch = { sheetTint: 0.8, motionTilt: -0.25 }
+    expect(s.view.set(viewPatch as never)).toBeUndefined()
+    // A view layer is draw class and never reaches a build: a front is shared by every view.
+    expect(built()).toEqual(reference(s, 'sheet', [stagePatch, spritePatch]))
+    expect(drawn()).toEqual(reference(s, 'motion', [stagePatch, spritePatch, viewPatch]))
+    s.stage.dispose()
+  })
+
+  it('reuses one frozen bag while no layer moves, and mints a new one when one does', async () => {
+    const s = await scene()
+    s.view.refresh()
+    const first = s.motion.calls.draw.at(-1)?.knobs
+    s.view.refresh()
+    // The whole point of the cache: a draw whose three versions are unchanged pays a version
+    // compare and reuses the bag, rather than re-merging four layers and re-projecting.
+    expect(s.motion.calls.draw.at(-1)?.knobs).toBe(first)
+    expect(Object.isFrozen(first)).toBe(true)
+    expect(s.stage.set({ motionTilt: 0.25 } as never)).toBeUndefined()
+    expect(s.motion.calls.draw.at(-1)?.knobs).not.toBe(first)
+    s.stage.dispose()
+  })
+
+  it('keeps the sheet bag stable across rebuilds that no patch preceded', async () => {
+    const s = await scene()
+    const builds = s.sheet.calls.build.length
+    expect(await s.stage.prepare('k')).not.toBeInstanceOf(Error)
+    // Nothing moved, so `prepare` had nothing to rebuild; the next front-class patch is what
+    // mints a new bag.
+    expect(s.sheet.calls.build).toHaveLength(builds)
+    const before = s.sheet.calls.build.at(-1)?.knobs
+    expect(Object.isFrozen(before)).toBe(true)
+    expect(s.sprite.set({ sheetEdge: 0.42 } as never)).toBeUndefined()
+    expect(s.sheet.calls.build.at(-1)?.knobs).not.toBe(before)
+    expect(s.sheet.calls.build.at(-1)?.knobs.sheetEdge).toBe(0.42)
+    s.stage.dispose()
+  })
+})
+
+/**
+ * C1's second half — views indexed by the key of the sprite they show, so a per-sprite fan-out
+ * (`invalidateSprite`, the re-source's redraw, `remove({ detach: true })`) walks that sprite's
+ * views rather than every view on the stage. The index is only correct if `show`, a swap's adopt
+ * and `dispose` all maintain it, which is what these three cases separate.
+ */
+describe('the view index by sprite key', () => {
+  async function twoOfEach() {
+    const timers = createFakeTimers()
+    const sheet = fakeSheet()
+    const motion = fakeMotion()
+    const stage = await createStage(
+      { sheet, motion, maxSize: 384, present: 'blit' },
+      stageEnv({ timers }),
+    )
+    if (stage instanceof Error || isAborted(stage)) return expect.fail('stage refused')
+    const a = await stage.add('/a.png', { key: 'a' })
+    const b = await stage.add('/b.png', { key: 'b' })
+    const va = stage.view({ canvas: destCanvas() })
+    const vb = stage.view({ canvas: destCanvas() })
+    if (a instanceof Error || isAborted(a) || b instanceof Error || isAborted(b)) {
+      return expect.fail('add refused')
+    }
+    if (va instanceof Error || vb instanceof Error) return expect.fail('view refused')
+    va.show(a)
+    vb.show(b)
+    return { stage, sheet, motion, timers, a, b, va, vb }
+  }
+
+  /** Which sprite each draw since `mark` was for — the fake clip's id: 1 for `a`, 2 for `b`. */
+  const drawnSince = (motion: FakeMotion, mark: number): number[] =>
+    motion.calls.draw.slice(mark).map((d) => d.clip.id)
+
+  it('redraws only the views showing the patched sprite', async () => {
+    const s = await twoOfEach()
+    const mark = s.motion.calls.draw.length
+    expect(s.a.set({ sheetTint: 0.3 } as never)).toBeUndefined()
+    expect(drawnSince(s.motion, mark)).toEqual([1])
+    expect(s.b.set({ sheetTint: 0.4 } as never)).toBeUndefined()
+    expect(drawnSince(s.motion, mark)).toEqual([1, 2])
+    s.stage.dispose()
+  })
+
+  it('follows a view that is shown onto another sprite', async () => {
+    const s = await twoOfEach()
+    s.va.show(s.b)
+    const mark = s.motion.calls.draw.length
+    expect(s.a.set({ sheetTint: 0.3 } as never)).toBeUndefined()
+    expect(drawnSince(s.motion, mark)).toEqual([])
+    expect(s.b.set({ sheetTint: 0.4 } as never)).toBeUndefined()
+    expect(drawnSince(s.motion, mark)).toEqual([2, 2])
+    s.stage.dispose()
+  })
+
+  it('drops a disposed view, so nothing is drawn for it afterwards', async () => {
+    const s = await twoOfEach()
+    s.va.dispose()
+    const mark = s.motion.calls.draw.length
+    expect(s.a.set({ sheetTint: 0.3 } as never)).toBeUndefined()
+    expect(drawnSince(s.motion, mark)).toEqual([])
+    expect(s.b.set({ sheetTint: 0.4 } as never)).toBeUndefined()
+    expect(drawnSince(s.motion, mark)).toEqual([2])
+    s.stage.dispose()
+  })
+
+  /**
+   * The index is a live `Set`, and a `show()` moves its view to the end of it (`attachRecord`:
+   * `indexHide` then `indexShow`). A JS `Set` iterator visits entries appended during iteration,
+   * so a fan-out that walks the live set while a handler under one of its draws re-shows a view
+   * onto the same sprite revisits that view, re-draws it, and never runs out. The draw hook here
+   * is that handler — the shape a consumer's `on('error')` / orphan handler (§10.6) can take from
+   * inside a synchronous `refresh()` — and it gives up after 64 draws so the failure is a count,
+   * not a worker that never returns.
+   */
+  it('terminates a draw-class set() when a draw re-shows the current views onto the same sprite', async () => {
+    const s = await scene()
+    const second = s.stage.view({ canvas: destCanvas() })
+    if (second instanceof Error) return expect.fail('second view refused')
+    second.show(s.sprite)
+
+    let draws = 0
+    let reShowing = false
+    const inner = s.motion.draw
+    s.motion.draw = (args) => {
+      draws += 1
+      // Once per draw and never from inside its own re-show, so the only path back into the
+      // fan-out loop is the index itself.
+      if (!reShowing && draws <= 64) {
+        reShowing = true
+        s.view.show(s.sprite)
+        second.show(s.sprite)
+        reShowing = false
+      }
+      return inner(args)
+    }
+
+    expect(s.stage.set({ sheetTint: 0.5 } as never)).toBeUndefined()
+    // Two views refreshed once each, and each refresh's hook re-shows both (one nested draw
+    // apiece): six draws. A count anywhere near the hook's cap means the loop was fed by the
+    // re-shows rather than by the two views that were showing when set() was called.
+    expect(draws).toBe(6)
+    s.stage.dispose()
   })
 })

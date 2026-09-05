@@ -1,6 +1,16 @@
 import { afterEach, describe, expect, it } from 'vitest'
-import { captureGlState, pinAmbientState, restoreGlState } from './gl-state.js'
+import { GlError } from './errors.js'
+import { createGlContext } from './gl-context.js'
+import { drawTargetFor } from './gl-resources.js'
+import { FULLSCREEN_VS } from './gl-shaders.js'
+import { captureGlState, pinAmbientState, restoreGlState, type GlState } from './gl-state.js'
 import { createRawGl, type RawGl } from './testing/gl-fixture.js'
+
+const TRIVIAL_FS = `#version 300 es
+precision highp float;
+out vec4 oColor;
+void main() { oColor = vec4(1.0); }
+`
 
 let raw: RawGl | null = null
 
@@ -196,5 +206,107 @@ void main() { oColor = vec4(1.0); }
     restoreGlState(gl, before)
     expect(gl.getParameter(gl.READ_FRAMEBUFFER_BINDING)).toBeNull()
     gl.deleteFramebuffer(fbo)
+  })
+})
+
+/**
+ * Item by item, and by identity for the handles: `toEqual` sees two distinct `WebGLTexture`
+ * objects as equal because neither has an own enumerable key, which is exactly the comparison a
+ * wrong restore would slip through.
+ */
+function expectSameState(actual: GlState, expected: GlState): void {
+  for (const key of Object.keys(expected) as Array<keyof GlState>) {
+    const want = expected[key]
+    if (typeof want === 'object' && want !== null && !Array.isArray(want)) {
+      expect(actual[key], key).toBe(want)
+    } else {
+      expect(actual[key], key).toEqual(want)
+    }
+  }
+}
+
+describe('an owned context restores the pinned baseline without a query (§4.0, §5.1)', () => {
+  it('leaves every enumerated item at the baseline after representative library work', () => {
+    const gl = open()
+    const ctx = createGlContext(gl, { owned: true })
+    // A real 36-query capture, taken right after creation: what every scope exit must reproduce.
+    const baseline = captureGlState(gl)
+
+    const program = ctx.program(FULLSCREEN_VS, TRIVIAL_FS, 'work')
+    const tex = ctx.texture({ width: 8, height: 8, format: 'RGBA8', label: 'work' })
+    expect(program).not.toBeInstanceOf(GlError)
+    expect(tex).not.toBeInstanceOf(GlError)
+    if (GlError.is(program) || GlError.is(tex)) return
+    const target = ctx.target(tex)
+    expect(target).not.toBeInstanceOf(GlError)
+    if (GlError.is(target)) return
+    const vao = gl.createVertexArray()
+    const sampler: WebGLSampler | null = gl.createSampler()
+    const tex2dArray: WebGLTexture | null = gl.createTexture()
+    const tex3d: WebGLTexture | null = gl.createTexture()
+    const texCube: WebGLTexture | null = gl.createTexture()
+
+    // Allocating outside any scope: only the library has written, and it put its binding back.
+    expectSameState(captureGlState(gl), baseline)
+
+    ctx.scope((s) => {
+      // Every write the stage and the slots make inside a scope (stage.ts drawInto, motion
+      // source.ts draw, paper gl-sdf.ts / paper-renderer.ts / artwork.ts), plus the ones only
+      // the enumeration names, so a restore that forgot an item shows up below.
+      s.bindTarget(drawTargetFor(target))
+      // bindTarget's scissor box is the whole 8x8 target, which is the baseline's; move it.
+      gl.scissor(1, 1, 2, 2)
+      s.enable('SCISSOR_TEST', true)
+      s.enable('DEPTH_TEST', true)
+      s.enable('BLEND', true)
+      s.enable('CULL_FACE', true)
+      gl.useProgram(program.handle)
+      gl.bindVertexArray(vao)
+      // Unit 0 — the baseline's active unit — gets a binding on every target §5.1 restores and a
+      // sampler; the active unit is then left on TEXTURE1, so the restore has to move back to
+      // unit 0 before it rebinds, and every one of its five binding entries is exercised.
+      gl.activeTexture(gl.TEXTURE0)
+      gl.bindTexture(gl.TEXTURE_2D, tex.handle)
+      if (tex2dArray) gl.bindTexture(gl.TEXTURE_2D_ARRAY, tex2dArray)
+      if (tex3d) gl.bindTexture(gl.TEXTURE_3D, tex3d)
+      if (texCube) gl.bindTexture(gl.TEXTURE_CUBE_MAP, texCube)
+      if (sampler) gl.bindSampler(0, sampler)
+      gl.activeTexture(gl.TEXTURE1)
+      gl.bindTexture(gl.TEXTURE_2D, tex.handle)
+      gl.bindFramebuffer(gl.READ_FRAMEBUFFER, target.framebuffer)
+      gl.enable(gl.STENCIL_TEST)
+      gl.stencilMask(0x0f)
+      gl.blendFuncSeparate(gl.ONE, gl.SRC_ALPHA, gl.DST_ALPHA, gl.ZERO)
+      gl.depthFunc(gl.LEQUAL)
+      gl.depthMask(false)
+      gl.clearColor(0.25, 0.5, 0.75, 1)
+      gl.clearDepth(0.125)
+      gl.clear(gl.COLOR_BUFFER_BIT)
+      gl.pixelStorei(gl.UNPACK_ALIGNMENT, 8)
+      gl.pixelStorei(gl.UNPACK_ROW_LENGTH, 13)
+      gl.pixelStorei(gl.UNPACK_SKIP_ROWS, 2)
+      gl.pixelStorei(gl.UNPACK_SKIP_PIXELS, 3)
+      gl.pixelStorei(gl.UNPACK_IMAGE_HEIGHT, 5)
+      gl.pixelStorei(gl.UNPACK_SKIP_IMAGES, 1)
+      gl.pixelStorei(gl.UNPACK_FLIP_Y_WEBGL, 1)
+      gl.pixelStorei(gl.UNPACK_PREMULTIPLY_ALPHA_WEBGL, 1)
+      gl.pixelStorei(gl.UNPACK_COLORSPACE_CONVERSION_WEBGL, gl.BROWSER_DEFAULT_WEBGL)
+      // An allocation mid-scope, the way gl-sdf.ts's pool does, restores its own binding only.
+      const mid = ctx.texture({ width: 4, height: 4, format: 'R8', label: 'mid' })
+      if (!GlError.is(mid)) ctx.target(mid)
+      // A nested scope, the way motion.draw's sits inside drawInto's.
+      ctx.scope(() => {
+        gl.viewport(1, 1, 2, 2)
+      })
+    })
+
+    expectSameState(captureGlState(gl), baseline)
+
+    gl.deleteVertexArray(vao)
+    gl.deleteSampler(sampler)
+    gl.deleteTexture(tex2dArray)
+    gl.deleteTexture(tex3d)
+    gl.deleteTexture(texCube)
+    ctx.dispose()
   })
 })
