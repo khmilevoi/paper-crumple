@@ -93,6 +93,12 @@ export interface SheetRenderer<K extends Knobs = Knobs, H extends SheetHandle = 
    */
   readonly overscan: number
 
+  /**
+   * Synchronous. Returns the errors it can detect without waiting for the driver; on a driver
+   * with `KHR_parallel_shader_compile` a shader that fails to compile or link is reported by the
+   * first `source()` instead (§5.2 amendment, P7 — `Program.ready()`), so the compile never
+   * blocks the page.
+   */
   mount(ctx: GlContext): InstanceType<typeof GlError> | undefined
   source(bitmap: ImageBitmap, o: SourceOptions): Promise<SourceError | Aborted | H>
   build(handle: H, size: Size, knobs: Readonly<SheetKnobs<K>>): BuildError | SheetFront

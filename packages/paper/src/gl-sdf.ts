@@ -46,6 +46,7 @@ import type {
   ArtworkPool,
   DrawScope,
   GlContext,
+  Program,
   Target,
   Texture,
   TextureDesc,
@@ -306,6 +307,13 @@ export interface SdfBuilder {
   fieldTargetDesc(w: number, h: number): TextureDesc
   buildField(o: BuildFieldOptions): InstanceType<typeof GlError> | Field
   blurField(o: BlurFieldOptions): InstanceType<typeof GlError> | LooseField
+  /**
+   * Resolves once the four programs have linked — `undefined`, or the first link failure (P7,
+   * `Program.ready()`; the programs are `SdfPrograms`, linked at `paperSheet`'s `mount()` and
+   * awaited at the start of its `source()`, so no pass blocks on a pending link and a failed
+   * one is that `source()`'s error).
+   */
+  ready(): Promise<InstanceType<typeof GlError> | undefined>
   dispose(): void
 }
 
@@ -341,7 +349,25 @@ function scheduleFor(width: number, height: number): readonly number[] {
   return schedule
 }
 
-export function createSdfBuilder(ctx: GlContext, pool: ArtworkPool): Err | SdfBuilder {
+/**
+ * The four programs a builder draws with, linked once per context (P7). They depend on the driver
+ * (`byteMode`) and on nothing a pool decides, so `paperSheet` links them at `mount()` — where the
+ * deferred link starts earliest — awaits them once at the start of `source()`, and hands them to
+ * every builder its scratch pools go through, rather than re-linking (and re-waiting for) them
+ * each time the pools are re-sized: a wait between `ensurePools` and the first pass would be a
+ * window another `source()` could re-size the pools in.
+ */
+export interface SdfPrograms {
+  readonly seed: Program
+  readonly step: Program
+  readonly resolve: Program
+  readonly blur: Program
+  /** Resolves once all four have linked — `undefined`, or the first link failure. */
+  ready(): Promise<InstanceType<typeof GlError> | undefined>
+  dispose(): void
+}
+
+export function createSdfPrograms(ctx: GlContext): Err | SdfPrograms {
   const byteMode = !ctx.caps.floatRT
 
   const seed = ctx.program(FULLSCREEN_VS, SEED_FS(byteMode), 'paper.sdf.seed')
@@ -364,6 +390,44 @@ export function createSdfBuilder(ctx: GlContext, pool: ArtworkPool): Err | SdfBu
     resolve.dispose()
     return blur
   }
+  return {
+    seed,
+    step,
+    resolve,
+    blur,
+    async ready() {
+      const outcomes = await Promise.all([
+        seed.ready(),
+        step.ready(),
+        resolve.ready(),
+        blur.ready(),
+      ])
+      return outcomes.find((o) => o !== undefined)
+    },
+    dispose() {
+      seed.dispose()
+      step.dispose()
+      resolve.dispose()
+      blur.dispose()
+    },
+  }
+}
+
+/**
+ * With `programs` given the builder draws with them and never disposes them (they are the
+ * caller's, shared across the pools' lifetimes); without, it links its own and owns them.
+ */
+export function createSdfBuilder(
+  ctx: GlContext,
+  pool: ArtworkPool,
+  programs?: SdfPrograms,
+): Err | SdfBuilder {
+  const byteMode = !ctx.caps.floatRT
+
+  const linked = programs ?? createSdfPrograms(ctx)
+  if (GlError.is(linked)) return linked
+  const ownsPrograms = programs === undefined
+  const { seed, step, resolve, blur } = linked
 
   const contract: FieldContract = byteMode
     ? {
@@ -625,11 +689,9 @@ export function createSdfBuilder(ctx: GlContext, pool: ArtworkPool): Err | SdfBu
     fieldTargetDesc,
     buildField,
     blurField,
+    ready: () => linked.ready(),
     dispose() {
-      seed.dispose()
-      step.dispose()
-      resolve.dispose()
-      blur.dispose()
+      if (ownsPrograms) linked.dispose()
       // The pool owns the coord and field textures backing every slot above, and disposes its
       // own on `pool.dispose()` — this builder never holds a texture Pool A did not hand it. The
       // framebuffers wrapping the ping-pong textures are this builder's own, though (see

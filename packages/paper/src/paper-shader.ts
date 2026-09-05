@@ -44,6 +44,19 @@
  *    and `img`, `nUv` and `wear` moved to the top of `main()` — `wear` because `creaseNet` takes
  *    `fwidth`, which has to stay in uniform control flow ahead of any per-fragment `return`.
  *    Nothing else moved.
+ *
+ * P7 (the first-load freeze) made one more, and it deletes no line either:
+ *
+ * 9. **`#define PAPER_FRONT_BUILD 1` compiles the front build's dead paths out.** Every program
+ *    this package links serves `renderFront`, which fixes `uFoldCount = 0`, `uShadow = 0`,
+ *    `uCrumpleFill = 0` and `uDebug = 0` (spec 8.6, `paper-renderer.ts`) — so the fold loops, the
+ *    flap shadow, the crumple mosaic, the ball compaction, the drop shadow's fold cut and ball
+ *    term, and the debug views are never executed, but ANGLE's HLSL compiler (fxc) still compiled
+ *    them: 42–48 s cold on an Intel Iris Xe (D3D11), of which the crumple block alone was ~80 %.
+ *    The `#if !PAPER_FRONT_BUILD` guards below leave the text whole and hand fxc only what the
+ *    front build can reach; the identity proof is the P7 block above `main()`, the evidence is
+ *    `paper-shader-early-out.gl.test.ts` (byte-for-byte against `PAPER_FRONT_BUILD 0`, which is
+ *    the whole program of edits 1–8 and what a later draw path would link).
  */
 
 /** `poses.js:16`. `build()` renders pose 0, whose fold list is empty; the fold table itself is
@@ -83,6 +96,11 @@ precision highp int;
 // P6a: 1 compiles the front-build early-outs in (see the block above main()), 0 compiles them
 // out. The GL identity test flips it to 0 through a string replace; it is not a knob or a uniform.
 #define PAPER_EARLY_OUT 1
+// P7: 1 compiles out every path the front build's fixed uniforms (uFoldCount 0, uShadow 0,
+// uCrumpleFill 0, uDebug 0) make unreachable — see the P7 block above main() — so the D3D11
+// backend's HLSL compile is seconds rather than the better part of a minute. 0 is the whole
+// program, which the identity test links to compare against; it is not a knob or a uniform.
+#define PAPER_FRONT_BUILD 1
 
 uniform vec2 uFrontSize;  // front-pass render target size, px
 out vec4 outColor;
@@ -1618,6 +1636,42 @@ vec3 fieldViz(float d) {
 // below samples a single-level texture, where the implicit LOD is irrelevant (the deckle band
 // already did so under 'deckle > 0.002').
 // =============================================================================================
+//
+// P7 — PAPER_FRONT_BUILD: the paths the front build cannot reach are compiled out.
+//
+// Under the SAME four uniforms the guard above names (uFoldCount == 0, uShadow == 0.0,
+// uCrumpleFill == 0.0, uDebug == 0 — every program this package links is driven by renderFront,
+// which fixes them), each '#if !PAPER_FRONT_BUILD' region below is one of three shapes, and the
+// value of every variable that survives it is the literal the '#else' or the retained declaration
+// carries:
+//
+//   - a loop over 'i < uFoldCount' runs 0 times: step 1 leaves remaining = 1.0; the drop shadow's
+//     fold cut leaves shadowRemaining = 1.0; foldCreases returns m = 1.0, which is what the
+//     front build's 'float creaseM = 1.0' declares;
+//   - a branch whose condition is false is skipped: flapPossible and shadowPossible are
+//     'uFoldCount > 0 && ...', the flap-shadow gate is 'uShadow > 0.0 && ...', the crumple
+//     block's gate and the compaction's 'uCrumpleFill > 0.0' are false, the ball shadow's
+//     'uShadow > 0.0 && uCrumpleFill > 0.0' is false, and every 'uDebug == n' is false — so flap =
+//     layers = 0.0, top = -1, flapShadow = 0.0, shell = body = 0.0 and bodyOut = 1.0 stay at
+//     their declared initialisers, exactly as the front build declares them;
+//   - a statement compiled out whole is 'front *= 1.0 - flapShadow * 0.7 * uShadow', which at
+//     flapShadow == 0.0 and uShadow == 0.0 is 'front *= 1.0 - 0.0', a multiplication by exactly
+//     1.0 — the identity for every float, NaN and infinities included.
+//
+// Every expression that consumed one of those values is kept verbatim, so the front build
+// evaluates the same operation sequence on the same operands; what changes is only that fxc now
+// sees a literal where it saw a uniform-derived value, and may fold 'x * 1.0', 'x + 0.0' or
+// 'back * 0.0 + y'. The first two are exact for every operand but the sign of a zero, and no
+// consumer can observe that sign: baseA = sheetCov * 1.0 is never -0.0 (sheetCov is a max of
+// coverages that are +0.0 or positive), and the only reads of 'a' and 'premul' are the
+// 'outA > 1e-4' test and the division under it. The third needs 'back' finite, which the P6a
+// block established above ('back is finite'): then back * 0.0 is a signed zero and adding it to
+// front * baseA * 1.0 returns that product exactly. The drop-shadow step keeps its full text
+// minus the two false branches, so at uShadowBlur == 0.0 it still evaluates the same undefined
+// smoothstep the whole program does, whatever that yields. The debug views return before the
+// composite and are simply absent. The evidence is paper-shader-early-out.gl.test.ts, which
+// renders the same requests through this program and through the whole one and compares bytes.
+// =============================================================================================
 float fieldTexelPx(vec2 pxPerUv, ivec2 texels) {
   return max(pxPerUv.x / float(texels.x), pxPerUv.y / float(texels.y));
 }
@@ -1753,12 +1807,14 @@ void main() {
   // Uniform control flow, so fwidth is legal here: one rendered pixel of antialiasing gives
   // the fold line the mechanically straight edge the whole illusion rests on.
   float remaining = 1.0;
+#if !PAPER_FRONT_BUILD
   for (int i = 0; i < MAX_FOLDS; i++) {
     if (i >= uFoldCount) break;
     float s = dot(p, uFolds[i].xy) - uFolds[i].z;
     float w = max(fwidth(s), 1e-6) * 0.5;
     remaining = min(remaining, 1.0 - smoothstep(-w, w, s));
   }
+#endif
 
   // --- 2. is a flap lying on top of it? ------------------------------------
   // Twelve folds means up to twelve mask samples, so the loop is gated hard, twice.
@@ -1775,26 +1831,31 @@ void main() {
   // cut the sheet under it, and those overhangs are the ball's protruding points.
   // In hull mode the envelope is the polygon's own field: nothing reaches past it but the
   // jitter arc and the slack, which is what uFlapReach is set to there.
+#if !PAPER_FRONT_BUILD
   float envelope = (uEdgeMode == 0) ? (sampleLoose(uv) + uLoosePush) : samplePaper(uv);
   bool flapPossible =
     uFoldCount > 0 &&
     survivesAfter(p, -1, uSlack) &&
     envelope > -uFlapReach;
+#endif
 
   float creaseDist = 1e9;
   float layers = 0.0;
   vec2 facetN = vec2(0.0);
   float flap = 0.0;
   int top = -1;
+#if !PAPER_FRONT_BUILD
   if (flapPossible) {
     flap = flapCoverage(p, creaseDist, layers, facetN, top);
   }
+#endif
 
   // The shadow the flaps above the visible layer throw onto it — the remaining sheet or a flap
   // lower in the stack. Soft, offset and widened by how high the caster sits; see flapShadowAt.
   // Its own gate is the flap gate widened by the furthest the shadow reaches, so a flap just
   // past the last fold line can still shade the sheet next to it.
   float flapShadow = 0.0;
+#if !PAPER_FRONT_BUILD
   float shadowReach = 18.0 * uPxScale;
   bool shadowPossible =
     uFoldCount > 0 &&
@@ -1805,6 +1866,7 @@ void main() {
   if (uShadow > 0.0 && shadowPossible && top < uFoldCount - 1 && uCrumpleFill < 0.999) {
     flapShadow = flapShadowAt(p, top);
   }
+#endif
 
   // --- 3. shading ----------------------------------------------------------
   // (nUv and the handling wear are computed at the top of main since P6a.)
@@ -1964,7 +2026,9 @@ void main() {
   // The only thing folding is allowed to do to a still-visible pixel: darken it under a flap
   // edge. Geometry never moves. Tied to the shadow knob so that turning shadows off makes the
   // "visible artwork is identical to pose 0" property exact and testable.
+#if !PAPER_FRONT_BUILD
   front *= 1.0 - flapShadow * 0.7 * uShadow;
+#endif
 
   // The reverse of the sheet: blank, near-white, never the artwork. The SAME material as the
   // front — paper colour, fibre grain, the slight sheet relief — in both edge modes, so a flap
@@ -1974,7 +2038,11 @@ void main() {
   float flapTone = facetShade(facetN, layers);
   // Crisp creases along the fold lines that actually creased this layer, and the shadow of the
   // flaps above it. Both tied to the knobs the identity check switches off.
+#if PAPER_FRONT_BUILD
+  float creaseM = 1.0; // foldCreases at uFoldCount == 0: the loop runs 0 times and m stays 1.0
+#else
   float creaseM = foldCreases(p, top, layers);
+#endif
   float shadowM = 1.0 - flapShadow * 0.7 * uShadow;
   vec3 back = uPaperBack * grainFactor * relief * flapTone * creaseM * shadowM;
 
@@ -1995,6 +2063,7 @@ void main() {
   // Sheets of paper stacked at this position: the base sheet, if the folds have not taken it
   // away, plus every flap lying on top of it. One sheet is flat paper and can still be showing
   // artwork; four is a crumple.
+#if !PAPER_FRONT_BUILD
   float stack = remaining + layers;
   // Stacked-sheet count alone cannot separate a single flap lying on sheet the folds have
   // already removed (remaining 0, layers 1) from bare artwork (remaining 1, layers 0): both are
@@ -2026,6 +2095,7 @@ void main() {
   // 0.72 at pose 4, 1 at the ball — so the plates come in progressively rather than switching on.
   float mosaicK = clamp((uCrumpleFill - 0.2) / 0.8, 0.0, 1.0);
   float crumple = 0.0;
+#endif
   float shell = 0.0;
 
   // The sheet's front, where it still lies here. Needed by the compaction gate below as well
@@ -2053,10 +2123,13 @@ void main() {
   //
   // The frontier is the tear's low and mid octaves sampled along the unit circle of the ball
   // frame: periodic in angle by construction, and never a clean circle.
+#if !PAPER_FRONT_BUILD
   float ballRamp = uCrumpleFill * uCrumpleFill;
   float bodyIn = 0.0;
+#endif
   float bodyOut = 1.0;
   float body = 0.0;
+#if !PAPER_FRONT_BUILD
   vec2 b = toBall(p);
   float rB = length(b);
   float aaB = uAaPx / max(uBallR * uPlanePx, 1e-4);
@@ -2150,6 +2223,7 @@ void main() {
       back = mix(back, plate, crumple);
     }
   }
+#endif
 
   // The reverse side — flap, shell or body — lies ON the remaining sheet, so this is a
   // premultiplied "over", not a mix. A mix with alpha = max(sheet, flap) lets the artwork at a
@@ -2183,16 +2257,19 @@ void main() {
     float shadowMask = smoothstep(-uShadowBlur, uShadowBlur * 0.25, dS);
     // The scrap's shadow follows the scrap, so the folds cut it away too.
     float shadowRemaining = 1.0;
+#if !PAPER_FRONT_BUILD
     for (int i = 0; i < MAX_FOLDS; i++) {
       if (i >= uFoldCount) break;
       shadowRemaining = min(shadowRemaining, 1.0 - step(0.0, dot(toPlane(sUv), uFolds[i].xy) - uFolds[i].z));
     }
+#endif
 
     // Once the compaction is under way the shadow follows the ball rather than the sheet: the
     // sheet's shadow is faded out by the same frontier that fades the sheet, and the plate
     // outline's own shadow takes over, fully so at fill 1 — the fold polygon's shadow is smaller
     // than the ball where the rim plates stick out and cut by fold lines the ball no longer has.
     float shadowA = shadowMask * shadowRemaining;
+#if !PAPER_FRONT_BUILD
     if (uShadow > 0.0 && uCrumpleFill > 0.0) {
       vec2 bS = toBall(toPlane(sUv));
       float rS = length(bS);
@@ -2211,6 +2288,7 @@ void main() {
       }
       shadowA = max(shadowA * fadeS, ballS * ballK);
     }
+#endif
 
     // A flap can land outside the base scrap and past the fold lines that cut it — that is
     // exactly how the protruding points happen — so the alpha above is the union of what is left
@@ -2220,6 +2298,7 @@ void main() {
   float outA = a + sa;
   vec3 rgb = (outA > 1e-4) ? premul / outA : vec3(0.0);
 
+#if !PAPER_FRONT_BUILD
   if (uDebug == 1) { outColor = vec4(fieldViz(sampleTight(uv)), 1.0); return; }
   if (uDebug == 2) { outColor = vec4(fieldViz(sampleLoose(uv)), 1.0); return; }
   if (uDebug == 3) {
@@ -2262,6 +2341,7 @@ void main() {
     outColor = vec4(fieldViz(baseField(uv)), 1.0);
     return;
   }
+#endif
   outColor = vec4(rgb, outA);
 }`
 

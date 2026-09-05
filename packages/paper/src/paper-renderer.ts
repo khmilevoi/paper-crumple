@@ -113,6 +113,16 @@ export interface FrontRenderRequest {
 
 export interface PaperRenderer {
   renderFront(tiles: MountedTiles, r: FrontRenderRequest): Err | undefined
+  /**
+   * Resolves once `PAPER_FS` has linked — `undefined`, or the link failure (P7, `Program.ready()`,
+   * spec 5.2 amendment). `createPaperRenderer` no longer waits for the driver: on ANGLE/D3D11 the
+   * HLSL compile ran 42–48 s cold inside `mount()` before P7, seconds after it, and neither belongs
+   * on the main thread. `paperSheet`'s `source()` awaits this at its start, so `build()` — and
+   * `renderFront` on the library's own path — always finds a linked program; a `/unstable` caller
+   * driving `renderFront` directly should await it too, or accept that the first draw blocks on
+   * the link exactly as `mount()` used to.
+   */
+  ready(): Promise<Err | undefined>
   dispose(): void
 }
 
@@ -318,6 +328,7 @@ export function createPaperRenderer(ctx: GlContext): Err | PaperRenderer {
 
   return {
     renderFront,
+    ready: () => program.ready(),
     dispose() {
       program.dispose()
     },
