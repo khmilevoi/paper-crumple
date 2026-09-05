@@ -357,4 +357,69 @@ describe('the ingest lane at stage level (spec §8.10)', () => {
     expect(stage.usage().fronts).toBe(2)
     stage.dispose()
   })
+
+  it("prepare() during replace()'s build joins the replace instead of re-sourcing the old image (S13, spec §8.5/§8.8/§8.10)", async () => {
+    const g = sourceGate()
+    const sheet = fakeSheet({ gate: g.gate })
+    const timers = createFakeTimers()
+    const stage = await createStage({ ...base(), sheet, present: 'blit' }, stageEnv({ timers }))
+    if (stage instanceof Error || isAborted(stage)) return expect.fail('stage refused')
+    const a = await stage.add(asBitmap(fakeBitmap({ width: 64 })), { key: 'a', pin: true })
+    if (a instanceof Error || isAborted(a)) return expect.fail('add refused')
+
+    g.close()
+    const replaced = stage.replace('a', asBitmap(fakeBitmap({ width: 90 })))
+    await flush()
+    // `replace`'s job is suspended inside `source()`. Its D3 release has already handed the old
+    // handle back and cleared the front, so a demand on `a` now has nothing of its own to build
+    // from: without the S13 fix `rebuildFront` tries the released handle, reads
+    // `SourceExpiredError`, and schedules a re-source of the OLD bitmap that lands after the
+    // replace and installs the old image under a resolved `replace()`.
+    expect(g.pending).toBe(1)
+    const prep = stage.prepare('a')
+    await flush()
+    g.open()
+    const [prepared, sprite] = await Promise.all([prep, replaced])
+    if (sprite instanceof Error || isAborted(sprite)) return expect.fail('replace refused')
+    expect(sprite.key).toBe('a')
+    expect(prepared).toBe(sprite)
+    // Two sources and no third: the old image was never re-sourced behind the replace, and the
+    // replacement's handle is the one still anybody's.
+    expect(sheet.calls.source.map((c) => c.bitmap.width)).toEqual([64, 90])
+    const released = new Set(sheet.calls.release.map((h) => h.id))
+    expect([1, 2].filter((id) => !released.has(id))).toEqual([2])
+    expect(stage.usage().fronts).toBe(1)
+    stage.dispose()
+  })
+
+  it("remove() during replace()'s build releases the halves the replace built and leaves nothing under the key (S13, spec §8.5/§8.8)", async () => {
+    const g = sourceGate()
+    const sheet = fakeSheet({ gate: g.gate })
+    const timers = createFakeTimers()
+    const stage = await createStage({ ...base(), sheet, present: 'blit' }, stageEnv({ timers }))
+    if (stage instanceof Error || isAborted(stage)) return expect.fail('stage refused')
+    const a = await stage.add(asBitmap(fakeBitmap({ width: 64 })), { key: 'a', pin: true })
+    if (a instanceof Error || isAborted(a)) return expect.fail('add refused')
+
+    g.close()
+    const replaced = stage.replace('a', asBitmap(fakeBitmap({ width: 90 })))
+    await flush()
+    expect(g.pending).toBe(1)
+    // Unattached, so `remove` takes the record out from under the running replace.
+    expect(stage.remove('a')).toBeUndefined()
+    g.open()
+    const outcome = await replaced
+    expect(outcome).toBeInstanceOf(Error)
+    expect((outcome as Error).message).toContain('removed')
+    // The handle and the front the job built went straight back, and the LRU never saw the key.
+    expect(sheet.calls.source.map((c) => c.bitmap.width)).toEqual([64, 90])
+    const released = new Set(sheet.calls.release.map((h) => h.id))
+    expect([1, 2].filter((id) => !released.has(id))).toEqual([])
+    expect(stage.get('a')).toBeUndefined()
+    expect(stage.usage()).toMatchObject({ fronts: 0, handles: 0 })
+    // The key is free: an add() under it is not refused as live.
+    const again = await stage.add(asBitmap(fakeBitmap({ width: 70 })), { key: 'a', pin: true })
+    expect(again instanceof Error || isAborted(again)).toBe(false)
+    stage.dispose()
+  })
 })

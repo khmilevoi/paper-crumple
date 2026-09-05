@@ -1889,6 +1889,13 @@ function buildStage(p: StageParts): BuiltStage {
     return record.sprite
   }
 
+  /**
+   * The re-point of a live key (§4.1). Drains the key's re-source, releases the source-derived
+   * halves (D3), then rebuilds through the lane (§8.10). While the rebuild is out the key's
+   * `resourcing` entry is the replace itself, so a demand on the half-released record joins it
+   * instead of building from a released handle (§8.5/§8.8); and a `remove()` inside that window
+   * wins — the halves the rebuild produced go back, and nothing lands under the removed key.
+   */
   async function replace(
     key: string,
     src: SpriteSource,
@@ -1966,6 +1973,26 @@ function buildStage(p: StageParts): BuiltStage {
     p.o.sheet.release(record.handle)
     p.o.motion.release(record.clip)
 
+    // §8.5/§8.8/§8.10 — for as long as `buildSprite` runs, this key's entry in `resourcing` is
+    // the replace itself. The window is wide — the supplier, the lane's queue, `source()`,
+    // `load()`, `build()` — and the record inside it is half-released: the handle above is the
+    // slot's again and the front is null. A `prepare(k)`, or a front-class `set()` on a sprite a
+    // view shows, reaches `rebuildFront` there, and without the entry that is `build()` on the
+    // released handle: either a front built from it that this function then overwrites without
+    // a `releaseFront` (a leak), or `SourceExpiredError` and a `resourceFront` that re-sources
+    // the OLD `record.source` — promoted to `visible` by `prepare`, ahead of a background
+    // replace — so that, landing after the replace, `resourceIngest` releases the new halves
+    // and installs the old image under a `replace()` that has already resolved. With the entry
+    // `rebuildFront` returns early, `resourceFront` joins this promise and `prepare` waits on it
+    // the way it waits on a re-source (§8.5.1) — the mechanism the drain above relies on, from
+    // the other side. The promise never rejects (`buildSprite` returns its failures), which is
+    // what an entry in `resourcing` requires, and it settles with the failure so a joined
+    // `prepare` can name it.
+    let settleReplace: (failed: Error | undefined) => void = () => {}
+    const replacing = new Promise<Error | undefined>((resolve) => {
+      settleReplace = resolve
+    })
+    resourcing.set(key, replacing)
     const built = await buildSprite(
       key,
       source,
@@ -1973,19 +2000,43 @@ function buildStage(p: StageParts): BuiltStage {
       // §8.10 — a sprite a view is showing is rebuilt ahead of background work.
       viewsShowing(key).size > 0 ? 'visible' : 'background',
     )
+    if (resourcing.get(key) === replacing) resourcing.delete(key)
+    // `remove(k)` — or `remove(k)` and a fresh `add(k)` — inside the window: the record this
+    // call drained and released is no longer the one under the key. `remove()` handed the
+    // record's halves back already, so nothing of the record's is left to release here, and
+    // nothing of the record's may be deleted either — the key may be another record's now.
+    const alive = p.sprites.get(key) === record
     if (isAborted(built)) {
       // The D3 release above already handed this record's handle and clip back to the slots, so
       // the record cannot outlive an abort: a later `remove(key)` would release both a second
       // time, and `prepare(key)` would build a front from a released handle.
-      p.sprites.delete(key)
-      p.lru.remove(key)
-      rebuildQueue.forget(key)
+      if (alive) {
+        p.sprites.delete(key)
+        p.lru.remove(key)
+        rebuildQueue.forget(key)
+      }
+      settleReplace(undefined)
       return ABORTED
     }
     if (built instanceof Error) {
-      p.sprites.delete(key)
-      p.lru.remove(key)
+      if (alive) {
+        p.sprites.delete(key)
+        p.lru.remove(key)
+      }
+      settleReplace(built)
       return p.policy.returned(built, null)
+    }
+    if (!alive) {
+      // The halves the job built are nobody's: back to their slots, and the LRU never learns a
+      // removed key.
+      if (built.front !== null) p.o.sheet.releaseFront(built.front)
+      p.o.sheet.release(built.handle)
+      p.o.motion.release(built.clip)
+      const removed = new SheetError(
+        `replace('${key}'): the sprite under that key was removed while its replacement was built; add() or replace() again`,
+      )
+      settleReplace(removed)
+      return p.policy.returned(removed, null)
     }
 
     // The key, the pins and the attachments survive, so a reference the application holds does
@@ -1999,6 +2050,7 @@ function buildStage(p: StageParts): BuiltStage {
     if (record.pinned) p.lru.pin(key)
     for (let i = 0; i < record.attachCount; i += 1) p.lru.attach(key)
     warnReplaced(key)
+    settleReplace(undefined)
     return record.sprite
   }
 
