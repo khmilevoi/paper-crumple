@@ -255,4 +255,58 @@ describe('the ingest lane at stage level (spec §8.10)', () => {
     expect(results.every((r) => isAborted(r))).toBe(true)
     expect(bitmaps.map((b) => b.closes)).toEqual(Array.from({ length: 30 }, () => 1))
   })
+
+  it('a re-source whose supplier rejects (a breached §10.8 boundary) does not strand the key: prepare() resolves to an Error and the next prepare() retries', async () => {
+    let fetches = 0
+    const healthy = () => ({
+      ok: true,
+      status: 200,
+      headers: { get: () => null },
+      blob: async () => new Blob(['png'], { type: 'image/png' }),
+    })
+    // The second response is hostile: reading `ok` throws (a property of `null` — no `throw`
+    // statement is needed to breach §10.8 from a consumer object), outside every boundary the url
+    // arm wraps, so `resupply()` — and with it `resource()` — rejects instead of returning.
+    const hostile = () => ({
+      get ok(): boolean {
+        return (null as unknown as { ok: boolean }).ok
+      },
+      status: 200,
+      headers: { get: () => null },
+      blob: async () => new Blob(['png'], { type: 'image/png' }),
+    })
+    const stage = await createStage(
+      { ...base(), present: 'blit' },
+      stageEnv({
+        sourceEnv: {
+          fetch: async () => {
+            fetches += 1
+            return fetches === 2 ? hostile() : healthy()
+          },
+          createImageBitmap: async () => asBitmap(fakeBitmap({ width: 40, height: 30 })),
+        },
+      }),
+    )
+    if (stage instanceof Error || isAborted(stage)) return expect.fail('stage refused')
+    const errors: Error[] = []
+    stage.on('error', (e) => errors.push(e.error))
+    const a = await stage.add('/a.png', { key: 'a' })
+    if (a instanceof Error || isAborted(a)) return expect.fail('add refused')
+    // `b` takes the artwork slot; the budget drops `a`'s front, so `prepare('a')` must re-source.
+    const b = await stage.add(asBitmap(fakeBitmap()), { key: 'b', pin: true })
+    if (b instanceof Error || isAborted(b)) return expect.fail('add refused')
+    stage.budget({ bytes: 1 })
+    expect(stage.usage().fronts).toBe(1)
+
+    const first = await stage.prepare('a')
+    expect(first).toBeInstanceOf(Error)
+    expect(fetches).toBe(2)
+    // The key is not stuck: the next demand re-sources again, and this time the supplier answers.
+    const second = await stage.prepare('a')
+    expect(second instanceof Error || isAborted(second)).toBe(false)
+    expect((second as Sprite).key).toBe('a')
+    expect(fetches).toBe(3)
+    expect(stage.usage().fronts).toBe(2)
+    stage.dispose()
+  })
 })

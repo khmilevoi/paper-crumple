@@ -577,8 +577,19 @@ function buildStage(p: StageParts): BuiltStage {
     const inFlight = resourcing.get(key)
     if (inFlight !== undefined) return inFlight
     // Serialised by the lane (§8.10), not by a promise chain: the supplier runs now, and the
-    // `source()` that follows it waits its turn behind whatever the lane holds.
-    const run = resource(record)
+    // `source()` that follows it waits its turn behind whatever the lane holds. Nothing in
+    // `resource` rejects — every step returns its failure — but the supplier is a boundary a
+    // consumer injects, and a promise stored in `resourcing` that could reject would strand the
+    // key for the stage's life (`rebuildFront` deferring to it, `prepare` rejecting), so a
+    // rejection is folded into the failure it should have been.
+    const run: Promise<Error | undefined> = resource(record).then(
+      (failed) => failed,
+      (cause: unknown) =>
+        new AssetError(
+          `the re-source of '${key}' rejected instead of returning its failure (§10.8)`,
+          { cause },
+        ),
+    )
     resourcing.set(key, run)
     void run.then((failed) => {
       if (resourcing.get(key) === run) resourcing.delete(key)
