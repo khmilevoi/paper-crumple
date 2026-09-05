@@ -8,7 +8,9 @@
  *     pnpm bench:smooth -- --json path          # machine-readable output (BENCH_OUT)
  *     pnpm bench:smooth -- --iter 3             # timed storms per row, 2 by default (BENCH_ITER)
  *     pnpm bench:smooth -- --profile            # one more storm per row under the CDP profiler (BENCH_PROFILE)
- *     pnpm bench:smooth -- --gate               # the D3D11 verdict becomes an assertion (BENCH_GATE)
+ *     pnpm bench:smooth -- --check              # the D3D11 verdict becomes an assertion, so the run
+ *                                               # exits non-zero when a row misses (BENCH_CHECK;
+ *                                               # BENCH_GATE / --gate is the old spelling)
  *
  * `run.mjs` turns those flags into the environment this config reads; `-t <name>` also works,
  * since every row is a test named after itself. Build core, paper and motion first: the bench
@@ -37,7 +39,7 @@ const runId = new Date().toISOString()
 const iterations = Math.max(1, Number(process.env.BENCH_ITER ?? 2) || 2)
 const profile = process.env.BENCH_PROFILE === '1'
 const filter = process.env.BENCH_FILTER ?? ''
-const gate = process.env.BENCH_GATE === '1'
+const check = process.env.BENCH_CHECK === '1' || process.env.BENCH_GATE === '1'
 const viewport = { width: 1400, height: 900 }
 
 export default defineConfig({
@@ -47,7 +49,7 @@ export default defineConfig({
     __BENCH_GPU__: JSON.stringify(realGpu),
     __BENCH_PROFILE__: JSON.stringify(profile),
     __BENCH_FILTER__: JSON.stringify(filter),
-    __BENCH_GATE__: JSON.stringify(gate),
+    __BENCH_CHECK__: JSON.stringify(check),
   },
   test: {
     name: 'bench-smooth',

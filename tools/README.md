@@ -14,12 +14,33 @@ gitignored) and, with `--profile`, a `.cpuprofile` per scenario that `profile-su
 
 `tools/bench/smooth/` is the smoothness bench (`pnpm bench:smooth`; `BENCH_GPU=1` for ANGLE
 D3D11 as with `bench:gl`): thirty on-screen `{ canvas }` views swapping 1024² artworks in
-headless Chromium under a CDP-synthesised user — burst / stream / double-swap cadences, URL and
-pre-decoded-bitmap sources, DPR 1 and 2 — measuring main-thread tasks (CDP `Tracing` and the
-`longtask` observer), frame times, input latency and the swap outcomes against the thresholds
-its doc comment proposes for the D3D11 backend. `--filter`, `--json`, `--iter`, `--profile`
-(`.cpuprofile` per row, ranked by phase with `profile-phases.mjs`) and `--gate`; output under
-`tools/bench/out/`.
+headless Chromium under a CDP-synthesised user — `sequential` / burst-url / burst-bitmap /
+stream / double-swap cadences, plus `idle`, `burst-drag` and DPR 2 — measuring main-thread tasks
+(CDP `Tracing` and the `longtask` observer), frame times, input latency and the swap outcomes
+against the thresholds its doc comment states for the D3D11 backend. `--filter`, `--json`
+(`BENCH_OUT`), `--iter`, `--profile` (`.cpuprofile` per row, ranked by phase with
+`profile-phases.mjs`) and `--check` (`BENCH_CHECK=1`, the run exits non-zero when a D3D11 row
+misses; `--gate` is the old spelling); output under `tools/bench/out/`.
+
+**How to read a run.** Start at the `idle` row: it is the control, and if its frame p95 is not
+≈ 16.7 ms with an input max under ~20 ms the machine was busy and the whole run is contended —
+discard it rather than reading anything into the other rows. Then check each row's `probe` line:
+it is the first check of every verdict and fails unless the CDP trace actually returned tasks, the
+synthesised user was handled, the rAF recorder saw frames and the expected number of runs settled;
+a row whose `probe` failed measured nothing, and its other checks mean nothing either. Read the
+`sequential` row next — thirty awaited `add`s on a stage with no views — because its
+`sequentialIdealMs` is the floor every storm's ingest time is divided by, and the same probe runs
+per row for the row's own source kind (a bitmap ingest and a URL ingest are different numbers).
+Only then read the storm rows, from the `plan[…]` line, which is the flat per-row JSON object
+(`summaries[]` in `BENCH_OUT`) printed verbatim: `task max` and `>50` are the hard line, `p95` is
+the discriminating one (over the **work tasks**, those of 1 ms or more — sub-millisecond timer
+ticks would pin any quantile to zero), `frame p95` is what the reader actually sees, and `ok` /
+`rects` / `abort` / `waste` are the correctness columns — thirty swaps must give thirty sprites
+with thirty distinct `sprite.rect`s, and `waste` is the superseded ingest that still ran. Each row
+runs one cold storm and two timed ones and reports the better (lowest task max, then task p95), so
+compare the headline against the per-storm lines beneath it before trusting a single number; two
+whole runs, better kept, is the intended protocol. SwiftShader is report-only (spec §11): its
+columns exist so a change can be seen off the gate machine, not to be judged against a threshold.
 
 `tools/bake/` will hold the Python pack writer and its unit tests, the Blender launcher, the
 synthetic-pack generator, the JS twin writer and the `tiny` fixture. P12 creates it.

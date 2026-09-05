@@ -64,8 +64,10 @@ export interface AddStats {
   readonly failed: number
   /** Runs that settled `ABORTED` — superseded (the double-swap row's first wave). */
   readonly aborted: number
-  /** Distinct `view.frame.artwork` rects among the views that swapped — 30 distinct artworks
-   *  should give 30 distinct rects; fewer means fronts built from another sprite's field. */
+  /** Distinct `${rect.x},${rect.y},${rect.w},${rect.h}` over the sprites the **successful** adds
+   *  produced (`sprite.rect`, the silhouette's box in source pixels) — 30 distinct artworks must
+   *  give 30 distinct rects; fewer means two runs share one sprite, or a front was built from
+   *  another sprite's field (the §1.3 `burst-bitmap` regression). */
   readonly distinctRects: number
   /** Distinct pixel hashes of the swapped views' canvases once every run settled — the robust
    *  form of the same check: a front built from another sprite's artwork is another's pixels. */
@@ -112,8 +114,64 @@ export interface Verdict {
   readonly checks: readonly Check[]
 }
 
-export type Cadence = 'idle' | 'burst' | 'stream' | 'double'
+export type Cadence = 'idle' | 'sequential' | 'burst' | 'stream' | 'double'
 export type SourceKind = 'url' | 'bitmap'
+
+/**
+ * One row, one backend, flattened to the object the smooth-swap plan names as this bench's output
+ * contract (`docs/superpowers/plans/2026-09-05-smooth-swap.md`, task S0, "Interfaces — produces").
+ * Every field is taken from the better timed storm (`RowResult.best`); the nested `storms` keep
+ * everything this drops.
+ */
+export interface RowSummary {
+  /** The plan's row id — `burst-url`, `burst-bitmap`, `stream`, `double-swap`, `sequential`, plus
+   *  the extra rows this bench also runs (`idle`, `burst-drag`, `…@dpr2`). */
+  readonly row: string
+  readonly backend: 'd3d11' | 'swiftshader'
+  readonly stormMs: number
+  /** `views × the row's sequential per-add median` — see `RowResult.sequentialIdealMs`. */
+  readonly sequentialIdealMs: number
+  readonly stormRatio: number
+  /** The longest top-level main-thread task in the window, from the CDP trace. */
+  readonly longestTaskMs: number
+  /** Tasks over 50 ms in the trace; `longTasks.count` is the in-page cross-check. */
+  readonly longTasks50: number
+  /** p95 over the **work tasks** (≥ 1 ms) — see the harness doc comment. */
+  readonly taskP95Ms: number
+  readonly frameP50Ms: number
+  readonly frameP95Ms: number
+  readonly frameMaxMs: number
+  readonly dropped: number
+  readonly inputP50Ms: number
+  readonly inputP95Ms: number
+  readonly inputMaxMs: number
+  readonly inputGapMaxMs: number
+  /**
+   * `source` is **wall-clock inclusive** (`sheet.source` entry → settle, its awaits included), so
+   * it overlaps the others and is not a term of an additive split. `build`, `draw` and `blit` are
+   * synchronous self+callee time. `other` is the rest of the window's main-thread busy time:
+   * `tasks.totalMs − (build + draw + blit)` — `source`'s own on-thread cost lives in there.
+   */
+  readonly phases: {
+    readonly source: number
+    readonly build: number
+    readonly draw: number
+    readonly blit: number
+    readonly other: number
+  }
+  readonly outcomes: {
+    readonly ok: number
+    readonly error: number
+    readonly aborted: number
+    readonly distinctRects: number
+    /** Not in the plan's list; the robust twin of `distinctRects`, 0 for a row with no views. */
+    readonly distinctPixels: number
+    /** `sheet.source` calls beyond one per wanted image — the `double-swap` row's waste. */
+    readonly wastedIngests: number
+  }
+  /** `undefined` on SwiftShader and for `idle` (report-only, spec §11). */
+  readonly pass?: boolean
+}
 
 export interface RowResult {
   readonly name: string
@@ -129,17 +187,26 @@ export interface RowResult {
   readonly frontSize: string
   /** The 30 `stage.mount` calls, sequential, first to last — the page-load number. */
   readonly mountMs: number
-  /** One `stage.add` of the row's source kind, alone on the idle stage: median of three. */
+  /** Median per-add time of the row's own **sequential probe**: `views` awaited `stage.add`s of
+   *  the row's source kind, one after another, before the storms. The plan's `sequential` ideal
+   *  measured for this row's source kind. */
   readonly ingestMs: number
   readonly ingestUrlMs: number
   readonly ingestBitmapMs: number
-  /** The sequential ideal: `max(issue span, views × ingestMs)`. */
+  /** `views × ingestMs` — the plan's `sequentialIdealMs`: the same thirty images ingested one at
+   *  a time. Cadence-independent, so it is the throughput floor a storm is measured against. */
+  readonly sequentialIdealMs: number
+  /** What `stormRatio` divides by: `max(issue span, sequentialIdealMs)`. For `stream` the issue
+   *  span (2.9 s) dominates, so its ratio is ~1 by construction and the check bites only when the
+   *  stream falls behind; for a burst the two are the same number. */
   readonly idealMs: number
   readonly storms: readonly StormResult[]
   /** Index into `storms` of the timed storm with the lowest task max, then task p95. */
   readonly best: number
   /** Only on the D3D11 backend and only for the swapping rows; SwiftShader is report-only. */
   readonly verdict?: Verdict
+  /** The plan's flat per-row contract, over the better timed storm. */
+  readonly summary: RowSummary
   readonly note?: string
 }
 
@@ -164,8 +231,11 @@ export interface SmoothMeta {
 
 export interface SmoothFile {
   readonly runId: string
+  readonly backend: 'd3d11' | 'swiftshader'
   readonly meta: SmoothMeta
   readonly rows: readonly RowResult[]
+  /** The flat contract, one object per row — the same objects as `rows[].summary`. */
+  readonly summaries: readonly RowSummary[]
 }
 
 /** What `smoothInput('start', plan)` drives: a Lissajous sweep over the rect, at `hz`. */

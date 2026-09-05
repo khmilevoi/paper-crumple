@@ -59,12 +59,15 @@ export function rowBlock(r: RowResult): string {
       ? 'report only'
       : r.verdict.pass
         ? 'PASS'
-        : `FAIL ${r.verdict.checks
+        : // Not "value > limit": `adds ok` and `distinct rects` fail by falling *short* of theirs.
+          `FAIL ${r.verdict.checks
             .filter((c) => !c.pass)
-            .map((c) => `${c.name} ${c.value.toFixed(1)} > ${c.limit}`)
+            .map((c) => `${c.name} ${c.value.toFixed(1)} (limit ${c.limit})`)
             .join(', ')}`
+  const q = r.summary
   const lines = [
-    `${r.name}  front ${r.frontSize} dpr ${r.dprSeen}  mount ${ms(r.mountMs)} ms  ingest url ${ms(r.ingestUrlMs)} bitmap ${ms(r.ingestBitmapMs)} ideal ${ms(r.idealMs)}  ->  ${verdict}`,
+    `${r.name} [${q.row}]  front ${r.frontSize} dpr ${r.dprSeen}  mount ${ms(r.mountMs)} ms  ingest url ${ms(r.ingestUrlMs)} bitmap ${ms(r.ingestBitmapMs)}` +
+      `  seqIdeal ${ms(r.sequentialIdealMs)} ideal ${ms(r.idealMs)}  ->  ${verdict}`,
     `  best #${s.iteration}: storm ${ms(s.stormMs)} ingest ${ms(s.ingestStormMs)} adopt ${ms(s.lastAdoptMs)} ratio ${ms(s.stormRatio, 5, 2)}` +
       ` | tasks work ${s.tasks.n}/${s.tasks.all} p50 ${ms(s.tasks.p50, 5)} p95 ${ms(s.tasks.p95, 6)} p95w ${ms(s.tasks.p95Weighted, 6)} max ${ms(s.tasks.max, 6)} (>50: ${s.tasks.over50}; longtask ${s.longTasks.count} max ${ms(s.longTasks.maxMs)})` +
       ` | frame p50 ${ms(s.frames.p50, 5)} p95 ${ms(s.frames.p95, 6)} max ${ms(s.frames.max, 6)} drop ${s.frames.dropped}` +
@@ -74,6 +77,12 @@ export function rowBlock(r: RowResult): string {
       ` | adds ok ${s.adds.ok} fail ${s.adds.failed} abort ${s.adds.aborted} rects ${s.adds.distinctRects} fronts ${s.adds.distinctPixels} waste ${s.wastedIngests}` +
       (s.adds.messages.length === 0 ? '' : ` | ${s.adds.messages.join(' | ')}`),
     ...r.storms.map(stormLine),
+    // The plan's flat contract, exactly as it lands in the JSON (`summaries[]`).
+    `  plan[${q.row}/${q.backend}]: storm ${ms(q.stormMs)} seqIdeal ${ms(q.sequentialIdealMs)} ratio ${ms(q.stormRatio, 5, 2)}` +
+      ` task max ${ms(q.longestTaskMs, 6)} >50 ${q.longTasks50} p95 ${ms(q.taskP95Ms, 6)}` +
+      ` | frame ${ms(q.frameP50Ms, 5)}/${ms(q.frameP95Ms, 6)}/${ms(q.frameMaxMs, 6)} drop ${q.dropped}` +
+      ` | input ${ms(q.inputP50Ms, 5)}/${ms(q.inputP95Ms, 6)}/${ms(q.inputMaxMs, 6)} gap ${ms(q.inputGapMaxMs, 6)}` +
+      ` | ok ${q.outcomes.ok} err ${q.outcomes.error} abort ${q.outcomes.aborted} rects ${q.outcomes.distinctRects} waste ${q.outcomes.wastedIngests}`,
     ...(r.note === undefined ? [] : [`  note: ${r.note}`]),
   ]
   return lines.join('\n') + '\n'
@@ -191,7 +200,16 @@ export function smoothCommands(o: { outPath: string; profileDir: string; runId: 
     }
     const byName = new Map(previous.map((r) => [r.name, r] as const))
     for (const r of rows) byName.set(r.name, r)
-    const file: SmoothFile = { runId: o.runId, meta, rows: [...byName.values()] }
+    const kept = [...byName.values()]
+    const file: SmoothFile = {
+      runId: o.runId,
+      backend: meta.realGpu ? 'd3d11' : 'swiftshader',
+      meta,
+      rows: kept,
+      // The plan's flat contract, lifted to the top of the file so a reader (or S1/S2's
+      // acceptance) never has to walk into `storms[best]` for it.
+      summaries: kept.map((r) => r.summary),
+    }
     writeFileSync(o.outPath, JSON.stringify(file, null, 2) + '\n')
     process.stdout.write(
       `\n${meta.renderer}\n${meta.realGpu ? 'D3D11 — thresholds apply' : 'SwiftShader — report only'}; ` +
