@@ -53,7 +53,7 @@ function stormLine(s: StormResult): string {
     ` | task>50 ${String(s.longTasks.count).padStart(2)} max ${ms(s.longTasks.maxMs)} p95 ${ms(s.tasks.p95, 6)} n ${String(s.tasks.n).padStart(4)}` +
     ` | frame p95 ${ms(s.frames.p95, 6)} max ${ms(s.frames.max, 6)} drop ${String(s.frames.dropped).padStart(3)}` +
     ` | input p95 ${ms(s.input.latency.p95, 6)} max ${ms(s.input.latency.max, 6)} gap ${ms(s.input.longestGapMs, 6)}` +
-    ` | adds ok ${s.adds.ok} fail ${s.adds.failed} abort ${s.adds.aborted} fronts ${s.adds.distinctPixels} waste ${s.wastedIngests} err ${s.errors}`
+    ` | adds ok ${s.adds.ok} fail ${s.adds.failed} abort ${s.adds.aborted} fronts ${s.adds.distinctPixels} waste ${s.wastedIngests}/${s.completedWastedIngests} err ${s.errors}`
   )
 }
 
@@ -82,7 +82,7 @@ export function rowBlock(r: RowResult): string {
       ` | input p50 ${ms(s.input.latency.p50, 5)} p95 ${ms(s.input.latency.p95, 6)} max ${ms(s.input.latency.max, 6)} gap ${ms(s.input.longestGapMs, 6)} (handled ${s.input.handled}/${s.input.sent}, ack p95 ${ms(s.input.ack.p95, 5)})`,
     `  phases: source ${ms(p.sourceWallMs)} (${p.sourceCalls ?? 0}) readPixels ${ms(p.readPixelsMs)} (${p.readPixelsCalls ?? 0}) build ${ms(p.buildMs ?? p.buildWallMs)} draw ${ms(p.drawMs)} (${p.drawCalls ?? 0})` +
       ` blit ${ms(p.blitMs)} (${p.blitCalls ?? 0}) rect ${ms(p.rectMs)} (${p.rectCalls ?? 0}) upload ${ms(p.uploadMs)} shader ${ms(p.shaderMs)} sync ${ms(p.syncMs)} decodes ${p.decodeCalls ?? 0}` +
-      ` | adds ok ${s.adds.ok} fail ${s.adds.failed} abort ${s.adds.aborted} rects ${s.adds.distinctRects} fronts ${s.adds.distinctPixels} waste ${s.wastedIngests}` +
+      ` | adds ok ${s.adds.ok} fail ${s.adds.failed} abort ${s.adds.aborted} rects ${s.adds.distinctRects} fronts ${s.adds.distinctPixels} waste ${s.wastedIngests}/${s.completedWastedIngests}` +
       (s.adds.messages.length === 0 ? '' : ` | ${s.adds.messages.join(' | ')}`),
     // Where the main thread waited on the GPU process, and what the longest task spent its time in.
     `  stalls: getError ${stall(s.stalls.getError)} readback ${stall(s.stalls.readback)} waits ${stall(s.stalls.waits)}` +
@@ -103,7 +103,7 @@ export function rowBlock(r: RowResult): string {
       ` task max ${ms(q.longestTaskMs, 6)} >50 ${q.longTasks50} p95 ${ms(q.taskP95Ms, 6)}` +
       ` | frame ${ms(q.frameP50Ms, 5)}/${ms(q.frameP95Ms, 6)}/${ms(q.frameMaxMs, 6)} drop ${q.dropped}` +
       ` | input ${ms(q.inputP50Ms, 5)}/${ms(q.inputP95Ms, 6)}/${ms(q.inputMaxMs, 6)} gap ${ms(q.inputGapMaxMs, 6)}` +
-      ` | ok ${q.outcomes.ok} err ${q.outcomes.error} abort ${q.outcomes.aborted} rects ${q.outcomes.distinctRects} waste ${q.outcomes.wastedIngests}`,
+      ` | ok ${q.outcomes.ok} err ${q.outcomes.error} abort ${q.outcomes.aborted} rects ${q.outcomes.distinctRects} waste ${q.outcomes.wastedIngests}/${q.outcomes.completedWastedIngests}`,
     ...(r.note === undefined ? [] : [`  note: ${r.note}`]),
   ]
   return lines.join('\n') + '\n'

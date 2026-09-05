@@ -17,7 +17,10 @@ that fails (`WAIT_FAILED`, a lost context) takes that fallback too, and a `dispo
 readback is in flight answers a `SheetError` instead of a handle. Torn mode reads the field once
 per add where it read it twice. Abort check point 2 (spec §10.5) is the fence wait: a
 signal fired while the readback is in flight answers `ABORTED` on the next turn, with the fence
-deleted and no pack buffer left bound.
+deleted and no pack buffer left bound. On an injected (consumer) context both halves of the
+readback leave the consumer's own `PIXEL_PACK_BUFFER` binding null — the issue at once, the
+completion in a later task — because §5.1's restore set does not carry that binding; a consumer
+that keeps a pack buffer bound across a `source()` rebinds it.
 
 Observable timing: `source()` — and so `stage.add()` — now resolves at least one macrotask after
 the call where it used to resolve on a microtask, and on a busy GPU it resolves when the readback

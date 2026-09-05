@@ -349,12 +349,15 @@ export function App(): ReactNode {
       const options = { duration: duration ?? SWAP_DURATION_MS, signal: controller.signal }
       // `prefetchSamples` put the other samples on the stage at idle under their own ids
       // (`stage.ts`), so the sprite this click wants may already exist: `crumpleTo` then folds
-      // straight to it and the swap pays no ingest at all. Everything with no prefetched sprite
-      // behind it — the deliberately broken URL, a dropped file, a prefetch that failed or that
-      // the LRU evicted — falls back to `swapTo`, which is `add` + `crumpleTo(pending)` and does
-      // exactly what this panel did before. Both settle the same `SwapResult`, so nothing below
-      // has to know which one ran.
-      const ready = key === undefined ? undefined : live.built.stage.get(key)
+      // straight to it and the swap pays no ingest at all. A prefetch still in flight is its
+      // promise (`live.prefetched`): `crumpleTo` holds it, which promotes the add to the head of
+      // the lane, and adopts it when it lands — no second ingest, where `swapTo` would queue one
+      // of the same image behind it. Everything with no prefetch behind it — the deliberately
+      // broken URL, a dropped file, a prefetch that failed — falls back to `swapTo`, which is
+      // `add` + `crumpleTo(pending)` and does exactly what this panel did before. All three
+      // settle the same `SwapResult`, so nothing below has to know which one ran.
+      const ready =
+        key === undefined ? undefined : (live.built.stage.get(key) ?? live.prefetched.get(key))
       const run = ready === undefined ? view.swapTo(src, options) : view.crumpleTo(ready, options)
       runRef.current = run
       const r = await run

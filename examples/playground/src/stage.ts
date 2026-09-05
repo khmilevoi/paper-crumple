@@ -30,6 +30,8 @@ export interface MountedHero {
   readonly addMs: number
   /** How long the whole mount took: add + view + show. */
   readonly mountMs: number
+  /** The prefetches `prefetchSamples` started and has not seen settle — the click holds one. */
+  readonly prefetched: Prefetched
 }
 
 export interface FrameHeroRequest {
@@ -100,6 +102,9 @@ function atIdle(fn: () => void): void {
   globalThis.setTimeout(fn, PREFETCH_IDLE_FALLBACK_MS)
 }
 
+/** The prefetches still in flight, by sample id — each entry lives as long as its add is pending. */
+export type Prefetched = ReadonlyMap<string, Promise<pc.Sprite | Error | pc.Aborted>>
+
 /**
  * Warm the other five samples into the stage once the hero is up, so that clicking "swap" costs a
  * fold and nothing else.
@@ -107,31 +112,41 @@ function atIdle(fn: () => void): void {
  * `stage.add()` enters the ingest lane in its **background** class (spec §8.10, `stage.ts`'s
  * `add` → `addAs(…, 'background')`), so these never run ahead of a front a shown view needs, and
  * the lane yields to the platform scheduler between a job's phases — five ingests in the
- * background do not become one long task. When the reader then clicks, `App.tsx` asks
- * `stage.get(id)` for the sprite: a landed prefetch makes the swap a `crumpleTo` on a resident
- * sprite with no ingest left to pay for, and a prefetch still in flight is promoted to the head of
- * the lane the moment the `crumpleTo` holds its promise (§4.5's `hold`) — so the click is never
- * slower for having prefetched.
+ * background do not become one long task. The promises are kept, and that is the point: when the
+ * reader clicks, `App.tsx` asks `stage.get(id)` for a landed prefetch — a `crumpleTo` on a
+ * resident sprite, no ingest left to pay for — and, failing that, this map for one still in
+ * flight, whose promise the `crumpleTo` holds (§4.5's `hold`): the add is promoted to the head of
+ * the lane and adopted when it lands, with no second ingest. `view.swapTo(url)` on a key whose
+ * prefetch is in flight would queue a second ingest of the same image behind the running one, so
+ * the click takes it only for a key that was never prefetched, or whose prefetch failed.
  *
  * Keyed on `sample.id`, the same key `mountHero` uses, and the mounted sample is skipped: `add()`
  * on a live key is refused by design (§4.1) and would only fill the status pill.
  *
- * Fire and forget on purpose. A prefetch that fails, or that the LRU later evicts, leaves
- * `stage.get(id)` empty and the click falls back to `view.swapTo(url)` — exactly what the
- * playground did before.
+ * An entry is dropped the moment its add settles: from there `stage.get(id)` is the truth — the
+ * sprite (whose front the LRU may drop and `crumpleTo` rebuilds), or nothing for an add that
+ * failed, which sends the click to `view.swapTo(url)` — exactly what the playground did before.
  */
-export function prefetchSamples(built: BuiltStage, mounted: Sample, signal: AbortSignal): void {
+export function prefetchSamples(
+  built: BuiltStage,
+  mounted: Sample,
+  signal: AbortSignal,
+): Prefetched {
+  const pending = new Map<string, Promise<pc.Sprite | Error | pc.Aborted>>()
   const rest = SAMPLES.filter((s) => s.id !== mounted.id)
-  if (rest.length === 0) return
+  if (rest.length === 0) return pending
   atIdle(() => {
     // The stage is disposed on unmount, and a disposed stage answers an Error rather than the
     // `ABORTED` the signal check further in would give; asking the signal first keeps a
     // torn-down build silent.
     if (signal.aborted) return
     for (const sample of rest) {
-      void built.stage.add(sample.url, { key: sample.id, signal })
+      const add = built.stage.add(sample.url, { key: sample.id, signal })
+      pending.set(sample.id, add)
+      void add.then(() => pending.delete(sample.id))
     }
   })
+  return pending
 }
 
 function heroCanvas(built: BuiltStage, slot: HTMLElement): HTMLCanvasElement | Error {
@@ -178,7 +193,7 @@ export async function mountHero(
     if (sprite === pc.ABORTED) return pc.ABORTED
     if (sprite instanceof Error) return sprite
     const addMs = performance.now() - addedAt
-    prefetchSamples(built, sample, signal)
+    const prefetched = prefetchSamples(built, sample, signal)
 
     const view = built.stage.view({ rect: { x: 0, y: 0, w: side, h: side }, tag: sample.id })
     if (view instanceof Error) return view
@@ -187,7 +202,7 @@ export async function mountHero(
     // The frame exists once the view shows a resident front, so the box is set after `show()`
     // and the surface is a fixed square that no CSS box can resize — one draw is enough here.
     frameHero({ view, slot, canvas, cssPx: built.artworkCssPx })
-    return { view, sprite, canvas, addMs, mountMs: performance.now() - startedAt }
+    return { view, sprite, canvas, addMs, mountMs: performance.now() - startedAt, prefetched }
   }
 
   // `add` + `view` + `show` spelled out rather than the `mount` that composes exactly those
@@ -198,7 +213,7 @@ export async function mountHero(
   if (sprite === pc.ABORTED) return pc.ABORTED
   if (sprite instanceof Error) return sprite
   const addMs = performance.now() - addedAt
-  prefetchSamples(built, sample, signal)
+  const prefetched = prefetchSamples(built, sample, signal)
 
   // `contain` and not `stretch`: `frameHero` gives the element the drawn box's own aspect, so
   // there is nothing left to letterbox — but the two differ by the sub-pixel rounding between
@@ -212,7 +227,7 @@ export async function mountHero(
   // backing store, which is written from `getBoundingClientRect()` during a draw, catch up.
   if (frameHero({ view, slot, canvas, cssPx: built.artworkCssPx })) view.refresh()
 
-  return { view, sprite, canvas, addMs, mountMs: performance.now() - startedAt }
+  return { view, sprite, canvas, addMs, mountMs: performance.now() - startedAt, prefetched }
 }
 
 /**

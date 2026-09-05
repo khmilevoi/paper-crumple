@@ -14,7 +14,11 @@ settles them with one read of the sticky error flag, drained until clear: a flag
 allocation could have raised (`OUT_OF_MEMORY`, `INVALID_FRAMEBUFFER_OPERATION`, a lost context)
 fails the batch, **releases every allocation of it** and is returned as the `GlError`, so an
 out-of-memory is never missed and nothing without storage is ever drawn with; any other flag is
-returned as a number for the caller's own purpose. `alive(t)` says whether the context still holds
+returned as a number for the caller's own purpose. On a shared (injected) context the flag is the
+consumer's too: a raw `gl.getError()` of theirs between a batch and its settle consumes the
+`OUT_OF_MEMORY` an allocation of the batch raised — that read is then the consumer's to act on,
+and the batch is proven — so a consumer sharing the context reads the flag after the settle, not
+between. `alive(t)` says whether the context still holds
 a texture, which is how the scratch pools drop a resident the context released behind their back
 (a dead artwork ends its residency, so `build()` expires and the core re-sources). Outside a batch
 `texture()` checks itself as before, and its read settles what a batch left unchecked.

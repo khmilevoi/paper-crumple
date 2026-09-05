@@ -90,8 +90,16 @@ export interface StormResult {
   readonly completed: number
   readonly errors: number
   readonly adds: AddStats
-  /** `sheet.source` calls beyond one per view — a superseded swap's ingest that still ran. */
+  /**
+   * `sheet.source` calls beyond one per view — a superseded swap's ingest that still ran,
+   * including one cancelled at a check point inside `source()`. Reported, never gated.
+   */
   readonly wastedIngests: number
+  /**
+   * `sheet.source` calls that ran to their end and returned a handle, beyond one per view — an
+   * ingest completed for a superseded sprite nobody adopted. The `double-swap` gate (0).
+   */
+  readonly completedWastedIngests: number
   readonly longTasks: LongTasks
   readonly tasks: TaskStats
   /** The main thread's waits on the GPU process, from the trace (`NO_STALLS` without one). */
@@ -170,8 +178,10 @@ export interface RowSummary {
     readonly distinctRects: number
     /** Not in the plan's list; the robust twin of `distinctRects`, 0 for a row with no views. */
     readonly distinctPixels: number
-    /** `sheet.source` calls beyond one per wanted image — the `double-swap` row's waste. */
+    /** `sheet.source` calls beyond one per wanted image — the `double-swap` row's raw waste. */
     readonly wastedIngests: number
+    /** Of those, the calls that returned a handle — the `double-swap` row's gated waste. */
+    readonly completedWastedIngests: number
   }
   /** `undefined` on SwiftShader and for `idle` (report-only, spec §11). */
   readonly pass?: boolean

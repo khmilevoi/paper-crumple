@@ -60,7 +60,11 @@ export interface GlContext {
    * slot that allocates seven textures for one sprite paid seven such waits — and the first one
    * after a burst of draws paid for the whole burst. Re-entrant: a batch opened inside another
    * joins it. `fn`'s value is passed through; nothing the batch handed out is to be trusted
-   * before its check.
+   * before its check. On a shared (injected, §7.3) context the flag is the consumer's too: a raw
+   * `gl.getError()` of theirs between the batch and its `checkAllocations()` consumes the
+   * `OUT_OF_MEMORY` an allocation of the batch raised — that read is then the consumer's to act
+   * on, and the batch is proven here — so a consumer sharing the context reads the flag after
+   * the settle, not between.
    */
   allocations<T>(fn: () => T): T
   /**

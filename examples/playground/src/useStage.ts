@@ -4,6 +4,7 @@ import type { RefObject } from 'react'
 import type { BuiltStage, DemoConfig } from './config'
 import { buildStage } from './config'
 import type { Sample } from './samples'
+import type { Prefetched } from './stage'
 import { frameHero, mountHero } from './stage'
 import type { KnobValues } from './knobs'
 import { collectDescriptors, movesGeometry } from './knobs'
@@ -30,6 +31,11 @@ export interface StageLive {
   readonly mountMs: number
   /** The front bake, which is where the hull runs — the design's `hull`, in `hull` mode. */
   readonly addMs: number
+  /**
+   * The prefetches still in flight, by sample id (`prefetchSamples`). A click on one of them
+   * hands the promise to `crumpleTo`, which promotes the add instead of starting a second one.
+   */
+  readonly prefetched: Prefetched
 }
 
 export interface StageStatus {
@@ -259,6 +265,7 @@ export function useStage(
         canvas: hero?.canvas ?? null,
         mountMs: hero?.mountMs ?? 0,
         addMs: hero?.addMs ?? 0,
+        prefetched: hero?.prefetched ?? new Map(),
       })
       setGeneration((g) => g + 1)
       // Nothing to say about a clean build that the caller's own idle line does not say better —

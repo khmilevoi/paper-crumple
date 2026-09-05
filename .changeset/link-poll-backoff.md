@@ -27,3 +27,9 @@ main-thread block the deferral exists to avoid, and on a hung driver it would ne
 Observable timing: a link that outlives eight turns is noticed one timer clamp (~1–4 ms) after it
 completes rather than within a turn. Nothing changes for a driver without the extension, whose
 link is checked inside `program()` as before, or for a link already complete at the first poll.
+
+A `dispose()` — the program's or its context's — that lands in the delayed phase ends the poll on
+its next delayed turn: no further status read, the program and its shaders released once, and
+`ready()` settled to `<label>: program disposed before its link completed` as a dispose during the
+fast phase already settles it. Before, a disposed owner kept polling until the driver reported
+completion or the 60 s bound fired.

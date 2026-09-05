@@ -17,7 +17,11 @@ D3D11 as with `bench:gl`): thirty on-screen `{ canvas }` views swapping 1024² a
 headless Chromium under a CDP-synthesised user — `sequential` / burst-url / burst-bitmap /
 stream / double-swap cadences, plus `idle`, `burst-drag` and DPR 2 — measuring main-thread tasks
 (CDP `Tracing` and the `longtask` observer), frame times, input latency and the swap outcomes
-against the thresholds its doc comment states for the D3D11 backend. `--filter`, `--json`
+against the thresholds its doc comment states for the D3D11 backend. The `double-swap` row prints
+its waste as `raw/completed`: raw is every `sheet.source` call beyond one per view — a job the
+second wave finds inside `source()` is cancelled at its next check point and still counts, so one
+or two by construction — and completed is the calls that ran to their end and returned a handle
+for a sprite nobody adopted; only the completed count is gated (0). `--filter`, `--json`
 (`BENCH_OUT`), `--iter`, `--profile` (`.cpuprofile` per row, ranked by phase with
 `profile-phases.mjs`), `--trace-dump` (`BENCH_TRACE_DUMP=1`, every storm's raw trace events under
 `tools/bench/out/traces/`, tens of MB each), `--trace-cats <list>` (`BENCH_TRACE_CATS`, extra

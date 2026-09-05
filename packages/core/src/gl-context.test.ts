@@ -534,6 +534,45 @@ describe('program(): the deferred link (P7, §5.2 amendment)', () => {
     program.dispose()
     expect(f.calls('deleteProgram')).toBe(0)
   })
+
+  it('ctx.dispose() in the slow phase ends the poll on its next delayed turn: no further status read, settled once', async () => {
+    const f = fakeGl({ parallel: true })
+    const ctx = createGlContext(f.gl)
+    // Three "still compiling" answers past the fast phase: a poll that kept going after the
+    // dispose would read them all and settle on the fourth, with the very same message.
+    f.answers.pendingPolls = LINK_FAST_POLLS_FOR_TEST + 3
+    f.reset()
+    // Resolves on the first back-off turn the poll arms: the slow phase has begun.
+    let armed: () => void = () => {}
+    const slow = new Promise<void>((resolve) => {
+      armed = resolve
+    })
+    const realTimeout = globalThis.setTimeout
+    const timer = vi.spyOn(globalThis, 'setTimeout').mockImplementation(((
+      fn: () => void,
+      ms?: number,
+    ) => {
+      if (ms === LINK_SLOW_DELAY_MS_FOR_TEST) armed()
+      return realTimeout(fn, ms)
+    }) as unknown as typeof setTimeout)
+    const program = ctx.program(VS, FS, 'late')
+    if (GlError.is(program)) return
+    const readiness = program.ready()
+    await slow
+    timer.mockRestore()
+    expect(f.calls('getProgramParameter')).toBe(LINK_FAST_POLLS_FOR_TEST + 1)
+    ctx.dispose()
+    f.reset()
+    const outcome = await readiness
+    expect(outcome?.message).toBe('late: program disposed before its link completed')
+    // Not one status read after the dispose: the delayed turn found the owner gone and cleaned
+    // up without asking the driver. Released once, and every later ready() is the same promise.
+    expect(f.calls('getProgramParameter')).toBe(0)
+    expect(f.calls('deleteProgram')).toBe(1)
+    expect(f.calls('deleteShader')).toBe(2)
+    expect(await program.ready()).toBe(outcome)
+    expect(f.calls('getProgramParameter')).toBe(0)
+  })
 })
 
 describe('allocation batches (§7.3, §8.1, §10.8): one sticky-flag read per batch', () => {
