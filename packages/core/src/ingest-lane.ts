@@ -94,6 +94,10 @@ export interface IngestLane {
    * Drop a remembered class whose job will never arrive — the `add()` it was meant for failed
    * before it reached the lane (its `acquire` refused). A no-op for a queued or running key,
    * which holds no memory. Without it a promoted key whose decode failed would remember forever.
+   * The memory is per key and shared by every path under that key, so an `add(k)` refused on a
+   * live key drops a `prepare(k)` promotion made while k's re-source is still in its supplier
+   * phase; that re-source then runs as `background` — an accepted degradation on a consumer
+   * error, never a correctness issue.
    */
   forget(key: string): void
   /**
