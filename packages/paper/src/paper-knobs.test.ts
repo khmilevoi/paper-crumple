@@ -1,149 +1,142 @@
 import { describe, expect, it } from 'vitest'
-import type { KnobDescriptor } from '@paper-crumple/core'
-import type { EdgeMode } from '@paper-crumple/core/unstable'
+import type { EdgeFinish, EdgeShape, EdgeSpec, EdgeWidthUnit } from '@paper-crumple/core/unstable'
 import {
-  COMMON_KNOBS,
   descriptorsFor,
   defaultsFor,
   edgeParamsFrom,
-  HULL_KNOBS,
   resolveSdfRes,
   SDF_RES_KNOB,
-  TORN_KNOBS,
-  type PaperEdgeMode,
 } from './paper-knobs.js'
 
-// Type assertion: PaperEdgeMode must remain an alias of core's EdgeMode.
-// This ensures a future divergence fails the build rather than passing silently.
-const _checkPaperEdgeModeSameAsEdgeMode: EdgeMode = null as unknown as PaperEdgeMode
-const _checkEdgeModeSameAsPaperEdgeMode: PaperEdgeMode = null as unknown as EdgeMode
-void _checkPaperEdgeModeSameAsEdgeMode
-void _checkEdgeModeSameAsPaperEdgeMode
+const spec = (shape: EdgeShape, finish: EdgeFinish, widthUnit: EdgeWidthUnit = 'px'): EdgeSpec => ({
+  shape,
+  finish,
+  widthUnit,
+})
 
-const keysOf = (d: readonly KnobDescriptor[]): string[] => d.map((k) => k.key).sort()
-
-describe('the descriptor split (spec 6.7)', () => {
-  it('is 20 common, 3 hull-only and 13 torn-only, plus sdfRes', () => {
-    expect(COMMON_KNOBS).toHaveLength(20)
-    expect(HULL_KNOBS).toHaveLength(3)
-    expect(TORN_KNOBS).toHaveLength(13)
-    expect(SDF_RES_KNOB.key).toBe('sdfRes')
+describe('descriptorsFor (design 2026-09-05 §2.4)', () => {
+  it('lands the four cells counts', () => {
+    expect(descriptorsFor(spec('smooth', 'clean')).length).toBe(24)
+    expect(descriptorsFor(spec('smooth', 'paper')).length).toBe(30)
+    expect(descriptorsFor(spec('torn', 'clean')).length).toBe(28)
+    expect(descriptorsFor(spec('torn', 'paper')).length).toBe(34)
   })
 
-  it('declares no key twice', () => {
-    const all = keysOf([...COMMON_KNOBS, ...HULL_KNOBS, ...TORN_KNOBS, SDF_RES_KNOB])
-    expect(new Set(all).size).toBe(all.length)
-  })
-
-  it('never re-declares a core-owned shared knob (spec 6.2, 6.7)', () => {
-    const all = keysOf([...COMMON_KNOBS, ...HULL_KNOBS, ...TORN_KNOBS])
-    expect(all).not.toContain('paperColor')
-    expect(all).not.toContain('paperBack')
-  })
-
-  it('never declares edgeMode, preset, pose or crumpleFill', () => {
-    const all = keysOf([...COMMON_KNOBS, ...HULL_KNOBS, ...TORN_KNOBS, SDF_RES_KNOB])
-    for (const excluded of ['edgeMode', 'preset', 'pose', 'crumpleFill']) {
-      expect(all).not.toContain(excluded)
+  it('carries exactly one edgeWidth descriptor, chosen by the unit', () => {
+    for (const shape of ['smooth', 'torn'] as const) {
+      for (const unit of ['px', 'percent'] as const) {
+        const width = descriptorsFor(spec(shape, 'clean', unit)).filter(
+          (d) => d.key === 'edgeWidth',
+        )
+        expect(width).toHaveLength(1)
+        expect(width[0].kind === 'number' && width[0].reference).toBe(
+          unit === 'px' ? 'sprite-px' : 'artwork-pct',
+        )
+      }
     }
   })
 
-  it('binds nothing, because grain is ambiguous and not shared (spec 6.2)', () => {
-    // Widened to `KnobDescriptor[]` explicitly — see the same annotation's comment further below.
-    const all: readonly KnobDescriptor[] = [
-      ...COMMON_KNOBS,
-      ...HULL_KNOBS,
-      ...TORN_KNOBS,
-      SDF_RES_KNOB,
+  it('invalidates the hull under smooth and only the front under torn', () => {
+    const of = (s: EdgeSpec, key: string) => descriptorsFor(s).find((d) => d.key === key)
+    for (const key of ['edgeWidth', 'edgeVariance']) {
+      expect(of(spec('smooth', 'clean'), key)?.invalidates).toBe('hull')
+      expect(of(spec('torn', 'clean'), key)?.invalidates).toBe('front')
+    }
+  })
+
+  it('drops every deleted knob', () => {
+    for (const shape of ['smooth', 'torn'] as const) {
+      for (const finish of ['clean', 'paper'] as const) {
+        const keys = descriptorsFor(spec(shape, finish)).map((d) => d.key)
+        for (const gone of ['minDist', 'maxDist', 'tearAmp', 'midAmp', 'thickness']) {
+          expect(keys, `${shape}/${finish}`).not.toContain(gone)
+        }
+      }
+    }
+  })
+
+  it('hides the finish knobs under clean and shows six under paper', () => {
+    const clean = descriptorsFor(spec('torn', 'clean')).map((d) => d.key)
+    const paper = descriptorsFor(spec('torn', 'paper')).map((d) => d.key)
+    const finishKeys = [
+      'deckleWidth',
+      'deckleLight',
+      'deckleTex',
+      'fibers',
+      'fiberLen',
+      'tearShadow',
     ]
-    expect(all.filter((k) => k.binds !== undefined)).toEqual([])
-  })
-})
-
-describe('edgeMode as a factory option (spec 6.5)', () => {
-  it('hides the 13 torn-only descriptors from a hull factory', () => {
-    const hull = keysOf(descriptorsFor('hull'))
-    expect(hull).toHaveLength(24)
-    expect(hull).not.toContain('tearAmp')
-    expect(hull).toContain('maxDist')
+    for (const k of finishKeys) {
+      expect(clean).not.toContain(k)
+      expect(paper).toContain(k)
+    }
   })
 
-  it('hides the 3 hull-only descriptors from a torn factory', () => {
-    const torn = keysOf(descriptorsFor('torn'))
-    expect(torn).toHaveLength(34)
-    expect(torn).not.toContain('maxDist')
-    expect(torn).toContain('tearAmp')
-  })
-
-  it("exposes both sets for 'both', which is edge.js's third front mode", () => {
-    expect(descriptorsFor('both')).toHaveLength(37)
-  })
-})
-
-describe('the shipped defaults reproduce DEFAULT_PARAMS', () => {
-  it('carries the spike values a reader can check against paper.js:2027', () => {
-    const d = defaultsFor('both')
-    expect(d.maxDist).toBe(72)
-    expect(d.minDist).toBe(22)
-    expect(d.angularity).toBe(0.7)
-    expect(d.tearAmp).toBe(44)
-    expect(d.thickness).toBe(22)
-    expect(d.looseness).toBe(0.5)
-    expect(d.grain).toBe(0.09)
-    expect(d.seed).toBe(3)
-    expect(d.photoFibre).toBe(0.8)
-    expect(d.debug).toBe(0)
-  })
-})
-
-describe('reference: sprite-px marks every px-valued knob (spec 6.4)', () => {
-  it('marks exactly the ten px knobs', () => {
-    // Widened to `KnobDescriptor[]` explicitly: the spread's own inferred type is a union of each
-    // individual literal descriptor's exact object type, and not every member of that union
-    // declares `reference` (it is optional only on `KnobBase`'s common supertype), so `.filter`
-    // below cannot access it without this annotation.
-    const all: readonly KnobDescriptor[] = [...COMMON_KNOBS, ...HULL_KNOBS, ...TORN_KNOBS]
-    const marked = all
-      .filter((k) => k.kind === 'number' && k.reference === 'sprite-px')
-      .map((k) => k.key)
-      .sort()
-    expect(marked).toEqual(
-      [
-        'chew',
-        'creaseWidth',
-        'deckleWidth',
-        'fiberLen',
-        'maxDist',
-        'midAmp',
-        'minDist',
-        'shadowBlur',
-        'tearAmp',
-        'thickness',
-      ].sort(),
+  it('gives torn its five shape knobs and smooth its one', () => {
+    const torn = descriptorsFor(spec('torn', 'clean')).map((d) => d.key)
+    expect(torn).toEqual(
+      expect.arrayContaining(['tearFreq', 'tearAngular', 'looseness', 'chew', 'tearMix']),
     )
+    expect(descriptorsFor(spec('smooth', 'clean')).map((d) => d.key)).toContain('angularity')
+    expect(descriptorsFor(spec('smooth', 'clean')).map((d) => d.key)).not.toContain('tearMix')
   })
 })
 
-describe('the invalidation ladder (spec 6.3, 6.6)', () => {
-  it("puts seed at 'hull', because ensureHull keys its cache on it", () => {
-    expect(HULL_KNOBS.every((k) => k.invalidates === 'hull')).toBe(true)
-    expect(COMMON_KNOBS.find((k) => k.key === 'seed')?.invalidates).toBe('hull')
+describe('defaultsFor (design 2026-09-05 §2.4)', () => {
+  it('is total over descriptorsFor(spec): every key that spec exposes has a default', () => {
+    for (const shape of ['smooth', 'torn'] as const) {
+      for (const finish of ['clean', 'paper'] as const) {
+        const s = spec(shape, finish)
+        const d = defaultsFor(s)
+        for (const descriptor of descriptorsFor(s)) {
+          expect(d).toHaveProperty(descriptor.key, descriptor.default)
+        }
+      }
+    }
   })
 
-  it("puts looseness and sdfRes at 'field', and nothing else", () => {
-    const field = [...COMMON_KNOBS, ...HULL_KNOBS, ...TORN_KNOBS, SDF_RES_KNOB]
-      .filter((k) => k.invalidates === 'field')
-      .map((k) => k.key)
-      .sort()
-    expect(field).toEqual(['looseness', 'sdfRes'])
-  })
-
-  it('declares no draw-class knob, because a sheet only ever builds a front', () => {
-    const all = [...COMMON_KNOBS, ...HULL_KNOBS, ...TORN_KNOBS, SDF_RES_KNOB]
-    expect(all.filter((k) => k.invalidates === 'draw')).toEqual([])
+  it('carries the percent default, 5.9, not the px one, when widthUnit is percent', () => {
+    expect(defaultsFor(spec('smooth', 'clean', 'percent')).edgeWidth).toBe(5.9)
+    expect(defaultsFor(spec('smooth', 'clean', 'px')).edgeWidth).toBe(47)
   })
 })
 
+describe('edgeParamsFrom (design 2026-09-05 §4.1)', () => {
+  it('zeroes the finish terms under clean, whatever the bag holds', () => {
+    const p = edgeParamsFrom(
+      spec('torn', 'clean'),
+      { edgeVariance: 0.53, fiberLen: 4, deckleWidth: 7 },
+      47,
+    )
+    expect(p).toEqual({ widthRef: 47, variance: 0.53, fiberLen: 0, deckleWidth: 0 })
+  })
+
+  it('reads the finish terms under paper', () => {
+    const p = edgeParamsFrom(
+      spec('torn', 'paper'),
+      { edgeVariance: 0.53, fiberLen: 4, deckleWidth: 7 },
+      47,
+    )
+    expect(p.fiberLen).toBe(4)
+    expect(p.deckleWidth).toBe(7)
+  })
+
+  it('never reads edgeWidth from the bag: the caller resolves the unit', () => {
+    const p = edgeParamsFrom(spec('torn', 'clean'), { edgeWidth: 999 }, 47)
+    expect(p.widthRef).toBe(47)
+  })
+
+  it('resolves a missing edgeVariance from defaultsFor(spec), never a literal 0 (ruling R3)', () => {
+    const s = spec('torn', 'clean')
+    const p = edgeParamsFrom(s, {}, 47)
+    expect(p.variance).toBe(defaultsFor(s).edgeVariance)
+    expect(p.variance).toBe(0.53)
+  })
+})
+
+// The following behaviour belongs to `resolveSdfRes` and `SDF_RES_KNOB`, neither of which this
+// task touches (design 2026-09-05 §2.4: "`SDF_RES_KNOB` untouched"). Kept here because it is
+// this file's only coverage of that function.
 describe('resolveSdfRes (spec 7.4.3)', () => {
   it('derives from the front long side when the knob is 0', () => {
     expect(resolveSdfRes(0, 384)).toBe(192)
@@ -156,24 +149,8 @@ describe('resolveSdfRes (spec 7.4.3)', () => {
     expect(resolveSdfRes(64, 384)).toBe(128)
     expect(resolveSdfRes(9999, 384)).toBe(512)
   })
-})
 
-describe('edgeParamsFrom feeds core overscanFor (spec 8.6)', () => {
-  it("reports mode 'hull' with only maxDist live", () => {
-    const p = edgeParamsFrom('hull', defaultsFor('hull'))
-    expect(p.mode).toBe('hull')
-    expect(p.maxDist).toBe(72)
-  })
-
-  it('carries every torn margin consumer through', () => {
-    const p = edgeParamsFrom('torn', defaultsFor('torn'))
-    expect(p).toMatchObject({
-      mode: 'torn',
-      thickness: 22,
-      looseness: 0.5,
-      tearAmp: 44,
-      midAmp: 26,
-      fiberLen: 4,
-    })
+  it('is still a knob at the field invalidation level', () => {
+    expect(SDF_RES_KNOB.invalidates).toBe('field')
   })
 })

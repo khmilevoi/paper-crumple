@@ -96,18 +96,22 @@ export {
 } from './mask.js'
 export type { AlphaBox, HolesReport } from './mask.js'
 
-// --- P10: the knob descriptors and the edgeMode factory option (§6.4-§6.7) ---
+// --- design 2026-09-05 §2.1-§2.4: the knob descriptors, composed from edgeShape/edgeFinish/edgeWidthUnit ---
 export {
   COMMON_KNOBS,
   defaultsFor,
   descriptorsFor,
   edgeParamsFrom,
-  HULL_KNOBS,
+  PAPER_FINISH_KNOBS,
   resolveSdfRes,
   SDF_RES_KNOB,
+  SMOOTH_KNOBS,
   TORN_KNOBS,
+  VARIANCE_KNOB,
+  WIDTH_PCT_KNOB,
+  WIDTH_PX_KNOB,
 } from './paper-knobs.js'
-export type { PaperEdgeMode } from './paper-knobs.js'
+export type { EdgeFinish, EdgeShape, EdgeSpec, EdgeWidthUnit } from '@paper-crumple/core/unstable'
 
 // --- P10: the rect §8.3 derives without a readback ---
 export { growBox, scaleBox, sheetRectFromExtent, signedFieldExtent } from './extent.js'
