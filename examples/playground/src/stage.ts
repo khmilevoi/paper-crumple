@@ -1,7 +1,7 @@
 import * as pc from '@paper-crumple/core'
 import type { BuiltStage } from './config'
 import { frameArtwork } from './framing'
-import type { Sample } from './samples'
+import { SAMPLES, type Sample } from './samples'
 
 /**
  * Mounting the one hero view the design's stage shows.
@@ -79,6 +79,58 @@ export function frameHero(o: FrameHeroRequest): boolean {
   return true
 }
 
+/**
+ * How long the fallback waits when the browser has no `requestIdleCallback` (Safari shipped it
+ * only in 18.4). Long enough that the hero's first frames are on screen before a prefetch takes
+ * the lane, short enough to be finished before a reader has read the swap panel.
+ */
+const PREFETCH_IDLE_FALLBACK_MS = 200
+
+/** `requestIdleCallback`, or a timeout where the browser has none. */
+function atIdle(fn: () => void): void {
+  if (typeof globalThis.requestIdleCallback === 'function') {
+    globalThis.requestIdleCallback(() => {
+      fn()
+    })
+    return
+  }
+  globalThis.setTimeout(fn, PREFETCH_IDLE_FALLBACK_MS)
+}
+
+/**
+ * Warm the other five samples into the stage once the hero is up, so that clicking "swap" costs a
+ * fold and nothing else.
+ *
+ * `stage.add()` enters the ingest lane in its **background** class (spec §8.10, `stage.ts`'s
+ * `add` → `addAs(…, 'background')`), so these never run ahead of a front a shown view needs, and
+ * the lane yields to the platform scheduler between a job's phases — five ingests in the
+ * background do not become one long task. When the reader then clicks, `App.tsx` asks
+ * `stage.get(id)` for the sprite: a landed prefetch makes the swap a `crumpleTo` on a resident
+ * sprite with no ingest left to pay for, and a prefetch still in flight is promoted to the head of
+ * the lane the moment the `crumpleTo` holds its promise (§4.5's `hold`) — so the click is never
+ * slower for having prefetched.
+ *
+ * Keyed on `sample.id`, the same key `mountHero` uses, and the mounted sample is skipped: `add()`
+ * on a live key is refused by design (§4.1) and would only fill the status pill.
+ *
+ * Fire and forget on purpose. A prefetch that fails, or that the LRU later evicts, leaves
+ * `stage.get(id)` empty and the click falls back to `view.swapTo(url)` — exactly what the
+ * playground did before.
+ */
+export function prefetchSamples(built: BuiltStage, mounted: Sample, signal: AbortSignal): void {
+  const rest = SAMPLES.filter((s) => s.id !== mounted.id)
+  if (rest.length === 0) return
+  atIdle(() => {
+    // The stage is disposed on unmount, and a disposed stage answers an Error rather than the
+    // `ABORTED` the signal check further in would give; asking the signal first keeps a
+    // torn-down build silent.
+    if (signal.aborted) return
+    for (const sample of rest) {
+      void built.stage.add(sample.url, { key: sample.id, signal })
+    }
+  })
+}
+
 function heroCanvas(built: BuiltStage, slot: HTMLElement): HTMLCanvasElement | Error {
   slot.replaceChildren()
 
@@ -123,6 +175,7 @@ export async function mountHero(
     if (sprite === pc.ABORTED) return pc.ABORTED
     if (sprite instanceof Error) return sprite
     const addMs = performance.now() - addedAt
+    prefetchSamples(built, sample, signal)
 
     const view = built.stage.view({ rect: { x: 0, y: 0, w: side, h: side }, tag: sample.id })
     if (view instanceof Error) return view
@@ -142,6 +195,7 @@ export async function mountHero(
   if (sprite === pc.ABORTED) return pc.ABORTED
   if (sprite instanceof Error) return sprite
   const addMs = performance.now() - addedAt
+  prefetchSamples(built, sample, signal)
 
   // `contain` and not `stretch`: `frameHero` gives the element the drawn box's own aspect, so
   // there is nothing left to letterbox — but the two differ by the sub-pixel rounding between
