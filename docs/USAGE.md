@@ -765,24 +765,37 @@ through one stage-wide **ingest lane** (§8.10), and the lane orders jobs by cla
 `crumpleTo` is parked on, then a front a shown view needs, then background, FIFO within a class.
 `add()` is a **background** job (`mount()` adds at `visible`), so a speculative add never runs ahead
 of the front the reader is looking at — and a background add is **promoted to the head of the lane
-the moment a `crumpleTo` holds the promise it returned** (§4.5's `hold`). Prefetching can therefore
-only have finished first; it can never make the click that follows it slower.
+the moment a `crumpleTo` holds the promise it returned** (§4.5's `hold`). That promotion is what
+keeps the click no slower for having prefetched, and it reads the promise — so **keep the promise
+`add()` returned and hand that to `crumpleTo`**. A prefetch still in flight at the click is then
+promoted and adopted when it lands, with no second ingest; a landed one is a `crumpleTo` on a
+resident sprite. Falling back to `swapTo(url)` for a key whose prefetch is in flight would queue a
+**second** ingest of the same image — `swapTo` is `add()` + `crumpleTo(pending)`, and its own
+`add()` is held, but it still runs behind the job the lane already holds, so the click pays the
+prefetch's ingest and then its own. `swapTo` is for a key that was never prefetched, or whose
+prefetch already failed.
 
 ```ts
-// At idle, once the current page is on screen.
+// At idle, once the current page is on screen. The promises are the prefetch.
+const prefetched = new Map<string, ReturnType<typeof stage.add>>()
 const idle = (fn: () => void) =>
   typeof requestIdleCallback === 'function' ? requestIdleCallback(fn, { timeout: 200 }) : setTimeout(fn, 200)
 idle(() => {
-  for (const n of nextPage) void stage.add(n.url, { key: n.id, signal })
+  for (const n of nextPage) {
+    const pending = stage.add(n.url, { key: n.id, signal })
+    prefetched.set(n.id, pending)
+    // Settled: `stage.get` is the truth from here — the sprite, or nothing for an add that failed.
+    void pending.then(() => prefetched.delete(n.id))
+  }
 })
 
-// At the click: prefer the sprite that already exists. `stage.get` is synchronous, and answers
-// `undefined` for a key never added, one whose add is still in flight, and one whose add failed —
-// all three fall back to `swapTo`, which is `add` + `crumpleTo(pending)` behind one call.
-const ready = stage.get(next.id)
+// At the click: a landed prefetch is a resident sprite, one still in flight is its promise —
+// `crumpleTo` promotes it to the head of the lane and adopts it when it lands. Only a key never
+// prefetched, or whose prefetch failed, takes `swapTo`.
+const target = stage.get(next.id) ?? prefetched.get(next.id)
 const run =
-  ready !== undefined
-    ? view.crumpleTo(ready, { duration, signal })
+  target !== undefined
+    ? view.crumpleTo(target, { duration, signal })
     : view.swapTo(next.url, { duration, signal })
 ```
 
