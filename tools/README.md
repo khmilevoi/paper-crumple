@@ -19,8 +19,16 @@ stream / double-swap cadences, plus `idle`, `burst-drag` and DPR 2 — measuring
 (CDP `Tracing` and the `longtask` observer), frame times, input latency and the swap outcomes
 against the thresholds its doc comment states for the D3D11 backend. `--filter`, `--json`
 (`BENCH_OUT`), `--iter`, `--profile` (`.cpuprofile` per row, ranked by phase with
-`profile-phases.mjs`) and `--check` (`BENCH_CHECK=1`, the run exits non-zero when a D3D11 row
-misses; `--gate` is the old spelling); output under `tools/bench/out/`.
+`profile-phases.mjs`), `--trace-dump` (`BENCH_TRACE_DUMP=1`, every storm's raw trace events under
+`tools/bench/out/traces/`, tens of MB each), `--trace-cats <list>` (`BENCH_TRACE_CATS`, extra
+trace categories), `--probe` (`BENCH_PROBE=1`, adds the `*.smooth.probe.ts` isolation probes —
+pick one with `-t probe-blit` / `-t probe-stage`) and `--check` (`BENCH_CHECK=1`, the run exits
+non-zero when a D3D11 row misses; `--gate` is the old spelling); output under `tools/bench/out/`.
+Each row's `stalls:` line is the trace's `gpu` category read for the main thread: how often and
+how long it waited on the GPU process (`getError` round trips, a software 2D canvas's
+`ReadbackImagePixels`, every `WaitForGetOffset`), the longest single `GPUTask` on the GPU
+process's main thread, and the two longest tasks with the event each spent its time in — a spike
+reads as a wait or as work from this line alone.
 
 **How to read a run.** Start at the `idle` row: it is the control, and if its frame p95 is not
 ≈ 16.7 ms with an input max under ~20 ms the machine was busy and the whole run is contended —

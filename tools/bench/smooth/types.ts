@@ -94,6 +94,10 @@ export interface StormResult {
   readonly wastedIngests: number
   readonly longTasks: LongTasks
   readonly tasks: TaskStats
+  /** The main thread's waits on the GPU process, from the trace (`NO_STALLS` without one). */
+  readonly stalls: TraceStalls
+  /** The three longest tasks and what they spent their time in. */
+  readonly anatomy: readonly TaskAnatomy[]
   readonly frames: FrameStats
   readonly input: InputStats
   /** Wrapped-method timers: `sourceWallMs`, `readPixelsMs`, `blitMs`, `rectMs`, `...Calls`. */
@@ -185,6 +189,8 @@ export interface RowResult {
   readonly artworkPx: number
   readonly artworkCssPx: number
   readonly frontSize: string
+  /** The stage's surface, `WxH` — every blit's `drawImage` snapshots this whole buffer. */
+  readonly surfaceSize: string
   /** The 30 `stage.mount` calls, sequential, first to last — the page-load number. */
   readonly mountMs: number
   /** Median per-add time of the row's own **sequential probe**: `views` awaited `stage.add`s of
@@ -256,6 +262,46 @@ export interface InputReport {
   readonly ackMs: readonly number[]
 }
 
+/** One kind of renderer-side wait, summed over the storm window. */
+export interface StallStats {
+  readonly n: number
+  readonly totalMs: number
+  readonly maxMs: number
+}
+
+/**
+ * Where the main thread waited on the GPU process (the `gpu` trace category). Every synchronous
+ * GL call — `getError`, `getParameter` of a read format, `clientWaitSync`, `getBufferSubData`,
+ * `checkFramebufferStatus` — is a round trip that returns only once the GPU process has consumed
+ * every command queued before it (`CommandBufferProxyImpl::WaitForGetOffset`), so a task's length
+ * is the queue's depth at the moment of the call, not the call's own work. A software 2D canvas
+ * reads the WebGL surface back the same way at paint (`ReadbackImagePixels`).
+ */
+export interface TraceStalls {
+  /** `GLES2::GetGLError` — `gl.getError()`, the per-allocation check and the readback drain. */
+  readonly getError: StallStats
+  /** `RasterImplementation::ReadbackImagePixels` — a 2D destination canvas that is not GPU-backed
+   *  copying the WebGL surface through the CPU, once per `drawImage`. `n === 0` on the fast path. */
+  readonly readback: StallStats
+  /** Every `WaitForGetOffset`, whatever the caller — the total the main thread spent blocked. */
+  readonly waits: StallStats
+  /** The GPU process's main thread: the longest single `GPUTask` (one command-buffer flush the
+   *  driver did not return from) and its total over the window. */
+  readonly gpuTaskMaxMs: number
+  readonly gpuTaskTotalMs: number
+}
+
+/** The longest main-thread tasks of the storm, each with what it spent its time in. */
+export interface TaskAnatomy {
+  readonly ms: number
+  /** Start, milliseconds after the storm mark. */
+  readonly atMs: number
+  /** The longest event nested in the task that is not a scheduler wrapper — the wait or the work. */
+  readonly longest: { readonly name: string; readonly ms: number }
+  /** The JS entry point the trace names (`functionName url:line`), when there is one. */
+  readonly entry?: string
+}
+
 /** What `smoothTrace('stop')` returns: every top-level `RunTask` between the storm marks. */
 export interface TraceReport {
   /** Task durations in milliseconds, in time order. */
@@ -264,4 +310,15 @@ export interface TraceReport {
   readonly marks: boolean
   readonly thread: string
   readonly events: number
+  readonly stalls: TraceStalls
+  /** The three longest tasks, longest first. */
+  readonly anatomy: readonly TaskAnatomy[]
 }
+
+export const NO_STALLS: TraceStalls = Object.freeze({
+  getError: { n: 0, totalMs: 0, maxMs: 0 },
+  readback: { n: 0, totalMs: 0, maxMs: 0 },
+  waits: { n: 0, totalMs: 0, maxMs: 0 },
+  gpuTaskMaxMs: 0,
+  gpuTaskTotalMs: 0,
+})

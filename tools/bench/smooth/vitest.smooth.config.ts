@@ -35,6 +35,9 @@ const outPath = resolve(
     (realGpu ? 'tools/bench/out/smooth-gpu.json' : 'tools/bench/out/smooth.json'),
 )
 const profileDir = resolve(root, 'tools/bench/out/profiles')
+const traceDir =
+  process.env.BENCH_TRACE_DUMP === '1' ? resolve(root, 'tools/bench/out/traces') : undefined
+const traceCategories = (process.env.BENCH_TRACE_CATS ?? '').split(',').filter(Boolean)
 const runId = new Date().toISOString()
 const iterations = Math.max(1, Number(process.env.BENCH_ITER ?? 2) || 2)
 const profile = process.env.BENCH_PROFILE === '1'
@@ -53,7 +56,12 @@ export default defineConfig({
   },
   test: {
     name: 'bench-smooth',
-    include: ['tools/bench/smooth/**/*.smooth.bench.ts'],
+    // The probes (`*.smooth.probe.ts`) isolate one mechanism each and are opt-in: `--probe`
+    // (`BENCH_PROBE=1`) adds them, `-t probe-blit` / `-t probe-stage` picks one.
+    include: [
+      'tools/bench/smooth/**/*.smooth.bench.ts',
+      ...(process.env.BENCH_PROBE === '1' ? ['tools/bench/smooth/**/*.smooth.probe.ts'] : []),
+    ],
     fileParallelism: false,
     testTimeout: 900_000,
     hookTimeout: 900_000,
@@ -71,7 +79,7 @@ export default defineConfig({
         contextOptions: { viewport },
       }),
       instances: [{ browser: 'chromium' }],
-      commands: smoothCommands({ outPath, profileDir, runId }),
+      commands: smoothCommands({ outPath, profileDir, runId, traceDir, traceCategories }),
     },
   },
 })

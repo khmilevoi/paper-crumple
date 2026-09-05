@@ -116,6 +116,7 @@ import {
   tiles,
 } from './deps.js'
 import type { BlitStage, Sprite, View } from './deps.js'
+import { NO_STALLS } from './types.js'
 import type {
   AddStats,
   Cadence,
@@ -139,7 +140,7 @@ declare module 'vitest/browser' {
   interface BrowserCommands {
     smoothWrite: (rows: RowResult[], meta: SmoothMeta) => Promise<string>
     smoothInput: (action: 'start' | 'stop', plan?: InputPlan) => Promise<InputReport | undefined>
-    smoothTrace: (action: 'start' | 'stop') => Promise<TraceReport | undefined>
+    smoothTrace: (action: 'start' | 'stop', label?: string) => Promise<TraceReport | undefined>
     smoothEmulate: (dpr: number, width: number, height: number) => Promise<void>
     smoothProfile: (action: 'start' | 'stop', label: string) => Promise<string | undefined>
   }
@@ -669,7 +670,10 @@ async function runStorm(o: StormRequest): Promise<StormResult> {
 
   const report = await commands.smoothInput('stop')
   const rec = await recorders.stop(t0, tEnd)
-  const trace = await commands.smoothTrace('stop')
+  const trace = await commands.smoothTrace(
+    'stop',
+    `${spec.name}.${REAL_GPU ? 'gpu' : 'sw'}.${String(o.iteration)}`,
+  )
   const profile =
     o.profileLabel === undefined ? undefined : await commands.smoothProfile('stop', o.profileLabel)
   for (const off of offs) off()
@@ -734,6 +738,8 @@ async function runStorm(o: StormRequest): Promise<StormResult> {
     wastedIngests: isIdle ? 0 : Math.max(0, (acc.sourceCalls ?? 0) - wantedIngests),
     longTasks: rec.longTasks,
     tasks: taskStats(trace),
+    stalls: trace?.stalls ?? NO_STALLS,
+    anatomy: trace?.anatomy ?? [],
     frames: rec.frames,
     input: {
       handled: rec.inputTimes.length,
@@ -1022,6 +1028,7 @@ async function runRow(spec: RowSpec): Promise<RowResult | Error> {
     return new Error('paperStage aborted')
   }
   describeStage(stage)
+  const surfaceSize = `${String(stage.surface.width)}x${String(stage.surface.height)}`
   const frame = meta?.frameRect ?? { x: 0, y: 0, w: VIEWPORT.w, h: VIEWPORT.h }
   const plan: InputPlan = { ...frame, hz: 60, clickEveryMs: 500, keyEveryMs: 250 }
 
@@ -1162,6 +1169,7 @@ async function runRow(spec: RowSpec): Promise<RowResult | Error> {
     artworkPx: ARTWORK_PX,
     artworkCssPx: ARTWORK_CSS_PX,
     frontSize,
+    surfaceSize,
     mountMs,
     ingestMs,
     ingestUrlMs,

@@ -8,6 +8,12 @@
  *                                                tools/bench/out/smooth.json / smooth-gpu.json)
  *   pnpm bench:smooth -- --iter 3                timed storms per row (2)
  *   pnpm bench:smooth -- --profile               one more storm per row under the CDP profiler
+ *   pnpm bench:smooth -- --trace-dump            keep every storm's raw trace events (BENCH_TRACE_DUMP;
+ *                                                tools/bench/out/traces/, tens of MB per storm)
+ *   pnpm bench:smooth -- --trace-cats gpu.angle  extra trace categories, comma-separated
+ *                                                (BENCH_TRACE_CATS; the GPU process's side of a stall)
+ *   pnpm bench:smooth -- --probe -t probe-stage  the isolation probes (BENCH_PROBE; `*.smooth.probe.ts`,
+ *                                                one mechanism each — the blit alone, the stage alone)
  *   pnpm bench:smooth -- --gpu                   ANGLE D3D11 (same as BENCH_GPU=1)
  *   pnpm bench:smooth -- --check                 the D3D11 verdict fails the run (BENCH_CHECK=1;
  *                                                --gate / BENCH_GATE is the old spelling)
@@ -35,6 +41,9 @@ function parseArgs(argv) {
     else if (flag === '--json' || flag === '--out') o.env.BENCH_OUT = value()
     else if (flag === '--iter') o.env.BENCH_ITER = value()
     else if (flag === '--profile') o.env.BENCH_PROFILE = '1'
+    else if (flag === '--trace-dump') o.env.BENCH_TRACE_DUMP = '1'
+    else if (flag === '--trace-cats') o.env.BENCH_TRACE_CATS = value()
+    else if (flag === '--probe') o.env.BENCH_PROBE = '1'
     else if (flag === '--gpu') o.env.BENCH_GPU = '1'
     else if (flag === '--check' || flag === '--gate') o.env.BENCH_CHECK = '1'
     else o.rest.push(a)
