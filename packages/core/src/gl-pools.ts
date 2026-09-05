@@ -144,7 +144,7 @@ export interface ScratchPoolsOptions {
   readonly artwork: Size
   readonly sdfRes: number
   /** Defaults to the real clock. The tests inject `createFakeTimers`. */
-  readonly timers?: Timers
+  readonly timers?: Pick<Timers, 'now' | 'setTimeoutFn' | 'clearTimeoutFn'>
 }
 
 interface Slot {

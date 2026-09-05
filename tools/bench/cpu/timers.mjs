@@ -42,5 +42,8 @@ export function createBenchTimers(start = 0) {
     get pending() {
       return queue.length
     },
+    // The lane's yield (spec 8.10): a microtask here, as in the test fake, so a scenario measures
+    // the lane's own cost and never a task boundary.
+    yield: () => Promise.resolve(),
   }
 }

@@ -1,4 +1,5 @@
 import type { Step } from './dwell.js'
+import { nextTurn } from './next-turn.js'
 
 /**
  * # The absolute-deadline stepper (§7.2)
@@ -32,6 +33,13 @@ export interface Timers {
   now(): number
   setTimeoutFn(fn: () => void, ms: number): TimerHandle
   clearTimeoutFn(handle: TimerHandle): void
+  /**
+   * §8.10 — the platform yield the ingest lane takes between two phases once a turn has spent
+   * its budget: resolves in a later macrotask so the browser can paint and dispatch input in
+   * between. `nextTurn()` on the system clock; a microtask on the test clock (§11), because every
+   * lane guarantee holds by construction of the queue and none by a task boundary.
+   */
+  yield(): Promise<void>
 }
 
 /** The real clock. `performance.now()` and not `Date.now()`: deadlines want a monotonic clock. */
@@ -41,6 +49,7 @@ export const systemTimers: Timers = {
   clearTimeoutFn: (handle) => {
     clearTimeout(handle as ReturnType<typeof setTimeout>)
   },
+  yield: nextTurn,
 }
 
 export interface StepperOptions {
