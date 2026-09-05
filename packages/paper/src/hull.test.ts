@@ -1,4 +1,5 @@
 import { describe, expect, it } from 'vitest'
+import { hullBandFor } from './edge-derive.js'
 import { cpuSdfFromAlpha } from './field.js'
 import {
   buildHull,
@@ -13,7 +14,7 @@ import {
 import type { HullCanvas, HullRasterContext } from './hull.js'
 import { hullComponent, hullComponentCount, hullVertexCount, packPolygons } from './hull-shape.js'
 import { makeRandom } from './random.js'
-import { annulusAlpha, discAlpha } from './test-fixtures.js'
+import { annulusAlpha, discAlpha, logoAlpha, unionAlpha } from './test-fixtures.js'
 
 const W = 64
 const H = 64
@@ -699,5 +700,57 @@ describe('fillHullMask', () => {
       expect(diff, `trial ${trial}: first differing byte`).toBe(-1)
     }
     expect(nonEmpty, 'most trials must actually fill something').toBeGreaterThan(150)
+  })
+})
+
+describe('the §11 measurement — the vertex reach under smooth after the repair pass', () => {
+  const FIELDS: readonly (readonly [string, Float32Array])[] = [
+    ['disc', discField()],
+    ['annulus', cpuSdfFromAlpha(annulusAlpha(W, H, 32, 32, 26, 12), W, H)],
+    ['logo', cpuSdfFromAlpha(logoAlpha(W), W, H)],
+    [
+      'twoLobes',
+      cpuSdfFromAlpha(unionAlpha(discAlpha(W, H, 22, 32, 11), discAlpha(W, H, 44, 32, 11)), W, H),
+    ],
+  ]
+
+  it('reports the vertex distances the repair pass leaves (design §11, item 3)', () => {
+    // measurement, not a gate — see task-3-report.md §11 for the verdict line.
+    const rows: string[] = []
+    for (const [name, field] of FIELDS) {
+      // The band is in TEXELS here: this fixture is 64x64, so the reference-px band is scaled to
+      // fit it rather than used raw — `hullBandFor(47, 0.53)` divided by 8 lands inside the frame.
+      const band = hullBandFor(47 / 8, 0.53)
+      const built = buildHull({
+        field,
+        width: W,
+        height: H,
+        minDist: band.minDist,
+        maxDist: band.maxDist,
+        angularity: 0.7,
+        seed: 3,
+      })
+      // measureHull wants a PackedHull, not the raw buffer pair hullBuffers() returns for the
+      // handle's byte accounting — narrow the same way `measureHull`'s own describe block does
+      // above (line ~184). A nonzero band never yields 'use-alpha', so this never fires; `continue`
+      // rather than throwing keeps the errors-as-values convention even in a test file.
+      if (built.hull.kind !== 'polygons') {
+        expect(built.hull.kind, `${name}: expected a polygon hull at this nonzero band`).toBe(
+          'polygons',
+        )
+        continue
+      }
+      const m = measureHull(field, W, H, built.hull)
+      rows.push(
+        `${name}: vertexMin ${m.vertexMin.toFixed(2)} vertexMax ${m.vertexMax.toFixed(2)} ` +
+          `segmentMin ${m.segmentMin.toFixed(2)} inserted ${built.stats.inserted}/${built.stats.vertices}`,
+      )
+      // The GATE, and the only claim design §5.1 makes about `smooth`: it is a VERTEX property.
+      // `moveToDistance` stops at |residual| < 0.02 texels (`field.ts:87`), and `hull.test.ts`
+      // already uses +-0.05 for exactly this reason. 1e-6 is not achievable.
+      expect(m.vertexMin).toBeGreaterThanOrEqual(band.minDist - 0.05)
+      expect(m.vertexMax).toBeLessThanOrEqual(band.maxDist + 0.05)
+    }
+    expect(rows).toHaveLength(4)
   })
 })
