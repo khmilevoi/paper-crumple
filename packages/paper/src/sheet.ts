@@ -607,9 +607,14 @@ const READBACK_POLL_MAX = 1_000_000
  * bound pack buffer redirects every later `readPixels` on the context, the level-2 suite's own
  * included.
  *
- * The CPU-fallback decision stays synchronous and exactly where it was: `getError` right after
- * `readPixels` — `sheet.gl.test.ts` forces that read non-zero to reach `cpuFieldFallback`, and
- * `null` here means what `null` from `readBackField` means. The read format is chosen the way
+ * **No `getError` after `readPixels` here: the CPU-fallback decision is `completeFieldReadback`'s,
+ * once the fence has signalled.** Measured, not assumed: a synchronous `getError` right after a
+ * pack-buffer `readPixels` waits for the GPU process to execute the read, and on ANGLE's
+ * SwiftShader backend that read waits for pass A's raster — 670–875 ms blocked per
+ * `gl.e2e.add.1024`, the very drain this function exists to take off the main thread (ANGLE
+ * D3D11 answers the same call in well under a millisecond). Every flag the read could raise — a
+ * refused format, an out-of-memory `bufferData`, a pack buffer too small — is still pending when
+ * the fence signals, and is read there, before any decode. The read format is chosen the way
  * `readBackField` chooses it (RED/FLOAT when the driver reports that as its implementation
  * format, RGBA/FLOAT otherwise; the RGBA8 byte contract without float targets), so the bytes
  * that land in the buffer are the bytes the client array used to receive.
@@ -638,21 +643,21 @@ function issueFieldReadback(m: Mounted, field: Field): PendingReadback | null {
       if (m.readbackBuffer === null) return null
     }
     gl.bindBuffer(gl.PIXEL_PACK_BUFFER, m.readbackBuffer)
-    const grow = m.readbackBytes < bytes
-    if (grow) gl.bufferData(gl.PIXEL_PACK_BUFFER, bytes, gl.STREAM_READ)
+    if (m.readbackBytes < bytes) {
+      gl.bufferData(gl.PIXEL_PACK_BUFFER, bytes, gl.STREAM_READ)
+      // Recorded now and dropped again by `completeFieldReadback` if the read is refused, so a
+      // `bufferData` the driver could not honour is retried on the next call, not assumed.
+      m.readbackBytes = bytes
+    }
     if (kind === 'float') {
       gl.readPixels(0, 0, w, h, channels === 1 ? gl.RED : gl.RGBA, gl.FLOAT, 0)
     } else {
       gl.readPixels(0, 0, w, h, gl.RGBA, gl.UNSIGNED_BYTE, 0)
     }
-    // Not a drain: this read IS the CPU-fallback decision (as in `readBackField`), and it also
-    // covers a refused `bufferData` — so the recorded size only grows once the read went through.
-    const refused = gl.getError() !== gl.NO_ERROR
-    const sync = refused ? null : gl.fenceSync(gl.SYNC_GPU_COMMANDS_COMPLETE, 0)
+    const sync = gl.fenceSync(gl.SYNC_GPU_COMMANDS_COMPLETE, 0)
     if (sync !== null) gl.flush()
     gl.bindBuffer(gl.PIXEL_PACK_BUFFER, null)
     if (sync === null) return null
-    if (grow) m.readbackBytes = bytes
     return { sync, w, h, channels, kind, decode: field.decode }
   })
 }
@@ -703,11 +708,18 @@ async function awaitFieldReadback(
 
 /**
  * §8.10 — the second half of `readBackField`: the pack buffer's bytes into the same float/byte
- * scratch `readBackField` reads into, then the decode loops VERBATIM from there — the
+ * scratch `readBackField` reads into, then ONE `getError` for everything since the issue's own
+ * drain — the CPU-fallback decision, moved here from right after `readPixels` (see
+ * `issueFieldReadback` for the measurement that moved it): a refused read, a refused
+ * `bufferData`, a failed copy all answer `null`, and the recorded buffer size goes with it so the
+ * next call sizes the buffer again. Then the decode loops VERBATIM from `readBackField` — the
  * `(v * d0 + d1) / texelPx` order is an identity contract (`sheet.gl.test.ts`'s readback goldens
- * pin it to the byte). Stale errors are drained first, as before the issue, and `null` when
- * `getError` reports the copy failed (→ the CPU fallback). The pack buffer is unbound before the
- * scope exits, for the reason `issueFieldReadback` gives.
+ * pin it to the byte). The pack buffer is unbound before returning, for the reason
+ * `issueFieldReadback` gives.
+ *
+ * No `scope()` here, unlike the issue: nothing this function touches is in §5.1's restore set —
+ * the pack buffer binding is not, and it restores that one itself — and an outermost scope's
+ * restore is some thirty state writes on the ingest path's call count (`calls.add.1024.*`).
  */
 function completeFieldReadback(
   m: Mounted,
@@ -722,39 +734,35 @@ function completeFieldReadback(
   const channels = pending.channels
   const d0 = pending.decode[0]
   const d1 = pending.decode[1]
-  return m.ctx.scope((): Float32Array | null => {
-    while (gl.getError() !== gl.NO_ERROR) {
-      // drain — see `readBackField`
-    }
-    gl.bindBuffer(gl.PIXEL_PACK_BUFFER, buffer)
-    let out: Float32Array | null = null
-    if (pending.kind === 'float') {
-      const buf = floatReadbackScratch(w * h * channels)
-      gl.getBufferSubData(gl.PIXEL_PACK_BUFFER, 0, buf)
-      gl.bindBuffer(gl.PIXEL_PACK_BUFFER, null)
-      if (gl.getError() === gl.NO_ERROR) {
-        out = decodeScratch(w * h)
-        if (channels === 1) {
-          for (let i = 0; i < out.length; i++) out[i] = (buf[i] * d0 + d1) / texelPx
-        } else {
-          for (let i = 0, p = 0; i < out.length; i++, p += channels) {
-            out[i] = (buf[p] * d0 + d1) / texelPx
-          }
-        }
-      }
+  gl.bindBuffer(gl.PIXEL_PACK_BUFFER, buffer)
+  const floats = pending.kind === 'float'
+  const buf = floats ? floatReadbackScratch(w * h * channels) : byteReadbackScratch(w * h * 4)
+  gl.getBufferSubData(gl.PIXEL_PACK_BUFFER, 0, buf)
+  gl.bindBuffer(gl.PIXEL_PACK_BUFFER, null)
+  // Not a drain: this read IS the CPU-fallback decision, and it is only trustworthy because the
+  // issue's loop emptied every flag first. `sheet.gl.test.ts` forces exactly this read non-zero
+  // to reach `cpuFieldFallback`.
+  if (gl.getError() !== gl.NO_ERROR) {
+    m.readbackBytes = 0
+    return null
+  }
+  const out = decodeScratch(w * h)
+  if (floats) {
+    // Split rather than strided: on the RED/FLOAT path (`channels === 1`) `p` IS `i`, and one
+    // induction variable is measurably cheaper than two. Same expression, same order.
+    if (channels === 1) {
+      for (let i = 0; i < out.length; i++) out[i] = (buf[i] * d0 + d1) / texelPx
     } else {
-      const buf = byteReadbackScratch(w * h * 4)
-      gl.getBufferSubData(gl.PIXEL_PACK_BUFFER, 0, buf)
-      gl.bindBuffer(gl.PIXEL_PACK_BUFFER, null)
-      if (gl.getError() === gl.NO_ERROR) {
-        out = decodeScratch(w * h)
-        for (let i = 0, p = 0; i < out.length; i++, p += 4) {
-          out[i] = ((buf[p] / 255) * d0 + d1) / texelPx
-        }
+      for (let i = 0, p = 0; i < out.length; i++, p += channels) {
+        out[i] = (buf[p] * d0 + d1) / texelPx
       }
     }
-    return out
-  })
+  } else {
+    for (let i = 0, p = 0; i < out.length; i++, p += 4) {
+      out[i] = ((buf[p] / 255) * d0 + d1) / texelPx
+    }
+  }
+  return out
 }
 
 /**
@@ -1237,9 +1245,11 @@ export function paperSheet(options?: PaperSheetOptions): PaperSheet {
      *
      * The yield inside is check point 2 (§10.5): the fence poll when a readback is pending — its
      * `ABORTED` answer is the check point — and one platform turn otherwise, the signal read
-     * after it. The busy path decodes BEFORE it yields, while the field slot is still this
-     * call's own, and copies out of the shared decode scratch because it then yields (the
-     * scratch is consumed in the task that fills it — `decodeScratch`'s own doc comment).
+     * after it. A refused read is known once the fence signals (`completeFieldReadback`), and
+     * falls to the CPU field then. The busy path decodes BEFORE it yields, while the field slot
+     * is still this call's own, and copies out of the shared decode scratch because it then
+     * yields (the scratch is consumed in the task that fills it — `decodeScratch`'s own doc
+     * comment).
      */
     const readField = async (): Promise<InstanceType<typeof GlError> | Aborted | Float32Array> => {
       if (m.readbackBusy) {
@@ -1251,6 +1261,7 @@ export function paperSheet(options?: PaperSheetOptions): PaperSheet {
       }
       const pending = issueFieldReadback(m, tight)
       if (pending === null) {
+        // No pack buffer or no fence to be had: the yield still happens, then the CPU field.
         await nextTurn()
         if (signalAborted(o.signal)) return ABORTED
         return cpuFieldFallback(bitmap, tight.width, tight.height, placement, front)

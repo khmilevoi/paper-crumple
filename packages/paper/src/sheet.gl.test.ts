@@ -2072,7 +2072,7 @@ describe('async field readback (spec §8.10)', () => {
     sheet.dispose()
   })
 
-  it('falls back to the CPU field when readPixels into the pack buffer errors: the decision is synchronous', async () => {
+  it('falls back to the CPU field when readPixels into the pack buffer errors: the refusal is read at the fence, before any decode', async () => {
     const ctx = open()
     const sheet = paperSheet()
     sheet.mount(ctx)
@@ -2080,24 +2080,38 @@ describe('async field readback (spec §8.10)', () => {
     const restore = forceCpuFallbackOnce(ctx)
     const fenceSync = vi.spyOn(ctx.gl, 'fenceSync')
     const getBufferSubData = vi.spyOn(ctx.gl, 'getBufferSubData')
+    const bufferData = vi.spyOn(ctx.gl, 'bufferData')
     const handle = await sheet.source(bitmap, { maxSize: 128, exact: false })
     const issued = (ctx.gl.readPixels as unknown as { mock: { calls: unknown[][] } }).mock.calls
     restore()
-    bitmap.close()
     expect(GlError.is(handle) || SheetError.is(handle) || isAborted(handle)).toBe(false)
     if (GlError.is(handle) || SheetError.is(handle) || isAborted(handle)) return
-    // The one readPixels was into the pack buffer (an offset, not a client array), and its own
-    // getError refused it before any fence existed — the same synchronous decision as before.
+    // The one readPixels was into the pack buffer (an offset, not a client array); the fence
+    // was waited for, the bytes copied out, and the getError after the copy — the first since
+    // the issue's drain — read the refusal and refused the decode.
     expect(issued).toHaveLength(1)
     expect(issued[0][6]).toBe(0)
-    expect(fenceSync).not.toHaveBeenCalled()
-    expect(getBufferSubData).not.toHaveBeenCalled()
+    expect(fenceSync).toHaveBeenCalledTimes(1)
+    expect(getBufferSubData).toHaveBeenCalledTimes(1)
+    expect(bufferData, 'the first readback sizes the pack buffer').toHaveBeenCalledTimes(1)
     // `cpuFieldFallback`'s own rect: within the JFA-vs-EDT tolerance the "findings 1, 4" test
     // states, and not the readback's exact integers.
     expect(Math.abs(handle.frontRect.y - READBACK_GOLDEN['top/hull'].frontRect.y)).toBeLessThan(10)
     expect(ctx.scope(() => ctx.gl.getParameter(ctx.gl.PIXEL_PACK_BUFFER_BINDING))).toBeNull()
+    // A refusal drops the recorded buffer size, so the next readback sizes the buffer again
+    // rather than trusting a `bufferData` that may have been the refusal.
+    bufferData.mockClear()
+    getBufferSubData.mockClear()
+    const again = await topSprite()
+    const second = await sheet.source(again, { maxSize: 128, exact: false })
+    again.close()
+    bitmap.close()
+    expect(GlError.is(second) || SheetError.is(second) || isAborted(second)).toBe(false)
+    expect(bufferData, 'sized again after the refusal').toHaveBeenCalledTimes(1)
+    expect(getBufferSubData).toHaveBeenCalledTimes(1)
     fenceSync.mockRestore()
     getBufferSubData.mockRestore()
+    bufferData.mockRestore()
     sheet.dispose()
   })
 
