@@ -46,6 +46,15 @@
  * `UNPACK_FLIP_Y_WEBGL` not inherited from the spike's `true`. P6's `pinAmbientState` pins them
  * at context creation; this module's own level-2 suite asserts them rather than assuming, because
  * a byte lost here is invisible until a fixture comparison fails.
+ *
+ * **No status read of its own (S7, §7.3, §8.1).** The upload reads no `getError`: a closed or
+ * detached bitmap is the one failure `texSubImage2D` has that nothing else detects, and it
+ * throws — `attempt` returns it. What the profile saw as "a `getError` after the 4 MB upload" was
+ * the artwork slot's own per-allocation read (`gl-context.ts`), which waited for the upload
+ * ahead of it; `source()` now runs this whole call inside one allocation batch
+ * (`GlContext.allocations`), so the copy, the staging, the artwork and their targets are settled
+ * by the sheet's one read after its yield, and this module reads nothing. Called on its own —
+ * the level-2 suite does — each allocation still checks itself.
  */
 import { attempt, GlError } from '@paper-crumple/core'
 import type { Rect, Size } from '@paper-crumple/core'
