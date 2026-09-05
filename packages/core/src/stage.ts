@@ -516,8 +516,9 @@ function buildStage(p: StageParts): BuiltStage {
   const lane = createIngestLane({ timers: p.timers })
   /**
    * The promise each `add()` returned, by key, so `holdTarget` can promote the add a `crumpleTo`
-   * is parked on (§4.5's `hold` is the natural promotion signal, §8.10). Weak: the entry lives
-   * exactly as long as a consumer can still hand the promise back.
+   * is parked on (§4.5's `hold` is the natural promotion signal, §8.10). The entry is deleted at
+   * settle (`addAs`), so it lives exactly as long as the add is pending and a settled promise
+   * promotes nothing; weak besides, so a promise a consumer dropped costs nothing.
    */
   const pendingAdds = new WeakMap<Promise<unknown>, string>()
 
@@ -1740,6 +1741,13 @@ function buildStage(p: StageParts): BuiltStage {
     // source refused at `acquire` — must not be remembered for the next add under this key.
     // Registered before the consumer's own continuation, so it runs first.
     void done.then(() => {
+      // §8.10 — the entry lives exactly as long as the add is pending. A `crumpleTo` handed a
+      // settled promise has no job to promote, and the `lane.promote` it would make is
+      // remembered for the NEXT job under this key — a fresh add after a `remove()`, a
+      // re-source — which then jumps work queued before it, or sits in the lane's memory until
+      // `dispose()`. The liveness check is the entry itself rather than `p.sprites.has(key)`: an
+      // add that failed has no sprite and would still have promoted.
+      pendingAdds.delete(done)
       lane.forget(opts.key)
     })
     return done

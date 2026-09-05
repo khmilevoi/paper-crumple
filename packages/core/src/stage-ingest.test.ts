@@ -422,4 +422,39 @@ describe('the ingest lane at stage level (spec §8.10)', () => {
     expect(again instanceof Error || isAborted(again)).toBe(false)
     stage.dispose()
   })
+
+  it('crumpleTo() on the promise of an add that has landed leaves no promotion behind for the next job under that key (§8.10)', async () => {
+    const g = sourceGate()
+    const sheet = fakeSheet({ gate: g.gate })
+    const timers = createFakeTimers()
+    const stage = await createStage({ ...base(), sheet, present: 'blit' }, stageEnv({ timers }))
+    if (stage instanceof Error || isAborted(stage)) return expect.fail('stage refused')
+    const shown = await stage.add('/base.png', { key: 'base' })
+    if (shown instanceof Error || isAborted(shown)) return expect.fail('add refused')
+    const view = stage.view({ canvas: destCanvas(), tag: 'tile' })
+    if (view instanceof Error) return expect.fail('view refused')
+    view.show(shown)
+    const addK = stage.add(asBitmap(fakeBitmap({ width: 70 })), { key: 'k', pin: true })
+    const k = await addK
+    if (k instanceof Error || isAborted(k)) return expect.fail('add refused')
+    // The add has landed, so there is no job to promote: a `held` remembered for `k` here would
+    // be consumed by the NEXT job under the key, whoever enqueues it.
+    const run = view.crumpleTo(addK)
+    view.stop()
+    expect(isAborted(await run)).toBe(true)
+    expect(stage.remove('k')).toBeUndefined()
+
+    g.close()
+    const addX = stage.add(asBitmap(fakeBitmap({ width: 80 })), { key: 'x', pin: true })
+    await flush()
+    expect(g.pending).toBe(1)
+    const addY = stage.add(asBitmap(fakeBitmap({ width: 81 })), { key: 'y', pin: true })
+    const addK2 = stage.add(asBitmap(fakeBitmap({ width: 82 })), { key: 'k', pin: true })
+    await flush()
+    g.open()
+    await Promise.all([addX, addY, addK2])
+    // FIFO within the background class: a stale `held` would have put `k` ahead of `y`.
+    expect(sheet.calls.source.slice(2).map((c) => c.bitmap.width)).toEqual([80, 81, 82])
+    stage.dispose()
+  })
 })
