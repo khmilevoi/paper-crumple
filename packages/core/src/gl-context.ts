@@ -16,7 +16,7 @@
  * after) — and the outcome is delivered by `Program.ready()`, which polls `COMPLETION_STATUS_KHR`
  * once per `nextTurn()` and only then reads `LINK_STATUS`. That poll backs off after eight fast
  * turns (S11: a cold `PAPER_FS` link is ~3 s, which was ~200 000 undelayed turns of a spinning core (206 448 measured on a 1.3 s link)
- * core) and gives up on a driver that never answers — see `LINK_FAST_POLLS` below. Without the
+ * and gives up on a driver that never answers — see `LINK_FAST_POLLS` below. Without the
  * extension both shaders are compiled and the program linked, then the three statuses are read
  * before `program()` returns, and `ready()` resolves at once.
  *

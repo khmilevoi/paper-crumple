@@ -865,7 +865,7 @@ function describeStage(stage: BlitStage): void {
   const canvas: unknown = stage.surface.canvas
   const gl =
     canvas instanceof HTMLCanvasElement || canvas instanceof OffscreenCanvas
-      ? canvas.getContext('webgl2')
+      ? (canvas.getContext('webgl2') as WebGL2RenderingContext | null)
       : null
   const info = gl?.getExtension('WEBGL_debug_renderer_info') ?? null
   const frame = window.frameElement?.getBoundingClientRect()
