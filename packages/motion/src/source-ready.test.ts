@@ -71,6 +71,9 @@ function fakeContext(link: LinkOutcome | Promise<LinkOutcome>): {
       return texture
     },
     target: () => new GlError('fake: no targets here'),
+    allocations: (fn) => fn(),
+    checkAllocations: () => 0,
+    alive: () => true,
     scope: (fn) => fn({ bindTarget() {}, enable() {} }),
     gl,
   }
