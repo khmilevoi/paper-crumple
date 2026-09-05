@@ -12,33 +12,50 @@
  * the mid amplitude by `midLow` is what pins the LOWER reach at exactly `W (1 - v)`; the upper
  * reach then lands inside `W (1 + v)`, which is the direction the reserve can afford.
  *
- * Known boundary this module does NOT cover: the tear floor `tearFloor = tight + 0.4*W` (the
- * shader's own clamp on how far a tear can pull inward) binds before `W(1 - v)` once `v > 0.6`, so
- * the true lower reach past that point is `max(W(1 - v), 0.4*W)`, not `W(1 - v)` as this module's
- * amplitudes assume. The amplitudes computed here are unaffected by that floor — they are about
- * amplitudes, not about where the shader ultimately clamps the result — but a caller sweeping
- * `edgeVariance` past 0.6 must not assume the band identity above still holds.
+ * Known boundaries this module does NOT cover:
+ *
+ * - The tear floor `tearFloor = tight + 0.4*W` (the shader's own clamp on how far a tear can pull
+ *   inward) binds before `W(1 - v)` once `v > 0.6`, so the true lower reach past that point is
+ *   `max(W(1 - v), 0.4*W)`, not `W(1 - v)` as this module's amplitudes assume. The amplitudes
+ *   computed here are unaffected by that floor — they are about amplitudes, not about where the
+ *   shader ultimately clamps the result — but a caller sweeping `edgeVariance` past 0.6 must not
+ *   assume the band identity above still holds.
+ *
+ * - `tearAmpsFor`'s own budget clamp (`Math.max(0, w*v - CHEW_REACH*chew)`, below) breaks the SAME
+ *   identity from the other end. Whenever `W*v < CHEW_REACH*chew` — at the design defaults
+ *   (`chew = 1.8`, so `CHEW_REACH*chew = 2.88`), that is any `v < 0.0613` at `W = 47`, or
+ *   equivalently any `W < 5.43` at `v = 0.53` — the budget clamps to 0 (`tearAmp = midAmp = 0`) and
+ *   the lower reach becomes `W - CHEW_REACH*chew`, not `W(1 - v)`: strictly BELOW `W(1 - v)`, because
+ *   the clamp only engages when the unclamped budget would already have gone negative, i.e. exactly
+ *   when `W - CHEW_REACH*chew < W(1 - v)`. `edgeVariance` sweeps starting at 0 walk straight into
+ *   this regime at the defaults — do not gate a sweep assertion on `W(1 - v)` holding down there.
  */
 
 /**
- * `|midSmooth|` in the shader: `1.25 * MID_SCALLOP` (`paper-shader.ts:548`). Mirrored as a GLSL
- * literal there; the two must move together (R11).
+ * `|midSmooth|` in the shader's `mid = mix(midSmooth, midAng, uTearAngular)` branch:
+ * `1.25 * MID_SCALLOP`, where `MID_SCALLOP` is `paper-shader.ts`'s own named GLSL constant (NOT a
+ * bare literal — this is `1.25 *` that constant's value). The two must move together (R11): if
+ * `MID_SCALLOP` changes, this constant must be updated to `1.25 * MID_SCALLOP`'s new value.
  */
 export const MID_LOW_SMOOTH = 0.225
 /**
- * `-bite * 1.0` (`paper-shader.ts:556`). Read only by `midLow` in this file — it is exported
- * anyway so a reader can see the shader's own branch coefficient named, not folded into an
- * arithmetic expression; do not let lint/knip strip it as unused-across-files.
+ * `-bite * 1.0`, the shader's `midAng` angular branch of that same `mid = mix(...)` expression.
+ * Read only by `midLow` in this file — it is exported anyway so a reader can see the shader's own
+ * branch coefficient named, not folded into an arithmetic expression; do not let lint/knip strip it
+ * as unused-across-files.
  */
 export const MID_LOW_ANGULAR = 1
 /**
- * `+tab * 0.55` (`paper-shader.ts:556`). Mirrored as a GLSL literal there; the two must move
- * together (R11). Read only by `midHigh` in this file, exported for the same reason as
- * `MID_LOW_ANGULAR` above.
+ * `+tab * 0.55`, the other half of that same `midAng` expression. Mirrored as a GLSL literal there;
+ * the two must move together (R11). Read only by `midHigh` in this file, exported for the same
+ * reason as `MID_LOW_ANGULAR` above.
  */
 export const MID_HIGH_ANGULAR = 0.55
-/** `teeth = uChew * 1.6` (`paper-shader.ts:585`). Mirrored as a GLSL literal there; the two must
- * move together (R11). */
+/**
+ * `teeth = chew * 1.6` in the shader — mirrored as a GLSL literal at TWO sites there (the tear
+ * silhouette's `teeth` and a second, differently-scoped `teeth = (uChew * k) * 1.6`); all three
+ * (this constant and both shader sites) must move together (R11).
+ */
 export const CHEW_REACH = 1.6
 
 const clamp01 = (x: number): number => (Number.isFinite(x) ? Math.min(1, Math.max(0, x)) : 0)

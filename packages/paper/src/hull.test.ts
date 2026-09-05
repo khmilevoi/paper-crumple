@@ -706,6 +706,10 @@ describe('fillHullMask', () => {
 describe('the §11 measurement — the vertex reach under smooth after the repair pass', () => {
   const FIELDS: readonly (readonly [string, Float32Array])[] = [
     ['disc', discField()],
+    // outer 26 + the band's own maxDist (~8.99) reaches past this 64-frame's edge at 32±34.99 vs
+    // the frame's 32-texel half-width — the only fixture here whose contour actually touches the
+    // field boundary, which is why its numbers below (segmentMin 2.58, vertexMax 7.20) diverge
+    // from its neighbours. Not a defect: flagged so it doesn't read as an arbitrary outlier later.
     ['annulus', cpuSdfFromAlpha(annulusAlpha(W, H, 32, 32, 26, 12), W, H)],
     ['logo', cpuSdfFromAlpha(logoAlpha(W), W, H)],
     [
@@ -715,7 +719,9 @@ describe('the §11 measurement — the vertex reach under smooth after the repai
   ]
 
   it('reports the vertex distances the repair pass leaves (design §11, item 3)', () => {
-    // measurement, not a gate — see task-3-report.md §11 for the verdict line.
+    // The vertexMin/vertexMax expects below (per field) are a real gate — R13 does not ask for
+    // those to be softened. Only the `rows`/`toHaveLength` bookkeeping at the end of this block is
+    // the measurement half: see the comment there, and task-3-report.md §11 for the verdict line.
     const rows: string[] = []
     for (const [name, field] of FIELDS) {
       // The band is in TEXELS here: this fixture is 64x64, so the reference-px band is scaled to
@@ -751,6 +757,8 @@ describe('the §11 measurement — the vertex reach under smooth after the repai
       expect(m.vertexMin).toBeGreaterThanOrEqual(band.minDist - 0.05)
       expect(m.vertexMax).toBeLessThanOrEqual(band.maxDist + 0.05)
     }
+    // measurement, not a gate: this asserts only that all four rows were collected, not anything
+    // about their content — the real per-field bounds are the two `expect`s inside the loop above.
     expect(rows).toHaveLength(4)
   })
 })

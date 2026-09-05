@@ -21,6 +21,9 @@ describe('hullBandFor (design 2026-09-05 §5)', () => {
 
   it('is 0/0 at width 0, which is what makes buildHull return HULL_USE_ALPHA', () => {
     expect(hullBandFor(0, 0.53)).toEqual({ minDist: 0, maxDist: 0 })
+    // Task 7 leans on this identity holding at every variance, not only the default 0.53.
+    expect(hullBandFor(0, 0)).toEqual({ minDist: 0, maxDist: 0 })
+    expect(hullBandFor(0, 1)).toEqual({ minDist: 0, maxDist: 0 })
   })
 })
 
@@ -67,9 +70,17 @@ describe('tearAmpsFor (design 2026-09-05 §5)', () => {
   })
 
   it('clamps the budget at zero and lets chew alone set the wobble', () => {
-    const a = tearAmpsFor({ ...defaults, widthRef: 2, variance: 0.5, chew: 8 })
+    const o = { ...defaults, widthRef: 2, variance: 0.5, chew: 8 }
+    const a = tearAmpsFor(o)
     expect(a.tearAmp).toBe(0)
     expect(a.midAmp).toBe(0)
+    // Below the clamp threshold (here W*v = 1 < CHEW_REACH*chew = 12.8), the identity this module
+    // otherwise guarantees -- the lower reach pinned at exactly W(1-v) -- does NOT hold. The true
+    // lower reach is W - CHEW_REACH*chew, strictly BELOW W(1-v) (see the module's "Known
+    // boundaries" doc comment): fix-round item, Task 8 must not sweep past this assuming it does.
+    const down = a.tearAmp + midLow(o.tearAngular) * a.midAmp + CHEW_REACH * o.chew
+    expect(o.widthRef - down).toBeCloseTo(o.widthRef - CHEW_REACH * o.chew, 9)
+    expect(o.widthRef - down).toBeLessThan(o.widthRef * (1 - o.variance))
   })
 
   it('puts the whole budget in the low octave at tearMix 1, and none at 0', () => {
