@@ -1,17 +1,33 @@
 import { afterEach, describe, expect, it } from 'vitest'
-import { GlError } from '@paper-crumple/core'
+import { GlError, KNOB_REFERENCE_PX } from '@paper-crumple/core'
 import { createScratchPools, drawTargetFor } from '@paper-crumple/core/unstable'
-import type { ScratchPools } from '@paper-crumple/core/unstable'
+import type { EdgeSpec, GlContext, Program, ScratchPools } from '@paper-crumple/core/unstable'
 import { createGlFixture, type PaperGlFixture } from './testing/gl-fixture.js'
+import { CHEW_REACH, midHigh, tearAmpsFor } from './edge-derive.js'
 import { createSdfBuilder, SDF_POOL_SLOTS, sigmaFor } from './gl-sdf.js'
+import type { Field } from './gl-sdf.js'
 import { createPaperRenderer } from './paper-renderer.js'
+import type { FrontRenderRequest, PaperRenderer } from './paper-renderer.js'
+import { PAPER_FS, PAPER_UNIFORMS } from './paper-shader.js'
 import { mountNeutralTiles } from './paper-tiles.js'
-import { defaultsFor, descriptorsFor, type PaperEdgeMode } from './paper-knobs.js'
+import type { MountedTiles } from './paper-tiles.js'
+import { defaultsFor, descriptorsFor } from './paper-knobs.js'
 
 type Err = InstanceType<typeof GlError>
 
+/**
+ * design 2026-09-05 §6's four cells. `EdgeMode`'s three values are gone: the contour source is
+ * `shape`, expressed by WHICH TEXTURES the renderer binds, and the decoration is `finish`,
+ * expressed by `uEdgeFinish` alone.
+ */
+const SMOOTH_CLEAN: EdgeSpec = { shape: 'smooth', finish: 'clean', widthUnit: 'px' }
+const SMOOTH_PAPER: EdgeSpec = { shape: 'smooth', finish: 'paper', widthUnit: 'px' }
+const TORN_CLEAN: EdgeSpec = { shape: 'torn', finish: 'clean', widthUnit: 'px' }
+const TORN_PAPER: EdgeSpec = { shape: 'torn', finish: 'paper', widthUnit: 'px' }
+const CELLS: readonly EdgeSpec[] = [SMOOTH_CLEAN, SMOOTH_PAPER, TORN_CLEAN, TORN_PAPER]
+
 // Arrays, not a single mutable slot: `scene()` runs once per `renderInto()` call, and the one
-// test below (`'produces a different silhouette in torn mode than in hull mode'`) calls
+// test below (`'produces a different silhouette under torn than under smooth'`) calls
 // `renderInto()` twice. A single `let fixture` / `let pools` reassigned by the second call would
 // orphan the first call's whole WebGL2 context and `ScratchPools` — `afterEach` would then only
 // ever dispose the last one, not every one the test opened. §4.0 caps live WebGL2 contexts at
@@ -31,6 +47,10 @@ const FRONT = { w: 96, h: 96 }
 const ARTWORK = { w: 64, h: 64 }
 const ARTWORK_RECT = { x: 16, y: 16, w: 64, h: 64 }
 const FIELD = 64
+/** Working px per reference px on this front — what `scaleKnob` applies (spec 6.4). */
+const PX = FRONT.h / KNOB_REFERENCE_PX
+/** The width knob's own shipped default, in reference px; never a literal (§2.1). */
+const WIDTH_REF = Number(defaultsFor(TORN_PAPER).edgeWidth)
 
 /** A centred opaque square, as RGBA8UI bytes: solid red inside, fully transparent outside. */
 function square(w: number, h: number, r: number): Uint8Array {
@@ -50,8 +70,8 @@ function square(w: number, h: number, r: number): Uint8Array {
  * Fully opaque, as RGBA8UI bytes — everywhere, not just a centred region. This is a synthetic
  * paper mask, not artwork (ruling R28): `buildField`'s own `BuildFieldOptions.artwork` doc
  * comment (`gl-sdf.ts:224`) says pass A does not care whether its `RGBA8UI` source is the artwork
- * or the hull mask, so uploading this through the same pass A `artwork` builds a real
- * `paperField`, the one `uEdgeMode = 1` (`'hull'` with a real paper field) needs.
+ * or the hull mask, so uploading this through the same pass A builds a real polygon field — the
+ * one `edgeShape: 'smooth'` binds to BOTH `uSdfTight` and `uSdfLoose` (design 2026-09-05 §6).
  */
 function opaqueMask(w: number, h: number): Uint8Array {
   const out = new Uint8Array(w * h * 4)
@@ -112,17 +132,17 @@ function scene() {
   })
   if (GlError.is(loose)) return loose
 
-  // Ruling R28: `edgeMode: 'hull'` with `paperField: null` selects `uEdgeMode = 2`, the
-  // degenerate "sheet IS the artwork alpha" mode (`paper.js:117`), which by design carries no
-  // margin — asserting a margin under that combination is unsatisfiable, not a renderer bug. A
-  // test that wants paper in the margin must drive the real hull path, `uEdgeMode = 1`, which
-  // needs a real `paperField`. This uploads a synthetic `RGBA8UI` mask, opaque across its whole
-  // texture, and runs it through the landed `buildField` (own `BuildFieldOptions.artwork` doc
-  // comment, `gl-sdf.ts:224`: "the RGBA8UI artwork, or the RGBA8UI hull mask — pass A does not
-  // care which"). The identity `artworkUv` maps the field 1:1 onto the mask, so the resulting
-  // field reads "inside" everywhere except right at the front's own outer edge — comfortably
-  // covering `at(10, 48)`, this suite's margin sample, well outside `ARTWORK_RECT`. Built into
-  // its own `SDF_POOL_SLOTS.hullField` slot so it never displaces `tight`'s target.
+  // Ruling R28, re-pointed at design 2026-09-05 §6: `shape: 'smooth'` with `paperField: null`
+  // falls back to `r.tight`, so the sheet IS the artwork alpha and carries no margin — asserting
+  // a margin under that combination is unsatisfiable, not a renderer bug. A test that wants paper
+  // in the margin must supply a real polygon field. This uploads a synthetic `RGBA8UI` mask,
+  // opaque across its whole texture, and runs it through the landed `buildField` (own
+  // `BuildFieldOptions.artwork` doc comment, `gl-sdf.ts:224`: "the RGBA8UI artwork, or the
+  // RGBA8UI hull mask — pass A does not care which"). The identity `artworkUv` maps the field 1:1
+  // onto the mask, so the resulting field reads "inside" everywhere except right at the front's
+  // own outer edge — comfortably covering `at(10, 48)`, this suite's margin sample, well outside
+  // `ARTWORK_RECT`. Built into its own `SDF_POOL_SLOTS.hullField` slot so it never displaces
+  // `tight`'s target.
   const paperMask = ctx.texture({
     width: ARTWORK.w,
     height: ARTWORK.h,
@@ -162,10 +182,11 @@ function scene() {
 }
 
 /**
- * `withPaperField`: pass the real synthetic `paperField` (drives `uEdgeMode = 1`, the actual hull
- * path) or `null` (drives `uEdgeMode = 2`, "the sheet IS the artwork alpha" — ruling R28).
+ * `withPaperField`: pass the real synthetic polygon field (design §6's `smooth` cell with a
+ * polygon built) or `null` (no polygon — `smooth` then falls back to `r.tight` and the sheet is
+ * the artwork alpha, ruling R28).
  */
-function renderInto(mode: PaperEdgeMode, withPaperField: boolean) {
+function renderInto(spec: EdgeSpec, withPaperField: boolean, widthRef = WIDTH_REF) {
   const built = scene()
   if (GlError.is(built)) return built
   const { ctx, artwork, tight, loose, tiles, builder, paperMask, paperField } = built
@@ -189,9 +210,10 @@ function renderInto(mode: PaperEdgeMode, withPaperField: boolean) {
     tight,
     loose,
     paperField: withPaperField ? paperField : null,
-    edgeMode: mode,
-    values: defaultsFor(mode),
-    descriptors: descriptorsFor(mode),
+    edgeSpec: spec,
+    widthRef,
+    values: defaultsFor(spec),
+    descriptors: descriptorsFor(spec),
   })
   expect(failed, failed?.message).toBeUndefined()
   if (failed !== undefined) return failed
@@ -228,15 +250,191 @@ function expectOk<T>(v: Err | T): T {
   return v
 }
 
+/**
+ * Records what `renderFront` uploaded. `Program.uniformLocation` is memoised per name, so the
+ * locations are stable within one program and can be reversed into names once.
+ *
+ * It monkey-patches the LIVE context's `uniform1f` / `uniform1i` / `activeTexture` /
+ * `bindTexture`, so the `try/finally` restore is load-bearing: leave one of the four patched and
+ * every later test in the file draws through a closure over a disposed capture. The restore is
+ * asserted, not assumed — see `'restores the context even when the run fails'` below (ruling R14).
+ */
+function captureUniforms(
+  ctx: GlContext,
+  program: { uniformLocation(name: string): WebGLUniformLocation | null },
+  run: () => Err | undefined,
+): {
+  floats: Record<string, number>
+  ints: Record<string, number>
+  textures: Record<string, WebGLTexture | null>
+} {
+  const byLocation = new Map<WebGLUniformLocation, string>()
+  for (const [key, name] of Object.entries(PAPER_UNIFORMS)) {
+    const loc = program.uniformLocation(name)
+    if (loc !== null) byLocation.set(loc, key)
+  }
+  const floats: Record<string, number> = {}
+  const ints: Record<string, number> = {}
+  const textures: Record<string, WebGLTexture | null> = {}
+  const gl = ctx.gl
+  // The UNBOUND originals, kept so the restore below is identity-preserving: restoring a
+  // `.bind(gl)` copy would leave the context holding a different function object every time this
+  // helper ran, which is exactly what the restore assertion would then fail to notice.
+  const was = {
+    uniform1f: gl.uniform1f,
+    uniform1i: gl.uniform1i,
+    activeTexture: gl.activeTexture,
+    bindTexture: gl.bindTexture,
+  }
+  const realFloat = was.uniform1f.bind(gl)
+  const realInt = was.uniform1i.bind(gl)
+  let unit = 0
+  const realActive = was.activeTexture.bind(gl)
+  const bound = new Map<number, WebGLTexture | null>()
+  const realBind = was.bindTexture.bind(gl)
+  gl.uniform1f = (loc, v) => {
+    if (loc !== null) floats[byLocation.get(loc) ?? '?'] = v
+    realFloat(loc, v)
+  }
+  gl.uniform1i = (loc, v) => {
+    const key = loc === null ? '?' : (byLocation.get(loc) ?? '?')
+    ints[key] = v
+    textures[key] = bound.get(v) ?? null
+    realInt(loc, v)
+  }
+  gl.activeTexture = (t) => {
+    unit = t - gl.TEXTURE0
+    realActive(t)
+  }
+  gl.bindTexture = (target, tex) => {
+    bound.set(unit, tex)
+    realBind(target, tex)
+  }
+  try {
+    expectOk(run())
+  } finally {
+    gl.uniform1f = was.uniform1f
+    gl.uniform1i = was.uniform1i
+    gl.activeTexture = was.activeTexture
+    gl.bindTexture = was.bindTexture
+  }
+  return { floats, ints, textures }
+}
+
+interface UniformScene {
+  readonly ctx: GlContext
+  readonly program: Program
+  readonly renderer: PaperRenderer
+  readonly tiles: MountedTiles
+  readonly polygon: Field
+  readonly base: FrontRenderRequest
+  cleanup(): void
+}
+
+/**
+ * A scene that can be asked what the renderer UPLOADED, not only what it drew.
+ *
+ * Two things make this more than `renderInto` with a spy. `createPaperRenderer` keeps its
+ * `Program` private, and a uniform location is a per-program object — a second
+ * `ctx.program(FULLSCREEN_VS, PAPER_FS)` would hand back locations that never equal the ones
+ * `renderFront` uploads through — so the context is spread with one method replaced (the idiom
+ * `paper-shader-early-out.gl.test.ts` uses) to keep a reference to the renderer's OWN program.
+ * And `Program.uniformLocation` memoises `null` as eagerly as it memoises a location
+ * (`gl-context.ts`'s `locations` map), so asking before the link has completed poisons every name
+ * for the life of the program: `await renderer.ready()` before the first `uniformLocation` call is
+ * what keeps this capture from being vacuous.
+ */
+/**
+ * The whole program, every path compiled in (`PAPER_FRONT_BUILD 0`) — the same test-only string
+ * replace `paper-shader-early-out.gl.test.ts` uses.
+ *
+ * The front build compiles the fold and flap-shadow paths out (P7), and a uniform no surviving
+ * statement reads is optimised away by the driver: `uFlapReach` HAS no location in the shipped
+ * program, so a capture of it there records nothing at all. Its value is still `renderFront`'s to
+ * get right — the 3D layer's poses read it — so the one test that pins it compiles the flap paths
+ * back in.
+ */
+const PAPER_FS_WHOLE = PAPER_FS.replace(
+  '#define PAPER_FRONT_BUILD 1',
+  '#define PAPER_FRONT_BUILD 0',
+)
+
+async function uniformScene(fs: string | null = null): Promise<Err | UniformScene> {
+  const built = scene()
+  if (GlError.is(built)) return built
+  const { ctx, artwork, tight, loose, tiles, builder, paperMask, paperField } = built
+  const front = ctx.texture({
+    width: FRONT.w,
+    height: FRONT.h,
+    format: 'RGBA8',
+    filter: 'LINEAR',
+    label: 'front',
+  })
+  if (GlError.is(front)) return front
+  const target = ctx.target(front)
+  if (GlError.is(target)) return target
+
+  const programs: Program[] = []
+  const spy: GlContext = {
+    ...ctx,
+    program: (vs, source, label) => {
+      const made = ctx.program(vs, fs !== null && source === PAPER_FS ? fs : source, label)
+      if (!GlError.is(made)) programs.push(made)
+      return made
+    },
+  }
+  const renderer = createPaperRenderer(spy)
+  if (GlError.is(renderer)) return renderer
+  const linked = await renderer.ready()
+  if (linked !== undefined) return linked
+  const program = programs[0]
+  if (program === undefined) return new GlError('createPaperRenderer created no program')
+
+  const base: FrontRenderRequest = {
+    target: drawTargetFor(target),
+    front: FRONT,
+    artworkRect: ARTWORK_RECT,
+    artwork,
+    tight,
+    loose,
+    paperField: null,
+    edgeSpec: SMOOTH_CLEAN,
+    widthRef: WIDTH_REF,
+    // The widest cell's bag and descriptors, so every knob each test overrides below is one the
+    // descriptor set actually declares — a bag missing `chew` would make `tearAmpsFor`'s budget
+    // and the shader's teeth disagree for a reason that has nothing to do with the binding
+    // (ruling R3).
+    values: defaultsFor(TORN_PAPER),
+    descriptors: descriptorsFor(TORN_PAPER),
+  }
+  return {
+    ctx,
+    program,
+    renderer,
+    tiles,
+    polygon: paperField,
+    base,
+    cleanup() {
+      target.dispose()
+      front.dispose()
+      renderer.dispose()
+      tiles.dispose()
+      paperMask.dispose()
+      builder.dispose()
+    },
+  }
+}
+
 describe('the front build (edge.js:86)', () => {
-  // Ruling R28: `'hull'` + a real `paperField` is `uEdgeMode = 1`, the genuine hull path — the
-  // one with a margin at all, and the one `source()` uses in production.
+  // design §6: `smooth` with a real polygon field binds that field to BOTH slots, so the sheet is
+  // the polygon's own contour — the case with a margin at all, and the one `source()` uses in
+  // production.
   it('puts the artwork inside and paper in the margin around it', () => {
-    const { at, cleanup } = expectOk(renderInto('hull', true))
+    const { at, cleanup } = expectOk(renderInto(SMOOTH_PAPER, true))
     // Centre: the artwork's red square, composited over the sheet.
     expect(at(48, 48)[0]).toBeGreaterThan(200)
     expect(at(48, 48)[3]).toBe(255)
-    // Just outside the artwork rect but inside the hull: opaque paper, not the artwork's red.
+    // Just outside the artwork rect but inside the polygon: opaque paper, not the artwork's red.
     const margin = at(10, 48)
     expect(margin[3]).toBeGreaterThan(200)
     // The artwork's own red carries G = B = 0 (`square()`'s own bytes); `paperColor`'s default
@@ -247,12 +445,12 @@ describe('the front build (edge.js:86)', () => {
     cleanup()
   })
 
-  // Ruling R28: `'hull'` + `paperField: null` is `uEdgeMode = 2` — `paper.js:117`'s "hull with
-  // minDist = maxDist = 0: the sheet IS the artwork alpha". That is correct, not a bug, and reads
-  // as no margin at all: the same point that is paper under a real hull field (above) is
-  // transparent here, because nothing paper-shaped exists beyond the artwork's own alpha.
-  it('is the artwork alpha with no margin when no paper field is supplied (paper.js:117)', () => {
-    const { at, cleanup } = expectOk(renderInto('hull', false))
+  // design §6: `smooth` with `paperField: null` has no polygon to bind, so both slots fall back to
+  // the artwork's own tight field and `uBaseBias` is 0 — the sheet IS the artwork alpha, which
+  // reads as no margin at all: the same point that is paper under a real polygon field (above) is
+  // transparent here.
+  it('is the artwork alpha with no margin when no polygon field is supplied (design §6)', () => {
+    const { at, cleanup } = expectOk(renderInto(SMOOTH_PAPER, false))
     expect(at(48, 48)[0]).toBeGreaterThan(200)
     expect(at(48, 48)[3]).toBe(255)
     expect(at(10, 48)[3]).toBe(0)
@@ -260,72 +458,234 @@ describe('the front build (edge.js:86)', () => {
   })
 
   it('leaves the outer corner of the front transparent', () => {
-    const { at, cleanup } = expectOk(renderInto('hull', false))
+    const { at, cleanup } = expectOk(renderInto(SMOOTH_PAPER, false))
     expect(at(1, 1)[3]).toBe(0)
     cleanup()
   })
 
-  it('produces a different silhouette in torn mode than in hull mode', () => {
-    const hull = expectOk(renderInto('hull', false))
-    const alphaHull = Array.from(hull.out)
+  it('produces a different silhouette under torn than under smooth', () => {
+    const smooth = expectOk(renderInto(SMOOTH_PAPER, false))
+    const alphaSmooth = Array.from(smooth.out)
       .filter((_, i) => i % 4 === 3)
       .reduce((a, b) => a + b, 0)
-    hull.cleanup()
-    const torn = expectOk(renderInto('torn', false))
+    smooth.cleanup()
+    const torn = expectOk(renderInto(TORN_PAPER, false))
     const alphaTorn = Array.from(torn.out)
       .filter((_, i) => i % 4 === 3)
       .reduce((a, b) => a + b, 0)
     torn.cleanup()
-    expect(alphaHull).not.toBe(alphaTorn)
+    expect(alphaSmooth).not.toBe(alphaTorn)
   })
 
-  // `edge.js:100-116`'s third mode, and the one public factory option with zero runtime coverage
-  // before this: `renderFront`'s `'both'` branch binds `uSdfTight` *and* `uSdfLoose` to the hull's
-  // own field (never `r.tight` / `r.loose`) and forces `uLoosePush = 0`. This is the first test
-  // that actually mounts, sources or builds a front in `'both'` mode rather than only counting its
-  // descriptors (`paper-knobs.test.ts`).
-  //
-  // `withPaperField: false` throughout, deliberately — not this suite's synthetic all-opaque
-  // `paperField` (built for the `'hull'` margin test above, ruling R28). That field's only real
-  // contour sits in the last ~2% of the texture, where `paperField()`'s own border guard
-  // (`smoothstep(0.482, 0.5, ...) * 1e4`) already forces the field to a huge negative number
-  // regardless of edge mode — so a `'both'` vs `'hull'` comparison built on it came back
-  // byte-for-byte identical, telling this test nothing. `paperField: null` instead falls back to
-  // `r.tight` (`hullField = r.paperField ?? r.tight`, this module's header comment) — the real
-  // square artwork's own field, with its actual contour tens of pixels inside the canvas, which is
-  // where the torn maths this finding is about have room to run.
-  it("renders 'both' — the hull silhouette, decorated by the torn shader path (edge.js:100-116)", () => {
-    const both = expectOk(renderInto('both', false))
-    // It renders at all: the centre still carries the artwork, composited and opaque.
-    expect(both.at(48, 48)[0]).toBeGreaterThan(200)
-    expect(both.at(48, 48)[3]).toBe(255)
-    const alphaBoth = Array.from(both.out)
-      .filter((_, i) => i % 4 === 3)
-      .reduce((a, b) => a + b, 0)
-    both.cleanup()
+  /**
+   * The guard against the failure mode this task was dispatched to fix: while the renderer
+   * uploaded to uniform names `PAPER_UNIFORMS` no longer carried, `loc(...)` resolved to `null`,
+   * `gl-context.ts` cached that `null`, `uEdgeWidth` / `uBaseBias` / `uEdgeFinish` all read 0, and
+   * every cell rendered the SAME front — the `edgeWidth = 0` one. A suite that sweeps four cells
+   * and renders one is worse than no suite, so the four fronts are asserted to be four fronts.
+   *
+   * The sum is over ALL bytes, not the alpha plane alone: `finish` at a fixed `shape` changes the
+   * deckle band's colour and the fibre fringe long before it changes the silhouette's coverage.
+   *
+   * `withPaperField: false` throughout, deliberately — not this suite's synthetic all-opaque
+   * polygon field, whose only real contour sits in the last ~2% of the texture, where
+   * `paperField()`'s own border guard (`smoothstep(0.482, 0.5, ...) * 1e4`) already forces the
+   * field to a huge negative number: the rim, and with it every finish decoration that rides
+   * `edgeK()`, falls off the canvas and `smooth`/`clean` and `smooth`/`paper` come back
+   * byte-identical for a reason that has nothing to do with the uniforms. `paperField: null`
+   * falls back to `r.tight` — the square artwork's own field, with its contour tens of pixels
+   * inside the canvas, which is where the finish has room to draw.
+   */
+  it('renders a different front in each of the four cells (design §6)', () => {
+    const sums = CELLS.map((spec) => {
+      const r = expectOk(renderInto(spec, false))
+      const sum = Array.from(r.out).reduce((a, b) => a + b, 0)
+      r.cleanup()
+      return sum
+    })
+    expect(new Set(sums).size).toBe(CELLS.length)
+  })
+})
 
-    // Its silhouette differs from plain `'hull'` on the same fallback field — `'both'` forces
-    // `uEdgeMode = 0` (the torn/fibre/deckle path over `scrapBase`), `'hull'` without a real
-    // `paperField` is `uEdgeMode = 2` (`paper.js:117`'s direct artwork-alpha path, ruling R28) —
-    // different maths over the same inputs.
-    const hull = expectOk(renderInto('hull', false))
-    const alphaHull = Array.from(hull.out)
-      .filter((_, i) => i % 4 === 3)
-      .reduce((a, b) => a + b, 0)
-    hull.cleanup()
-    expect(alphaBoth).not.toBe(alphaHull)
+describe('design 2026-09-05 §6: the four-cell binding table', () => {
+  it('binds the polygon field to both slots under smooth and biases nothing (design §6)', async () => {
+    const s = expectOk(await uniformScene())
+    const seen = captureUniforms(s.ctx, s.program, () =>
+      s.renderer.renderFront(s.tiles, {
+        ...s.base,
+        paperField: s.polygon,
+        edgeSpec: SMOOTH_CLEAN,
+        widthRef: WIDTH_REF,
+      }),
+    )
+    expect(seen.textures.sdfTight).toBe(s.polygon.target.texture.handle)
+    expect(seen.textures.sdfLoose).toBe(s.polygon.target.texture.handle)
+    expect(seen.floats.baseBias).toBe(0)
+    expect(seen.floats.edgeWidth).toBeCloseTo(WIDTH_REF * PX, 6)
+    expect(seen.floats.tearAmp).toBe(0)
+    expect(seen.floats.midAmp).toBe(0)
+    expect(seen.floats.chew).toBe(0)
+    expect(seen.floats.tearAngular).toBe(0) // baseAngular is gated on this, not on an amplitude
+    expect(seen.ints.edgeFinish).toBe(0)
+    s.cleanup()
+  })
 
-    // The binding this finding is specifically about — `uSdfLoose` pointed at the *tight* field
-    // and `uLoosePush` forced to `0` — only matters where `uEdgeMode == 0` (`scrapBase`'s
-    // `max(tight, loose + uLoosePush)`), so the sharper comparison is against plain `'torn'`,
-    // which takes the same `uEdgeMode == 0` path but with the real `uSdfLoose` / `uLoosePush`
-    // binding: exactly the materially different render `renderFront`'s `'both'` branch never had
-    // a test for before this one.
-    const torn = expectOk(renderInto('torn', false))
-    const alphaTorn = Array.from(torn.out)
-      .filter((_, i) => i % 4 === 3)
-      .reduce((a, b) => a + b, 0)
-    torn.cleanup()
-    expect(alphaBoth).not.toBe(alphaTorn)
+  it('binds the artwork pair under torn and biases by W', async () => {
+    const s = expectOk(await uniformScene())
+    // `base.values` MUST carry the torn shape knobs, or the resolved values below fall back to
+    // the descriptor defaults for a reason that has nothing to do with the binding.
+    const values = {
+      ...s.base.values,
+      edgeVariance: 0.53,
+      tearMix: 0.6,
+      tearAngular: 0.8,
+      chew: 1.8,
+    }
+    const seen = captureUniforms(s.ctx, s.program, () =>
+      s.renderer.renderFront(s.tiles, {
+        ...s.base,
+        values,
+        paperField: null,
+        edgeSpec: TORN_PAPER,
+        widthRef: WIDTH_REF,
+      }),
+    )
+    expect(seen.textures.sdfTight).toBe(s.base.tight.target.texture.handle)
+    expect(seen.textures.sdfLoose).toBe(s.base.loose.target.texture.handle)
+    expect(seen.floats.baseBias).toBeCloseTo(WIDTH_REF * PX, 6)
+    // Take the expected values from the derivation itself rather than from a rounded literal:
+    // `13.218` and `10.4284`, and a 4-digit literal misses by 1e-3 once scaled.
+    const amps = tearAmpsFor({
+      widthRef: WIDTH_REF,
+      variance: 0.53,
+      tearMix: 0.6,
+      tearAngular: 0.8,
+      chew: 1.8,
+    })
+    expect(seen.floats.tearAmp).toBeCloseTo(amps.tearAmp * PX, 6)
+    expect(seen.floats.midAmp).toBeCloseTo(amps.midAmp * PX, 6)
+    expect(seen.ints.edgeFinish).toBe(1)
+    s.cleanup()
+  })
+
+  it('honours the zero rule: at width 0 the finish is off whatever the spec says (design §2.5)', async () => {
+    const s = expectOk(await uniformScene())
+    const seen = captureUniforms(s.ctx, s.program, () =>
+      s.renderer.renderFront(s.tiles, {
+        ...s.base,
+        paperField: null,
+        edgeSpec: TORN_PAPER,
+        widthRef: 0,
+      }),
+    )
+    expect(seen.ints.edgeFinish).toBe(0)
+    expect(seen.floats.edgeWidth).toBe(0)
+    expect(seen.floats.baseBias).toBe(0)
+    s.cleanup()
+  })
+
+  /**
+   * Ruling R3, pinned as a uniform capture rather than as an argument about the source.
+   *
+   * The knob bag carries ONLY `edgeWidth`: no `tearAngular`, no `chew`, no `tearMix`, no
+   * `edgeVariance`. If the derivation and the upload resolve that bag separately — the shape the
+   * plan's own snippet had, `tearAmpsFor(rawNum('tearAngular', 0))` against
+   * `uniform1f(rawNum('tearAngular', 0.8))` — the amplitudes are normalised by `midLow(0)` while
+   * the shader applies `midLow(0.8)`, and the inward reach inflates by 3.8x. One resolved value
+   * per knob makes the captured `uTearAngular` and the captured `uMidAmp` agree by construction,
+   * which is what this asserts.
+   */
+  it('resolves one value per edge knob for both the derivation and the upload (ruling R3)', async () => {
+    const s = expectOk(await uniformScene())
+    const seen = captureUniforms(s.ctx, s.program, () =>
+      s.renderer.renderFront(s.tiles, {
+        ...s.base,
+        values: { edgeWidth: WIDTH_REF },
+        paperField: null,
+        edgeSpec: TORN_PAPER,
+        widthRef: WIDTH_REF,
+      }),
+    )
+    const d = defaultsFor(TORN_PAPER)
+    const amps = tearAmpsFor({
+      widthRef: WIDTH_REF,
+      variance: Number(d.edgeVariance),
+      tearMix: Number(d.tearMix),
+      tearAngular: Number(d.tearAngular),
+      chew: Number(d.chew),
+    })
+    // The uploaded angularity is the SAME number the amplitudes were normalised by.
+    expect(seen.floats.tearAngular).toBe(Number(d.tearAngular))
+    expect(seen.floats.chew).toBeCloseTo(Number(d.chew) * PX, 6)
+    expect(seen.floats.tearAmp).toBeCloseTo(amps.tearAmp * PX, 6)
+    expect(seen.floats.midAmp).toBeCloseTo(amps.midAmp * PX, 6)
+    s.cleanup()
+  })
+
+  /**
+   * Ruling R4. `uFlapReach` reserves the whole OUTWARD reach of the tear, not the low octave
+   * alone: `tearAmp + midHigh(tearAngular) * midAmp + CHEW_REACH * chew` is 21.16 reference px at
+   * the defaults against the 13.22 `amps.tearAmp` alone would reserve. Under-reserving clips
+   * flaps at pose 2 under `torn`, intermittently.
+   */
+  it('reserves the whole outward tear reach in uFlapReach (ruling R4)', async () => {
+    expect(PAPER_FS_WHOLE).not.toBe(PAPER_FS)
+    const s = expectOk(await uniformScene(PAPER_FS_WHOLE))
+    const seen = captureUniforms(s.ctx, s.program, () =>
+      s.renderer.renderFront(s.tiles, {
+        ...s.base,
+        paperField: null,
+        edgeSpec: TORN_PAPER,
+        widthRef: WIDTH_REF,
+      }),
+    )
+    const d = defaultsFor(TORN_PAPER)
+    const angular = Number(d.tearAngular)
+    const chew = Number(d.chew)
+    const amps = tearAmpsFor({
+      widthRef: WIDTH_REF,
+      variance: Number(d.edgeVariance),
+      tearMix: Number(d.tearMix),
+      tearAngular: angular,
+      chew,
+    })
+    const outward = amps.tearAmp + midHigh(angular) * amps.midAmp + CHEW_REACH * chew
+    // The reference figure the ruling names, recomputed rather than restated.
+    expect(outward).toBeCloseTo(21.16, 2)
+    expect(outward).toBeGreaterThan(amps.tearAmp)
+    // `jitter` and `fiberLen` at their defaults, and the shader's own 30 reference px of slack —
+    // the rest of the expression, so the assertion pins the tear term inside the whole sum.
+    const jitterDeg = Number(d.jitter)
+    const jitterRadians = (jitterDeg * Math.PI) / 180
+    const slack = (jitterDeg / 14) * 0.06
+    const expected =
+      (outward + Number(d.fiberLen) * 4 + 30) * PX + (jitterRadians * 0.8 + slack) * FRONT.h
+    expect(seen.floats.flapReach).toBeCloseTo(expected, 5)
+    s.cleanup()
+  })
+
+  /**
+   * Ruling R14: `captureUniforms` patches the live context, so its `try/finally` must restore the
+   * four methods even when the body fails. A run that returns a `GlError` makes `expectOk` throw
+   * its assertion out through the `finally` — no `throw` written here (spec §10.8), and no
+   * successful path either.
+   */
+  it('restores the context even when the run fails (ruling R14)', async () => {
+    const s = expectOk(await uniformScene())
+    const gl = s.ctx.gl
+    const before = {
+      f: gl.uniform1f,
+      i: gl.uniform1i,
+      a: gl.activeTexture,
+      b: gl.bindTexture,
+    }
+    expect(() =>
+      captureUniforms(s.ctx, s.program, () => new GlError('deliberate: the run refuses')),
+    ).toThrow()
+    expect(gl.uniform1f).toBe(before.f)
+    expect(gl.uniform1i).toBe(before.i)
+    expect(gl.activeTexture).toBe(before.a)
+    expect(gl.bindTexture).toBe(before.b)
+    s.cleanup()
   })
 })

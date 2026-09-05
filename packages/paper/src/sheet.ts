@@ -66,7 +66,13 @@ import type { HullCache, HullCacheKey } from './hull-cache.js'
 import { DISTANCE_WAVELENGTH_PX, buildHull, fillHullMask, toleranceFor } from './hull.js'
 import { boundsExtent, hullBounds, hullComponentCount } from './hull-shape.js'
 import type { HullShape, VertexBounds } from './hull-shape.js'
-import { defaultsFor, descriptorsFor, edgeParamsFrom, resolveSdfRes } from './paper-knobs.js'
+import {
+  defaultsFor,
+  descriptorsFor,
+  edgeParamsFrom,
+  resolveSdfRes,
+  WIDTH_PX_KNOB,
+} from './paper-knobs.js'
 import type { PaperEdgeMode } from './paper-knobs.js'
 import { createPaperRenderer } from './paper-renderer.js'
 import type { PaperRenderer } from './paper-renderer.js'
@@ -2058,7 +2064,21 @@ export function paperSheet(options?: PaperSheetOptions): PaperSheet {
           // exercised, because `build()` hardcoded `null` until now. Growing `both`'s sheet extent to
           // match is Task 4's concern, not this one's — this is not a "no change" claim for `both`.
           paperField,
-          edgeMode,
+          // TASK 6 BRIDGE — DELETE ME IN TASK 7, which owns this file and replaces the whole
+          // `edgeMode` vocabulary with `edgeShape` / `edgeFinish` / `edgeWidthUnit`
+          // (design 2026-09-05 §2, ruling R5's `optionsFor(spec)`). `renderFront` now takes the
+          // §6 cell and the width in reference px, so the front build has to hand it both; this
+          // reproduces today's behaviour for the three legacy modes and nothing more. `hull` and
+          // `both` alike bound one field to both `uSdf*` slots or fell back to the polygon, which
+          // is exactly `shape: 'smooth'`; every legacy mode rendered the deckle/fibre decoration,
+          // which is `finish: 'paper'`; and the width is the `edgeWidth` knob in `px`, resolved
+          // here rather than by `widthRefFrom` — Task 7's job, with the percent unit.
+          edgeSpec: {
+            shape: edgeMode === 'torn' ? 'torn' : 'smooth',
+            finish: 'paper',
+            widthUnit: 'px',
+          },
+          widthRef: numKnob(knobValues, 'edgeWidth', Number(WIDTH_PX_KNOB.default)),
           values: knobValues,
           descriptors: knobDescriptors,
         })

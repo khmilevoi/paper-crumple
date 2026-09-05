@@ -28,15 +28,25 @@
  * `(1, 1, 0, 0)` here; the spike's own line computing it from `asset.tight.uvScale ?? [1, 1]`
  * would be dead code in this port and is dropped rather than carried across unused.
  *
- * **THIS BLOCK IS STALE FROM TASK 5 AND TASK 6 REWRITES IT.** The shader no longer has
- * `uEdgeMode`, `uThickness`, `uLooseness`, `uLoosePush`, `uPaperField` or `samplePaper` (design
- * 2026-09-05 §6): the contour is expressed by which textures are bound and by nothing else. The
- * `'both'` trick this paragraph described is now the ONLY mechanism, and it is what
- * `edgeShape: 'smooth'` is — bind the polygon's own field to `uSdfTight` AND `uSdfLoose`, upload
- * `uBaseBias = 0`, and `scrapUnguarded` returns `max(pf, pf) + 0 = pf`, the polygon's contour
- * exactly, border guard included. The three uploads below that no longer resolve (`edgeMode`,
- * `looseness`, `thickness`) are the three lines Task 6 replaces with `edgeWidth`, `baseBias` and
- * `edgeFinish`.
+ * **The four-cell binding table (design 2026-09-05 §6).** There is no `uEdgeMode` and no mode int
+ * to switch on: the CONTOUR SOURCE is expressed by WHICH TEXTURES this module binds, and the
+ * decoration by `uEdgeFinish` alone. The ancestor spike's `edge.js:104-110` trick — bind one field
+ * to both `uSdf*` slots — stops being one mode's special case and becomes the general rule.
+ *
+ * | `edgeSpec.shape` | `uSdfTight` / `uSdfLoose`     | `uEdgeFinish` | `uEdgeWidth` | `uBaseBias` | `uTearAmp` / `uMidAmp` / `uChew` |
+ * |------------------|-------------------------------|---------------|--------------|-------------|----------------------------------|
+ * | `smooth`         | polygon field / polygon field | 0 or 1        | `W`          | `0`         | `0`                              |
+ * | `torn`           | artwork tight / artwork loose | 0 or 1        | `W`          | `W`         | derived (`edge-derive.ts`)       |
+ *
+ * Under `smooth` both slots point at the polygon's own field, so `scrapUnguarded` returns
+ * `max(pf, pf) + 0 = pf` — the polygon's contour exactly, border guard included. There is no
+ * polygon-field uniform to bind it to instead: `uPaperField` / `uDecodePaper` and `samplePaper`
+ * were deleted in Task 5, and the fold loop's own lookups go through `paperFieldFast`, which reads
+ * the same two `uSdf*` slots as everything else.
+ *
+ * `looseness` is NOT uploaded and never was a uniform of its own after §6.1: it reaches the shader
+ * through the CONTENTS of `uSdfLoose` (`sigmaFor` -> `blurField`, `sheet.ts`), which is why the
+ * `torn` row binds the artwork's genuinely blurred loose field rather than its tight one twice.
  *
  * **Every px-valued knob passes through `scaleKnob(descriptor, value, front.h)`** (spec 6.4),
  * which is `value * front.h / KNOB_REFERENCE_PX` for a `reference: 'sprite-px'` descriptor and
@@ -53,15 +63,17 @@
  */
 import { GlError, SHARED_KNOBS } from '@paper-crumple/core'
 import type { DrawTarget, KnobDescriptor, Rect, SharedKnob, Size } from '@paper-crumple/core'
-import type { GlContext, Texture } from '@paper-crumple/core/unstable'
+import type { EdgeSpec, GlContext, Texture } from '@paper-crumple/core/unstable'
 import {
   FULLSCREEN_VS,
   hexToRgb,
   pxScale as pxScaleOf,
   scaleKnob,
 } from '@paper-crumple/core/unstable'
+import { CHEW_REACH, midHigh, tearAmpsFor } from './edge-derive.js'
+import type { TearAmps } from './edge-derive.js'
 import type { Field, LooseField } from './gl-sdf.js'
-import type { PaperEdgeMode } from './paper-knobs.js'
+import { defaultsFor } from './paper-knobs.js'
 import {
   FIBRE_TILE_PX,
   MAX_FOLDS,
@@ -88,6 +100,33 @@ function sharedColorDefault(key: SharedKnob): string {
   return SHARED_DEFAULTS.get(key) ?? '#000000'
 }
 
+/**
+ * Ruling R3's fallback, once and in one place: the edge knobs' own SHIPPED defaults.
+ *
+ * Every value that feeds BOTH `tearAmpsFor` and a uniform upload has to be ONE resolved number.
+ * The plan's own snippet resolved them twice — `tearAmpsFor(rawNum('tearAngular', 0))` against
+ * `uniform1f(rawNum('tearAngular', 0.8))` — and on an incomplete knob bag those are different
+ * numbers: the amplitudes come out normalised by `midLow(0) = 0.225` while the shader applies
+ * `midLow(0.8) = 0.845`, inflating the inward reach by 3.8x and breaking the `W (1 +- v)` identity
+ * the whole redesign rests on. So: no bare-literal fallback for any edge knob, here or at the
+ * upload.
+ *
+ * This is the WIDEST cell's bag (`torn`/`paper`) rather than `defaultsFor(r.edgeSpec)`, and
+ * deliberately: `descriptorsFor` composes the same descriptor objects into all four cells, so a
+ * knob's default does not vary by cell, while a knob the rendered cell does not declare is still
+ * read by the shader — `tearFreq` is a torn-shape knob (§2.2) and the deckle band's own width
+ * noise reads it under `smooth` too. The one descriptor whose default DOES vary by cell is
+ * `edgeWidth` (`WIDTH_PX_KNOB` 47 against `WIDTH_PCT_KNOB` 5.9), and it is never read here: the
+ * width arrives already resolved to reference px as `FrontRenderRequest.widthRef` (§3.1).
+ */
+const EDGE_DEFAULTS: Readonly<Record<string, string | number | boolean>> = defaultsFor({
+  shape: 'torn',
+  finish: 'paper',
+  widthUnit: 'px',
+})
+
+const NO_TEAR: TearAmps = { tearAmp: 0, midAmp: 0 }
+
 export interface FrontRenderRequest {
   /** Where the front is drawn. A caller-owned offscreen target — this module never allocates
    *  one (spec 7.3: a slot never chooses its own destination). */
@@ -101,10 +140,26 @@ export interface FrontRenderRequest {
   readonly artwork: Texture
   readonly tight: Field
   readonly loose: LooseField
-  /** The hull polygon's own field, or `null` when none has been built (the degenerate
-   *  minDist = maxDist = 0 case, `uEdgeMode = 2`; spike `paper.js:2159`). */
+  /**
+   * The hull polygon's own field, or `null` when no polygon was built.
+   *
+   * Under `edgeSpec.shape === 'smooth'` this IS the contour source and is bound to BOTH `uSdfTight`
+   * and `uSdfLoose` (design 2026-09-05 §6). `null` falls back to `r.tight`, which collapses the
+   * sheet onto the artwork's own alpha — the degenerate case the deleted `uEdgeMode = 2` used to
+   * name (spike `paper.js:2159`), reached now by having no polygon rather than by a mode. Ignored
+   * under `torn`, which always binds the artwork's own tight/loose pair.
+   */
   readonly paperField: Field | null
-  readonly edgeMode: PaperEdgeMode
+  /** Which cell of design 2026-09-05 §6's table this front is. Replaces `edgeMode`. */
+  readonly edgeSpec: EdgeSpec
+  /**
+   * `W`, in REFERENCE px — this module scales it by `front.h / KNOB_REFERENCE_PX` itself.
+   *
+   * Resolved by the CALLER, not read off `values`: the `percent` width unit's conversion needs the
+   * sprite's aspect and the frozen reserve, neither of which a knob bag carries (design §3.1), so
+   * `paperSheet`'s `build()` / `source()` owns that step and hands the answer down.
+   */
+  readonly widthRef: number
   readonly values: Readonly<Record<string, string | number | boolean>>
   readonly descriptors: readonly KnobDescriptor[]
 }
@@ -139,6 +194,7 @@ export function createPaperRenderer(ctx: GlContext): Err | PaperRenderer {
   // the fuller explanation). A `const` arrow has no such hoisting hazard.
   const renderFront = (tiles: MountedTiles, r: FrontRenderRequest): Err | undefined => {
     const descByKey = new Map(r.descriptors.map((d) => [d.key, d] as const))
+    const pxs = pxScaleOf(r.front.h)
 
     function rawNum(key: string, fallback: number): number {
       const v = r.values[key]
@@ -155,6 +211,27 @@ export function createPaperRenderer(ctx: GlContext): Err | PaperRenderer {
       const v = r.values[key]
       return typeof v === 'string' ? v : fallback
     }
+    /**
+     * An EDGE knob, resolved ONCE (ruling R3): the caller's value if it set one, otherwise that
+     * knob's own shipped default from `EDGE_DEFAULTS`. Never a bare literal — the same number has
+     * to reach `tearAmpsFor` and the uniform, or the shader and the derivation disagree about the
+     * band. `NaN` rather than `0` if a key reaches this that no descriptor declares, for the reason
+     * `edgeParamsFrom` gives: a missing value must never be indistinguishable from a deliberate
+     * zero.
+     */
+    function edgeNum(key: string): number {
+      const v = r.values[key]
+      if (typeof v === 'number' && Number.isFinite(v)) return v
+      const d = EDGE_DEFAULTS[key]
+      return typeof d === 'number' ? d : NaN
+    }
+    /**
+     * The same value, in working px. Every DIMENSIONAL edge knob is `reference: 'sprite-px'` (§2.3),
+     * so the conversion is `pxs` and does not need the descriptor — which the rendered cell may not
+     * even declare (`fiberLen` under `finish: 'clean'`, `chew` under `shape: 'smooth'`), and where
+     * `scaled` would silently hand back an UNSCALED number.
+     */
+    const edgePx = (key: string): number => edgeNum(key) * pxs
 
     const paperColorRgb = hexToRgb(rawStr('paperColor', sharedColorDefault('paperColor')))
     if (paperColorRgb instanceof Error) {
@@ -165,25 +242,49 @@ export function createPaperRenderer(ctx: GlContext): Err | PaperRenderer {
       return new GlError('paper.renderFront: paperBack', { cause: paperBackRgb })
     }
 
-    // `paper.js:2157-2163` and `edge.js`'s third mode (see this module's header comment).
-    // `edge.js:116` rewrites `renderParams.edgeMode` to `'torn'` for `'both'` before calling
-    // `engine.render`, so `hullMode` inside that call is `false` for `'both'` too — a single
-    // `effectiveEdgeMode` reproduces that rewrite instead of computing `hullMode` twice with two
-    // different answers for the same request.
-    const both = r.edgeMode === 'both'
-    const effectiveEdgeMode = both ? 'torn' : r.edgeMode
-    const hullMode = effectiveEdgeMode !== 'torn'
-    const hullField: Field = r.paperField ?? r.tight
-    const uEdgeModeValue = hullMode ? (r.paperField === null ? 2 : 1) : 0
-    const tightField: Field = both ? hullField : r.tight
-    const looseTexture = both ? hullField.target.texture : r.loose.target.texture
-    const looseDecode = both ? hullField.decode : r.loose.decode
-    // TASK 5 left this deliberately incomplete: `uLoosePush` no longer exists (design 2026-09-05
-    // §6.1 item 2 zeroes the push in every cell), so the value that fed it is gone with it. The
-    // remaining `edgeMode` / `thickness` / `looseness` uploads below are Task 6's to replace with
-    // `edgeWidth` / `baseBias` / `edgeFinish` — they resolve to no location in the meantime.
+    // design 2026-09-05 §6: the CONTOUR SOURCE is expressed by WHICH TEXTURES are bound, never by
+    // editing the shader — the general form of the ancestor spike's `edge.js:104-110` trick that
+    // `'both'` used to be the only user of. Under `smooth` both slots point at the polygon's own
+    // field, which collapses `scrapUnguarded`'s tight/loose union onto the polygon's contour;
+    // under `torn` they are the artwork's own pair, as they always were. `looseness` still reaches
+    // the shader here — through the CONTENTS of `r.loose` (`sigmaFor` -> `blurField`), never
+    // through a uniform of its own.
+    const smooth = r.edgeSpec.shape === 'smooth'
+    const contour: Field = smooth ? (r.paperField ?? r.tight) : r.tight
+    const looseTexture = smooth ? contour.target.texture : r.loose.target.texture
+    const looseDecode = smooth ? contour.decode : r.loose.decode
+    // §2.5's zero rule, stated once: no rim means nothing to decorate, so the finish knobs stay in
+    // the bag and stop having an effect.
+    const widthRef = Number.isFinite(r.widthRef) && r.widthRef > 0 ? r.widthRef : 0
+    const finishOn = r.edgeSpec.finish === 'paper' && widthRef > 0
+    // Under `smooth` the polygon already sits at `W (1 +- v)`, so biasing it again would reach
+    // `2 W` (§6.1 item 1, and ruling R12's correction to the spec's own table); under `torn` the
+    // bias IS the band (§5).
+    const baseBias = smooth ? 0 : widthRef
 
-    const pxs = pxScaleOf(r.front.h)
+    // Ruling R3: ONE resolved number per edge knob, above BOTH the derivation and the upload.
+    // `uTearAngular` is not an amplitude — `baseAngular` (`paper-shader.ts`) is gated on
+    // `uTearAngular * edgeK()` and on nothing else, so a non-zero value here would POLYGONISE the
+    // polygon under `smooth`, chamfering every concavity on a coarse lattice, and would put
+    // `farOutside`'s `angTerm` back into the early-out's reach. Zeroing it under `smooth` and
+    // zeroing the amplitudes are the same decision and are taken here together.
+    const tearAngular = smooth ? 0 : edgeNum('tearAngular')
+    const chewRef = smooth ? 0 : edgeNum('chew')
+    const amps = smooth
+      ? NO_TEAR
+      : tearAmpsFor({
+          widthRef,
+          variance: edgeNum('edgeVariance'),
+          tearMix: edgeNum('tearMix'),
+          tearAngular,
+          chew: chewRef,
+        })
+    // Ruling R4: the whole OUTWARD reach of the tear, not its low octave alone. `midAmp` reaches
+    // out by `midHigh(tearAngular)` per unit (`midAng`'s `+tab * 0.55` branch mixed against
+    // `midSmooth`), and the teeth add `CHEW_REACH * chew` on top of both, independently of the
+    // width. 21.16 reference px at the defaults, against the 13.22 `amps.tearAmp` alone reserves —
+    // under-reserving clips flaps at pose 2 under `torn`, intermittently.
+    const tearReach = amps.tearAmp + midHigh(tearAngular) * amps.midAmp + CHEW_REACH * chewRef
 
     return ctx.scope((s): Err | undefined => {
       const { gl } = ctx
@@ -202,7 +303,7 @@ export function createPaperRenderer(ctx: GlContext): Err | PaperRenderer {
       }
 
       bind(0, r.artwork.handle, 'image')
-      bind(1, tightField.target.texture.handle, 'sdfTight')
+      bind(1, contour.target.texture.handle, 'sdfTight')
       bind(2, looseTexture.handle, 'sdfLoose')
       // Unit 3 is free: `uPaperField` / `uDecodePaper` and `samplePaper` were deleted in Task 5
       // (design 2026-09-05 §6). Under `edgeShape: 'smooth'` the polygon's own field goes to
@@ -212,8 +313,7 @@ export function createPaperRenderer(ctx: GlContext): Err | PaperRenderer {
       bind(6, tiles.crumpleA.handle, 'crumpleA')
       bind(7, tiles.fibreA.handle, 'fibreA')
 
-      gl.uniform1i(loc('edgeMode'), uEdgeModeValue)
-      gl.uniform2f(loc('decodeTight'), tightField.decode[0], tightField.decode[1])
+      gl.uniform2f(loc('decodeTight'), contour.decode[0], contour.decode[1])
       gl.uniform2f(loc('decodeLoose'), looseDecode[0], looseDecode[1])
       // Always identity — see this module's header comment.
       gl.uniform4f(loc('tightUv'), 1, 1, 0, 0)
@@ -241,20 +341,27 @@ export function createPaperRenderer(ctx: GlContext): Err | PaperRenderer {
       gl.uniform1f(loc('sheetCrumple'), rawNum('sheetCrumple', 0.12))
       gl.uniform1f(loc('sheetTile'), SHEET_TILE_PX * pxs)
 
-      gl.uniform1f(loc('looseness'), rawNum('looseness', 0.5))
-      gl.uniform1f(loc('thickness'), scaled('thickness', 22))
-      gl.uniform1f(loc('tearFreq'), rawNum('tearFreq', 9))
-      gl.uniform1f(loc('tearAmp'), scaled('tearAmp', 44))
-      gl.uniform1f(loc('midAmp'), scaled('midAmp', 26))
-      gl.uniform1f(loc('chew'), scaled('chew', 1.8))
-      gl.uniform1f(loc('tearAngular'), rawNum('tearAngular', 0.8))
-      gl.uniform1f(loc('fiberDens'), rawNum('fibers', 0.8))
-      gl.uniform1f(loc('fiberLen'), scaled('fiberLen', 4))
+      // design 2026-09-05 §6's table, uploaded. `uEdgeFinish` carries the DECORATION and nothing
+      // else; the contour source was decided by the two binds above. `uEdgeWidth` is the master
+      // ramp `edgeK()` reads, `uBaseBias` the outward offset of the contour source — the same
+      // number under `torn`, deliberately different under `smooth` (ruling R12).
+      gl.uniform1i(loc('edgeFinish'), finishOn ? 1 : 0)
+      gl.uniform1f(loc('edgeWidth'), widthRef * pxs)
+      gl.uniform1f(loc('baseBias'), baseBias * pxs)
+      gl.uniform1f(loc('tearFreq'), edgeNum('tearFreq'))
+      gl.uniform1f(loc('tearAmp'), amps.tearAmp * pxs)
+      gl.uniform1f(loc('midAmp'), amps.midAmp * pxs)
+      gl.uniform1f(loc('chew'), chewRef * pxs)
+      // The same resolved number `amps` was normalised by (ruling R3), and 0 under `smooth` — see
+      // the derivation block above for why that pair is not optional.
+      gl.uniform1f(loc('tearAngular'), tearAngular)
+      gl.uniform1f(loc('fiberDens'), edgeNum('fibers'))
+      gl.uniform1f(loc('fiberLen'), edgePx('fiberLen'))
       gl.uniform1f(loc('grain'), rawNum('grain', 0.09))
-      gl.uniform1f(loc('deckleWidth'), scaled('deckleWidth', 7))
-      gl.uniform1f(loc('deckleLight'), rawNum('deckleLight', 0.6))
-      gl.uniform1f(loc('deckleTex'), rawNum('deckleTex', 0.3))
-      gl.uniform1f(loc('tearShadow'), rawNum('tearShadow', 0.4))
+      gl.uniform1f(loc('deckleWidth'), edgePx('deckleWidth'))
+      gl.uniform1f(loc('deckleLight'), edgeNum('deckleLight'))
+      gl.uniform1f(loc('deckleTex'), edgeNum('deckleTex'))
+      gl.uniform1f(loc('tearShadow'), edgeNum('tearShadow'))
       gl.uniform1f(loc('creases'), rawNum('creases', 0.035))
       gl.uniform3f(loc('paperColor'), paperColorRgb[0], paperColorRgb[1], paperColorRgb[2])
       gl.uniform3f(loc('paperBack'), paperBackRgb[0], paperBackRgb[1], paperBackRgb[2])
@@ -284,12 +391,12 @@ export function createPaperRenderer(ctx: GlContext): Err | PaperRenderer {
       const jitterRadians = (jitterDeg * Math.PI) / 180
       const slack = (jitterDeg / 14) * 0.06
       gl.uniform1f(loc('slack'), slack)
-      // Worst case a flap can overshoot the envelope: the tear itself, plus the arc the jitter
-      // rotation swings the far end of a flap through, plus the slack. In hull mode the sheet's
-      // envelope is the polygon's own field, so only the arc and the slack reach past it.
+      // Worst case a flap can overshoot the envelope: the tear's own OUTWARD reach (0 under a
+      // polygon contour, where the amplitudes are all 0), plus the fibre fringe, plus the arc the
+      // jitter rotation swings the far end of a flap through, plus the slack.
       gl.uniform1f(
         loc('flapReach'),
-        (hullMode ? 30 : rawNum('tearAmp', 44) + rawNum('fiberLen', 4) * 4 + 30) * pxs +
+        (tearReach + (finishOn ? edgeNum('fiberLen') * 4 : 0) + 30) * pxs +
           (jitterRadians * 0.8 + slack) * r.front.h,
       )
       // The front build always renders pose 0's fill, 0 (edge.js:86) — the 3D layer owns the
