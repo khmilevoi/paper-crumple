@@ -172,12 +172,23 @@ export interface PaperSheet extends SheetRenderer<Knobs, PaperSheetHandle> {
    * drive `source()`'s SECOND abort check point (§10.5) deterministically: `source()` calls it
    * synchronously right after pass A (`buildField`) succeeds and BEFORE
    * the `await` that check point 2 sits behind — the only way to make an abort land inside that
-   * window without a race, since nothing else in this call ever yields before it (fix round 1,
-   * finding 2: the level-2 suite had no way to reach this check point at all before this hook
-   * existed). A name no consumer could mistake for API, by the same convention as
+   * window without a race, since no yield of this call falls inside it (fix round 1, finding 2:
+   * the level-2 suite had no way to reach this check point at all before this hook existed;
+   * S12's split yields one phase EARLIER, which is `__afterArtworkForTest`'s own window). A name no consumer could mistake for API, by the same convention as
    * `__afterHullForTest`.
    */
   __afterFieldForTest?: () => void
+
+  /**
+   * **Test-only**, and never assigned by production code. The level-2 suite installs this to
+   * drive the abort check point in `source()`'s SPLIT (S12; §8.10's "upload and field", §10.5)
+   * deterministically: `source()` calls it synchronously right after the artwork batch — the
+   * upload and the resample — and BEFORE the platform turn that separates it from the field
+   * passes, so an abort fired here is certain to have landed by the time the check after that
+   * turn reads the signal. The same convention, and the same reason, as `__afterFieldForTest`,
+   * one phase earlier.
+   */
+  __afterArtworkForTest?: () => void
 }
 
 /** A `resolve`-only deferred: `.promise` is handed out immediately, `.resolve` settles it once. */
@@ -1089,6 +1100,9 @@ export function paperSheet(options?: PaperSheetOptions): PaperSheet {
   // See `PaperSheet.__afterFieldForTest`'s own doc comment: test-only, never set by production
   // code (fix round 1, finding 2).
   let afterFieldForTest: (() => void) | undefined
+  // See `PaperSheet.__afterArtworkForTest`'s own doc comment: test-only, never set by production
+  // code (S12).
+  let afterArtworkForTest: (() => void) | undefined
 
   function mount(ctx: GlContext): InstanceType<typeof GlError> | undefined {
     // The earliest honest surface for a factory-level `overscanHeadroom` that could not be
@@ -1209,8 +1223,8 @@ export function paperSheet(options?: PaperSheetOptions): PaperSheet {
   }
 
   // A function, not the inlined `o.signal?.aborted === true` it wraps: `aborted` can flip between
-  // any two of `source()`'s three check points (an abort mid-trace is the entire reason there are
-  // three, not one), but TS's CFA does not know that — having seen one `=== true` check rule the
+  // any two of `source()`'s check points — 1, 1b (S12's split), 2 and 3 — (an abort mid-trace is
+  // the entire reason there are four, not one), but TS's CFA does not know that — having seen one `=== true` check rule the
   // property out, it treats a second textually-identical check on the same reference as
   // unreachable. A fresh call each time is a fresh expression, so nothing narrows across calls
   // (same idiom as `core/runner.ts`'s own `signalAborted`).
@@ -1300,12 +1314,16 @@ export function paperSheet(options?: PaperSheetOptions): PaperSheet {
 
     // Step 5: pools, sized at { artwork, sdfRes } — created lazily here, reused across sprites,
     // re-created (with disposal) when a later sprite needs a bigger Pool A.
-    // No wait between here and the passes (P7): the builder draws with `m.sdfPrograms`, linked
-    // at mount and awaited above, so a concurrent source() of another size re-sizes the pools
-    // only between two calls' synchronous runs from the pools to the fields — as before.
+    // The builder draws with `m.sdfPrograms`, linked at mount and awaited above, so no link wait
+    // falls between here and the passes (P7). A platform turn does, since S12's split: the pools
+    // and the artwork slot are therefore re-derived on the far side of it (below), because a
+    // concurrent direct `source()` of another size may re-size them, and one of any size may take
+    // the single artwork slot (§8.1), while this call sits between its two tasks. Through the
+    // stage that cannot happen — §8.10's lane holds one sprite between `source()` and `build()`,
+    // which is the invariant the one slot needs — so this is the direct caller's safety net.
     const ensured = ensurePools(m, artwork, sdfRes)
     if (GlError.is(ensured)) return ensured
-    const { pools, sdf } = ensured
+    const { pools } = ensured
 
     // Step 6: resample into the Pool A artwork slot — unless it is already sitting there. A
     // spriteKey is minted per BITMAP OBJECT IDENTITY (above), so "the artwork slot already holds
@@ -1319,42 +1337,112 @@ export function paperSheet(options?: PaperSheetOptions): PaperSheet {
       info.lastArtwork !== null &&
       info.lastArtwork.w === artwork.w &&
       info.lastArtwork.h === artwork.h
-    // Steps 6–7 are one allocation batch (S7; §7.3, §8.1 — `GlContext.allocations`): the
-    // staging, the source-sized copy, the artwork slot, the ping-pong and the tight field —
-    // every texture and target this call allocates — are allocated without a status read
-    // apiece, and settled by ONE `getError` after the yield below (`settleAllocations`, inside
-    // `readField` or the no-field branch), where the GPU has had a turn to drain. Nothing the
-    // batch hands out reaches a handle before that settle. A failure inside the batch settles
-    // at once, on its error path, so the pools never keep what the batch already released.
-    const staged = m.ctx.allocations(
-      (): InstanceType<typeof GlError> | { readonly tight: Field } => {
-        let artworkTexture: Texture
-        if (alreadyResident) {
-          const held = pools.poolA.holdArtwork(spriteKey, {
+    // The answer every yield in this call gives when `dispose()` landed inside it (the same
+    // convention as the readiness wait in `mount()`): nothing is written to the dead mount.
+    // Declared here because the first such yield is now the split below, not the readback's.
+    const disposedDuringSource = () => new SheetError('paperSheet: disposed during source()')
+
+    // Steps 6–7 are TWO allocation batches, one platform turn apart (S12), each on S7's rules
+    // (§7.3, §8.1 — `GlContext.allocations`): the staging, the source-sized copy, the artwork
+    // slot, the ping-pong and the tight field — every texture and target this call allocates —
+    // are allocated without a status read apiece, and settled by ONE `getError` after the yield
+    // below (`settleAllocations`, inside `readField` or the no-field branch), where the GPU has
+    // had a turn to drain. `allocations()` is synchronous (its `batching` counter falls back to
+    // zero the moment its body returns), so a batch cannot be held across an `await`: what spans
+    // the split is not one batch but the context's `unchecked` list, which is exactly what S7's
+    // settle proves — a flag is never lost between readers (`GlContext.checkAllocations`), and an
+    // unbatched reader that runs inside the gap settles ours conservatively, the same window the
+    // readback yield below has had since S2/S7. Nothing either batch hands out reaches a handle
+    // before that settle. A failure inside a batch settles at once, on its error path, so the
+    // pools never keep what the batch already released.
+    //
+    // Step 6, the first task: resample into the Pool A artwork slot — or hold what is already
+    // sitting there. A function, because the far side of the split may have to take the slot
+    // again (below); `resident` is the caller's decision, never re-derived here.
+    const takeArtwork = (
+      scratch: ScratchPools,
+      resident: boolean,
+    ): InstanceType<typeof GlError> | Texture =>
+      m.ctx.allocations((): InstanceType<typeof GlError> | Texture => {
+        if (resident) {
+          return scratch.poolA.holdArtwork(spriteKey, {
             width: artwork.w,
             height: artwork.h,
             format: 'RGBA8UI',
             filter: 'NEAREST',
             label: `artwork:${spriteKey}`,
           })
-          if (GlError.is(held)) return held
-          artworkTexture = held
-        } else {
-          const resampled = m.resampler.resample({
-            spriteKey,
-            bitmap,
-            srcRect: { x: 0, y: 0, w: srcW, h: srcH },
-            artwork,
-            poolA: pools.poolA,
-            poolB: pools.poolB,
-          })
-          if (GlError.is(resampled)) return resampled
-          artworkTexture = resampled.texture
-          info.lastArtwork = artwork
         }
+        const resampled = m.resampler.resample({
+          spriteKey,
+          bitmap,
+          srcRect: { x: 0, y: 0, w: srcW, h: srcH },
+          artwork,
+          poolA: scratch.poolA,
+          poolB: scratch.poolB,
+        })
+        if (GlError.is(resampled)) return resampled
+        info.lastArtwork = artwork
+        return resampled.texture
+      })
 
-        // Step 7: buildField — the margin applied as a uv offset, at no cost (§8.5): the artwork's
-        // own placement in the front, expressed in uv.
+    // Every failure exit between the first allocation and the settle below takes this path: the
+    // batch is settled now — a round trip, but on a call that has already failed — so a refused
+    // allocation among this call's own is released here and not blamed on the next reader's
+    // batch; an artwork this call resampled is then not vouched for either way.
+    const failNow = <E extends Error>(e: E): E => {
+      if (GlError.is(settleAllocations(m))) info.lastArtwork = null
+      return e
+    }
+
+    const firstArtwork = takeArtwork(pools, alreadyResident)
+    if (GlError.is(firstArtwork)) return failNow(firstArtwork)
+
+    // Test-only hook (S12 — see `__afterArtworkForTest`'s own doc comment on `PaperSheet`):
+    // fires synchronously, before the split's `await`, so a test-driven `controller.abort()` here
+    // has certainly landed by the time the check below reads the signal.
+    afterArtworkForTest?.()
+
+    // **The split (S12; §8.10's own phase list — "upload and field").** The 4 MB artwork upload,
+    // the resample draw and the field passes issued behind them were ONE task: ~10 ms in a
+    // thirty-view burst on the reference GPU (D3D11, Iris Xe), and that task was the whole of what
+    // held `bench:smooth`'s task p95 at 9.6–10.4 ms against its limit of 10. One turn between the
+    // two halves makes them two tasks of roughly half the length each; the GL calls, their
+    // arguments and their order per sprite are untouched, so every byte downstream is what it was.
+    // The turn is unconditional — the `alreadyResident` path yields too, though it allocated
+    // nothing — so how many turns an ingest takes is a property of the code, not of the cache.
+    await nextTurn()
+    // Abort check point 1b (§10.5), the one this split makes reachable: between work already paid
+    // for (the artwork is resampled and resident) and the field passes, which are not yet issued.
+    // "Stop spending, keep what is already paid for" — the artwork stays in the slot for the next
+    // call, and this call's allocations stay unchecked for the next reader to settle, exactly as
+    // an abort at the fence leaves them.
+    if (signalAborted(o.signal)) return ABORTED
+    // `dispose()` inside the gap: the same answer the call's other yields give.
+    if (mounted !== m) return disposedDuringSource()
+
+    // The far side of the split re-derives what the near side read from the mount, because
+    // another direct `source()` on this sheet could have run in the gap (§8.1's ONE artwork slot;
+    // §8.10's lane is what rules this out for the stage): the pools may have been re-sized and
+    // disposed under us, and the slot may now hold another sprite. Both are answered the same way
+    // — take the slot again, by resampling, since a slot that is not ours holds another sprite's
+    // bytes and a texture the pools have released is dead. `alive()` is S7's own answer to "is
+    // this texture still owned"; the whole check is two comparisons on the ordinary path, where
+    // nothing ran in the gap and nothing is retaken.
+    const stillEnsured = ensurePools(m, artwork, sdfRes)
+    if (GlError.is(stillEnsured)) return failNow(stillEnsured)
+    const { pools: scratch, sdf } = stillEnsured
+    let artworkTexture = firstArtwork
+    if (scratch.poolA.artworkKey() !== spriteKey || !m.ctx.alive(artworkTexture)) {
+      const retaken = takeArtwork(scratch, false)
+      if (GlError.is(retaken)) return failNow(retaken)
+      artworkTexture = retaken
+    }
+
+    // Step 7, the second task: buildField — the margin applied as a uv offset, at no cost (§8.5):
+    // the artwork's own placement in the front, expressed in uv.
+    const staged = m.ctx.allocations(
+      (): InstanceType<typeof GlError> | { readonly tight: Field } => {
         const tight = sdf.buildField({
           artwork: artworkTexture,
           artworkUv: artworkUvFor(placement, front),
@@ -1366,13 +1454,7 @@ export function paperSheet(options?: PaperSheetOptions): PaperSheet {
         return { tight }
       },
     )
-    if (GlError.is(staged)) {
-      // The error path settles now — a round trip, but on a call that has already failed — so
-      // a refused allocation among this call's own is released here and not blamed on the next
-      // reader's batch; an artwork this call resampled is then not vouched for either way.
-      if (GlError.is(settleAllocations(m))) info.lastArtwork = null
-      return staged
-    }
+    if (GlError.is(staged)) return failNow(staged)
     const tight = staged.tight
 
     // Step 8 — no blur here. Pass B (`blurField`) used to run at this point, sigma off the
@@ -1439,7 +1521,6 @@ export function paperSheet(options?: PaperSheetOptions): PaperSheet {
      * yields (the scratch is consumed in the task that fills it — `decodeScratch`'s own doc
      * comment).
      */
-    const disposedDuringSource = () => new SheetError('paperSheet: disposed during source()')
     const readField = async (): Promise<
       InstanceType<typeof SheetError> | InstanceType<typeof GlError> | Aborted | Float32Array
     > => {
@@ -2101,6 +2182,12 @@ export function paperSheet(options?: PaperSheetOptions): PaperSheet {
     },
     set __afterFieldForTest(fn) {
       afterFieldForTest = fn
+    },
+    get __afterArtworkForTest() {
+      return afterArtworkForTest
+    },
+    set __afterArtworkForTest(fn) {
+      afterArtworkForTest = fn
     },
   }
 }

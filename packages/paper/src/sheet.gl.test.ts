@@ -2120,6 +2120,104 @@ describe('async field readback (spec §8.10)', () => {
     sheet.dispose()
   })
 
+  // S12. The first ingest phase — the 4 MB artwork upload, the resample draw and the field
+  // passes issued behind it — was ONE ~10 ms task in a thirty-view burst, which is what held
+  // `bench:smooth`'s task p95 at 9.6-10.4 ms against a limit of 10. §8.10 already names "upload
+  // and field" as two phases of a job; these two tests pin the boundary between them: the turn
+  // that separates the tasks, and the abort check point (§10.5) that turn makes reachable.
+  it('splits the first ingest phase in two tasks: the artwork resample, one platform turn, then the field passes (spec §8.10)', async () => {
+    const ctx = open()
+    const sheet = paperSheet()
+    sheet.mount(ctx)
+    const bitmap = await topSprite()
+    // The fence's status is stated rather than raced for, so the readback itself takes exactly
+    // one turn ('a fence that signals at once', above) and every other turn in `delays` is the
+    // split's.
+    const clientWaitSync = vi
+      .spyOn(ctx.gl, 'clientWaitSync')
+      .mockImplementation(() => ctx.gl.ALREADY_SIGNALED)
+    const drawArrays = vi.spyOn(ctx.gl, 'drawArrays')
+    const turns = watchTurns()
+    const delays = turns.delays()
+    let drawsAtSplit = -1
+    let turnsAtSplit = -1
+    sheet.__afterArtworkForTest = () => {
+      drawsAtSplit = drawArrays.mock.calls.length
+      turnsAtSplit = delays.length
+    }
+    const handle = await sheet.source(bitmap, { maxSize: 128, exact: false })
+    turns.restore()
+    bitmap.close()
+    expect(GlError.is(handle) || SheetError.is(handle) || isAborted(handle)).toBe(false)
+    if (GlError.is(handle) || SheetError.is(handle) || isAborted(handle)) return
+    expect(
+      turnsAtSplit,
+      'the artwork phase is the first task of the call: nothing has yielded before the split',
+    ).toBe(0)
+    expect(drawsAtSplit, 'the resample is issued in that first task').toBeGreaterThan(0)
+    expect(
+      drawArrays.mock.calls.length,
+      'the field passes are issued after the split, in a task of their own',
+    ).toBeGreaterThan(drawsAtSplit)
+    expect(
+      delays,
+      'two fast turns: the split between the artwork and the field passes, then the poll that settles the fence',
+    ).toEqual([0, 0])
+    // The extra task boundary moves no byte: same calls, same order, one turn between them.
+    expect(hullDigest(handle.hull)).toBe(READBACK_GOLDEN['top/hull'].hull)
+    drawArrays.mockRestore()
+    clientWaitSync.mockRestore()
+    sheet.dispose()
+  })
+
+  it('aborts in the split: a signal fired between the artwork and the field passes returns ABORTED, issues no field pass and no readback, and the next source() succeeds (spec §10.5)', async () => {
+    const ctx = open()
+    const sheet = paperSheet()
+    sheet.mount(ctx)
+    const bitmap = await sprite()
+    const controller = new AbortController()
+    const drawArrays = vi.spyOn(ctx.gl, 'drawArrays')
+    const fenceSync = vi.spyOn(ctx.gl, 'fenceSync')
+    const readPixels = vi.spyOn(ctx.gl, 'readPixels')
+    let drawsAtSplit = -1
+    // Fires synchronously inside `source()`, before the split's own `await`, so the abort has
+    // certainly landed by the time the check after that turn reads the signal — no signal-timing
+    // race (the convention of `__afterFieldForTest`, whose doc comment gives the reason).
+    sheet.__afterArtworkForTest = () => {
+      drawsAtSplit = drawArrays.mock.calls.length
+      controller.abort()
+    }
+    const r = await sheet.source(bitmap, { maxSize: 128, exact: false, signal: controller.signal })
+    bitmap.close()
+    expect(isAborted(r), 'the split is a check point, not merely a task boundary').toBe(true)
+    expect(
+      drawsAtSplit,
+      'the abort lands after work already paid for: the artwork was resampled',
+    ).toBeGreaterThan(0)
+    expect(
+      drawArrays,
+      'not one field pass is issued once the split has aborted',
+    ).toHaveBeenCalledTimes(drawsAtSplit)
+    expect(fenceSync, 'and no readback is issued either').not.toHaveBeenCalled()
+    expect(readPixels, 'nothing is read back').not.toHaveBeenCalled()
+    drawArrays.mockRestore()
+    fenceSync.mockRestore()
+    readPixels.mockRestore()
+
+    // The aborted call settles no allocation batch (S7): the next reader settles it. That next
+    // reader is this source(), which must still answer the golden — nothing of the aborted call
+    // poisoned the pools, the artwork slot or the error flag.
+    sheet.__afterArtworkForTest = undefined
+    const again = await sprite()
+    const handle = await sheet.source(again, { maxSize: 128, exact: false })
+    again.close()
+    expect(GlError.is(handle) || SheetError.is(handle) || isAborted(handle)).toBe(false)
+    if (GlError.is(handle) || SheetError.is(handle) || isAborted(handle)) return
+    expect(handle.frontRect).toEqual(READBACK_GOLDEN['ellipse/hull'].frontRect)
+    expect(hullDigest(handle.hull)).toBe(READBACK_GOLDEN['ellipse/hull'].hull)
+    sheet.dispose()
+  })
+
   it('falls back to the CPU field when readPixels into the pack buffer errors: the refusal is read at the fence, before any decode', async () => {
     const ctx = open()
     const sheet = paperSheet()
@@ -2341,8 +2439,8 @@ describe('async field readback (spec §8.10)', () => {
     expect(clientWaitSync, 'one poll settles it').toHaveBeenCalledTimes(1)
     expect(
       delays,
-      'the whole wait is fast turns: the back-off costs a signalled fence nothing',
-    ).toEqual([0])
+      'the whole wait is fast turns: the back-off costs a signalled fence nothing (the first is S12’s split between the artwork and the field passes)',
+    ).toEqual([0, 0])
     expect(hullDigest(handle.hull)).toBe(READBACK_GOLDEN['top/hull'].hull)
     clientWaitSync.mockRestore()
     sheet.dispose()
@@ -2367,10 +2465,10 @@ describe('async field readback (spec §8.10)', () => {
     if (GlError.is(handle) || SheetError.is(handle) || isAborted(handle)) return
     expect(clientWaitSync).toHaveBeenCalledTimes(13)
     expect(
-      delays.slice(0, 8),
-      'eight fast turns first, so a fence that signals soon waits nothing',
-    ).toEqual([0, 0, 0, 0, 0, 0, 0, 0])
-    expect(delays.slice(8), 'every later turn is a millisecond of back-off, not a spin').toEqual([
+      delays.slice(0, 9),
+      'S12’s split turn, then eight fast polls, so a fence that signals soon waits nothing',
+    ).toEqual([0, 0, 0, 0, 0, 0, 0, 0, 0])
+    expect(delays.slice(9), 'every later turn is a millisecond of back-off, not a spin').toEqual([
       1, 1, 1, 1, 1,
     ])
     // The late signal changes when the bytes are decoded, not what they say.
