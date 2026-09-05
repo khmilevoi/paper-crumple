@@ -88,10 +88,18 @@ if (results.length > 0) process.stdout.write(`${formatTable(results)}\n`)
 
 // GL call counts per operation (`calls.*`): the real slots against the recording context.
 const calls = []
-for (const s of selectedCalls) {
-  process.stderr.write(`  ${s.name} ...\n`)
-  const counts = await s.run()
-  calls.push({ name: s.name, note: s.note ?? null, ...counts })
+// A slot's `nextTurn()` parks on an unref'd `MessageChannel` under Node (`next-turn.ts`), so a
+// scenario whose only pending work is that turn would let the process exit mid-await; an interval
+// holds the loop open for exactly as long as the scenarios run.
+const keepAlive = setInterval(() => {}, 1_000)
+try {
+  for (const s of selectedCalls) {
+    process.stderr.write(`  ${s.name} ...\n`)
+    const counts = await s.run()
+    calls.push({ name: s.name, note: s.note ?? null, ...counts })
+  }
+} finally {
+  clearInterval(keepAlive)
 }
 if (calls.length > 0) {
   const columns = ['captures', 'syncQueries', ...TRACKED_CALLS, 'total', 'ms']

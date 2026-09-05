@@ -174,7 +174,9 @@ export function bakedMotion(o: BakedMotionOptions): BakedMotion {
     if (!pack) {
       return new GlError(`bakedMotion: bucket '${bucket}' is not loaded; call load(fit) first`)
     }
-    const mesh = createSheetMesh(m.ctx.gl, pack)
+    // The flag is read through the context's allocation accounting (S7, `mesh.ts`'s header):
+    // a raw `getError` here could consume an OUT_OF_MEMORY the sheet's batch is yet to settle.
+    const mesh = createSheetMesh(m.ctx.gl, pack, () => m.ctx.checkAllocations())
     if (mesh instanceof Error) return mesh
     meshes.set(bucket, mesh)
     return mesh

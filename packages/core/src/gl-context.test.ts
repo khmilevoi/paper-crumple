@@ -1,4 +1,4 @@
-import { describe, expect, it } from 'vitest'
+import { describe, expect, it, vi } from 'vitest'
 import { GlError } from './errors.js'
 import { createGlContext } from './gl-context.js'
 
@@ -19,11 +19,17 @@ interface FakeGl {
   /**
    * What `checkFramebufferStatus`, `getError`, `LINK_STATUS`, `COMPILE_STATUS` (per stage) and
    * `COMPLETION_STATUS_KHR` (false for the next `pendingPolls` reads, then true) answer; a test
-   * flips these to fail a path or to keep a link pending.
+   * flips these to fail a path or to keep a link pending. `error` is a sticky flag the way GL's
+   * is — one read returns it and clears it — and `errors` is a FIFO of flags read before it, for
+   * a driver holding several at once (GL ES 3.0 §2.5). `failStoreAt` N: the N-th `texStorage2D`
+   * since the last `reset()` raises OUT_OF_MEMORY — the fake driver that fails one allocation of
+   * a batch.
    */
   readonly answers: {
     framebufferStatus: string
     error: string
+    errors: string[]
+    failStoreAt: number
     linkStatus: boolean
     compileStatus: { VERTEX_SHADER: boolean; FRAGMENT_SHADER: boolean }
     pendingPolls: number
@@ -39,6 +45,8 @@ function fakeGl(o: { parallel?: boolean } = {}): FakeGl {
   const answers = {
     framebufferStatus: 'FRAMEBUFFER_COMPLETE',
     error: 'NO_ERROR',
+    errors: [] as string[],
+    failStoreAt: 0,
     linkStatus: true,
     compileStatus: { VERTEX_SHADER: true, FRAGMENT_SHADER: true },
     pendingPolls: 0,
@@ -101,8 +109,18 @@ function fakeGl(o: { parallel?: boolean } = {}): FakeGl {
         return { kind: name, id: nextId++, type: names.get(args[0] as number) }
       case 'checkFramebufferStatus':
         return enumValue(answers.framebufferStatus)
-      case 'getError':
-        return enumValue(answers.error)
+      case 'getError': {
+        const queued = answers.errors.shift()
+        if (queued !== undefined) return enumValue(queued)
+        const flag = answers.error
+        answers.error = 'NO_ERROR'
+        return enumValue(flag)
+      }
+      case 'texStorage2D':
+        if (answers.failStoreAt > 0 && counts.get(name) === answers.failStoreAt) {
+          answers.errors.push('OUT_OF_MEMORY')
+        }
+        return undefined
       case 'createProgram':
       case 'createTexture':
       case 'createFramebuffer':
@@ -139,6 +157,34 @@ function fakeGl(o: { parallel?: boolean } = {}): FakeGl {
 
 /** `captureGlState`'s footprint: 31 `getParameter` enums and 5 `isEnabled` caps (§5.1). */
 const CAPTURE = { getParameter: 31, isEnabled: 5 }
+
+/** `gl-context.ts`'s own `LINK_FAST_POLLS` / `LINK_SLOW_DELAY_MS`, restated here on purpose. */
+const LINK_FAST_POLLS_FOR_TEST = 8
+const LINK_SLOW_DELAY_MS_FOR_TEST = 1
+
+/**
+ * Every back-off turn the readiness poll takes while this is installed, as the number of
+ * `getProgramParameter` calls that had run when it was armed (spec §5.2's amendment).
+ *
+ * A back-off turn is `setTimeout(fn, LINK_SLOW_DELAY_MS)` — the only route `nextTurn({ delay })`
+ * has — while a fast turn is the `MessageChannel` this file's runtime prefers, so the timer spy
+ * sees the slow phase and nothing else. During the wait the only `getProgramParameter` the
+ * context issues is the `COMPLETION_STATUS_KHR` poll, so the recorded count IS the poll number,
+ * and a first entry of nine says eight polls span the fast phase. The spy calls through, so the
+ * turns still happen; it ignores any other timer the runtime arms.
+ */
+function watchBackOff(f: FakeGl): { armed: number[]; restore: () => void } {
+  const armed: number[] = []
+  const realTimeout = globalThis.setTimeout
+  const timer = vi.spyOn(globalThis, 'setTimeout').mockImplementation(((
+    fn: () => void,
+    ms?: number,
+  ) => {
+    if (ms === LINK_SLOW_DELAY_MS_FOR_TEST) armed.push(f.calls('getProgramParameter'))
+    return realTimeout(fn, ms)
+  }) as unknown as typeof setTimeout)
+  return { armed, restore: () => timer.mockRestore() }
+}
 
 describe('scope() on an injected context (§7.3): capture at the outermost entry only', () => {
   it('pays one full capture for the outermost scope and none for a nested one', () => {
@@ -405,5 +451,282 @@ describe('program(): the deferred link (P7, §5.2 amendment)', () => {
     expect(f.calls('deleteProgram')).toBe(0)
     expect(await program.ready()).toBeInstanceOf(GlError)
     expect(f.calls('deleteProgram')).toBe(1)
+  })
+
+  it('takes no delayed turn for a link that completes at once or inside the fast phase', async () => {
+    const f = fakeGl({ parallel: true })
+    const ctx = createGlContext(f.gl)
+
+    // Already done at the first poll: one status read, no turn at all.
+    f.reset()
+    let watch = watchBackOff(f)
+    const done = ctx.program(VS, FS, 'done')
+    if (GlError.is(done)) return
+    expect(await done.ready()).toBeUndefined()
+    watch.restore()
+    expect(watch.armed, 'a finished link never reaches the back-off').toEqual([])
+    // The COMPLETION poll and the LINK_STATUS read, and nothing between them.
+    expect(f.calls('getProgramParameter')).toBe(2)
+
+    // The last poll the fast phase can take still costs no delay.
+    f.reset()
+    f.answers.pendingPolls = LINK_FAST_POLLS_FOR_TEST - 1
+    watch = watchBackOff(f)
+    const late = ctx.program(VS, FS, 'late')
+    if (GlError.is(late)) return
+    expect(await late.ready()).toBeUndefined()
+    watch.restore()
+    expect(watch.armed, 'eight turns are free, and this link needed seven').toEqual([])
+    expect(f.calls('getProgramParameter')).toBe(LINK_FAST_POLLS_FOR_TEST + 1)
+  })
+
+  it('backs off to a delayed turn after eight fast polls when the link runs long (spec §5.2 amendment)', async () => {
+    const f = fakeGl({ parallel: true })
+    const ctx = createGlContext(f.gl)
+    f.reset()
+    // Twelve "still compiling" answers: four polls past the fast phase.
+    f.answers.pendingPolls = LINK_FAST_POLLS_FOR_TEST + 4
+    const watch = watchBackOff(f)
+    const program = ctx.program(VS, FS, 'slow')
+    if (GlError.is(program)) return
+    expect(await program.ready()).toBeUndefined()
+    watch.restore()
+    // 13 COMPLETION polls (12 false, 1 true) + the one LINK_STATUS read.
+    expect(f.calls('getProgramParameter')).toBe(LINK_FAST_POLLS_FOR_TEST + 6)
+    expect(
+      watch.armed,
+      'the first eight polls spin, and every poll after them is armed on a timer',
+    ).toEqual([9, 10, 11, 12])
+    expect(f.answers.pendingPolls).toBe(0)
+    expect(f.calls('deleteShader')).toBe(2)
+  })
+
+  it('gives a link that never completes up on the wall clock, once, worded as a link failure is', async () => {
+    const f = fakeGl({ parallel: true })
+    const ctx = createGlContext(f.gl)
+    // `Infinity - 1` is `Infinity`: the driver answers "still compiling" for ever.
+    f.answers.pendingPolls = Number.POSITIVE_INFINITY
+    const program = ctx.program(VS, FS, 'hung')
+    if (GlError.is(program)) return
+    f.reset()
+    // A clock that gains a million seconds a reading: whichever call the wait takes for its
+    // base, the next one is already past any finite bound — so no test waits a real minute.
+    let reading = 0
+    const now = vi.spyOn(performance, 'now').mockImplementation(() => {
+      reading += 1
+      return reading * 1e9
+    })
+    const outcome = await program.ready()
+    now.mockRestore()
+    expect(outcome).toBeInstanceOf(GlError)
+    expect(outcome?.message).toBe(
+      'hung: program did not link: the driver did not report completion within 60000 ms',
+    )
+    // The fast phase runs, then the first back-off turn finds the bound gone. LINK_STATUS is
+    // never read: that read is the block the deferral exists to avoid.
+    expect(f.calls('getProgramParameter')).toBe(LINK_FAST_POLLS_FOR_TEST + 1)
+    expect(f.calls('deleteProgram'), 'an abandoned link is released as a failed one is').toBe(1)
+    expect(f.calls('deleteShader')).toBe(2)
+    // Answered once, however many callers ask, and never polled again.
+    f.reset()
+    expect(await program.ready()).toBe(outcome)
+    expect(f.calls('getProgramParameter')).toBe(0)
+    program.dispose()
+    expect(f.calls('deleteProgram')).toBe(0)
+  })
+})
+
+describe('allocation batches (§7.3, §8.1, §10.8): one sticky-flag read per batch', () => {
+  const desc = { width: 8, height: 8, format: 'RGBA8' } as const
+
+  it('reads no status inside allocations(), and exactly one getError at checkAllocations()', () => {
+    const f = fakeGl()
+    const ctx = createGlContext(f.gl)
+    f.reset()
+    const made = ctx.allocations(() => {
+      const textures = [1, 2, 3, 4, 5].map((i) =>
+        ctx.texture({ ...desc, width: 8 * i, label: `t${i}` }),
+      )
+      const targets = textures.slice(0, 3).map((t) => (GlError.is(t) ? t : ctx.target(t)))
+      return { textures, targets }
+    })
+    for (const t of [...made.textures, ...made.targets]) expect(t).not.toBeInstanceOf(GlError)
+    // Five texStorage2D and three framebuffers, and not one round trip among them.
+    expect(f.calls('texStorage2D')).toBe(5)
+    expect(f.calls('createFramebuffer')).toBe(3)
+    expect(f.calls('getError')).toBe(0)
+    expect(f.calls('checkFramebufferStatus')).toBe(0)
+    expect(ctx.checkAllocations()).toBe(f.gl.NO_ERROR)
+    expect(f.calls('getError')).toBe(1)
+    expect(f.calls('deleteTexture')).toBe(0)
+    for (const t of made.textures) if (!GlError.is(t)) expect(ctx.alive(t)).toBe(true)
+    // Settled: a second check reads the flag again and has nothing to release.
+    expect(ctx.checkAllocations()).toBe(f.gl.NO_ERROR)
+    expect(f.calls('getError')).toBe(2)
+    expect(f.calls('deleteTexture')).toBe(0)
+  })
+
+  it('a driver that fails the third allocation of a batch: the check returns the error, every allocation of the batch is released, nothing is left to use', () => {
+    const f = fakeGl()
+    const ctx = createGlContext(f.gl)
+    f.reset()
+    f.answers.failStoreAt = 3
+    const made = ctx.allocations(() => {
+      const textures = [1, 2, 3, 4].map((i) =>
+        ctx.texture({ ...desc, width: 8 * i, label: `t${i}` }),
+      )
+      const first = textures[0]!
+      const target = GlError.is(first) ? first : ctx.target(first)
+      return { textures, target }
+    })
+    // Inside the batch nothing is read, so even the failed allocation looks like a success: the
+    // batch's contract is that nothing it handed out is trusted before checkAllocations().
+    for (const t of made.textures) expect(t).not.toBeInstanceOf(GlError)
+    expect(made.target).not.toBeInstanceOf(GlError)
+    expect(f.calls('getError')).toBe(0)
+    const outcome = ctx.checkAllocations()
+    expect(outcome).toBeInstanceOf(GlError)
+    expect((outcome as InstanceType<typeof GlError>).message).toMatch(
+      /^allocation batch of 4 textures and 1 target failed, GL error 0x[0-9a-f]+/,
+    )
+    // Every allocation of the batch — the three that succeeded included — is released, and the
+    // flag is drained: OUT_OF_MEMORY, then NO_ERROR.
+    expect(f.calls('deleteTexture')).toBe(4)
+    expect(f.calls('deleteFramebuffer')).toBe(1)
+    expect(f.calls('getError')).toBe(2)
+    for (const t of made.textures) if (!GlError.is(t)) expect(ctx.alive(t)).toBe(false)
+    // Reported once: a later check finds a clean flag and releases nothing more.
+    expect(ctx.checkAllocations()).toBe(f.gl.NO_ERROR)
+    expect(f.calls('deleteTexture')).toBe(4)
+    // An allocation's own dispose() after the batch's release is a no-op, not a second delete.
+    for (const t of made.textures) if (!GlError.is(t)) t.dispose()
+    if (!GlError.is(made.target)) made.target.dispose()
+    expect(f.calls('deleteTexture')).toBe(4)
+    expect(f.calls('deleteFramebuffer')).toBe(1)
+  })
+
+  it('reads every flag: an OUT_OF_MEMORY queued behind another flag still fails the batch', () => {
+    const f = fakeGl()
+    const ctx = createGlContext(f.gl)
+    f.reset()
+    const t = ctx.allocations(() => ctx.texture(desc))
+    // A draw into the unbacked target raised its own flag ahead of the storage failure.
+    f.answers.errors.push('INVALID_OPERATION', 'OUT_OF_MEMORY')
+    expect(ctx.checkAllocations()).toBeInstanceOf(GlError)
+    expect(f.calls('getError')).toBe(3)
+    expect(f.calls('deleteTexture')).toBe(1)
+    if (!GlError.is(t)) expect(ctx.alive(t)).toBe(false)
+  })
+
+  it('a flag no allocation can raise does not fail the batch: checkAllocations() returns it and keeps every allocation', () => {
+    const f = fakeGl()
+    const ctx = createGlContext(f.gl)
+    f.reset()
+    const t = ctx.allocations(() => ctx.texture(desc))
+    f.answers.errors.push('INVALID_OPERATION')
+    expect(ctx.checkAllocations()).toBe(f.gl.INVALID_OPERATION)
+    expect(f.calls('deleteTexture')).toBe(0)
+    if (!GlError.is(t)) expect(ctx.alive(t)).toBe(true)
+    // INVALID_FRAMEBUFFER_OPERATION is an allocation's own: a target of the batch is incomplete.
+    const u = ctx.allocations(() => ctx.texture({ ...desc, label: 'u' }))
+    f.answers.errors.push('INVALID_FRAMEBUFFER_OPERATION')
+    expect(ctx.checkAllocations()).toBeInstanceOf(GlError)
+    expect(f.calls('deleteTexture')).toBe(1)
+    if (!GlError.is(u)) expect(ctx.alive(u)).toBe(false)
+    if (!GlError.is(t)) expect(ctx.alive(t)).toBe(true)
+  })
+
+  it('an allocation outside any batch settles what is unchecked: a clean read proves it, a fatal one releases it and is reported at the next check', () => {
+    const f = fakeGl()
+    const ctx = createGlContext(f.gl)
+    f.reset()
+    const a = ctx.allocations(() => ctx.texture({ ...desc, label: 'a' }))
+    // Clean: the unbatched allocation's own read proves `a` too — no second read.
+    const b = ctx.texture({ ...desc, label: 'b' })
+    expect(b).not.toBeInstanceOf(GlError)
+    expect(f.calls('getError')).toBe(1)
+    expect(ctx.checkAllocations()).toBe(f.gl.NO_ERROR)
+    expect(f.calls('deleteTexture')).toBe(0)
+    // Fatal: `c` is unchecked when `d`'s own read finds OUT_OF_MEMORY. `d` fails on the call,
+    // `c` is released with it, and the batch's owner learns at its own check — the flag is never
+    // read and discarded between two readers.
+    const c = ctx.allocations(() => ctx.texture({ ...desc, label: 'c' }))
+    f.answers.error = 'OUT_OF_MEMORY'
+    const d = ctx.texture({ ...desc, label: 'd' })
+    expect(d).toBeInstanceOf(GlError)
+    expect(f.calls('deleteTexture')).toBe(2)
+    if (!GlError.is(c)) expect(ctx.alive(c)).toBe(false)
+    expect(ctx.checkAllocations()).toBeInstanceOf(GlError)
+    expect(ctx.checkAllocations()).toBe(f.gl.NO_ERROR)
+    if (!GlError.is(a)) expect(ctx.alive(a)).toBe(true)
+  })
+
+  it('a batch inside a batch joins it: one read for both', () => {
+    const f = fakeGl()
+    const ctx = createGlContext(f.gl)
+    f.reset()
+    const made = ctx.allocations(() => {
+      const outer = ctx.texture({ ...desc, label: 'outer' })
+      const inner = ctx.allocations(() => ctx.texture({ ...desc, label: 'inner' }))
+      // The inner batch's exit reads nothing: the outer owner's check covers it.
+      const after = ctx.texture({ ...desc, label: 'after' })
+      return [outer, inner, after]
+    })
+    expect(f.calls('getError')).toBe(0)
+    expect(ctx.checkAllocations()).toBe(f.gl.NO_ERROR)
+    expect(f.calls('getError')).toBe(1)
+    for (const t of made) expect(t).not.toBeInstanceOf(GlError)
+  })
+
+  it('target() inside a batch asks for no completeness status, and proves nothing for later targets', () => {
+    const f = fakeGl()
+    const ctx = createGlContext(f.gl)
+    const t = ctx.texture(desc)
+    if (GlError.is(t)) return
+    f.reset()
+    const target = ctx.allocations(() => ctx.target(t))
+    expect(target).not.toBeInstanceOf(GlError)
+    expect(f.calls('checkFramebufferStatus')).toBe(0)
+    expect(ctx.checkAllocations()).toBe(f.gl.NO_ERROR)
+    // An incomplete target in a batch is caught by the draws into it
+    // (INVALID_FRAMEBUFFER_OPERATION), not by a status query, so a clean batch is no proof of
+    // the combination: the first unbatched target of it still asks.
+    expect(ctx.target(t)).not.toBeInstanceOf(GlError)
+    expect(f.calls('checkFramebufferStatus')).toBe(1)
+  })
+
+  it('alive(): true for a texture this context holds, false once anyone released it', () => {
+    const f = fakeGl()
+    const ctx = createGlContext(f.gl)
+    const t = ctx.texture(desc)
+    if (GlError.is(t)) return
+    expect(ctx.alive(t)).toBe(true)
+    t.dispose()
+    expect(ctx.alive(t)).toBe(false)
+    const u = ctx.texture(desc)
+    if (GlError.is(u)) return
+    ctx.dispose()
+    expect(ctx.alive(u)).toBe(false)
+  })
+
+  it('a failure another reader found releases what the next batch allocated too: the owner is told once, and nothing of its batch survives the failed settle', () => {
+    const f = fakeGl()
+    const ctx = createGlContext(f.gl)
+    f.reset()
+    const a = ctx.allocations(() => ctx.texture({ ...desc, label: 'a' }))
+    // An unbatched allocation's own read finds the fatal flag: `a` goes, the failure is kept.
+    f.answers.error = 'OUT_OF_MEMORY'
+    expect(ctx.texture({ ...desc, label: 'b' })).toBeInstanceOf(GlError)
+    expect(f.calls('deleteTexture')).toBe(2)
+    // A new batch before the owner's check — `build()`'s front, say — settles into that kept
+    // failure: the contract that a failed settle releases every unchecked allocation holds here
+    // too, or the caller returns the error and the front outlives it, owned by nobody.
+    const front = ctx.allocations(() => ctx.texture({ ...desc, label: 'front' }))
+    expect(front).not.toBeInstanceOf(GlError)
+    expect(ctx.checkAllocations()).toBeInstanceOf(GlError)
+    if (!GlError.is(front)) expect(ctx.alive(front)).toBe(false)
+    expect(f.calls('deleteTexture')).toBe(3)
+    expect(ctx.checkAllocations()).toBe(f.gl.NO_ERROR)
+    if (!GlError.is(a)) expect(ctx.alive(a)).toBe(false)
   })
 })

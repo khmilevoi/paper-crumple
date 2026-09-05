@@ -758,6 +758,57 @@ stage.pin('hero'); stage.unpin('hero')
 await stage.replace('sweater', file)      // a File is a Blob, so it is a SpriteSource
 ```
 
+### Prefetch the next page at idle
+
+Every asynchronous ingest — `add()`, `replace()`, `prepare()`'s re-source, §8.5's re-load — runs
+through one stage-wide **ingest lane** (§8.10), and the lane orders jobs by class: the target a live
+`crumpleTo` is parked on, then a front a shown view needs, then background, FIFO within a class.
+`add()` is a **background** job (`mount()` adds at `visible`), so a speculative add never runs ahead
+of the front the reader is looking at — and a background add is **promoted to the head of the lane
+the moment a `crumpleTo` holds the promise it returned** (§4.5's `hold`). That promotion is what
+keeps the click no slower for having prefetched, and it reads the promise — so **keep the promise
+`add()` returned and hand that to `crumpleTo`**. A prefetch still in flight at the click is then
+promoted and adopted when it lands, with no second ingest; a landed one is a `crumpleTo` on a
+resident sprite. Falling back to `swapTo(url)` for a key whose prefetch is in flight would queue a
+**second** ingest of the same image — `swapTo` is `add()` + `crumpleTo(pending)`, and its own
+`add()` is held, but it still runs behind the job the lane already holds, so the click pays the
+prefetch's ingest and then its own. `swapTo` is for a key that was never prefetched, or whose
+prefetch already failed.
+
+```ts
+// At idle, once the current page is on screen. The promises are the prefetch.
+const prefetched = new Map<string, ReturnType<typeof stage.add>>()
+const idle = (fn: () => void) =>
+  typeof requestIdleCallback === 'function' ? requestIdleCallback(fn, { timeout: 200 }) : setTimeout(fn, 200)
+idle(() => {
+  for (const n of nextPage) {
+    const pending = stage.add(n.url, { key: n.id, signal })
+    prefetched.set(n.id, pending)
+    // Settled: `stage.get` is the truth from here — the sprite, or nothing for an add that failed.
+    void pending.then(() => prefetched.delete(n.id))
+  }
+})
+
+// At the click: a landed prefetch is a resident sprite, one still in flight is its promise —
+// `crumpleTo` promotes it to the head of the lane and adopts it when it lands. Only a key never
+// prefetched, or whose prefetch failed, takes `swapTo`.
+const target = stage.get(next.id) ?? prefetched.get(next.id)
+const run =
+  target !== undefined
+    ? view.crumpleTo(target, { duration, signal })
+    : view.swapTo(next.url, { duration, signal })
+```
+
+Two properties make that safe to do speculatively. A prefetched sprite is **reclaimable** whenever
+its source is a `string | URL | Blob`, so the budget still bounds the prefetch: the LRU may drop the
+front, `stage.get` hands back the sprite anyway, and `crumpleTo` rebuilds the front during the rise
+(§8.8 demand 5 — the ball is free time). And a `swapTo` that is superseded — a second `swapTo` on
+the same view, `view.stop()`, `dispose()`, or the caller's own signal — **aborts the `add()` it
+started**, so a reader clicking through five pages pays for one ingest rather than five; an aborted
+`add()` frees its key (§10.5), and the superseded run still settles `ABORTED` after the new `start`
+(§7.1). The lane also yields to the platform's task scheduler between a job's phases, so N
+speculative ingests are N short tasks rather than one long one.
+
 `add`, `addAll`, `replace`, `mount` and `swapTo` all take the same `SpriteSource`:
 
 ```ts

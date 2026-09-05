@@ -37,8 +37,64 @@ export interface GlContext {
    * (§5.2 amendment, P7). Without the extension the link is checked here, as it always was.
    */
   program(vs: string, fs: string, label: string): InstanceType<typeof GlError> | Program
+  /**
+   * Immutable storage, one level (§8.7). Outside `allocations()` the sticky error flag is read
+   * right after the storage call, so a `texStorage2D` the driver refused — §10.8's "any
+   * allocation that can fail on GPU OOM" — is this call's own `GlError`. Inside `allocations()`
+   * nothing is read here: the allocation is recorded as unchecked and `checkAllocations()`
+   * settles it with the rest of its batch.
+   */
   texture(d: TextureDesc): InstanceType<typeof GlError> | Texture
+  /**
+   * A framebuffer over `t`. Outside `allocations()` its completeness is queried once per
+   * (format, size) combination and trusted after that; inside, the query is skipped and an
+   * incomplete target is caught by the draws into it (`INVALID_FRAMEBUFFER_OPERATION`), at
+   * `checkAllocations()`.
+   */
   target(t: Texture): InstanceType<typeof GlError> | Target
+  /**
+   * §7.3, §8.1 — one sticky-flag read for a whole batch of allocations. `texture()` and
+   * `target()` inside `fn` read no status of their own; each is recorded as **unchecked** until
+   * `checkAllocations()` reads `getError` once for all of them. On ANGLE's D3D11 backend every
+   * `getError` is a GPU-process round trip that waits for everything queued ahead of it, so a
+   * slot that allocates seven textures for one sprite paid seven such waits — and the first one
+   * after a burst of draws paid for the whole burst. Re-entrant: a batch opened inside another
+   * joins it. `fn`'s value is passed through; nothing the batch handed out is to be trusted
+   * before its check. On a shared (injected, §7.3) context the flag is the consumer's too: a raw
+   * `gl.getError()` of theirs between the batch and its `checkAllocations()` consumes the
+   * `OUT_OF_MEMORY` an allocation of the batch raised — that read is then the consumer's to act
+   * on, and the batch is proven here — so a consumer sharing the context reads the flag after
+   * the settle, not between.
+   */
+  allocations<T>(fn: () => T): T
+  /**
+   * §7.3, §8.1, §10.8 — settle every unchecked allocation. Reads the error flag until it is clear
+   * (an implementation may hold several — GL ES 3.0 §2.5). A flag only an allocation of the
+   * batch can have raised — `OUT_OF_MEMORY` (storage refused), `INVALID_FRAMEBUFFER_OPERATION` (a
+   * target of the batch is incomplete), a lost context — fails the batch: **every unchecked
+   * allocation is released**, `alive()` answers false for each, and the `GlError` is returned,
+   * so an OOM is never missed and nothing unbacked is ever used; a caller that found one of the
+   * batch's textures in its own cache asks `alive()` before trusting it. Any other flag is not an
+   * allocation's: the batch is proven, the allocations kept, and that flag is returned for the
+   * caller's own purpose (a readback's refusal, say). `NO_ERROR` when the flag was clean.
+   *
+   * A `texture()` outside any batch settles the unchecked allocations with its own read: a clean
+   * read proves them, a fatal one releases them and is reported once more by the next
+   * `checkAllocations()`, so their owner still learns. Attribution across batches is by order,
+   * not by allocation: a flag left by one batch is read by the next reader, and an OOM is then
+   * blamed on that reader's batch — never lost.
+   *
+   * Place the check where the GPU has had a turn to drain (after a yield, once the batch's work
+   * was `flush`ed): the read waits for the queue ahead of it, and after a burst of draws that
+   * queue is the whole burst (§8.10).
+   */
+  checkAllocations(): InstanceType<typeof GlError> | number
+  /**
+   * Whether this context still holds `t`: false once its `dispose()` ran, whoever ran it — its
+   * owner, `checkAllocations()` failing the batch it was in, or the context's own `dispose()`.
+   * What a pool asks before handing back a resident it did not release itself.
+   */
+  alive(t: Texture): boolean
   /**
    * Runs `fn` with a scoped GL state. The outermost scope restores §5.1's enumerated set at its
    * exit; a scope entered while another is live on this context restores **nothing** at its own

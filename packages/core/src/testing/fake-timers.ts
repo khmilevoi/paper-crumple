@@ -19,6 +19,12 @@ export interface FakeTimers extends Timers {
   /** Move the clock by `ms` without firing anything. */
   freeze(ms: number): void
   readonly pending: number
+  /**
+   * How many times `yield()` was awaited. The fake's yield is a **microtask**, not a task: every
+   * lane guarantee (§8.10) holds by construction of its queue, so no fake-timer test has to drive
+   * a task boundary, and a budget test reads this count instead.
+   */
+  readonly yields: number
 }
 
 interface Scheduled {
@@ -30,6 +36,7 @@ interface Scheduled {
 export function createFakeTimers(start = 0): FakeTimers {
   let clock = start
   let seq = 0
+  let yields = 0
   const queue = new Map<number, Scheduled>()
 
   function due(limit: number): number | null {
@@ -49,6 +56,20 @@ export function createFakeTimers(start = 0): FakeTimers {
     return chosenId
   }
 
+  function advance(ms: number): void {
+    const target = clock + ms
+    for (;;) {
+      const id = due(target)
+      if (id === null) break
+      const entry = queue.get(id)
+      if (entry === undefined) break
+      queue.delete(id)
+      clock = Math.max(clock, entry.at)
+      entry.fn()
+    }
+    clock = Math.max(clock, target)
+  }
+
   return {
     now: () => clock,
     setTimeoutFn(fn, ms) {
@@ -59,24 +80,25 @@ export function createFakeTimers(start = 0): FakeTimers {
     clearTimeoutFn(handle: TimerHandle) {
       if (typeof handle === 'number') queue.delete(handle)
     },
-    advance(ms) {
-      const target = clock + ms
-      for (;;) {
-        const id = due(target)
-        if (id === null) break
-        const entry = queue.get(id)
-        if (entry === undefined) break
-        queue.delete(id)
-        clock = Math.max(clock, entry.at)
-        entry.fn()
-      }
-      clock = Math.max(clock, target)
-    },
+    advance,
     freeze(ms) {
       clock += ms
     },
     get pending() {
       return queue.size
+    },
+    /**
+     * A microtask, counted. A `{ delay }` (§8.10's back-off turn) is an ordinary passage of
+     * time on this clock: `advance(delay)`, so what falls due in the delay fires — the same
+     * thing the real timer route does while the awaiting code is parked.
+     */
+    yield(o) {
+      yields += 1
+      if (o !== undefined && o.delay !== undefined && o.delay > 0) advance(o.delay)
+      return Promise.resolve()
+    },
+    get yields() {
+      return yields
     },
   }
 }

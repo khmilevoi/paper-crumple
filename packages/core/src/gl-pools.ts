@@ -52,11 +52,13 @@ export const POOL_B_IDLE_MS = 10_000
 type Err = InstanceType<typeof GlError>
 
 /**
- * The two halves of `GlContext` a pool needs: `texture` for every slot, and `target` for the
- * size-keyed slots whose framebuffer the pool owns with the texture (`acquireSized`). Everything
- * else about the context is irrelevant here.
+ * The three parts of `GlContext` a pool needs: `texture` for every slot, `target` for the
+ * size-keyed slots whose framebuffer the pool owns with the texture (`acquireSized`), and
+ * `alive` for the residents the context may have released behind the pool's back — a failed
+ * allocation batch (`checkAllocations`) releases every allocation of the batch, the pool's
+ * among them. Everything else about the context is irrelevant here.
  */
-export type TextureFactory = Pick<GlContext, 'texture' | 'target'>
+export type TextureFactory = Pick<GlContext, 'texture' | 'target' | 'alive'>
 
 /** Pool A — artwork, JFA ping-pong, fields, hull mask, hull field, hull canvas. */
 export interface ArtworkPool {
@@ -144,7 +146,7 @@ export interface ScratchPoolsOptions {
   readonly artwork: Size
   readonly sdfRes: number
   /** Defaults to the real clock. The tests inject `createFakeTimers`. */
-  readonly timers?: Timers
+  readonly timers?: Pick<Timers, 'now' | 'setTimeoutFn' | 'clearTimeoutFn'>
 }
 
 interface Slot {
@@ -229,7 +231,42 @@ export function createScratchPools(o: ScratchPoolsOptions): ScratchPools {
   }
 
   function bytesA(): number {
+    sweepDead()
     return bytesExclusive() + bytesSized()
+  }
+
+  /**
+   * Drop every resident whose texture the context has released behind the pool's back: a failed
+   * allocation batch (`gl-context.ts`, `checkAllocations`) releases every allocation of the
+   * batch, the pool's among them, and the pool learns of it here, on its next look. A resident it
+   * cannot vouch for is treated as never allocated — looked up again it is reallocated, and it
+   * costs the budget nothing, so it is never the reason a live resident is evicted. The artwork
+   * slot's key goes with its texture (§8.5): an empty replacement holds nobody's artwork, so
+   * `build()` expires and the core re-sources rather than rendering from it. Every `dispose()`
+   * here is a no-op on the real context (its release runs once) and keeps a fake's books honest.
+   */
+  function sweepDead(): void {
+    for (const [slot, held] of slots) {
+      if (o.gl.alive(held.texture)) continue
+      held.texture.dispose()
+      slots.delete(slot)
+      if (slot !== ARTWORK_SLOT) continue
+      const previous = artworkKey
+      artworkKey = null
+      endArtworkRetention(previous, null)
+    }
+    for (const [key, s] of sized) {
+      if (o.gl.alive(s.target.texture)) continue
+      disposeOwned(s.target)
+      sized.delete(key)
+    }
+  }
+
+  /** Pool B's own sweep: a dead staging holds nothing, under no key. */
+  function sweepStaging(): void {
+    if (staging === null || o.gl.alive(staging.texture)) return
+    cancelIdle()
+    dropStaging()
   }
 
   function overBudget(total: number, slot: string): Err {
@@ -299,6 +336,7 @@ export function createScratchPools(o: ScratchPoolsOptions): ScratchPools {
     bytes: bytesA,
 
     acquire(slot, d) {
+      sweepDead()
       const held = slots.get(slot)
       if (held !== undefined && sameDesc(held.desc, d)) return held.texture
 
@@ -322,6 +360,7 @@ export function createScratchPools(o: ScratchPoolsOptions): ScratchPools {
     },
 
     acquireSized(slot, d) {
+      sweepDead()
       const key = sizedKey(slot, d)
       const hit = sized.get(key)
       if (hit !== undefined) {
@@ -376,14 +415,21 @@ export function createScratchPools(o: ScratchPoolsOptions): ScratchPools {
       return texture
     },
 
-    artworkKey: () => artworkKey,
+    artworkKey() {
+      sweepDead()
+      return artworkKey
+    },
   }
 
   const poolB: StagingPool = {
-    bytes: () => staging?.texture.bytes ?? 0,
+    bytes() {
+      sweepStaging()
+      return staging?.texture.bytes ?? 0
+    },
     budgetFor: (source) => poolBBytes(source),
 
     acquire(key, source) {
+      sweepStaging()
       // Whatever idle interval or deferral the previous key had is void: a different sprite takes
       // the slot at once, never on a timer — and takes the *texture* with it when the source size
       // is unchanged, because a staging texture holds nothing worth keeping once the resample that
@@ -420,6 +466,7 @@ export function createScratchPools(o: ScratchPoolsOptions): ScratchPools {
     },
 
     releaseIdle(key) {
+      sweepStaging()
       if (stagingKey !== key || staging === null) return
       if (artworkKey === key) {
         // §8.1: the interval must be at least as long as the artwork slot's retention. It has
@@ -430,7 +477,10 @@ export function createScratchPools(o: ScratchPoolsOptions): ScratchPools {
       armIdle(key)
     },
 
-    key: () => stagingKey,
+    key() {
+      sweepStaging()
+      return stagingKey
+    },
   }
 
   return {

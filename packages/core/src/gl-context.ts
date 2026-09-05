@@ -14,9 +14,24 @@
  * `Program` without reading `LINK_STATUS` — that read is where ANGLE's D3D11 backend blocked the
  * main thread for the whole HLSL compile (42–48 s cold for the paper shader before P7, seconds
  * after) — and the outcome is delivered by `Program.ready()`, which polls `COMPLETION_STATUS_KHR`
- * once per `nextTurn()` and only then reads `LINK_STATUS`. Without the extension both shaders are
- * compiled and the program linked, then the three statuses are read before `program()` returns,
- * and `ready()` resolves at once.
+ * once per `nextTurn()` and only then reads `LINK_STATUS`. That poll backs off after eight fast
+ * turns (S11: a cold `PAPER_FS` link is ~3 s, which was ~200 000 undelayed turns of a spinning core (206 448 measured on a 1.3 s link)
+ * and gives up on a driver that never answers — see `LINK_FAST_POLLS` below. Without the
+ * extension both shaders are compiled and the program linked, then the three statuses are read
+ * before `program()` returns, and `ready()` resolves at once.
+ *
+ * **Allocations are checked per batch where the caller asks for it (S7, §7.3, §8.1, §10.8).**
+ * `texture()` reads the sticky error flag right after `texStorage2D` — the one place §10.8's
+ * "any allocation that can fail on GPU OOM" can be caught — and on ANGLE's D3D11 backend that
+ * read is a GPU-process round trip that waits for everything queued ahead of it: seven per sprite
+ * on the ingest path, the first of them behind whatever burst of draws the consumer just issued
+ * (250–680 ms measured behind thirty synchronous `swapTo` starts). Inside `allocations(fn)` the
+ * per-allocation read is skipped and `checkAllocations()` reads once for the batch, wherever the
+ * caller places it — after a yield, once the GPU has drained. An OOM is never missed: a fatal
+ * flag releases every unchecked allocation and is returned as the batch's `GlError`; a flag
+ * another reader consumed first is remembered for the batch's own check; attribution across
+ * batches is by order, so a flag left by one batch fails the next reader's batch rather than
+ * vanishing.
  */
 import { GlError } from './errors.js'
 import { nextTurn } from './next-turn.js'
@@ -94,10 +109,70 @@ function isPositiveInteger(n: number): boolean {
   return Number.isInteger(n) && n > 0
 }
 
+/**
+ * How many flags one `checkAllocations()` reads before giving up on a clear one. GL ES 3.0 §2.5
+ * lets an implementation keep one flag per error kind — six — and Blink queues a handful of
+ * synthesised ones ahead of the driver's; sixty-four is far past both and still a bound.
+ */
+const CHECK_READS_MAX = 64
+
 /** `KHR_parallel_shader_compile`: the one enum the deferred link polls. */
 interface ParallelCompile {
   readonly COMPLETION_STATUS_KHR: number
 }
+
+/**
+ * How many turns `Program.ready()` polls `COMPLETION_STATUS_KHR` at full speed before it backs
+ * off (§5.2's amendment; the readback's own back-off is §8.10's, `sheet.ts`).
+ *
+ * A poll costs one platform turn, and a turn is tens of microseconds on an otherwise idle
+ * thread, so polling a whole link undelayed spins one core for its entire length. That length is
+ * the point: the cold link of `PAPER_FS` on an Intel Iris Xe (ANGLE/D3D11) is ~3 s — 2.9 s
+ * median, 2.5 s min on the `gl.compile.paperFs` row — which was roughly 200 000 undelayed turns (206 448 measured on a 1.3 s link)
+ * of a core doing nothing but asking a driver whether it is done yet, on the very first load,
+ * next to the decode and the first hull the page actually needs.
+ *
+ * Eight turns of it is not: it is the window in which a link that is already complete, or
+ * completes within a few turns of the issue (every driver without a real compile to do, and
+ * every warm shader cache), is answered with zero added latency — the common case, and the one
+ * the back-off must not tax. Past it every poll takes `LINK_SLOW_DELAY_MS` instead.
+ */
+const LINK_FAST_POLLS = 8
+
+/**
+ * The back-off turn's delay in milliseconds past the fast phase (§5.2's amendment). One
+ * millisecond is the smallest delay worth asking for and the browser's own timer clamp is the
+ * real floor (~4 ms once timers nest past the fifth) — so a link is noticed about a clamp after
+ * it completes rather than within a turn, a few milliseconds on a wait that is seconds long.
+ * `nextTurn`'s header carries the measurement and the reason the route is `setTimeout`.
+ */
+const LINK_SLOW_DELAY_MS = 1
+
+/**
+ * How long `ready()` polls, in wall-clock milliseconds, before it gives the link up (§5.2's
+ * amendment). A safety net against a driver that never reports completion while the context
+ * still says it is not lost — not a budget: every link that can complete is far inside it.
+ *
+ * Sized from P7's measurements on the slowest GPU this project has numbers for (Intel Iris Xe,
+ * ANGLE/D3D11, `report-P7.md`): the shipping `PAPER_FS` links cold in 3.6 s, and the whole
+ * pre-diet program — the worst link that has ever actually completed here — took 51.9 s. Sixty
+ * seconds clears the first by more than an order of magnitude and still clears the second, so no
+ * link a driver is genuinely working on is abandoned; a driver still saying "compiling" after a
+ * minute has hung, and an error the caller can act on beats a poll that never ends.
+ *
+ * Wall-clock and not a turn count because the turn is no longer a fixed cost: the fast phase's
+ * turns are microseconds and the back-off's are milliseconds, so one count would mean two
+ * different waits.
+ */
+const LINK_WAIT_MAX_MS = 60_000
+
+/**
+ * A second, absolute exit for the same loop: a clock that stands still (a frozen or replaced
+ * `performance.now`) must not turn the wall-clock bound into an endless loop. At one delayed
+ * turn per ~4 ms this is over an hour — far beyond `LINK_WAIT_MAX_MS`, and never the first
+ * bound to fire.
+ */
+const LINK_TURN_MAX = 1_000_000
 
 /** A shader object with its source set and its compile issued — its status is not read here. */
 function createShader(
@@ -210,29 +285,61 @@ function compile(
     gl.deleteProgram(handle)
   }
 
+  /** The dispose exit, shared by the two ends of the wait: the shaders and the program go. */
+  function disposedDuringLink(): Err {
+    releaseShaders()
+    release()
+    return new GlError(`${label}: program disposed before its link completed`)
+  }
+
   function settle(): Err | undefined {
     pending = false
-    if (disposed) {
-      releaseShaders()
-      release()
-      return new GlError(`${label}: program disposed before its link completed`)
-    }
+    if (disposed) return disposedDuringLink()
     const failed = linkOutcome(gl, handle, vertex, fragment, label)
     releaseShaders()
     if (failed !== undefined) release()
     return failed
   }
 
+  /**
+   * The give-up exit: the driver never reported completion inside `LINK_WAIT_MAX_MS`, so the
+   * outcome is the one the synchronous path words for a link that did not come out — with the
+   * bound in place of a driver log, because reading `LINK_STATUS` for a real one is exactly the
+   * block the deferral exists to avoid, and on a hung driver it would never return. The program
+   * is released as a failed link's is, and the shaders with it.
+   */
+  function abandon(): Err {
+    pending = false
+    if (disposed) return disposedDuringLink()
+    releaseShaders()
+    release()
+    return new GlError(
+      `${label}: program did not link: the driver did not report completion within ${LINK_WAIT_MAX_MS} ms`,
+    )
+  }
+
+  /**
+   * One `COMPLETION_STATUS_KHR` poll per turn, with the same back-off the sheet's fence wait
+   * takes (§8.10): the first `LINK_FAST_POLLS` turns are plain `nextTurn()`s, so a link that is
+   * already complete costs no turn at all and one that completes within a few costs no added
+   * latency; every turn after them is `nextTurn({ delay: LINK_SLOW_DELAY_MS })`, which parks the
+   * poll on the platform's timer instead of spinning a core through a link that runs for
+   * seconds. Two exits bound a driver that never answers — `LINK_WAIT_MAX_MS` of wall clock and
+   * `LINK_TURN_MAX` turns, only ever read in the slow phase, which the fast phase cannot outlast.
+   */
   async function awaitLink(): Promise<Err | undefined> {
-    // `false` is "still compiling"; `true` is done, and `null` is a lost context, whose
-    // LINK_STATUS then reads as a failure — either way the wait ends.
-    while (
-      parallel !== null &&
-      gl.getProgramParameter(handle, parallel.COMPLETION_STATUS_KHR) === false
-    ) {
-      await nextTurn()
+    // Without the extension nothing is pending and this is never reached; the narrowing is for
+    // the loop below.
+    if (parallel === null) return settle()
+    const deadline = performance.now() + LINK_WAIT_MAX_MS
+    for (let turn = 0; ; turn++) {
+      // `false` is "still compiling"; `true` is done, and `null` is a lost context, whose
+      // LINK_STATUS then reads as a failure — either way the wait ends.
+      if (gl.getProgramParameter(handle, parallel.COMPLETION_STATUS_KHR) !== false) return settle()
+      const fast = turn < LINK_FAST_POLLS
+      await (fast ? nextTurn() : nextTurn({ delay: LINK_SLOW_DELAY_MS }))
+      if (!fast && (performance.now() >= deadline || turn >= LINK_TURN_MAX)) return abandon()
     }
-    return settle()
   }
 
   function ready(): Promise<Err | undefined> {
@@ -374,13 +481,97 @@ export function createGlContext(
   /**
    * The (format, width, height) combinations this context has attached and found complete, so
    * `checkFramebufferStatus` runs once per combination: completeness is a property of the
-   * attachment's format and size, and `texture()` returns an Error on any allocation failure
-   * before a target can be built over it. A failure proves nothing and leaves the combination
-   * unproven.
+   * attachment's format and size, and outside a batch `texture()` returns an Error on any
+   * allocation failure before a target can be built over it. A failure proves nothing and leaves
+   * the combination unproven. Only a query proves: a target built inside `allocations()` skips
+   * the query — the draws into it raise `INVALID_FRAMEBUFFER_OPERATION` if it is incomplete, and
+   * `checkAllocations()` reads that — and adds nothing here, because a batch that never drew
+   * into it would have proven nothing.
    */
   const provenTargets = new Set<string>()
   const combination = (t: Pick<TextureDesc, 'format' | 'width' | 'height'>): string =>
     `${t.format}:${t.width}x${t.height}`
+
+  /**
+   * The allocation batch (§7.3, §8.1; `GlContext.allocations`). `batching` counts the live
+   * `allocations()` bodies: while it is positive, `texture()` and `target()` read no status of
+   * their own and push their release onto `unchecked`, which the next read of the flag — by
+   * `checkAllocations()`, or by an unbatched `texture()`'s own check — proves or releases as a
+   * whole. `pendingFailure` carries a failure a reader other than the batch's owner found, so
+   * the owner's own `checkAllocations()` still reports it, once. `releaseOf` is `alive()`'s
+   * answer: the tracked release behind every texture this context handed out.
+   */
+  let batching = 0
+  const unchecked: Array<{ readonly kind: 'texture' | 'target'; readonly release: () => void }> = []
+  let pendingFailure: Err | null = null
+  const releaseOf = new WeakMap<Texture, () => void>()
+
+  /**
+   * The flags only an allocation of the batch can have raised: storage refused, a target of the
+   * batch incomplete, or a context that is gone. Every other flag — a refused `readPixels`, a
+   * consumer's own mistake on an injected context — is not an allocation's and fails no batch.
+   */
+  function isFatal(flag: number): boolean {
+    return (
+      flag === gl.OUT_OF_MEMORY ||
+      flag === gl.INVALID_FRAMEBUFFER_OPERATION ||
+      flag === gl.CONTEXT_LOST_WEBGL
+    )
+  }
+
+  /** Release every unchecked allocation, and say so in the error the batch's owner receives. */
+  function failUnchecked(flag: number): Err {
+    let textures = 0
+    for (const u of unchecked) if (u.kind === 'texture') textures += 1
+    const targets = unchecked.length - textures
+    const plural = (n: number, noun: string): string => `${n} ${noun}${n === 1 ? '' : 's'}`
+    const error = new GlError(
+      `allocation batch of ${plural(textures, 'texture')} and ${plural(targets, 'target')} ` +
+        `failed, GL error 0x${flag.toString(16)}: every allocation of the batch has been released`,
+    )
+    for (const u of unchecked.splice(0)) u.release()
+    return error
+  }
+
+  /**
+   * `GlContext.checkAllocations`: read the flag until it is clear — an implementation may hold
+   * several (GL ES 3.0 §2.5), and a fatal one may sit behind the `INVALID_FRAMEBUFFER_OPERATION`
+   * a draw into the unbacked target raised — then settle. Bounded, so a driver (or a test double)
+   * that never clears cannot hold the caller; what a bound leaves behind is read by the next
+   * reader, never lost. Attribution is by order, deliberately (S7 ruling): a fatal flag read
+   * while anything is unchecked fails the batch whatever raised it — a pack buffer's
+   * `bufferData` refused between the batch and its settle fails the sprite's add and releases
+   * its residents rather than falling to a CPU field, the conservative answer when memory is
+   * gone. Only with nothing unchecked is a fatal flag not this batch's to fail: it is then
+   * returned like any other, for the caller to judge. A failure another reader found and kept
+   * (`pendingFailure`) is reported here once, and releases what was batched since, so that a
+   * failed settle always leaves nothing unchecked alive.
+   */
+  function checkAllocations(): Err | number {
+    let first: number = gl.NO_ERROR
+    let fatal: number | null = null
+    for (let reads = 0; reads < CHECK_READS_MAX; reads++) {
+      const flag = gl.getError()
+      if (flag === gl.NO_ERROR) break
+      if (first === gl.NO_ERROR) first = flag
+      if (fatal === null && isFatal(flag)) fatal = flag
+    }
+    if (fatal !== null && unchecked.length > 0) {
+      pendingFailure = null
+      return failUnchecked(fatal)
+    }
+    if (pendingFailure !== null) {
+      // The failure was found by another reader's read, which released what was unchecked
+      // then; what was batched since is released now, so the caller may return this error
+      // without a front or a field of its own outliving it.
+      const failure = pendingFailure
+      pendingFailure = null
+      for (const u of unchecked.splice(0)) u.release()
+      return failure
+    }
+    unchecked.length = 0
+    return first
+  }
 
   /**
    * Register one resource's release so `dispose()` can run it, and hand back a `dispose` that
@@ -447,6 +638,7 @@ export function createGlContext(
 
       const handle: WebGLTexture | null = gl.createTexture()
       if (handle === null) return new GlError(`${label}: createTexture returned null`)
+      const dispose = tracked(() => gl.deleteTexture(handle))
 
       const names = TEXTURE_FORMAT_GL[d.format]
       const wrap = d.wrap ?? 'CLAMP_TO_EDGE'
@@ -461,40 +653,75 @@ export function createGlContext(
       gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl[filter])
       gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl[wrap])
       gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl[wrap])
-      // One getError per allocation, always. A GL error is sticky only until someone reads it:
-      // an OUT_OF_MEMORY left on the flag here would be read and discarded by the next reader —
-      // a readback's drain loop, a mesh build — and a texture without storage would pass as a
-      // success, with the completeness cache below then vouching for a target over it. The step
-      // path allocates nothing, so this round trip costs nothing there.
-      const error = gl.getError()
-      gl.bindTexture(gl.TEXTURE_2D, previous)
 
-      if (error !== gl.NO_ERROR) {
-        gl.deleteTexture(handle)
-        return new GlError(
-          `${label}: texStorage2D ${d.width}x${d.height} ${d.format} failed, ` +
-            `GL error 0x${error.toString(16)}`,
-        )
+      if (batching > 0) {
+        // Inside `allocations()`: no read here. The allocation is unchecked until the batch's
+        // check — one round trip for the batch, where this used to be one per allocation, and
+        // placed by the caller where the GPU has drained rather than behind whatever the storm
+        // ahead of it is still running (§8.10).
+        gl.bindTexture(gl.TEXTURE_2D, previous)
+        unchecked.push({ kind: 'texture', release: dispose })
+      } else {
+        // Outside a batch: one getError per allocation, as always. A GL error is sticky only
+        // until someone reads it: an OUT_OF_MEMORY left on the flag here would be read and
+        // discarded by the next reader — a readback's drain, a mesh build — and a texture
+        // without storage would pass as a success, with the completeness cache vouching for a
+        // target over it. The step path allocates nothing, so this round trip costs nothing
+        // there. The same read settles whatever a batch left unchecked: a clean flag proves it,
+        // a fatal one releases it and is kept for the batch's own check to report.
+        const error = gl.getError()
+        gl.bindTexture(gl.TEXTURE_2D, previous)
+        if (error !== gl.NO_ERROR) {
+          dispose()
+          if (isFatal(error) && unchecked.length > 0) pendingFailure = failUnchecked(error)
+          return new GlError(
+            `${label}: texStorage2D ${d.width}x${d.height} ${d.format} failed, ` +
+              `GL error 0x${error.toString(16)}`,
+          )
+        }
+        unchecked.length = 0
       }
 
-      return {
+      const texture: Texture = {
         handle,
         width: d.width,
         height: d.height,
         format: d.format,
         bytes: textureBytes(d),
         label,
-        dispose: tracked(() => gl.deleteTexture(handle)),
+        dispose,
       }
+      releaseOf.set(texture, dispose)
+      return texture
     },
 
     target(t: Texture) {
       const key = combination(t)
-      const check = !provenTargets.has(key)
+      // Inside a batch the round trip is skipped (the batch's check reads what the draws into an
+      // incomplete target raise); outside, a combination is asked about once.
+      const check = batching === 0 && !provenTargets.has(key)
       const target = createTarget(gl, t, caps.floatRT, boundDrawFramebuffer, check)
       if (GlError.is(target)) return target
-      provenTargets.add(key)
-      return { ...target, dispose: tracked(() => target.dispose()) }
+      if (check) provenTargets.add(key)
+      const dispose = tracked(() => target.dispose())
+      if (batching > 0) unchecked.push({ kind: 'target', release: dispose })
+      return { ...target, dispose }
+    },
+
+    allocations<T>(fn: () => T): T {
+      batching += 1
+      try {
+        return fn()
+      } finally {
+        batching -= 1
+      }
+    },
+
+    checkAllocations,
+
+    alive(t: Texture): boolean {
+      const release = releaseOf.get(t)
+      return release !== undefined && owned.has(release)
     },
 
     scope<T>(fn: (s: DrawScope) => T): T {
@@ -532,6 +759,8 @@ export function createGlContext(
       disposed = true
       for (const release of [...owned]) release()
       owned.clear()
+      unchecked.length = 0
+      pendingFailure = null
       // The context itself is not lost here: the surface is P9's and a stage may be handed one
       // it does not own (§7.3's injected case).
     },

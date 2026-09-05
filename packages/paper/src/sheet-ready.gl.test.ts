@@ -155,6 +155,30 @@ describe('source() and the deferred paper program link (P7, spec 5.2 amendment)'
     sheet.dispose()
   }, 60_000)
 
+  it('delivers an abandoned link — the readiness poll giving up on a hung driver — the same way', async () => {
+    const link = deferred()
+    const ctx = withPendingLink(open(), 'paper', link)
+    const sheet = paperSheet()
+    expect(sheet.mount(ctx)).toBeUndefined()
+
+    const a = await sprite()
+    const pending = sheet.source(a, { maxSize: 128, exact: false })
+    // `gl-context.ts`'s give-up wording, restated here on purpose (its constants are module
+    // -private): after `LINK_WAIT_MAX_MS` of polling, `ready()` resolves to this instead of
+    // reading a `LINK_STATUS` that would never return. `source()` must not read the message —
+    // an abandoned link is a link failure, with the bound where a driver log would be.
+    const abandoned = new GlError(
+      'paper: program did not link: the driver did not report completion within 60000 ms',
+    )
+    link.resolve(abandoned)
+    const r = await pending
+    expect(GlError.is(r), 'an error value, never a rejection').toBe(true)
+    expect(r).toBe(abandoned)
+    expect(await sheet.source(a, { maxSize: 128, exact: false })).toBe(abandoned)
+    a.close()
+    sheet.dispose()
+  }, 60_000)
+
   it('reports a dispose() that ran during the wait as a SheetError, not a throw', async () => {
     const link = deferred()
     const ctx = withPendingLink(open(), 'paper', link)

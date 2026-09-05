@@ -139,6 +139,36 @@ decide whether a duplicate core is a startup failure or a logged degradation —
 `prefers-reduced-motion` needs no API of its own. The branch in the install block above is the whole
 accommodation.
 
+## Prefetching the next swap
+
+`view.swapTo(url)` in the install block above is `add()` + `crumpleTo(pending)` behind one call, and
+its `add()` starts at the click. When you already know what comes next, start it earlier: every
+asynchronous ingest runs through one stage-wide, prioritised lane, `add()` is its **background**
+class, and a background job is promoted to the head of the lane the moment a `crumpleTo` holds the
+promise it returned. Keep that promise and hand it to `crumpleTo`: a prefetch still in flight at
+the click is promoted and adopted when it lands, a landed one is a resident sprite, and neither
+pays a second ingest. `swapTo(url)` is for a key never prefetched — on one whose prefetch is in
+flight it would queue a second ingest of the same image behind the running one.
+
+```ts
+// At idle, once the current page is on screen. The promises are the prefetch.
+const prefetched = new Map<string, ReturnType<typeof stage.add>>()
+for (const n of nextPage) {
+  const pending = stage.add(n.url, { key: n.id, signal })
+  prefetched.set(n.id, pending)
+  void pending.then(() => prefetched.delete(n.id)) // settled: `stage.get` is the truth now
+}
+
+// At the click: a resident sprite, else the pending add, else the ordinary swap.
+const target = stage.get(next.id) ?? prefetched.get(next.id)
+const run =
+  target !== undefined ? view.crumpleTo(target, { signal }) : view.swapTo(next.url, { signal })
+```
+
+A superseded `swapTo` aborts the `add()` it started, and an aborted `add()` frees its key, so
+clicking through five pages costs one ingest rather than five. `docs/USAGE.md` §9 has the whole
+story, budget included.
+
 ## CDN and playgrounds
 
 There is no single `esm.sh/paper-crumple` URL, and that is a real cost rather than an oversight:
