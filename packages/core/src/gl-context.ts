@@ -14,9 +14,11 @@
  * `Program` without reading `LINK_STATUS` — that read is where ANGLE's D3D11 backend blocked the
  * main thread for the whole HLSL compile (42–48 s cold for the paper shader before P7, seconds
  * after) — and the outcome is delivered by `Program.ready()`, which polls `COMPLETION_STATUS_KHR`
- * once per `nextTurn()` and only then reads `LINK_STATUS`. Without the extension both shaders are
- * compiled and the program linked, then the three statuses are read before `program()` returns,
- * and `ready()` resolves at once.
+ * once per `nextTurn()` and only then reads `LINK_STATUS`. That poll backs off after eight fast
+ * turns (S11: a cold `PAPER_FS` link is ~3 s, which is ~60 000 undelayed turns of a spinning
+ * core) and gives up on a driver that never answers — see `LINK_FAST_POLLS` below. Without the
+ * extension both shaders are compiled and the program linked, then the three statuses are read
+ * before `program()` returns, and `ready()` resolves at once.
  */
 import { GlError } from './errors.js'
 import { nextTurn } from './next-turn.js'
@@ -98,6 +100,59 @@ function isPositiveInteger(n: number): boolean {
 interface ParallelCompile {
   readonly COMPLETION_STATUS_KHR: number
 }
+
+/**
+ * How many turns `Program.ready()` polls `COMPLETION_STATUS_KHR` at full speed before it backs
+ * off (§5.2's amendment; the readback's own back-off is §8.10's, `sheet.ts`).
+ *
+ * A poll costs one platform turn, and a turn is tens of microseconds on an otherwise idle
+ * thread, so polling a whole link undelayed spins one core for its entire length. That length is
+ * the point: the cold link of `PAPER_FS` on an Intel Iris Xe (ANGLE/D3D11) is ~3 s — 2.9 s
+ * median, 2.5 s min on the `gl.compile.paperFs` row — which is roughly 60 000 undelayed turns
+ * of a core doing nothing but asking a driver whether it is done yet, on the very first load,
+ * next to the decode and the first hull the page actually needs.
+ *
+ * Eight turns of it is not: it is the window in which a link that is already complete, or
+ * completes within a few turns of the issue (every driver without a real compile to do, and
+ * every warm shader cache), is answered with zero added latency — the common case, and the one
+ * the back-off must not tax. Past it every poll takes `LINK_SLOW_DELAY_MS` instead.
+ */
+const LINK_FAST_POLLS = 8
+
+/**
+ * The back-off turn's delay in milliseconds past the fast phase (§5.2's amendment). One
+ * millisecond is the smallest delay worth asking for and the browser's own timer clamp is the
+ * real floor (~4 ms once timers nest past the fifth) — so a link is noticed about a clamp after
+ * it completes rather than within a turn, a few milliseconds on a wait that is seconds long.
+ * `nextTurn`'s header carries the measurement and the reason the route is `setTimeout`.
+ */
+const LINK_SLOW_DELAY_MS = 1
+
+/**
+ * How long `ready()` polls, in wall-clock milliseconds, before it gives the link up (§5.2's
+ * amendment). A safety net against a driver that never reports completion while the context
+ * still says it is not lost — not a budget: every link that can complete is far inside it.
+ *
+ * Sized from P7's measurements on the slowest GPU this project has numbers for (Intel Iris Xe,
+ * ANGLE/D3D11, `report-P7.md`): the shipping `PAPER_FS` links cold in 3.6 s, and the whole
+ * pre-diet program — the worst link that has ever actually completed here — took 51.9 s. Sixty
+ * seconds clears the first by more than an order of magnitude and still clears the second, so no
+ * link a driver is genuinely working on is abandoned; a driver still saying "compiling" after a
+ * minute has hung, and an error the caller can act on beats a poll that never ends.
+ *
+ * Wall-clock and not a turn count because the turn is no longer a fixed cost: the fast phase's
+ * turns are microseconds and the back-off's are milliseconds, so one count would mean two
+ * different waits.
+ */
+const LINK_WAIT_MAX_MS = 60_000
+
+/**
+ * A second, absolute exit for the same loop: a clock that stands still (a frozen or replaced
+ * `performance.now`) must not turn the wall-clock bound into an endless loop. At one delayed
+ * turn per ~4 ms this is over an hour — far beyond `LINK_WAIT_MAX_MS`, and never the first
+ * bound to fire.
+ */
+const LINK_TURN_MAX = 1_000_000
 
 /** A shader object with its source set and its compile issued — its status is not read here. */
 function createShader(
@@ -210,29 +265,61 @@ function compile(
     gl.deleteProgram(handle)
   }
 
+  /** The dispose exit, shared by the two ends of the wait: the shaders and the program go. */
+  function disposedDuringLink(): Err {
+    releaseShaders()
+    release()
+    return new GlError(`${label}: program disposed before its link completed`)
+  }
+
   function settle(): Err | undefined {
     pending = false
-    if (disposed) {
-      releaseShaders()
-      release()
-      return new GlError(`${label}: program disposed before its link completed`)
-    }
+    if (disposed) return disposedDuringLink()
     const failed = linkOutcome(gl, handle, vertex, fragment, label)
     releaseShaders()
     if (failed !== undefined) release()
     return failed
   }
 
+  /**
+   * The give-up exit: the driver never reported completion inside `LINK_WAIT_MAX_MS`, so the
+   * outcome is the one the synchronous path words for a link that did not come out — with the
+   * bound in place of a driver log, because reading `LINK_STATUS` for a real one is exactly the
+   * block the deferral exists to avoid, and on a hung driver it would never return. The program
+   * is released as a failed link's is, and the shaders with it.
+   */
+  function abandon(): Err {
+    pending = false
+    if (disposed) return disposedDuringLink()
+    releaseShaders()
+    release()
+    return new GlError(
+      `${label}: program did not link: the driver did not report completion within ${LINK_WAIT_MAX_MS} ms`,
+    )
+  }
+
+  /**
+   * One `COMPLETION_STATUS_KHR` poll per turn, with the same back-off the sheet's fence wait
+   * takes (§8.10): the first `LINK_FAST_POLLS` turns are plain `nextTurn()`s, so a link that is
+   * already complete costs no turn at all and one that completes within a few costs no added
+   * latency; every turn after them is `nextTurn({ delay: LINK_SLOW_DELAY_MS })`, which parks the
+   * poll on the platform's timer instead of spinning a core through a link that runs for
+   * seconds. Two exits bound a driver that never answers — `LINK_WAIT_MAX_MS` of wall clock and
+   * `LINK_TURN_MAX` turns, only ever read in the slow phase, which the fast phase cannot outlast.
+   */
   async function awaitLink(): Promise<Err | undefined> {
-    // `false` is "still compiling"; `true` is done, and `null` is a lost context, whose
-    // LINK_STATUS then reads as a failure — either way the wait ends.
-    while (
-      parallel !== null &&
-      gl.getProgramParameter(handle, parallel.COMPLETION_STATUS_KHR) === false
-    ) {
-      await nextTurn()
+    // Without the extension nothing is pending and this is never reached; the narrowing is for
+    // the loop below.
+    if (parallel === null) return settle()
+    const deadline = performance.now() + LINK_WAIT_MAX_MS
+    for (let turn = 0; ; turn++) {
+      // `false` is "still compiling"; `true` is done, and `null` is a lost context, whose
+      // LINK_STATUS then reads as a failure — either way the wait ends.
+      if (gl.getProgramParameter(handle, parallel.COMPLETION_STATUS_KHR) !== false) return settle()
+      const fast = turn < LINK_FAST_POLLS
+      await (fast ? nextTurn() : nextTurn({ delay: LINK_SLOW_DELAY_MS }))
+      if (!fast && (performance.now() >= deadline || turn >= LINK_TURN_MAX)) return abandon()
     }
-    return settle()
   }
 
   function ready(): Promise<Err | undefined> {

@@ -1,4 +1,4 @@
-import { describe, expect, it } from 'vitest'
+import { describe, expect, it, vi } from 'vitest'
 import { GlError } from './errors.js'
 import { createGlContext } from './gl-context.js'
 
@@ -139,6 +139,34 @@ function fakeGl(o: { parallel?: boolean } = {}): FakeGl {
 
 /** `captureGlState`'s footprint: 31 `getParameter` enums and 5 `isEnabled` caps (§5.1). */
 const CAPTURE = { getParameter: 31, isEnabled: 5 }
+
+/** `gl-context.ts`'s own `LINK_FAST_POLLS` / `LINK_SLOW_DELAY_MS`, restated here on purpose. */
+const LINK_FAST_POLLS_FOR_TEST = 8
+const LINK_SLOW_DELAY_MS_FOR_TEST = 1
+
+/**
+ * Every back-off turn the readiness poll takes while this is installed, as the number of
+ * `getProgramParameter` calls that had run when it was armed (spec §5.2's amendment).
+ *
+ * A back-off turn is `setTimeout(fn, LINK_SLOW_DELAY_MS)` — the only route `nextTurn({ delay })`
+ * has — while a fast turn is the `MessageChannel` this file's runtime prefers, so the timer spy
+ * sees the slow phase and nothing else. During the wait the only `getProgramParameter` the
+ * context issues is the `COMPLETION_STATUS_KHR` poll, so the recorded count IS the poll number,
+ * and a first entry of nine says eight polls span the fast phase. The spy calls through, so the
+ * turns still happen; it ignores any other timer the runtime arms.
+ */
+function watchBackOff(f: FakeGl): { armed: number[]; restore: () => void } {
+  const armed: number[] = []
+  const realTimeout = globalThis.setTimeout
+  const timer = vi.spyOn(globalThis, 'setTimeout').mockImplementation(((
+    fn: () => void,
+    ms?: number,
+  ) => {
+    if (ms === LINK_SLOW_DELAY_MS_FOR_TEST) armed.push(f.calls('getProgramParameter'))
+    return realTimeout(fn, ms)
+  }) as unknown as typeof setTimeout)
+  return { armed, restore: () => timer.mockRestore() }
+}
 
 describe('scope() on an injected context (§7.3): capture at the outermost entry only', () => {
   it('pays one full capture for the outermost scope and none for a nested one', () => {
@@ -405,5 +433,87 @@ describe('program(): the deferred link (P7, §5.2 amendment)', () => {
     expect(f.calls('deleteProgram')).toBe(0)
     expect(await program.ready()).toBeInstanceOf(GlError)
     expect(f.calls('deleteProgram')).toBe(1)
+  })
+
+  it('takes no delayed turn for a link that completes at once or inside the fast phase', async () => {
+    const f = fakeGl({ parallel: true })
+    const ctx = createGlContext(f.gl)
+
+    // Already done at the first poll: one status read, no turn at all.
+    f.reset()
+    let watch = watchBackOff(f)
+    const done = ctx.program(VS, FS, 'done')
+    if (GlError.is(done)) return
+    expect(await done.ready()).toBeUndefined()
+    watch.restore()
+    expect(watch.armed, 'a finished link never reaches the back-off').toEqual([])
+    // The COMPLETION poll and the LINK_STATUS read, and nothing between them.
+    expect(f.calls('getProgramParameter')).toBe(2)
+
+    // The last poll the fast phase can take still costs no delay.
+    f.reset()
+    f.answers.pendingPolls = LINK_FAST_POLLS_FOR_TEST - 1
+    watch = watchBackOff(f)
+    const late = ctx.program(VS, FS, 'late')
+    if (GlError.is(late)) return
+    expect(await late.ready()).toBeUndefined()
+    watch.restore()
+    expect(watch.armed, 'eight turns are free, and this link needed seven').toEqual([])
+    expect(f.calls('getProgramParameter')).toBe(LINK_FAST_POLLS_FOR_TEST + 1)
+  })
+
+  it('backs off to a delayed turn after eight fast polls when the link runs long (spec §5.2 amendment)', async () => {
+    const f = fakeGl({ parallel: true })
+    const ctx = createGlContext(f.gl)
+    f.reset()
+    // Twelve "still compiling" answers: four polls past the fast phase.
+    f.answers.pendingPolls = LINK_FAST_POLLS_FOR_TEST + 4
+    const watch = watchBackOff(f)
+    const program = ctx.program(VS, FS, 'slow')
+    if (GlError.is(program)) return
+    expect(await program.ready()).toBeUndefined()
+    watch.restore()
+    // 13 COMPLETION polls (12 false, 1 true) + the one LINK_STATUS read.
+    expect(f.calls('getProgramParameter')).toBe(LINK_FAST_POLLS_FOR_TEST + 6)
+    expect(
+      watch.armed,
+      'the first eight polls spin, and every poll after them is armed on a timer',
+    ).toEqual([9, 10, 11, 12])
+    expect(f.answers.pendingPolls).toBe(0)
+    expect(f.calls('deleteShader')).toBe(2)
+  })
+
+  it('gives a link that never completes up on the wall clock, once, worded as a link failure is', async () => {
+    const f = fakeGl({ parallel: true })
+    const ctx = createGlContext(f.gl)
+    // `Infinity - 1` is `Infinity`: the driver answers "still compiling" for ever.
+    f.answers.pendingPolls = Number.POSITIVE_INFINITY
+    const program = ctx.program(VS, FS, 'hung')
+    if (GlError.is(program)) return
+    f.reset()
+    // A clock that gains a million seconds a reading: whichever call the wait takes for its
+    // base, the next one is already past any finite bound — so no test waits a real minute.
+    let reading = 0
+    const now = vi.spyOn(performance, 'now').mockImplementation(() => {
+      reading += 1
+      return reading * 1e9
+    })
+    const outcome = await program.ready()
+    now.mockRestore()
+    expect(outcome).toBeInstanceOf(GlError)
+    expect(outcome?.message).toBe(
+      'hung: program did not link: the driver did not report completion within 60000 ms',
+    )
+    // The fast phase runs, then the first back-off turn finds the bound gone. LINK_STATUS is
+    // never read: that read is the block the deferral exists to avoid.
+    expect(f.calls('getProgramParameter')).toBe(LINK_FAST_POLLS_FOR_TEST + 1)
+    expect(f.calls('deleteProgram'), 'an abandoned link is released as a failed one is').toBe(1)
+    expect(f.calls('deleteShader')).toBe(2)
+    // Answered once, however many callers ask, and never polled again.
+    f.reset()
+    expect(await program.ready()).toBe(outcome)
+    expect(f.calls('getProgramParameter')).toBe(0)
+    program.dispose()
+    expect(f.calls('deleteProgram')).toBe(0)
   })
 })
