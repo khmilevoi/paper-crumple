@@ -598,4 +598,25 @@ describe('allocation batches (§7.3, §8.1, §10.8): one sticky-flag read per ba
     ctx.dispose()
     expect(ctx.alive(u)).toBe(false)
   })
+
+  it('a failure another reader found releases what the next batch allocated too: the owner is told once, and nothing of its batch survives the failed settle', () => {
+    const f = fakeGl()
+    const ctx = createGlContext(f.gl)
+    f.reset()
+    const a = ctx.allocations(() => ctx.texture({ ...desc, label: 'a' }))
+    // An unbatched allocation's own read finds the fatal flag: `a` goes, the failure is kept.
+    f.answers.error = 'OUT_OF_MEMORY'
+    expect(ctx.texture({ ...desc, label: 'b' })).toBeInstanceOf(GlError)
+    expect(f.calls('deleteTexture')).toBe(2)
+    // A new batch before the owner's check — `build()`'s front, say — settles into that kept
+    // failure: the contract that a failed settle releases every unchecked allocation holds here
+    // too, or the caller returns the error and the front outlives it, owned by nobody.
+    const front = ctx.allocations(() => ctx.texture({ ...desc, label: 'front' }))
+    expect(front).not.toBeInstanceOf(GlError)
+    expect(ctx.checkAllocations()).toBeInstanceOf(GlError)
+    if (!GlError.is(front)) expect(ctx.alive(front)).toBe(false)
+    expect(f.calls('deleteTexture')).toBe(3)
+    expect(ctx.checkAllocations()).toBe(f.gl.NO_ERROR)
+    if (!GlError.is(a)) expect(ctx.alive(a)).toBe(false)
+  })
 })

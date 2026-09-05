@@ -451,8 +451,14 @@ export function createGlContext(
    * several (GL ES 3.0 §2.5), and a fatal one may sit behind the `INVALID_FRAMEBUFFER_OPERATION`
    * a draw into the unbacked target raised — then settle. Bounded, so a driver (or a test double)
    * that never clears cannot hold the caller; what a bound leaves behind is read by the next
-   * reader, never lost. A fatal flag with nothing unchecked is not this batch's to fail: it is
-   * returned like any other, for the caller to judge (a pack buffer's `bufferData` refused, say).
+   * reader, never lost. Attribution is by order, deliberately (S7 ruling): a fatal flag read
+   * while anything is unchecked fails the batch whatever raised it — a pack buffer's
+   * `bufferData` refused between the batch and its settle fails the sprite's add and releases
+   * its residents rather than falling to a CPU field, the conservative answer when memory is
+   * gone. Only with nothing unchecked is a fatal flag not this batch's to fail: it is then
+   * returned like any other, for the caller to judge. A failure another reader found and kept
+   * (`pendingFailure`) is reported here once, and releases what was batched since, so that a
+   * failed settle always leaves nothing unchecked alive.
    */
   function checkAllocations(): Err | number {
     let first: number = gl.NO_ERROR
@@ -468,8 +474,12 @@ export function createGlContext(
       return failUnchecked(fatal)
     }
     if (pendingFailure !== null) {
+      // The failure was found by another reader's read, which released what was unchecked
+      // then; what was batched since is released now, so the caller may return this error
+      // without a front or a field of its own outliving it.
       const failure = pendingFailure
       pendingFailure = null
+      for (const u of unchecked.splice(0)) u.release()
       return failure
     }
     unchecked.length = 0
