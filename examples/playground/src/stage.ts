@@ -89,9 +89,12 @@ const PREFETCH_IDLE_FALLBACK_MS = 200
 /** `requestIdleCallback`, or a timeout where the browser has none. */
 function atIdle(fn: () => void): void {
   if (typeof globalThis.requestIdleCallback === 'function') {
-    globalThis.requestIdleCallback(() => {
-      fn()
-    })
+    globalThis.requestIdleCallback(
+      () => {
+        fn()
+      },
+      { timeout: PREFETCH_IDLE_FALLBACK_MS },
+    )
     return
   }
   globalThis.setTimeout(fn, PREFETCH_IDLE_FALLBACK_MS)

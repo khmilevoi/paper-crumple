@@ -770,9 +770,10 @@ only have finished first; it can never make the click that follows it slower.
 
 ```ts
 // At idle, once the current page is on screen.
-const idle = globalThis.requestIdleCallback ?? ((fn: () => void) => setTimeout(fn, 200))
+const idle = (fn: () => void) =>
+  typeof requestIdleCallback === 'function' ? requestIdleCallback(fn, { timeout: 200 }) : setTimeout(fn, 200)
 idle(() => {
-  for (const n of nextPage) void stage.add(n.url, { key: n.id, signal: ac.signal })
+  for (const n of nextPage) void stage.add(n.url, { key: n.id, signal })
 })
 
 // At the click: prefer the sprite that already exists. `stage.get` is synchronous, and answers

@@ -1925,7 +1925,7 @@ function buildStage(p: StageParts): BuiltStage {
     // flight owns `record.handle`, and when it lands it installs its own handle and front on the
     // SAME record: its liveness test is the record's identity (`p.sprites.get(key) === record`)
     // and `replace` never changes that. Release and overwrite underneath it and the pair it
-    // installed is left unreleased — §8.5's per-key live-handle count never reaches zero, so the
+    // installed is left unreleased — the sheet's per-key live-handle count (`paperSheet.release`, the §8.5 row) never reaches zero, so the
     // sheet never busts the hull entry the release exists to bust, and a later `add(key, other)`
     // serves the stale polygon (D3). `paperSheet.release` is idempotent, so the double release
     // the interleave also produces is harmless; the leak is not.
@@ -1940,12 +1940,17 @@ function buildStage(p: StageParts): BuiltStage {
       await inFlight
       const disposed = dead()
       if (disposed !== undefined) return p.policy.returned(disposed, null)
+      // The signal is read only after each awaited re-source settles: an abort during the drain
+      // answers ABORTED once the current re-source lands, not at once (the lane runs it to its end).
       if (signalAborted()) return ABORTED
-      // Removed while we waited: `remove()` has already handed this record's halves back, so
-      // there is nothing left to replace and nothing of ours to release.
+      // Removed — or removed and re-added — while we waited: `remove()` has already handed this
+      // record's halves back, so there is nothing left to replace and nothing of ours to release;
+      // a re-added key is a different record the caller has not seen.
       if (p.sprites.get(key) !== record) {
         return p.policy.returned(
-          new SheetError(`replace('${key}') has no sprite under that key; add() it instead`),
+          new SheetError(
+            `replace('${key}'): the sprite under that key was removed while its re-source drained; add() or replace() again`,
+          ),
           null,
         )
       }
