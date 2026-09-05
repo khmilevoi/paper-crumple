@@ -15,7 +15,7 @@
  * main thread for the whole HLSL compile (42–48 s cold for the paper shader before P7, seconds
  * after) — and the outcome is delivered by `Program.ready()`, which polls `COMPLETION_STATUS_KHR`
  * once per `nextTurn()` and only then reads `LINK_STATUS`. That poll backs off after eight fast
- * turns (S11: a cold `PAPER_FS` link is ~3 s, which is ~60 000 undelayed turns of a spinning
+ * turns (S11: a cold `PAPER_FS` link is ~3 s, which was ~200 000 undelayed turns of a spinning core (206 448 measured on a 1.3 s link)
  * core) and gives up on a driver that never answers — see `LINK_FAST_POLLS` below. Without the
  * extension both shaders are compiled and the program linked, then the three statuses are read
  * before `program()` returns, and `ready()` resolves at once.
@@ -108,7 +108,7 @@ interface ParallelCompile {
  * A poll costs one platform turn, and a turn is tens of microseconds on an otherwise idle
  * thread, so polling a whole link undelayed spins one core for its entire length. That length is
  * the point: the cold link of `PAPER_FS` on an Intel Iris Xe (ANGLE/D3D11) is ~3 s — 2.9 s
- * median, 2.5 s min on the `gl.compile.paperFs` row — which is roughly 60 000 undelayed turns
+ * median, 2.5 s min on the `gl.compile.paperFs` row — which was roughly 200 000 undelayed turns (206 448 measured on a 1.3 s link)
  * of a core doing nothing but asking a driver whether it is done yet, on the very first load,
  * next to the decode and the first hull the page actually needs.
  *

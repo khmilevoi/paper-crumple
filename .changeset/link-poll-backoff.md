@@ -9,7 +9,7 @@ With `KHR_parallel_shader_compile`, `GlContext.program()` returns before the lin
 `Program.ready()` polls `COMPLETION_STATUS_KHR` for the outcome. It polled once per undelayed
 `nextTurn()`, so the whole link ran with one core asking the driver whether it had finished — and
 the link is the point: a cold `PAPER_FS` on an Intel Iris Xe (ANGLE/D3D11) takes ~3 s, which is
-roughly 60 000 of those turns, spent on the first load, alongside the decode and the first hull
+roughly 200 000 of those turns (206 448 measured on a 1.3 s link), spent on the first load, alongside the decode and the first hull
 the page actually needs. It now takes eight fast turns — enough that a link already complete, or
 completing within a few turns of the issue, is answered with no added latency and no timer at all
 — and every turn after them with a 1 ms delay (`nextTurn({ delay })`, which is `setTimeout`).
