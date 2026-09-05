@@ -288,14 +288,17 @@ describe('program(): the deferred link (P7, §5.2 amendment)', () => {
   const VS = 'void main() {}'
   const FS = 'void main() {}'
 
-  it('without KHR_parallel_shader_compile checks the link synchronously, as before, and ready() resolves at once', async () => {
+  it('without KHR_parallel_shader_compile compiles both shaders and links, then reads the three statuses inside program(), and ready() resolves at once', async () => {
     const f = fakeGl()
     const ctx = createGlContext(f.gl)
     f.reset()
     const program = ctx.program(VS, FS, 'sync')
     expect(program).not.toBeInstanceOf(GlError)
     if (GlError.is(program)) return
-    // Two COMPILE_STATUS reads and one LINK_STATUS read, inside program() itself.
+    // Both compiles and the link are issued first; then two COMPILE_STATUS reads and one
+    // LINK_STATUS read, inside program() itself.
+    expect(f.calls('compileShader')).toBe(2)
+    expect(f.calls('linkProgram')).toBe(1)
     expect(f.calls('getShaderParameter')).toBe(2)
     expect(f.calls('getProgramParameter')).toBe(1)
     expect(f.calls('deleteShader')).toBe(2)

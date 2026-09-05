@@ -124,13 +124,7 @@ export type { MountedTiles, TileName } from './paper-tiles.js'
 export type { PaperTileSet } from './tile-set.js'
 
 // --- P10: the GL halves — the jump-flood field, the blur, and the ported shader (§5.1, §15) ---
-export {
-  createSdfBuilder,
-  createSdfPrograms,
-  looseSizeFor,
-  SDF_POOL_SLOTS,
-  sigmaFor,
-} from './gl-sdf.js'
+export { createSdfBuilder, looseSizeFor, SDF_POOL_SLOTS, sigmaFor } from './gl-sdf.js'
 export type {
   BlurFieldOptions,
   BuildFieldOptions,
@@ -138,7 +132,6 @@ export type {
   FieldContract,
   LooseField,
   SdfBuilder,
-  SdfPrograms,
 } from './gl-sdf.js'
 export {
   DEBUG_MODES,

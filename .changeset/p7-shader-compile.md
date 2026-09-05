@@ -30,7 +30,20 @@ until the next shader change. Two changes, each on its own sufficient to remove 
 shader that fails to compile or link is no longer a synchronous error of `paperStage()` /
 `sheet.mount()`; it is the error value of the first `source()` — and so of the first `add()` /
 `prepare()` promise — emitted with `observed: true` (spec 10.6). `mount()` still returns
-synchronously every error it can detect without waiting for the driver. A `/unstable` consumer
-driving `PaperRenderer` (`ready()` added), `Resampler` (`ready()`) or `SdfBuilder` (`ready()`)
-directly should await them before the first draw, or accept that the first draw blocks on the link
-exactly as `mount()` used to.
+synchronously every error it can detect without waiting for the driver. The wait is cancellable:
+an `add()` whose signal fires during the link resolves `ABORTED` at once, and the shared link
+carries on for the next caller. `bakedMotion.load()` awaits its sheet program the same way and
+returns a link failure as an `AssetError` whose `cause` is the `GlError` (`LoadError` carries no
+`GlError`, spec 5.3). The rule, now in spec 5.2: every slot awaits `ready()` on its asynchronous
+path before the program's first use.
+
+**Public surface (the minor bump):** `ready(): Promise<GlError | undefined>` is added to the
+exported `PaperRenderer`, `Resampler` and `SdfBuilder` interfaces of `@paper-crumple/paper`, to
+`Program` on `@paper-crumple/core/unstable`, and `createSdfBuilder(ctx, pool, programs?)` gains an
+optional third parameter (the four field programs, shared across builders; omitted, it links its
+own as before). `nextTurn()` is the platform yield `@paper-crumple/core/unstable` already exports
+for the ingest lane (spec 8.10); the deferred link polls on it, and that is not the deferral spec
+7.1 forbids — nothing on the gesture path waits, only the asynchronous ingest path, which was a
+promise already. A `/unstable` consumer driving `PaperRenderer`, `Resampler` or `SdfBuilder`
+directly should await `ready()` before the first draw, or accept that the first draw blocks on the
+link exactly as `mount()` used to.

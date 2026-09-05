@@ -1,37 +1,58 @@
 /**
- * The platform yield: resolves on a fresh macrotask, never inside the current microtask
- * checkpoint, so whatever the browser had queued — input, rendering, other tasks — runs first.
+ * # The platform yield (spec §8.10)
  *
- * `scheduler.postTask` at `'user-visible'` where the platform has it (Chromium), a
- * `MessageChannel` message where it does not (a real task, unlike `setTimeout(0)`'s clamped and
- * throttled one), and `setTimeout(0)` last. Shared by every internal wait that has to leave the
- * event loop alone between two looks at something — the deferred program link polls
- * `COMPLETION_STATUS_KHR` once per turn (`gl-context.ts`) — so there is one definition of "later,
- * off the current task" in the library. Exported from `/unstable` (§14) for slot authors who need
- * the same yield.
+ * Resolves in a **later macrotask** — never a microtask. The point is a rendering and input
+ * opportunity between two phases of an ingest (and, for the sheet's asynchronous readback, one
+ * fence poll per turn), and a microtask checkpoint gives neither: the whole of the current task
+ * still runs before the browser paints or dispatches the click.
  *
- * This is not the deferral §7.1 forbids: nothing that starts a run or emits an event waits on
- * it. It lives on the asynchronous ingest path only (`source()`, `add()`, `prepare()`), which is a
- * promise already.
+ * Three routes, in order of preference:
+ *
+ * 1. `scheduler.postTask(fn, { priority: 'user-visible' })` where the global exists. The
+ *    priority is the one rendering runs at, so a yield neither starves paint nor waits behind
+ *    idle work.
+ * 2. One module-level `MessageChannel` with a FIFO of resolvers, one port message per call: a
+ *    macrotask without `setTimeout`'s nesting clamp.
+ * 3. `setTimeout(fn, 0)` where neither exists.
+ *
+ * `systemTimers.yield` is this function. A test's `FakeTimers.yield` is a microtask (§11), because
+ * every lane guarantee holds by construction of the queue and none by a task boundary.
  */
+
+interface SchedulerLike {
+  postTask(fn: () => void, o: { priority: 'user-visible' }): unknown
+}
+
+let channel: MessageChannel | null = null
+/** One resolver per posted message, taken in FIFO order — the channel carries no payload. */
+const waiting: Array<() => void> = []
+
+function viaChannel(resolve: () => void): void {
+  if (channel === null) {
+    channel = new MessageChannel()
+    channel.port1.onmessage = () => {
+      waiting.shift()?.()
+    }
+    // Node keeps its event loop alive for a started port; a library's idle channel must not.
+    // Browsers have no `unref`, and there the question does not arise. The price is that a bare
+    // Node script whose only pending work is `await nextTurn()` may exit before it resolves;
+    // under Vitest, the bench and any browser something else always holds the loop open.
+    ;(channel.port1 as MessagePort & { unref?: () => void }).unref?.()
+  }
+  waiting.push(resolve)
+  channel.port2.postMessage(null)
+}
+
+/** Resolves in a later macrotask (spec §8.10). Never rejects. */
 export function nextTurn(): Promise<void> {
-  return new Promise((resolve) => {
-    const scheduler = (
-      globalThis as {
-        scheduler?: { postTask?: (cb: () => void, o: { priority: 'user-visible' }) => unknown }
-      }
-    ).scheduler
-    if (scheduler !== undefined && typeof scheduler.postTask === 'function') {
-      scheduler.postTask(resolve, { priority: 'user-visible' })
+  return new Promise<void>((resolve) => {
+    const scheduler = (globalThis as { scheduler?: Partial<SchedulerLike> }).scheduler
+    if (typeof scheduler?.postTask === 'function') {
+      void scheduler.postTask(resolve, { priority: 'user-visible' })
       return
     }
-    if (typeof MessageChannel !== 'undefined') {
-      const channel = new MessageChannel()
-      channel.port1.onmessage = () => {
-        channel.port1.close()
-        resolve()
-      }
-      channel.port2.postMessage(undefined)
+    if (typeof MessageChannel === 'function') {
+      viaChannel(resolve)
       return
     }
     setTimeout(resolve, 0)

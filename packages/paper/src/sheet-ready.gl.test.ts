@@ -171,7 +171,7 @@ describe('source() and the deferred paper program link (P7, spec 5.2 amendment)'
     a.close()
   }, 60_000)
 
-  it('honours an abort that arrived during the wait before any GPU work', async () => {
+  it('returns ABORTED the moment the signal fires, without waiting for the link, and leaves the link to the next caller', async () => {
     const link = deferred()
     const ctx = withPendingLink(open(), 'paper', link)
     const sheet = paperSheet()
@@ -181,8 +181,29 @@ describe('source() and the deferred paper program link (P7, spec 5.2 amendment)'
     const pending = sheet.source(a, { maxSize: 128, exact: false, signal: controller.signal })
     await turns()
     controller.abort()
-    link.resolve(undefined)
+    // The fake link is still pending: a superseded swap or a dispose() must not hold the ingest
+    // lane's slot for the rest of a 2-3 s D3D11 compile.
     expect(isAborted(await pending)).toBe(true)
+    // The wait left nothing on the signal, and the shared link still serves the next source().
+    link.resolve(undefined)
+    const next = await sheet.source(a, { maxSize: 128, exact: false })
+    expect(next instanceof Error || isAborted(next)).toBe(false)
+    if (!(next instanceof Error) && !isAborted(next)) sheet.release(next)
+    a.close()
+    sheet.dispose()
+  }, 60_000)
+
+  it('honours a signal already aborted when source() is called, before any wait', async () => {
+    const link = deferred()
+    const ctx = withPendingLink(open(), 'paper', link)
+    const sheet = paperSheet()
+    expect(sheet.mount(ctx)).toBeUndefined()
+    const a = await sprite()
+    const controller = new AbortController()
+    controller.abort()
+    expect(
+      isAborted(await sheet.source(a, { maxSize: 128, exact: false, signal: controller.signal })),
+    ).toBe(true)
     a.close()
     sheet.dispose()
   }, 60_000)

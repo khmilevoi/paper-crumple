@@ -14,8 +14,9 @@
  * `Program` without reading `LINK_STATUS` — that read is where ANGLE's D3D11 backend blocked the
  * main thread for the whole HLSL compile (42–48 s cold for the paper shader before P7, seconds
  * after) — and the outcome is delivered by `Program.ready()`, which polls `COMPLETION_STATUS_KHR`
- * once per `nextTurn()` and only then reads `LINK_STATUS`. Without the extension the link is
- * checked synchronously as it always was, and `ready()` resolves at once.
+ * once per `nextTurn()` and only then reads `LINK_STATUS`. Without the extension both shaders are
+ * compiled and the program linked, then the three statuses are read before `program()` returns,
+ * and `ready()` resolves at once.
  */
 import { GlError } from './errors.js'
 import { nextTurn } from './next-turn.js'
@@ -185,6 +186,9 @@ function compile(
   }
 
   if (parallel === null) {
+    // Without the extension: both shaders are compiled and the program linked above, and only
+    // now are the three statuses read, inside `program()` — the synchronous path since P7 (it
+    // used to read each shader's status before compiling the next). Same outcome, same wording.
     const failed = linkOutcome(gl, handle, vertex, fragment, label)
     releaseShaders()
     if (failed !== undefined) {

@@ -901,6 +901,29 @@ export function paperSheet(options?: PaperSheetOptions): PaperSheet {
     return signal !== undefined && signal.aborted
   }
 
+  /**
+   * `promise`'s value, or `ABORTED` the moment `signal` fires — whichever comes first (P7). The
+   * listener is `once` and removed on either outcome, so a wait that ends normally leaves nothing
+   * on the signal; the promise itself is untouched, because a program link is shared by every
+   * caller and must keep going for the next one. `Program.ready()` never rejects (§10.8), so the
+   * fulfilment handler is the only one there is.
+   */
+  function raceAbort<T>(
+    promise: Promise<T>,
+    signal: AbortSignal | undefined,
+  ): Promise<T | Aborted> {
+    if (signal === undefined) return promise
+    if (signal.aborted) return Promise.resolve(ABORTED)
+    return new Promise<T | Aborted>((resolve) => {
+      const onAbort = (): void => resolve(ABORTED)
+      signal.addEventListener('abort', onAbort, { once: true })
+      void promise.then((value) => {
+        signal.removeEventListener('abort', onAbort)
+        resolve(value)
+      })
+    })
+  }
+
   async function source(
     bitmap: ImageBitmap,
     o: SourceOptions,
@@ -919,19 +942,23 @@ export function paperSheet(options?: PaperSheetOptions): PaperSheet {
     // surfaces: as this call's error, observed (§10.6), on the ingest path §7.1's ban on deferral
     // does not cover. Every `build()` needs a handle from a `source()` that passed this point,
     // so `build()` never meets a pending program. Two `source()` calls issued during one link
-    // resume here in call order (one promise, listeners in registration order). The abort check
-    // is repeated after the wait: still before any GPU work, and a scroll-away that happened
-    // during the link is honoured rather than spent.
-    const rendererReady = await m.renderer.ready()
-    if (rendererReady !== undefined) return rendererReady
-    const resamplerReady = await m.resampler.ready()
-    if (resamplerReady !== undefined) return resamplerReady
-    const fieldsReady = await m.sdfPrograms.ready()
-    if (fieldsReady !== undefined) return fieldsReady
+    // resume here in call order (one promise, listeners in registration order). The wait is
+    // raced against the signal (§10.5's check point "after a program-readiness wait"): a
+    // superseded swap or a `stage.dispose()` returns `ABORTED` the moment it fires rather than
+    // holding the ingest lane's slot for the rest of the link, which is shared and carries on
+    // for the next caller. A wait that ends normally re-checks the mount: still before any GPU
+    // work.
+    const ready = await raceAbort(
+      Promise.all([m.renderer.ready(), m.resampler.ready(), m.sdfPrograms.ready()]).then(
+        (outcomes) => outcomes.find((outcome) => outcome !== undefined),
+      ),
+      o.signal,
+    )
+    if (ready === ABORTED) return ABORTED
+    if (ready !== undefined) return ready
     if (mounted !== m) {
       return new SheetError('paperSheet: dispose() ran while source() waited for the program link')
     }
-    if (signalAborted(o.signal)) return ABORTED
 
     // §6.3 — the hull cache key is "every knob at or above 'hull'", so the trace runs at the
     // hull-tier values the caller projected for the sprite, over this factory's defaults. The
