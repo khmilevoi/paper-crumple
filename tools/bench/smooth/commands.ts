@@ -29,14 +29,22 @@ import type {
   RowResult,
   SmoothFile,
   SmoothMeta,
+  StallStats,
   StormResult,
+  TaskAnatomy,
   TraceReport,
+  TraceStalls,
 } from './types.js'
 
 function ms(x: number | undefined, width = 7, digits = 1): string {
   return x !== undefined && Number.isFinite(x)
     ? x.toFixed(digits).padStart(width)
     : '-'.padStart(width)
+}
+
+/** `n / total ms / max ms` of one wait kind. */
+function stall(s: StallStats): string {
+  return `${String(s.n)}/${s.totalMs.toFixed(0)}/${s.maxMs.toFixed(1)}`
 }
 
 function stormLine(s: StormResult): string {
@@ -66,7 +74,7 @@ export function rowBlock(r: RowResult): string {
             .join(', ')}`
   const q = r.summary
   const lines = [
-    `${r.name} [${q.row}]  front ${r.frontSize} dpr ${r.dprSeen}  mount ${ms(r.mountMs)} ms  ingest url ${ms(r.ingestUrlMs)} bitmap ${ms(r.ingestBitmapMs)}` +
+    `${r.name} [${q.row}]  front ${r.frontSize} surface ${r.surfaceSize} dpr ${r.dprSeen}  mount ${ms(r.mountMs)} ms  ingest url ${ms(r.ingestUrlMs)} bitmap ${ms(r.ingestBitmapMs)}` +
       `  seqIdeal ${ms(r.sequentialIdealMs)} ideal ${ms(r.idealMs)}  ->  ${verdict}`,
     `  best #${s.iteration}: storm ${ms(s.stormMs)} ingest ${ms(s.ingestStormMs)} adopt ${ms(s.lastAdoptMs)} ratio ${ms(s.stormRatio, 5, 2)}` +
       ` | tasks work ${s.tasks.n}/${s.tasks.all} p50 ${ms(s.tasks.p50, 5)} p95 ${ms(s.tasks.p95, 6)} p95w ${ms(s.tasks.p95Weighted, 6)} max ${ms(s.tasks.max, 6)} (>50: ${s.tasks.over50}; longtask ${s.longTasks.count} max ${ms(s.longTasks.maxMs)})` +
@@ -76,6 +84,19 @@ export function rowBlock(r: RowResult): string {
       ` blit ${ms(p.blitMs)} (${p.blitCalls ?? 0}) rect ${ms(p.rectMs)} (${p.rectCalls ?? 0}) upload ${ms(p.uploadMs)} shader ${ms(p.shaderMs)} sync ${ms(p.syncMs)} decodes ${p.decodeCalls ?? 0}` +
       ` | adds ok ${s.adds.ok} fail ${s.adds.failed} abort ${s.adds.aborted} rects ${s.adds.distinctRects} fronts ${s.adds.distinctPixels} waste ${s.wastedIngests}` +
       (s.adds.messages.length === 0 ? '' : ` | ${s.adds.messages.join(' | ')}`),
+    // Where the main thread waited on the GPU process, and what the longest task spent its time in.
+    `  stalls: getError ${stall(s.stalls.getError)} readback ${stall(s.stalls.readback)} waits ${stall(s.stalls.waits)}` +
+      ` | gpu task max ${ms(s.stalls.gpuTaskMaxMs)} total ${ms(s.stalls.gpuTaskTotalMs)}` +
+      (s.anatomy.length === 0
+        ? ''
+        : ` | top ${s.anatomy
+            .slice(0, 2)
+            .map(
+              (a) =>
+                `${a.ms.toFixed(1)} ms at +${a.atMs.toFixed(0)}: ${a.longest.name} ${a.longest.ms.toFixed(1)}` +
+                (a.entry === undefined ? '' : ` (${a.entry})`),
+            )
+            .join('; ')}`),
     ...r.storms.map(stormLine),
     // The plan's flat contract, exactly as it lands in the JSON (`summaries[]`).
     `  plan[${q.row}/${q.backend}]: storm ${ms(q.stormMs)} seqIdeal ${ms(q.sequentialIdealMs)} ratio ${ms(q.stormRatio, 5, 2)}` +
@@ -109,8 +130,34 @@ interface TraceEvent {
   readonly dur?: number
   readonly pid?: number
   readonly tid?: number
-  readonly args?: { readonly name?: string }
+  readonly args?: {
+    readonly name?: string
+    readonly data?: {
+      readonly functionName?: string
+      readonly url?: string
+      readonly lineNumber?: number
+    }
+  }
 }
+
+/**
+ * `disabled-by-default-devtools.timeline` carries `RunTask` (the task column), the raster and
+ * decode tasks and the compositor's frames; `devtools.timeline` the task's anatomy —
+ * `FunctionCall`, `TimerFire`, `EventDispatch`, layout, paint, commit; `v8.execute` +
+ * `disabled-by-default-v8.gc` the collector; and `gpu` the command buffer's client side —
+ * `GLES2::GetGLError`, `WaitForGetOffset`, `ReadbackImagePixels` — plus the GPU process's
+ * `GPUTask`s, so a spike can be read as GC, decode, library work or a wait on the GPU process.
+ */
+const TRACE_CATEGORIES = [
+  'disabled-by-default-devtools.timeline',
+  'disabled-by-default-devtools.timeline.frame',
+  'devtools.timeline',
+  'v8.execute',
+  'disabled-by-default-v8.gc',
+  'gpu',
+  'blink.user_timing',
+  '__metadata',
+]
 
 const MARK_START = 'smooth:storm:start'
 const MARK_END = 'smooth:storm:end'
@@ -161,20 +208,137 @@ export function analyseTrace(events: readonly TraceEvent[]): TraceReport {
     )
     .sort((a, b) => (a.ts ?? 0) - (b.ts ?? 0))
   const tasks: number[] = []
+  const outer: TraceEvent[] = []
   let outerEnd = -Infinity
   for (const e of runTasks) {
     const ts = e.ts ?? 0
     if (ts < outerEnd) continue
     outerEnd = ts + (e.dur ?? 0)
     tasks.push((e.dur ?? 0) / 1000)
+    outer.push(e)
   }
-  return { tasks, marks, thread: `${pid}/${tid}`, events: events.length }
+  const complete = completeEvents(events)
+  const inWindow = (e: TraceEvent): boolean => (e.ts ?? 0) + (e.dur ?? 0) >= lo && (e.ts ?? 0) <= hi
+  const onMain = (e: TraceEvent): boolean => e.pid === pid && e.tid === tid && inWindow(e)
+  const stat = (name: string): StallStats => {
+    let n = 0
+    let totalMs = 0
+    let maxMs = 0
+    for (const e of complete) {
+      if (e.name !== name || !onMain(e)) continue
+      const ms = (e.dur ?? 0) / 1000
+      n += 1
+      totalMs += ms
+      if (ms > maxMs) maxMs = ms
+    }
+    return { n, totalMs, maxMs }
+  }
+  // The GPU process's main thread by name; the `GPUTask` events on it are the flushes it ran.
+  let gpuTaskMaxMs = 0
+  let gpuTaskTotalMs = 0
+  const gpuMains = new Set<string>()
+  for (const e of events) {
+    if (e.ph === 'M' && e.name === 'thread_name' && e.args?.name === 'CrGpuMain') {
+      gpuMains.add(`${e.pid}/${e.tid}`)
+    }
+  }
+  for (const e of complete) {
+    if (e.name !== 'GPUTask' || !gpuMains.has(`${e.pid}/${e.tid}`) || !inWindow(e)) continue
+    const ms = (e.dur ?? 0) / 1000
+    gpuTaskTotalMs += ms
+    if (ms > gpuTaskMaxMs) gpuTaskMaxMs = ms
+  }
+  const stalls: TraceStalls = {
+    getError: stat('GLES2::GetGLError'),
+    readback: stat('RasterImplementation::ReadbackImagePixels'),
+    waits: stat('CommandBufferProxyImpl::WaitForGetOffset'),
+    gpuTaskMaxMs,
+    gpuTaskTotalMs,
+  }
+  const mainEvents = complete.filter(onMain)
+  const anatomy = [...outer]
+    .sort((a, b) => (b.dur ?? 0) - (a.dur ?? 0))
+    .slice(0, 3)
+    .map((t) => anatomyOf(t, mainEvents, lo))
+  return { tasks, marks, thread: `${pid}/${tid}`, events: events.length, stalls, anatomy }
 }
 
-export function smoothCommands(o: { outPath: string; profileDir: string; runId: string }): {
+/** Complete (`X`) events plus every `B`/`E` pair folded into one, per thread. */
+function completeEvents(events: readonly TraceEvent[]): TraceEvent[] {
+  const out: TraceEvent[] = []
+  const open = new Map<string, TraceEvent[]>()
+  for (const e of events) {
+    if (e.ph === 'X') out.push(e)
+    else if (e.ph === 'B') {
+      const k = `${e.pid}/${e.tid}`
+      const stack = open.get(k) ?? []
+      stack.push(e)
+      open.set(k, stack)
+    } else if (e.ph === 'E') {
+      const b = open.get(`${e.pid}/${e.tid}`)?.pop()
+      if (b !== undefined) out.push({ ...b, dur: (e.ts ?? 0) - (b.ts ?? 0) })
+    }
+  }
+  return out
+}
+
+/** Scheduler and command-buffer wrappers: never the answer to "what did this task spend on". */
+const WRAPPERS = new Set([
+  'RunTask',
+  'ThreadControllerImpl::RunTask',
+  'RunMicrotasks',
+  'RunPostTaskCallback',
+  'FireAnimationFrame',
+  'TimerFire',
+  'ImplementationBase::WaitForCmd',
+  'CommandBufferHelper::Finish',
+  'CommandBufferProxyImpl::WaitForGetOffset',
+  'CommandBufferHelper::WaitForGetOffsetInRange',
+  'V8.StackGuard',
+  'V8.HandleInterrupts',
+  'V8.BytecodeBudgetInterrupt',
+  'UpdateCounters',
+])
+
+function anatomyOf(task: TraceEvent, mainEvents: readonly TraceEvent[], lo: number): TaskAnatomy {
+  const ts = task.ts ?? 0
+  const end = ts + (task.dur ?? 0)
+  let longest: { name: string; ms: number } = { name: '(nothing nested)', ms: 0 }
+  let entry: string | undefined
+  for (const e of mainEvents) {
+    if (e === task || (e.ts ?? 0) < ts || (e.ts ?? 0) + (e.dur ?? 0) > end) continue
+    const name = e.name ?? ''
+    const ms = (e.dur ?? 0) / 1000
+    if (!WRAPPERS.has(name) && ms > longest.ms) longest = { name, ms }
+    if (entry === undefined && name === 'FunctionCall') {
+      const d = e.args?.data
+      const fn = d?.functionName ?? ''
+      const url = (d?.url ?? '').replace(/\\/g, '/').replace(/^.*\/(packages|tools)\//, '$1/')
+      const line = d?.lineNumber === undefined ? '' : `:${String(d.lineNumber + 1)}`
+      if (fn !== '' || url !== '') entry = `${fn || '(anonymous)'} ${url}${line}`.trim()
+    }
+  }
+  return {
+    ms: (task.dur ?? 0) / 1000,
+    atMs: (ts - (Number.isFinite(lo) ? lo : ts)) / 1000,
+    longest,
+    ...(entry === undefined ? {} : { entry }),
+  }
+}
+
+export function smoothCommands(o: {
+  outPath: string
+  profileDir: string
+  runId: string
+  /** Set (`BENCH_TRACE_DUMP=1`) to keep every storm's raw trace events under it. */
+  traceDir?: string
+  /** Extra trace categories (`BENCH_TRACE_CATS`, comma-separated) — `gpu.angle` for the GPU
+   *  process's side of a stall, `disabled-by-default-gpu.decoder` for every GL command. */
+  traceCategories?: readonly string[]
+}): {
   smoothWrite: BrowserCommand<[RowResult[], SmoothMeta]>
   smoothInput: BrowserCommand<['start' | 'stop', InputPlan?]>
-  smoothTrace: BrowserCommand<['start' | 'stop']>
+  smoothTrace: BrowserCommand<['start' | 'stop', string?]>
   smoothEmulate: BrowserCommand<[number, number, number]>
   smoothProfile: BrowserCommand<['start' | 'stop', string]>
 } {
@@ -292,7 +456,7 @@ export function smoothCommands(o: { outPath: string; profileDir: string; runId: 
   }
 
   let tracing: { session: CDPSession; events: TraceEvent[] } | null = null
-  const smoothTrace: BrowserCommand<['start' | 'stop']> = async (ctx, action) => {
+  const smoothTrace: BrowserCommand<['start' | 'stop', string?]> = async (ctx, action, label) => {
     if (action === 'start') {
       if (tracing !== null) return undefined
       const session = await ctx.context.newCDPSession(ctx.page)
@@ -304,11 +468,7 @@ export function smoothCommands(o: { outPath: string; profileDir: string; runId: 
         transferMode: 'ReportEvents',
         traceConfig: {
           recordMode: 'recordUntilFull',
-          includedCategories: [
-            'disabled-by-default-devtools.timeline',
-            'blink.user_timing',
-            '__metadata',
-          ],
+          includedCategories: [...TRACE_CATEGORIES, ...(o.traceCategories ?? [])],
         },
       })
       tracing = { session, events }
@@ -323,6 +483,12 @@ export function smoothCommands(o: { outPath: string; profileDir: string; runId: 
     await t.session.send('Tracing.end')
     await complete
     await t.session.detach()
+    if (o.traceDir !== undefined && label !== undefined) {
+      // The raw events, for reading a storm offline (`profile-phases.mjs` has the JS side; this
+      // has the platform's: GC, decode, raster, compositor frames). Tens of megabytes per storm.
+      mkdirSync(o.traceDir, { recursive: true })
+      writeFileSync(join(o.traceDir, `${label}.trace.json`), JSON.stringify(t.events))
+    }
     return analyseTrace(t.events)
   }
 

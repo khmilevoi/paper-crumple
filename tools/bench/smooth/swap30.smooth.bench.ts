@@ -116,6 +116,7 @@ import {
   tiles,
 } from './deps.js'
 import type { BlitStage, Sprite, View } from './deps.js'
+import { NO_STALLS } from './types.js'
 import type {
   AddStats,
   Cadence,
@@ -139,7 +140,7 @@ declare module 'vitest/browser' {
   interface BrowserCommands {
     smoothWrite: (rows: RowResult[], meta: SmoothMeta) => Promise<string>
     smoothInput: (action: 'start' | 'stop', plan?: InputPlan) => Promise<InputReport | undefined>
-    smoothTrace: (action: 'start' | 'stop') => Promise<TraceReport | undefined>
+    smoothTrace: (action: 'start' | 'stop', label?: string) => Promise<TraceReport | undefined>
     smoothEmulate: (dpr: number, width: number, height: number) => Promise<void>
     smoothProfile: (action: 'start' | 'stop', label: string) => Promise<string | undefined>
   }
@@ -494,10 +495,29 @@ function taskStats(trace: TraceReport | undefined): TaskStats {
   }
 }
 
+/**
+ * One scratch canvas every hash reads through, so the views' own canvases never see a
+ * `getImageData`. Chromium demotes a 2D canvas to software raster once it is read back (the
+ * `willReadFrequently` heuristic), and a software canvas copies the WebGL surface through the CPU
+ * on every `drawImage` — `stalls: readback` in the row block, 1–2 ms a blit inside `Paint`, which
+ * is what turned the late rows' frames into 35 ms ones (S10). Declared `willReadFrequently` so the
+ * scratch itself is software from the start and the read is a plain memcpy.
+ */
+let hashScratch: OffscreenCanvasRenderingContext2D | null = null
+
 /** A cheap FNV-1a over the canvas's pixels, so two views showing the same front hash alike. */
 function pixelHash(canvas: HTMLCanvasElement): string | null {
-  const c2d = canvas.getContext('2d')
-  if (c2d === null || canvas.width === 0 || canvas.height === 0) return null
+  if (canvas.width === 0 || canvas.height === 0) return null
+  if (hashScratch === null) {
+    hashScratch = new OffscreenCanvas(canvas.width, canvas.height).getContext('2d', {
+      willReadFrequently: true,
+    })
+    if (hashScratch === null) return null
+  }
+  const c2d = hashScratch
+  c2d.canvas.width = canvas.width
+  c2d.canvas.height = canvas.height
+  c2d.drawImage(canvas, 0, 0)
   const data = c2d.getImageData(0, 0, canvas.width, canvas.height).data
   let h = 0x811c9dc5
   for (let i = 0; i < data.length; i += 4) {
@@ -669,7 +689,10 @@ async function runStorm(o: StormRequest): Promise<StormResult> {
 
   const report = await commands.smoothInput('stop')
   const rec = await recorders.stop(t0, tEnd)
-  const trace = await commands.smoothTrace('stop')
+  const trace = await commands.smoothTrace(
+    'stop',
+    `${spec.name}.${REAL_GPU ? 'gpu' : 'sw'}.${String(o.iteration)}`,
+  )
   const profile =
     o.profileLabel === undefined ? undefined : await commands.smoothProfile('stop', o.profileLabel)
   for (const off of offs) off()
@@ -734,6 +757,8 @@ async function runStorm(o: StormRequest): Promise<StormResult> {
     wastedIngests: isIdle ? 0 : Math.max(0, (acc.sourceCalls ?? 0) - wantedIngests),
     longTasks: rec.longTasks,
     tasks: taskStats(trace),
+    stalls: trace?.stalls ?? NO_STALLS,
+    anatomy: trace?.anatomy ?? [],
     frames: rec.frames,
     input: {
       handled: rec.inputTimes.length,
@@ -1022,6 +1047,7 @@ async function runRow(spec: RowSpec): Promise<RowResult | Error> {
     return new Error('paperStage aborted')
   }
   describeStage(stage)
+  const surfaceSize = `${String(stage.surface.width)}x${String(stage.surface.height)}`
   const frame = meta?.frameRect ?? { x: 0, y: 0, w: VIEWPORT.w, h: VIEWPORT.h }
   const plan: InputPlan = { ...frame, hz: 60, clickEveryMs: 500, keyEveryMs: 250 }
 
@@ -1162,6 +1188,7 @@ async function runRow(spec: RowSpec): Promise<RowResult | Error> {
     artworkPx: ARTWORK_PX,
     artworkCssPx: ARTWORK_CSS_PX,
     frontSize,
+    surfaceSize,
     mountMs,
     ingestMs,
     ingestUrlMs,
