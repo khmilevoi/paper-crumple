@@ -14,6 +14,20 @@ const spec = (shape: EdgeShape, finish: EdgeFinish, widthUnit: EdgeWidthUnit = '
   widthUnit,
 })
 
+/** Every combination `descriptorsFor` can be called with — the four shape/finish cells crossed
+ *  with both width units, eight specs in all. */
+const allSpecs = (): EdgeSpec[] => {
+  const specs: EdgeSpec[] = []
+  for (const shape of ['smooth', 'torn'] as const) {
+    for (const finish of ['clean', 'paper'] as const) {
+      for (const widthUnit of ['px', 'percent'] as const) {
+        specs.push(spec(shape, finish, widthUnit))
+      }
+    }
+  }
+  return specs
+}
+
 describe('descriptorsFor (design 2026-09-05 §2.4)', () => {
   it('lands the four cells counts', () => {
     expect(descriptorsFor(spec('smooth', 'clean')).length).toBe(24)
@@ -79,6 +93,72 @@ describe('descriptorsFor (design 2026-09-05 §2.4)', () => {
     )
     expect(descriptorsFor(spec('smooth', 'clean')).map((d) => d.key)).toContain('angularity')
     expect(descriptorsFor(spec('smooth', 'clean')).map((d) => d.key)).not.toContain('tearMix')
+  })
+})
+
+// Four invariants that held for the old mode-based tables and still must hold for the composed
+// ones — none of these depends on the deleted vocabulary, so the redesign must not have quietly
+// dropped coverage of them (fix round 1).
+describe('invariants carried over from the mode-based tables (spec 6.2, 6.5, 6.7)', () => {
+  it('never re-declares a core-owned shared knob (paperColor, paperBack)', () => {
+    for (const s of allSpecs()) {
+      const keys = descriptorsFor(s).map((d) => d.key)
+      expect(keys, JSON.stringify(s)).not.toContain('paperColor')
+      expect(keys, JSON.stringify(s)).not.toContain('paperBack')
+    }
+  })
+
+  it('never declares edgeMode, preset, pose or crumpleFill', () => {
+    for (const s of allSpecs()) {
+      const keys = descriptorsFor(s).map((d) => d.key)
+      for (const excluded of ['edgeMode', 'preset', 'pose', 'crumpleFill']) {
+        expect(keys, JSON.stringify(s)).not.toContain(excluded)
+      }
+    }
+  })
+
+  it('binds nothing, because grain is ambiguous and not shared (spec 6.2)', () => {
+    for (const s of allSpecs()) {
+      expect(
+        descriptorsFor(s).filter((d) => d.binds !== undefined),
+        JSON.stringify(s),
+      ).toEqual([])
+    }
+  })
+
+  describe('reference: sprite-px vs artwork-pct partitions every number-kind descriptor (spec 6.4, design 2026-09-05 §3)', () => {
+    // `edgeWidth` is the only descriptor whose reference depends on the spec (ruling: it is
+    // `artwork-pct` under `widthUnit: 'percent'` and `sprite-px` otherwise). Every other px-valued
+    // knob is `sprite-px` unconditionally, but which OTHER knobs exist at all still depends on
+    // `shape` (`chew` only under `torn`) and `finish` (`deckleWidth` / `fiberLen` only under
+    // `paper`) — so the expected set is computed per spec, not a single fixed list.
+    const expectedSpritePx = (s: EdgeSpec): string[] =>
+      [
+        'shadowBlur',
+        'creaseWidth',
+        ...(s.shape === 'torn' ? ['chew'] : []),
+        ...(s.finish === 'paper' ? ['deckleWidth', 'fiberLen'] : []),
+        ...(s.widthUnit === 'px' ? ['edgeWidth'] : []),
+      ].sort()
+
+    it('marks exactly the expected keys sprite-px, and edgeWidth artwork-pct only under percent', () => {
+      for (const s of allSpecs()) {
+        const numeric = descriptorsFor(s).filter((d) => d.kind === 'number')
+        const spritePx = numeric
+          .filter((d) => d.kind === 'number' && d.reference === 'sprite-px')
+          .map((d) => d.key)
+          .sort()
+        const artworkPct = numeric
+          .filter((d) => d.kind === 'number' && d.reference === 'artwork-pct')
+          .map((d) => d.key)
+          .sort()
+
+        expect(spritePx, JSON.stringify(s)).toEqual(expectedSpritePx(s))
+        expect(artworkPct, JSON.stringify(s)).toEqual(
+          s.widthUnit === 'percent' ? ['edgeWidth'] : [],
+        )
+      }
+    })
   })
 })
 

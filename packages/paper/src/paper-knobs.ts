@@ -10,8 +10,9 @@
  * resources, or the set of other knobs is a factory option." `edgeShape` and `edgeFinish` each
  * change the set of other knobs, so both are `paperSheet({ … })` options.
  *
- * Two derived bounds, justified in the brief: `shadowBlur` is 0–40 (scale with `thickness` and
- * `deckleWidth`), and `photoFibre` is 0–1 (a mix factor, matching `photoCrumple`).
+ * Two derived bounds, justified in the brief: `shadowBlur` is 0–40 (scale with `edgeWidth` and
+ * `deckleWidth` — the old `thickness` this bound was originally pinned against is gone, folded
+ * into `edgeWidth`, §2.3), and `photoFibre` is 0–1 (a mix factor, matching `photoCrumple`).
  *
  * No `binds` on any paper descriptor. Core's `SharedKnob` union is exactly `'paperColor' |
  * 'paperBack'` (packages/core/src/shared-knobs.ts), and `paperColor` / `paperBack` are
@@ -226,7 +227,7 @@ export const VARIANCE_KNOB = {
   step: 0.01,
 } as const
 
-/** design §2.2. `angularity` is unchanged from the old `HULL_KNOBS`. */
+/** design 2026-09-05 §2.2. `angularity` is unchanged from the old `HULL_KNOBS`. */
 export const SMOOTH_KNOBS = knobs([
   {
     key: 'angularity',
@@ -240,7 +241,7 @@ export const SMOOTH_KNOBS = knobs([
 ])
 
 /**
- * design §2.2. `looseness` survives as a PURE SHAPE knob: after §6.1's edits its only remaining
+ * design 2026-09-05 §2.2. `looseness` survives as a PURE SHAPE knob: after §6.1's edits its only remaining
  * effect is that the blurred field fills concavities (`scrapUnguarded`'s `max(tight, loose)`),
  * which is a shape role, not a width one. `tearMix` is new — how the variance splits between the
  * coarse tear and the mid-frequency wobble. `tearMix` is consumed only by `edge-derive.ts`'s
@@ -289,7 +290,7 @@ export const TORN_KNOBS = knobs([
 ])
 
 /**
- * design §2.3. Every dimensional finish knob stays in `sprite-px`: a fibre hair and a deckle band
+ * design 2026-09-05 §2.3. Every dimensional finish knob stays in `sprite-px`: a fibre hair and a deckle band
  * are small absolute features of the rim, not a fraction of the picture (§3, §12).
  *
  * `thickness` is NOT here. The shader has no thickness slab — `uThickness` was the contour's own
@@ -362,7 +363,7 @@ export const SDF_RES_KNOB: KnobDescriptor = {
 }
 
 /**
- * design §2.1's per-shape `invalidates`: a width change under `smooth` rebuilds the hull polygon,
+ * design 2026-09-05 §2.1's per-shape `invalidates`: a width change under `smooth` rebuilds the hull polygon,
  * under `torn` it only rebuilds the front. Legal because the descriptor array is built by the
  * factory, so a given sheet carries exactly one answer (ruling R5).
  */
@@ -413,7 +414,15 @@ export function edgeParamsFrom(
     const v = values[key]
     if (typeof v === 'number' && Number.isFinite(v)) return v
     const d = defaults[key]
-    return typeof d === 'number' ? d : 0
+    // `defaults` is `defaultsFor(spec)`, and `descriptorsFor(spec)` declares `edgeVariance` in
+    // every cell and `fiberLen` / `deckleWidth` in every cell this function actually reads them
+    // in (`decorated` gates both on `finish === 'paper'`), so `d` is always a number here — this
+    // branch is unreachable for the three keys this file calls `num` with. It stays NaN, not `0`,
+    // on purpose: ruling R3 exists because a missing knob value must never look like that knob
+    // being deliberately zeroed, and `0` is exactly indistinguishable from a real zero variance —
+    // `NaN` propagates loudly through `overscanRadius` instead. If this ever fires, the caller
+    // passed a key `descriptorsFor(spec)` does not declare, which is a bug in the caller.
+    return typeof d === 'number' ? d : NaN
   }
   const w = Number.isFinite(widthRef) && widthRef > 0 ? widthRef : 0
   const decorated = spec.finish === 'paper' && w > 0
