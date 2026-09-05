@@ -1,6 +1,7 @@
 ---
 '@paper-crumple/core': minor
 '@paper-crumple/paper': patch
+'@paper-crumple/motion': patch
 ---
 
 **One `getError` per allocation batch, read after the ingest's yield** (the `/unstable` GL seam,
@@ -18,11 +19,22 @@ a texture, which is how the scratch pools drop a resident the context released b
 (a dead artwork ends its residency, so `build()` expires and the core re-sources). Outside a batch
 `texture()` checks itself as before, and its read settles what a batch left unchecked.
 
+**`TextureFactory` — the `Pick` of `GlContext` that `createScratchPools` takes — now includes
+`alive`.** A minimal `{ texture, target }` factory of your own no longer typechecks against it; add
+an `alive(t)` that answers whether your factory still holds `t` (the real context is the usual
+factory and needs nothing). `@paper-crumple/motion`'s `createSheetMesh` takes an optional third
+argument, `read`, through which the library's own mesh reads the flag via `checkAllocations()`;
+without it the mesh reads `gl.getError()` itself, as before.
+
 `paperSheet().source()` and `build()` run their allocations as batches. `source()` settles in the
 readback's completion read — after the fence poll, in the same round trip that decides the CPU
 fallback — and the stale-error drain that preceded `readPixels` is gone; `build()` settles once at
 its end, before the front leaves the slot. The implementation read format is asked once per field
-format and remembered. A warm `stage.add` reads `getError` twice where it read five times, and the
+format and remembered. One behaviour changes under memory exhaustion, deliberately: a fatal flag
+read while the sprite's allocations are still unchecked — a refused pack-buffer `bufferData`
+included — now fails the `add()` with the batch's `GlError` and releases the sprite's residents,
+where it used to fall to the 120 ms CPU field; with memory gone, the conservative answer is the
+right one. A warm `stage.add` reads `getError` twice where it read five times, and the
 first synchronous call after a burst of thirty `swapTo` starts is no longer queued behind that
 burst's GPU work: on ANGLE D3D11 the 250–310 ms `getError` stalls in `burst-url` /
 `burst-bitmap` are gone (longest task 21 / 12 ms). Fields, hulls, rects and fronts are

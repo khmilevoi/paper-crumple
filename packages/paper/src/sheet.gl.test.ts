@@ -2537,4 +2537,32 @@ describe('S7 — allocation batches (spec 7.3, 8.1, 10.8): one getError per phas
     if (!(front instanceof Error)) sheet.releaseFront(front)
     sheet.dispose()
   })
+
+  it('asks for the implementation read format once per field format: two getParameter reads on the first sprite, none on the second', async () => {
+    const ctx = open()
+    const sheet = paperSheet()
+    sheet.mount(ctx)
+    const gl = ctx.gl
+    // Counted by pname: the fixture's context is injected, so every outermost scope captures
+    // §5.1's set through `getParameter` as well, and those reads are not the ones in question.
+    const readFormat = (p: unknown) =>
+      p === gl.IMPLEMENTATION_COLOR_READ_FORMAT || p === gl.IMPLEMENTATION_COLOR_READ_TYPE
+    const getParameter = vi.spyOn(gl, 'getParameter')
+    const first = await compactSprite(64, 64)
+    const a = await sheet.source(first, { maxSize: 128, exact: false })
+    first.close()
+    const firstReads = getParameter.mock.calls.filter(([p]) => readFormat(p)).length
+    getParameter.mockClear()
+    // Another size, the same field format: the pair is remembered, not asked again.
+    const second = await compactSprite(80, 48)
+    const b = await sheet.source(second, { maxSize: 128, exact: false })
+    second.close()
+    const secondReads = getParameter.mock.calls.filter(([p]) => readFormat(p)).length
+    getParameter.mockRestore()
+    expect(a instanceof Error || isAborted(a)).toBe(false)
+    expect(b instanceof Error || isAborted(b)).toBe(false)
+    expect(firstReads).toBe(2)
+    expect(secondReads).toBe(0)
+    sheet.dispose()
+  })
 })
