@@ -585,15 +585,15 @@ interface PendingReadback {
 /**
  * How many turns `awaitFieldReadback` polls before it gives the field up to the CPU fallback. A
  * safety net against a fence that never signals while the context still says it is not lost —
- * not a budget, and not a number of milliseconds: a turn is whatever `nextTurn()` costs, and
- * that spans three orders of magnitude. Measured on `gl.e2e.add.1024` (a 512² field, one
- * sprite, nothing else queued): ANGLE D3D11 signals its ~30 ms readback after 590–1720 turns
- * — 20–50 µs of `postTask` per turn on an idle thread — while the level-2 suite's SwiftShader
- * needs 11–26 turns for its ~600 ms, because the software rasteriser starves the main thread
- * and a turn stretches to tens of ms. A swap burst queues up to thirty sprites' builds ahead
- * of one readback, so the legitimate wait is ~1 s on D3D11: ~60 000 turns at the fastest rate
- * seen. Sized an order of magnitude past that; a fence that outlives it is a driver that has
- * hung without losing the context, and the CPU field is the right answer for that.
+ * not a budget, and not a number of milliseconds: a turn is whatever `nextTurn()` costs on the
+ * thread at hand. Measured on `gl.e2e.add.1024` (a 512² field, one sprite, nothing else
+ * queued): ANGLE D3D11 signals its ~20 ms readback after 250–1720 turns, the level-2 suite's
+ * SwiftShader its ~700 ms of raster after ~15 000 — 20–50 µs of `postTask` per turn on an
+ * otherwise idle thread, either way. A swap burst queues up to thirty sprites' builds ahead of
+ * one readback, so the legitimate wait is ~1 s on D3D11 (~60 000 turns at the fastest rate
+ * seen) and ~20 s on SwiftShader (~450 000). Sized past both; a fence that outlives it is a
+ * driver that has hung without losing the context, and the CPU field is the right answer for
+ * that.
  */
 const READBACK_POLL_MAX = 1_000_000
 
@@ -618,6 +618,11 @@ const READBACK_POLL_MAX = 1_000_000
  * `readBackField` chooses it (RED/FLOAT when the driver reports that as its implementation
  * format, RGBA/FLOAT otherwise; the RGBA8 byte contract without float targets), so the bytes
  * that land in the buffer are the bytes the client array used to receive.
+ *
+ * On an injected (consumer) context both halves leave the consumer's own `PIXEL_PACK_BUFFER`
+ * binding null — this one at the issue, `completeFieldReadback` in a later task — because
+ * §5.1's restore set does not carry that binding; a consumer that keeps a pack buffer bound
+ * across a `source()` rebinds it.
  */
 function issueFieldReadback(m: Mounted, field: Field): PendingReadback | null {
   const { gl } = m.ctx
