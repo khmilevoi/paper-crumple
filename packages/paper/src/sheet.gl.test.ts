@@ -1934,3 +1934,343 @@ describe('build() at a bucket-shaped size (spec 5.4, 8.6)', () => {
     })
   }
 })
+
+/**
+ * FNV-1a (32-bit) over a packed hull's `points` bytes — the `Float32Array` read as its own bytes,
+ * so an ulp in any coordinate changes the hash — or `'use-alpha'` for a hull with no polygon.
+ */
+function hullDigest(hull: { readonly kind: string; readonly points?: Float32Array }): string {
+  if (hull.kind !== 'polygons' || hull.points === undefined) return hull.kind
+  const bytes = new Uint8Array(hull.points.buffer, hull.points.byteOffset, hull.points.byteLength)
+  let h = 0x811c9dc5
+  for (const b of bytes) {
+    h ^= b
+    h = Math.imul(h, 0x01000193) >>> 0
+  }
+  return h.toString(16).padStart(8, '0')
+}
+
+type ReadbackGolden = {
+  readonly hull: string
+  readonly frontRect: { x: number; y: number; w: number; h: number }
+  readonly rect: { x: number; y: number; w: number; h: number }
+}
+
+/**
+ * What `source()` answered for three fixtures in both edge modes at perf/2x @ 653d394 — the
+ * synchronous `readBackField` path, on the level-2 suite's own SwiftShader — right before the
+ * field readback became asynchronous (`PIXEL_PACK_BUFFER` + `fenceSync`, spec §8.10). The pin is
+ * that the decode, the hull traced off it and the two rects it feeds did not move by a byte: the
+ * hull digest is over the polygon's raw `Float32Array`, and `frontRect` / `rect` are the exact
+ * integers. Regenerate only for a deliberate change to pass A or the decode, by running this test
+ * at the commit being pinned and copying what the failures print.
+ */
+const READBACK_GOLDEN: Record<string, ReadbackGolden> = {
+  'ellipse/hull': {
+    hull: '2bbbd370',
+    frontRect: { x: 22, y: 14, w: 89, h: 63 },
+    rect: { x: 6, y: 3, w: 38, h: 27 },
+  },
+  'ellipse/torn': {
+    hull: 'use-alpha',
+    frontRect: { x: 10, y: 6, w: 108, h: 82 },
+    rect: { x: -2, y: -4, w: 53, h: 40 },
+  },
+  'top/hull': {
+    hull: '9e56b7ea',
+    frontRect: { x: 27, y: 11, w: 81, h: 73 },
+    rect: { x: 10, y: 0, w: 49, h: 44 },
+  },
+  'top/torn': {
+    hull: 'use-alpha',
+    frontRect: { x: 13, y: 2, w: 102, h: 91 },
+    rect: { x: -4, y: -12, w: 74, h: 66 },
+  },
+  'square/hull': {
+    hull: '639f583f',
+    frontRect: { x: 16, y: 13, w: 95, h: 101 },
+    rect: { x: 3, y: 1, w: 57, h: 61 },
+  },
+  'square/torn': {
+    hull: 'use-alpha',
+    frontRect: { x: 5, y: 5, w: 116, h: 116 },
+    rect: { x: -10, y: -10, w: 84, h: 84 },
+  },
+}
+
+describe('async field readback (spec §8.10)', () => {
+  const fixtures = [
+    ['ellipse', () => sprite()],
+    ['top', () => topSprite()],
+    ['square', () => boxSprite(64, 64, 8)],
+  ] as const
+
+  it('answers the hull, frontRect and rect the synchronous readback answered (golden from 653d394)', async () => {
+    const ctx = open()
+    for (const [name, make] of fixtures) {
+      for (const edgeMode of ['hull', 'torn'] as const) {
+        const sheet = paperSheet({ edgeMode })
+        sheet.mount(ctx)
+        const bitmap = await make()
+        const handle = await sheet.source(bitmap, { maxSize: 128, exact: false })
+        bitmap.close()
+        expect(
+          GlError.is(handle) || SheetError.is(handle) || isAborted(handle),
+          `${name}/${edgeMode}: ${String((handle as Error)?.message)}`,
+        ).toBe(false)
+        if (GlError.is(handle) || SheetError.is(handle) || isAborted(handle)) {
+          sheet.dispose()
+          continue
+        }
+        const actual: ReadbackGolden = {
+          hull: hullDigest(handle.hull),
+          frontRect: { ...handle.frontRect },
+          rect: { ...handle.rect },
+        }
+        // `soft`, so a regeneration run prints every fixture's values at once.
+        expect.soft(actual, `${name}/${edgeMode}`).toEqual(READBACK_GOLDEN[`${name}/${edgeMode}`])
+        sheet.dispose()
+      }
+    }
+  })
+
+  it('aborts at the fence: a signal fired after pass A returns ABORTED, leaves no pack buffer bound, and the next source() succeeds', async () => {
+    const ctx = open()
+    const sheet = paperSheet()
+    sheet.mount(ctx)
+    const bitmap = await sprite()
+    const controller = new AbortController()
+    // The hook fires synchronously after pass A and BEFORE the readback is issued; a microtask
+    // from inside it runs at the first `await` — after the issue, before the first poll — so the
+    // abort lands inside the fence wait and nowhere else.
+    sheet.__afterFieldForTest = () => queueMicrotask(() => controller.abort())
+    const fenceSync = vi.spyOn(ctx.gl, 'fenceSync')
+    const deleteSync = vi.spyOn(ctx.gl, 'deleteSync')
+    const getBufferSubData = vi.spyOn(ctx.gl, 'getBufferSubData')
+    const r = await sheet.source(bitmap, { maxSize: 128, exact: false, signal: controller.signal })
+    bitmap.close()
+    expect(isAborted(r)).toBe(true)
+    expect(
+      fenceSync,
+      'the readback was issued before the abort could be observed',
+    ).toHaveBeenCalledTimes(1)
+    expect(deleteSync, 'the fence is deleted on the abort exit').toHaveBeenCalledTimes(1)
+    expect(getBufferSubData, 'nothing is copied back after an abort').not.toHaveBeenCalled()
+    expect(ctx.scope(() => ctx.gl.getParameter(ctx.gl.PIXEL_PACK_BUFFER_BINDING))).toBeNull()
+    fenceSync.mockRestore()
+    deleteSync.mockRestore()
+    getBufferSubData.mockRestore()
+
+    sheet.__afterFieldForTest = undefined
+    const again = await sprite()
+    const handle = await sheet.source(again, { maxSize: 128, exact: false })
+    again.close()
+    expect(GlError.is(handle) || SheetError.is(handle) || isAborted(handle)).toBe(false)
+    if (GlError.is(handle) || SheetError.is(handle) || isAborted(handle)) return
+    expect(handle.frontRect).toEqual(READBACK_GOLDEN['ellipse/hull'].frontRect)
+    expect(hullDigest(handle.hull)).toBe(READBACK_GOLDEN['ellipse/hull'].hull)
+    sheet.dispose()
+  })
+
+  it('falls back to the CPU field when readPixels into the pack buffer errors: the refusal is read at the fence, before any decode', async () => {
+    const ctx = open()
+    const sheet = paperSheet()
+    sheet.mount(ctx)
+    const bitmap = await topSprite()
+    const restore = forceCpuFallbackOnce(ctx)
+    const fenceSync = vi.spyOn(ctx.gl, 'fenceSync')
+    const getBufferSubData = vi.spyOn(ctx.gl, 'getBufferSubData')
+    const bufferData = vi.spyOn(ctx.gl, 'bufferData')
+    const handle = await sheet.source(bitmap, { maxSize: 128, exact: false })
+    const issued = (ctx.gl.readPixels as unknown as { mock: { calls: unknown[][] } }).mock.calls
+    restore()
+    expect(GlError.is(handle) || SheetError.is(handle) || isAborted(handle)).toBe(false)
+    if (GlError.is(handle) || SheetError.is(handle) || isAborted(handle)) return
+    // The one readPixels was into the pack buffer (an offset, not a client array); the fence
+    // was waited for, the bytes copied out, and the getError after the copy — the first since
+    // the issue's drain — read the refusal and refused the decode.
+    expect(issued).toHaveLength(1)
+    expect(issued[0][6]).toBe(0)
+    expect(fenceSync).toHaveBeenCalledTimes(1)
+    expect(getBufferSubData).toHaveBeenCalledTimes(1)
+    expect(bufferData, 'the first readback sizes the pack buffer').toHaveBeenCalledTimes(1)
+    // `cpuFieldFallback`'s own rect: within the JFA-vs-EDT tolerance the "findings 1, 4" test
+    // states, and not the readback's exact integers.
+    expect(Math.abs(handle.frontRect.y - READBACK_GOLDEN['top/hull'].frontRect.y)).toBeLessThan(10)
+    expect(ctx.scope(() => ctx.gl.getParameter(ctx.gl.PIXEL_PACK_BUFFER_BINDING))).toBeNull()
+    // A refusal drops the recorded buffer size, so the next readback sizes the buffer again
+    // rather than trusting a `bufferData` that may have been the refusal.
+    bufferData.mockClear()
+    getBufferSubData.mockClear()
+    const again = await topSprite()
+    const second = await sheet.source(again, { maxSize: 128, exact: false })
+    again.close()
+    bitmap.close()
+    expect(GlError.is(second) || SheetError.is(second) || isAborted(second)).toBe(false)
+    expect(bufferData, 'sized again after the refusal').toHaveBeenCalledTimes(1)
+    expect(getBufferSubData).toHaveBeenCalledTimes(1)
+    fenceSync.mockRestore()
+    getBufferSubData.mockRestore()
+    bufferData.mockRestore()
+    sheet.dispose()
+  })
+
+  it('falls back to the CPU field on WAIT_FAILED', async () => {
+    const ctx = open()
+    const sheet = paperSheet()
+    sheet.mount(ctx)
+    const bitmap = await topSprite()
+    const clientWaitSync = vi
+      .spyOn(ctx.gl, 'clientWaitSync')
+      .mockImplementation(() => ctx.gl.WAIT_FAILED)
+    const deleteSync = vi.spyOn(ctx.gl, 'deleteSync')
+    const getBufferSubData = vi.spyOn(ctx.gl, 'getBufferSubData')
+    const handle = await sheet.source(bitmap, { maxSize: 128, exact: false })
+    bitmap.close()
+    expect(GlError.is(handle) || SheetError.is(handle) || isAborted(handle)).toBe(false)
+    if (GlError.is(handle) || SheetError.is(handle) || isAborted(handle)) return
+    expect(clientWaitSync).toHaveBeenCalledTimes(1)
+    expect(deleteSync, 'the fence is deleted on the failed exit').toHaveBeenCalledTimes(1)
+    expect(getBufferSubData, 'a failed wait never reads the buffer').not.toHaveBeenCalled()
+    expect(Math.abs(handle.frontRect.y - READBACK_GOLDEN['top/hull'].frontRect.y)).toBeLessThan(10)
+    clientWaitSync.mockRestore()
+    deleteSync.mockRestore()
+    getBufferSubData.mockRestore()
+    sheet.dispose()
+  })
+
+  it('two direct concurrent source() calls both return handles: the second takes the synchronous path', async () => {
+    const ctx = open()
+    // The two fixtures share a size, so they share a front, a field framing and the ONE tight
+    // slot pass A writes: B's pass A overwrites A's field before A's continuation runs. What
+    // `source(B)` alone answers, for the comparison below.
+    const solo = paperSheet()
+    solo.mount(ctx)
+    const soloBitmap = await boxSprite(48, 32, 6)
+    const soloHandle = await solo.source(soloBitmap, { maxSize: 128, exact: false })
+    soloBitmap.close()
+    solo.dispose()
+    expect(GlError.is(soloHandle) || SheetError.is(soloHandle) || isAborted(soloHandle)).toBe(false)
+    if (GlError.is(soloHandle) || SheetError.is(soloHandle) || isAborted(soloHandle)) return
+
+    const sheet = paperSheet()
+    sheet.mount(ctx)
+    const a = await sprite()
+    const b = await boxSprite(48, 32, 6)
+    const readPixels = vi.spyOn(ctx.gl, 'readPixels')
+    const [ha, hb] = await Promise.all([
+      sheet.source(a, { maxSize: 128, exact: false }),
+      sheet.source(b, { maxSize: 128, exact: false }),
+    ])
+    const calls = readPixels.mock.calls
+    readPixels.mockRestore()
+    a.close()
+    b.close()
+    expect(
+      GlError.is(ha) || SheetError.is(ha) || isAborted(ha),
+      String((ha as Error)?.message),
+    ).toBe(false)
+    expect(
+      GlError.is(hb) || SheetError.is(hb) || isAborted(hb),
+      String((hb as Error)?.message),
+    ).toBe(false)
+    if (GlError.is(ha) || SheetError.is(ha) || isAborted(ha)) return
+    if (GlError.is(hb) || SheetError.is(hb) || isAborted(hb)) return
+    // A issued into the pack buffer before it yielded; B found the buffer busy and read back
+    // synchronously into a client array, as `readBackField` always did.
+    expect(calls).toHaveLength(2)
+    expect(calls[0][6]).toBe(0)
+    expect(ArrayBuffer.isView(calls[1][6])).toBe(true)
+    // Each hull is its own: A's readPixels was queued ahead of B's pass A, so GL ordering gave
+    // it A's field even though B had overwritten the slot by the time A's continuation ran.
+    expect(hullDigest(ha.hull)).toBe(READBACK_GOLDEN['ellipse/hull'].hull)
+    expect(ha.frontRect).toEqual(READBACK_GOLDEN['ellipse/hull'].frontRect)
+    expect(hullDigest(hb.hull)).toBe(hullDigest(soloHandle.hull))
+    expect(hb.frontRect).toEqual(soloHandle.frontRect)
+    expect(ctx.scope(() => ctx.gl.getParameter(ctx.gl.PIXEL_PACK_BUFFER_BINDING))).toBeNull()
+    sheet.dispose()
+  })
+
+  it('torn mode issues one readback per add, not two', async () => {
+    const ctx = open()
+    const sheet = paperSheet({ edgeMode: 'torn' })
+    sheet.mount(ctx)
+    const bitmap = await sprite()
+    const readPixels = vi.spyOn(ctx.gl, 'readPixels')
+    const getBufferSubData = vi.spyOn(ctx.gl, 'getBufferSubData')
+    const handle = await sheet.source(bitmap, { maxSize: 128, exact: false })
+    bitmap.close()
+    expect(GlError.is(handle) || SheetError.is(handle) || isAborted(handle)).toBe(false)
+    if (GlError.is(handle) || SheetError.is(handle) || isAborted(handle)) return
+    // One field serves both the (use-alpha) hull trace and the silhouette extent.
+    expect(readPixels).toHaveBeenCalledTimes(1)
+    expect(getBufferSubData).toHaveBeenCalledTimes(1)
+    expect(handle.frontRect).toEqual(READBACK_GOLDEN['ellipse/torn'].frontRect)
+    expect(handle.rect).toEqual(READBACK_GOLDEN['ellipse/torn'].rect)
+    readPixels.mockRestore()
+    getBufferSubData.mockRestore()
+    const deleteBuffer = vi.spyOn(ctx.gl, 'deleteBuffer')
+    sheet.dispose()
+    expect(deleteBuffer, 'dispose() frees the pack buffer').toHaveBeenCalledTimes(1)
+    deleteBuffer.mockRestore()
+  })
+
+  it('the cached-hull path in hull mode issues no readback', async () => {
+    const ctx = open()
+    const sheet = paperSheet()
+    sheet.mount(ctx)
+    const bitmap = await sprite()
+    const first = await sheet.source(bitmap, { maxSize: 128, exact: false })
+    expect(GlError.is(first) || SheetError.is(first) || isAborted(first)).toBe(false)
+    const readPixels = vi.spyOn(ctx.gl, 'readPixels')
+    const fenceSync = vi.spyOn(ctx.gl, 'fenceSync')
+    const second = await sheet.source(bitmap, { maxSize: 128, exact: false })
+    bitmap.close()
+    expect(GlError.is(second) || SheetError.is(second) || isAborted(second)).toBe(false)
+    if (GlError.is(second) || SheetError.is(second) || isAborted(second)) return
+    expect(readPixels).not.toHaveBeenCalled()
+    expect(fenceSync).not.toHaveBeenCalled()
+    expect(hullDigest(second.hull)).toBe(READBACK_GOLDEN['ellipse/hull'].hull)
+    readPixels.mockRestore()
+    fenceSync.mockRestore()
+    sheet.dispose()
+  })
+
+  it('answers a SheetError, not a handle, when the sheet is disposed while the fence is pending: no CPU fallback, and the sheet mounts again', async () => {
+    const ctx = open()
+    const sheet = paperSheet()
+    sheet.mount(ctx)
+    const bitmap = await sprite()
+    // The hook fires after pass A and before the issue; its microtask runs at the first `await`
+    // — the readback issued, the fence pending — so the dispose lands inside the wait.
+    sheet.__afterFieldForTest = () => queueMicrotask(() => sheet.dispose())
+    const getBufferSubData = vi.spyOn(ctx.gl, 'getBufferSubData')
+    const deleteSync = vi.spyOn(ctx.gl, 'deleteSync')
+    // `cpuFieldFallback` is the only 2D-canvas user on this path (the resample takes the GPU
+    // branch on this context), so a 2D context asked for after this line is the fallback running.
+    const getContext = vi.spyOn(OffscreenCanvas.prototype, 'getContext')
+    const r = await sheet.source(bitmap, { maxSize: 128, exact: false })
+    expect(SheetError.is(r), String((r as Error)?.message)).toBe(true)
+    expect(String((r as Error).message)).toContain('disposed')
+    expect(getBufferSubData, 'nothing is decoded for a dead mount').not.toHaveBeenCalled()
+    expect(getContext, 'the CPU fallback must not run for a dead mount').not.toHaveBeenCalled()
+    expect(deleteSync, 'the fence is still deleted').toHaveBeenCalledTimes(1)
+    expect(ctx.scope(() => ctx.gl.getParameter(ctx.gl.PIXEL_PACK_BUFFER_BINDING))).toBeNull()
+    getBufferSubData.mockRestore()
+    deleteSync.mockRestore()
+    getContext.mockRestore()
+    // Nothing leaked into the dead mount that a live one could see: a fresh mount on the same
+    // context sources the same bitmap to the golden, tracing it anew.
+    sheet.__afterFieldForTest = undefined
+    expect(sheet.mount(ctx)).toBeUndefined()
+    const readPixels = vi.spyOn(ctx.gl, 'readPixels')
+    const again = await sheet.source(bitmap, { maxSize: 128, exact: false })
+    bitmap.close()
+    expect(GlError.is(again) || SheetError.is(again) || isAborted(again)).toBe(false)
+    if (GlError.is(again) || SheetError.is(again) || isAborted(again)) return
+    expect(readPixels, 'a fresh mount has no cached hull').toHaveBeenCalledTimes(1)
+    expect(hullDigest(again.hull)).toBe(READBACK_GOLDEN['ellipse/hull'].hull)
+    readPixels.mockRestore()
+    sheet.dispose()
+  })
+})
