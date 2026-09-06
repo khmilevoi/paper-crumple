@@ -21,6 +21,25 @@ export interface SwapOptions extends PlayOptions {
 }
 
 /**
+ * `swapTo`'s options ALONE (§5.3). `SwapOptions` above stays as it is — it is shared with
+ * `crumpleTo`, which takes a `Sprite` rather than a source and for which a key is meaningless.
+ * Widening the shared type would have added a member one of its two users silently ignores.
+ */
+export interface SwapToOptions extends SwapOptions {
+  /**
+   * The key the incoming sprite is added under. Defaults to the minted `swap:…` key, which is
+   * unstable by design. Supplying one makes the fold preset stable per picture, lets two views
+   * share one front, and lets the byte budget bound the result.
+   *
+   * A key that is already resident is a CACHE HIT, not a failure: the swap adopts the resident
+   * sprite and `src` is not read. Re-pointing a live key remains `replace()`, and a key whose
+   * `add()` is still in flight is still refused — sharing a front holds only once the first
+   * `add()` has settled.
+   */
+  key?: string
+}
+
+/**
  * Where the shown sprite's **artwork** lands in the box the view draws into.
  *
  * `box` is the destination the sheet is drawn into, in its own pixels: the front's box for a
@@ -94,8 +113,15 @@ export interface View {
    * `matchMedia('(prefers-reduced-motion: reduce)').matches ? view.show(b) : view.swapTo(src)`.
    */
   crumpleTo(target: Sprite | Promise<Sprite | Error | Aborted>, o?: SwapOptions): Run<SwapResult>
-  /** `add` + `crumpleTo(pending)`. Inherits `crumpleTo`'s contract exactly (amendment 11). */
-  swapTo(src: SpriteSource, o?: SwapOptions): Run<SwapResult>
+  /**
+   * `add` + `crumpleTo(pending)`. Inherits `crumpleTo`'s contract exactly (amendment 11).
+   *
+   * Without `o.key` the key is minted from the source and a monotonic counter, so the same
+   * picture folds differently on every swap — the fold preset is `presetForImageId(key)`. With
+   * one, the key is the caller's: a resident key is adopted without an `add()` and `src` is not
+   * read, a fresh one is the key the `add()` runs under.
+   */
+  swapTo(src: SpriteSource, o?: SwapToOptions): Run<SwapResult>
   /** Freezes at the current pose and **issues no draw** — a cancel path must not render. */
   stop(): void
 
