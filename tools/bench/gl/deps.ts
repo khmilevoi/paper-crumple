@@ -30,6 +30,7 @@ export {
 } from '../../../packages/core/dist/unstable.js'
 export type {
   CoreGlContext,
+  EdgeSpec,
   GlContext,
   GpuTimer,
   ScratchPools,
@@ -42,17 +43,13 @@ export {
   createSdfBuilder,
   defaultsFor,
   descriptorsFor,
+  optionsFor,
   PAPER_FS,
   paperSheet,
   SDF_POOL_SLOTS,
   sigmaFor,
 } from '../../../packages/paper/dist/index.js'
-export type {
-  Field,
-  LooseField,
-  MountedTiles,
-  PaperEdgeMode,
-} from '../../../packages/paper/dist/index.js'
+export type { Field, LooseField, MountedTiles } from '../../../packages/paper/dist/index.js'
 export { bakedMotion, MOTION_KNOBS } from '../../../packages/motion/dist/index.js'
 export type { BakedClip, BakedFit, MotionLookKnobs } from '../../../packages/motion/dist/index.js'
 export { default as pack1x1 } from '../../../packages/motion/dist/packs/1x1.js'

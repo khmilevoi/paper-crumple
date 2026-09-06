@@ -9,6 +9,7 @@ import {
 } from '@paper-crumple/core/unstable'
 import type { EdgeParams } from '@paper-crumple/core/unstable'
 import { packPolygons } from './hull-shape.js'
+import { VARIANCE_KNOB, WIDTH_PX_KNOB } from './paper-knobs.js'
 import {
   checkReserve,
   dimsForLongSide,
@@ -18,14 +19,17 @@ import {
 } from './handle.js'
 import type { PaperSheetHandle } from './handle.js'
 
-const hullDefaults: EdgeParams = {
-  mode: 'hull',
-  maxDist: 72,
-  thickness: 0,
-  looseness: 0,
-  tearAmp: 0,
-  midAmp: 0,
+/**
+ * design 2026-09-05 §4.1's bag, at the shipped `smooth`/`clean` defaults: the width and the
+ * variance from `WIDTH_PX_KNOB` / `VARIANCE_KNOB`, and no finish terms — `clean` draws neither a
+ * deckle nor a fibre, and `edgeParamsFrom` zeroes both in that cell rather than letting a knob
+ * value the shader ignores widen the reserve.
+ */
+const smoothDefaults: EdgeParams = {
+  widthRef: Number(WIDTH_PX_KNOB.default),
+  variance: Number(VARIANCE_KNOB.default),
   fiberLen: 0,
+  deckleWidth: 0,
 }
 
 /** ~40 vertices, which is what a 2 600 px perimeter yields at the default angularity (spec 8.5). */
@@ -53,9 +57,16 @@ function handleAt(srcW: number, srcH: number): PaperSheetHandle {
     srcH,
     aspect: srcW / srcH,
     exact: false,
-    edgeMode: 'hull',
+    edgeSpec: { shape: 'smooth', finish: 'clean', widthUnit: 'px' },
+    widthRef: Number(WIDTH_PX_KNOB.default),
+    reserve: { overscan: 0.09, radius: 84 },
     hull: fortyVertexHull(),
-    hullKnobs: { minDist: 22, maxDist: 72, angularity: 0.7, seed: 3 },
+    hullKnobs: {
+      edgeWidth: Number(WIDTH_PX_KNOB.default),
+      edgeVariance: Number(VARIANCE_KNOB.default),
+      angularity: 0.7,
+      seed: 3,
+    },
     alive: true,
     bytes: 0,
   }
@@ -87,12 +98,12 @@ describe('the handle holds no image data (spec 8.5, 11)', () => {
 })
 
 describe('freezeOverscan (spec 8.6)', () => {
-  // §8.6's "Defaults: hull ~ 0.09" is reachable only from maxDist = 64 - exactly the input
-  // core's own overscan.test.ts picks to reproduce that sentence. The spike ships
-  // DEFAULT_PARAMS.maxDist = 72, so r = maxDist + slop = 72 + 12 = 84 and
-  // p = r / (1000 - 2r) = 84 / 832 ~= 0.10096. This asserts the true derived default.
-  it('derives the hull default at about 0.10', () => {
-    const reserve = freezeOverscan(hullDefaults, 0)
+  // design 2026-09-05 §4.1: `r = W(1 + v) + 4*fiberLen + deckleWidth + slop`. At the shipped
+  // `smooth`/`clean` defaults that is `47 * 1.53 + 0 + 0 + 12 = 83.91`, so
+  // `p = r / (1000 - 2r) = 83.91 / 832.18 ~= 0.10083` — within a thousandth of the pre-redesign
+  // `hull` figure (`maxDist 72 + slop 12 = 84`), which is why the band below still holds.
+  it('derives the smooth/clean default at about 0.10', () => {
+    const reserve = freezeOverscan(smoothDefaults, 0)
     expect(KnobError.is(reserve)).toBe(false)
     if (KnobError.is(reserve)) return
     expect(reserve.overscan).toBeGreaterThan(0.08)
@@ -100,8 +111,8 @@ describe('freezeOverscan (spec 8.6)', () => {
   })
 
   it('adds headroom to the frozen radius rather than to the overscan', () => {
-    const plain = freezeOverscan(hullDefaults, 0)
-    const roomy = freezeOverscan(hullDefaults, 0.5)
+    const plain = freezeOverscan(smoothDefaults, 0)
+    const roomy = freezeOverscan(smoothDefaults, 0.5)
     expect(KnobError.is(plain)).toBe(false)
     expect(KnobError.is(roomy)).toBe(false)
     if (KnobError.is(plain) || KnobError.is(roomy)) return
@@ -110,20 +121,20 @@ describe('freezeOverscan (spec 8.6)', () => {
   })
 
   it('returns a KnobError rather than NaN when the radius cannot fit the reference plane', () => {
-    expect(KnobError.is(freezeOverscan({ ...hullDefaults, maxDist: 600 }, 0))).toBe(true)
+    expect(KnobError.is(freezeOverscan({ ...smoothDefaults, widthRef: 600 }, 0))).toBe(true)
   })
 })
 
-/** `freezeOverscan(hullDefaults, 0)`'s `overscan`, non-throwing (spec 10.8: no boundary throws). */
-function hullOverscan(): number {
-  const reserve = freezeOverscan(hullDefaults, 0)
+/** `freezeOverscan(smoothDefaults, 0)`'s `overscan`, non-throwing (spec 10.8: no boundary throws). */
+function smoothOverscan(): number {
+  const reserve = freezeOverscan(smoothDefaults, 0)
   return KnobError.is(reserve) ? Number.NaN : reserve.overscan
 }
 
 describe('frontForArtwork (spec 8.6, per axis)', () => {
-  const p = hullOverscan()
+  const p = smoothOverscan()
 
-  it('derives a finite reserve from the hull defaults (precondition for every case below)', () => {
+  it('derives a finite reserve from the smooth/clean defaults (precondition for every case below)', () => {
     expect(Number.isFinite(p)).toBe(true)
   })
 
@@ -144,16 +155,16 @@ describe('frontForArtwork (spec 8.6, per axis)', () => {
         srcH: 96,
         artwork: { w: 67, h: 100 },
         marginX: 13,
-        marginY: 14,
-        front: { w: 93, h: 128 },
+        marginY: 13,
+        front: { w: 93, h: 126 },
       },
       {
         srcW: 64,
         srcH: 64,
         artwork: { w: 100, h: 100 },
-        marginX: 14,
-        marginY: 14,
-        front: { w: 128, h: 128 },
+        marginX: 13,
+        marginY: 13,
+        front: { w: 126, h: 126 },
       },
       {
         srcW: 96,
@@ -229,7 +240,7 @@ describe('frontForArtwork (spec 8.6, per axis)', () => {
     // design 2026-09-05 §4.2: larger fronts than the pre-§4.2 figures, since the margin now
     // includes the guard band on top of paint.
     for (const { srcW, srcH, front } of [
-      { srcW: 64, srcH: 96, front: { w: 367, h: 506 } },
+      { srcW: 64, srcH: 96, front: { w: 367, h: 504 } },
       { srcW: 96, srcH: 64, front: { w: 476, h: 337 } },
     ]) {
       const result = frontForArtwork({
@@ -441,17 +452,17 @@ describe('frontForArtwork (spec 8.6, per axis)', () => {
 
 describe('checkReserve (spec 8.6)', () => {
   it('passes a knob that moves inside the reserve', () => {
-    const reserve = freezeOverscan(hullDefaults, 0.5)
+    const reserve = freezeOverscan(smoothDefaults, 0.5)
     expect(KnobError.is(reserve)).toBe(false)
     if (KnobError.is(reserve)) return
-    expect(checkReserve(reserve, { ...hullDefaults, maxDist: 80 })).toBeUndefined()
+    expect(checkReserve(reserve, { ...smoothDefaults, widthRef: 60 })).toBeUndefined()
   })
 
   it('names "re-add required" rather than clamping when a knob leaves it', () => {
-    const reserve = freezeOverscan(hullDefaults, 0)
+    const reserve = freezeOverscan(smoothDefaults, 0)
     expect(KnobError.is(reserve)).toBe(false)
     if (KnobError.is(reserve)) return
-    const err = checkReserve(reserve, { ...hullDefaults, maxDist: 140 })
+    const err = checkReserve(reserve, { ...smoothDefaults, widthRef: 140 })
     expect(SheetError.is(err)).toBe(true)
     expect(err?.message).toContain('re-add required')
     expect(err?.message).toContain('overscanHeadroom')

@@ -15,7 +15,14 @@ import { afterEach, describe, expect, it } from 'vitest'
 import { frontCapFor, isAborted, paperStage } from '@paper-crumple/core'
 import type { DrawResult, KnobDescriptor, MotionSource, Rect } from '@paper-crumple/core'
 import type { MotionClip, MotionFit } from '@paper-crumple/core/unstable'
-import { paperSheet } from './sheet.js'
+import type { EdgeSpec } from '@paper-crumple/core/unstable'
+import { optionsFor, paperSheet } from './sheet.js'
+
+/**
+ * design 2026-09-05 §6's default cell. `EdgeMode` is gone; `hull` was this cell by its descriptor
+ * set (§2.4's 24 keys).
+ */
+const SMOOTH_CLEAN: EdgeSpec = { shape: 'smooth', finish: 'clean', widthUnit: 'px' }
 
 const live: Array<{ dispose(): void }> = []
 afterEach(() => {
@@ -56,7 +63,7 @@ async function bitmapAt(w: number, h: number): Promise<ImageBitmap> {
 
 describe('artworkCssPx, end to end', () => {
   it('gives every sprite at least ceil(artworkCssPx x dpr) artwork texels, whatever its aspect', async () => {
-    const sheet = paperSheet({ edgeMode: 'hull', overscanHeadroom: 0.25 })
+    const sheet = paperSheet({ ...optionsFor(SMOOTH_CLEAN), overscanHeadroom: 0.25 })
     const stage = await paperStage({
       sheet,
       motion: stubMotion(),
@@ -106,7 +113,7 @@ describe('artworkCssPx, end to end', () => {
     //     1:1 source returns only 158 artwork texels, one short of the 159 requested — the OLD
     //     surface genuinely could not deliver what `artworkCssPx` asked for. The 256-texel
     //     surface this fixed code builds returns the full 159.
-    const sheet = paperSheet({ edgeMode: 'hull', overscanHeadroom: 0 })
+    const sheet = paperSheet({ ...optionsFor(SMOOTH_CLEAN), overscanHeadroom: 0 })
     const stage = await paperStage({
       sheet,
       motion: stubMotion(),

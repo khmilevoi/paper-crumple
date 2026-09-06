@@ -97,7 +97,7 @@ async function runConfig(c: Config): Promise<string> {
     if (c.context2d === 'wrf-true') canvas.getContext('2d', { willReadFrequently: true })
     canvases.push(canvas)
   }
-  const sheet = paperSheet({ edgeMode: 'hull', tiles, overscanHeadroom: 0.25 })
+  const sheet = paperSheet({ tiles, overscanHeadroom: 0.25 })
   const motion = bakedMotion({ packs: [pack1x1, pack2x3, pack3x2] })
   const stage = await paperStage({
     sheet,

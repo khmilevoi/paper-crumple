@@ -110,6 +110,13 @@ import { defaultsFor } from './paper-knobs.js'
 import { paperSheet } from './sheet.js'
 import { HOLES_FIXTURE, twoComponentsWithAHole } from './testing/fixture-sources.js'
 import { createGlFixture, type PaperGlFixture } from './testing/gl-fixture.js'
+import type { EdgeSpec } from '@paper-crumple/core/unstable'
+
+/**
+ * design 2026-09-05 §6's default cell. `EdgeMode` is gone; `hull` was this cell by its descriptor
+ * set (§2.4's 24 keys), so every `defaultsFor('hull')` in this file is `defaultsFor(SMOOTH_CLEAN)`.
+ */
+const SMOOTH_CLEAN: EdgeSpec = { shape: 'smooth', finish: 'clean', widthUnit: 'px' }
 
 let fixture: PaperGlFixture | null = null
 afterEach(() => {
@@ -175,7 +182,7 @@ describe('holes and components survive into the built front (§8.2, §11)', () =
     // pixel probe below still has to be read through that fact to be interpreted correctly.
     expect(hullComponentCount(handle.hull)).toBe(2)
 
-    const front = sheet.build(handle, { w: 128, h: 128 }, defaultsFor('hull') as never)
+    const front = sheet.build(handle, { w: 128, h: 128 }, defaultsFor(SMOOTH_CLEAN) as never)
     if (front instanceof Error) return expect.fail(front.message)
 
     // A is centred in the front (§7.4.3); the probes below are in the fixture's own canvas

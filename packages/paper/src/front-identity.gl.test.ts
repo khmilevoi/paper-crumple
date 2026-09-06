@@ -50,6 +50,13 @@ import {
   identitySourceBytes as sourceBytes,
 } from './testing/fixture-sources.js'
 import { createGlFixture, type PaperGlFixture } from './testing/gl-fixture.js'
+import type { EdgeSpec } from '@paper-crumple/core/unstable'
+
+/**
+ * design 2026-09-05 §6's default cell. `EdgeMode` is gone; `hull` was this cell by its descriptor
+ * set (§2.4's 24 keys), so every `defaultsFor('hull')` in this file is `defaultsFor(SMOOTH_CLEAN)`.
+ */
+const SMOOTH_CLEAN: EdgeSpec = { shape: 'smooth', finish: 'clean', widthUnit: 'px' }
 
 let fixture: PaperGlFixture | null = null
 afterEach(() => {
@@ -204,7 +211,7 @@ describe("the front's artwork rect through readPixels, partitioned by alpha", ()
     // exact: A === the source, and the front grows around it to fit the paper margin (§7.4.3).
     expect(handle.artwork).toEqual({ w: SRC.w, h: SRC.h })
 
-    const front = sheet.build(handle, { w: 128, h: 128 }, defaultsFor('hull') as never)
+    const front = sheet.build(handle, { w: 128, h: 128 }, defaultsFor(SMOOTH_CLEAN) as never)
     if (front instanceof Error) return expect.fail(front.message)
 
     // The artwork's origin inside the front: the front is `ceil(source x (1 + 2p))` and A is
@@ -233,13 +240,17 @@ describe("the front's artwork rect through readPixels, partitioned by alpha", ()
     // moves this split — carried over 1:1), a hull that lost or gained reach moves them.
     const covered = empty.filter((t) => got[t * 4 + 3] === 255)
     const clear = empty.filter((t) => got[t * 4 + 3] === 0)
-    expect(covered.length).toBe(152)
-    expect(clear.length).toBe(664)
+    expect(covered.length).toBe(153)
+    expect(clear.length).toBe(663)
     expect(covered.length + clear.length).toBe(empty.length)
     // Paper, not a stray copy of the artwork: the default `paperColor` (#f7f4ed) reads high on all
     // three channels. Measured, the per-channel minimum over all 152 covered texels is
     // (241, 238, 231), so the bound below clears it by ~90 counts; the artwork's own RGB at the
     // sixteen texels sampled (the ring's first row) is `g = 40..94, b <= 17`, nowhere near it.
+    // The split moved by ONE texel for the design 2026-09-05 edge redesign (152/664 before it):
+    // the band `hull.ts` traces is now `hullBandFor(47, 0.53) = [22.09, 71.91]` rather than the
+    // old `minDist 22` / `maxDist 72` pair — deliberately within a tenth of a reference px of it,
+    // which is why one texel of the ring crosses and no more.
     for (const t of covered.slice(0, 16)) {
       expect(got[t * 4]).toBeGreaterThan(150)
       expect(got[t * 4 + 1]).toBeGreaterThan(150)
@@ -286,7 +297,7 @@ describe("the front's artwork rect through readPixels, partitioned by alpha", ()
     }
     expect(handle.artwork.w).toBeLessThan(SRC.w)
 
-    const front = sheet.build(handle, { w: 28, h: 28 }, defaultsFor('hull') as never)
+    const front = sheet.build(handle, { w: 28, h: 28 }, defaultsFor(SMOOTH_CLEAN) as never)
     if (front instanceof Error) return expect.fail(front.message)
 
     const reference = identityResample(

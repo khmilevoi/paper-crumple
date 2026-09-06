@@ -8,14 +8,14 @@
  * ```ts
  * import { paperSheet } from '@paper-crumple/paper'
  * import { tiles } from '@paper-crumple/paper/tiles'
- * const sheet = paperSheet({ edgeMode: 'torn', tiles })
+ * const sheet = paperSheet({ edgeShape: 'torn', edgeFinish: 'paper', tiles })
  * ```
  *
  * The default is `tiles: null`, and the reason is **not** weight — the re-encoding measurement
  * put these four files at 0.74x one motion pack, so the old "5.6x one pack" argument does not
- * survive it. The reason is that **the default edge mode is `hull`** (§8.6), which needs no tear,
- * no teeth and no fibre at all, so the modal consumer would be charged for an asset their
- * configuration cannot use.
+ * survive it. The reason is that **the default cell is `smooth`/`clean`** (design 2026-09-05 §2,
+ * §8.6), which needs no tear, no teeth and no fibre at all, so the modal consumer would be
+ * charged for an asset their configuration cannot use.
  *
  * Every URL is `new URL('./tiles/<name>.webp', import.meta.url)` from a module shipped beside the
  * asset (§14). `tsdown.config.ts` copies the four files into `dist/tiles/`, so the specifier

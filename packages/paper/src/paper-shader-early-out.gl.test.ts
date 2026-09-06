@@ -59,7 +59,7 @@ import { defaultsFor, descriptorsFor } from './paper-knobs.js'
 import { createPaperRenderer } from './paper-renderer.js'
 import { PAPER_FS } from './paper-shader.js'
 import { mountNeutralTiles } from './paper-tiles.js'
-import { paperSheet } from './sheet.js'
+import { optionsFor, paperSheet } from './sheet.js'
 
 const fixtures: PaperGlFixture[] = []
 const poolsList: ScratchPools[] = []
@@ -119,12 +119,11 @@ const RENDER_CELLS = [
 ] as const satisfies ReadonlyArray<readonly [string, EdgeSpec]>
 
 /**
- * TASK 7 REPLACES THIS. `paperSheet()` still takes the legacy `edgeMode` factory option; Task 7
- * turns it into `edgeShape` / `edgeFinish` / `edgeWidthUnit` (design §2, ruling R5's
- * `optionsFor(spec)`), and the `paperSheet()` half of this file moves to `RENDER_CELLS` with it.
- * The `renderFront` half above has already moved.
+ * The two cells the `paperSheet()` half of this file drives end to end — the same pair the
+ * `renderFront` half above covers as the first and last rows of `RENDER_CELLS`. Two rather than
+ * four, because each case here is three full `source()` + `build()` round trips on SwiftShader.
  */
-type LegacyEdgeMode = 'hull' | 'torn'
+const SHEET_CELLS = [RENDER_CELLS[0], RENDER_CELLS[3]] as const
 
 /** The sentinel bytes the two branches paint: magenta for (a), green for (b). */
 const SENTINEL_A_RGBA = [255, 0, 255, 255] as const
@@ -544,11 +543,11 @@ function holesSource(): SourceBytes {
  */
 async function buildFront(
   ctx: CoreGlContext,
-  mode: LegacyEdgeMode,
+  spec: EdgeSpec,
   source: SourceBytes,
   size: number,
 ): Promise<{ bytes: Uint8Array; w: number; h: number } | Error> {
-  const sheet = paperSheet({ edgeMode: mode })
+  const sheet = paperSheet(optionsFor(spec))
   const mounted = sheet.mount(ctx)
   if (mounted !== undefined) return mounted
   const bitmap = await createImageBitmap(new ImageData(source.bytes, source.w, source.h), {
@@ -560,7 +559,7 @@ async function buildFront(
   if (GlError.is(handle) || SheetError.is(handle) || isAborted(handle)) {
     return new Error(`source() refused: ${String(handle)}`)
   }
-  const front = sheet.build(handle, { w: size, h: size }, defaultsFor(mode) as never)
+  const front = sheet.build(handle, { w: size, h: size }, defaultsFor(spec) as never)
   if (front instanceof Error) return front
   const bytes = readAll(ctx, front.texture, front.width, front.height)
   const out = { bytes, w: front.width, h: front.height }
@@ -576,13 +575,13 @@ describe('PAPER_FS early-outs through paperSheet() (the front-identity and front
   ] as const
 
   for (const c of cases) {
-    for (const mode of ['hull', 'torn'] as const satisfies readonly LegacyEdgeMode[]) {
-      it(`builds a byte-identical front with the early-outs on and off — ${c.name}, ${mode}`, async () => {
+    for (const [cell, spec] of SHEET_CELLS) {
+      it(`builds a byte-identical front with the early-outs on and off — ${c.name}, ${cell}`, async () => {
         const ctx = open()
-        const on = await buildFront(ctx, mode, c.source(), c.size)
+        const on = await buildFront(ctx, spec, c.source(), c.size)
         expect(on).not.toBeInstanceOf(Error)
         if (on instanceof Error) return
-        const off = await buildFront(withPaperShader(ctx, PAPER_FS_OFF), mode, c.source(), c.size)
+        const off = await buildFront(withPaperShader(ctx, PAPER_FS_OFF), spec, c.source(), c.size)
         expect(off).not.toBeInstanceOf(Error)
         if (off instanceof Error) return
         expect([on.w, on.h]).toEqual([off.w, off.h])
@@ -590,7 +589,7 @@ describe('PAPER_FS early-outs through paperSheet() (the front-identity and front
 
         const sentinel = await buildFront(
           withPaperShader(ctx, PAPER_FS_SENTINEL),
-          mode,
+          spec,
           c.source(),
           c.size,
         )
@@ -602,14 +601,14 @@ describe('PAPER_FS early-outs through paperSheet() (the front-identity and front
         // Three `source()` + `build()` round trips on SwiftShader run well past the default 15 s.
       }, 120_000)
 
-      it(`builds a byte-identical front through the front build and the whole program (P7) — ${c.name}, ${mode}`, async () => {
+      it(`builds a byte-identical front through the front build and the whole program (P7) — ${c.name}, ${cell}`, async () => {
         const ctx = open()
-        const front = await buildFront(ctx, mode, c.source(), c.size)
+        const front = await buildFront(ctx, spec, c.source(), c.size)
         expect(front).not.toBeInstanceOf(Error)
         if (front instanceof Error) return
         const whole = await buildFront(
           withPaperShader(ctx, PAPER_FS_FULL),
-          mode,
+          spec,
           c.source(),
           c.size,
         )

@@ -2,7 +2,7 @@
  * swap-30 — thirty on-screen views swapping images: smoothness and input blocking.
  *
  * **Scenario.** A 6×5 grid of 30 `{ canvas }` views on a `present: 'blit'` stage built the way the
- * playground builds one (`examples/playground/src/config.ts`): `paperSheet({ edgeMode: 'hull',
+ * playground builds one (`examples/playground/src/config.ts`): `paperSheet({
  * tiles, overscanHeadroom: 0.25 })`, `bakedMotion` with the three packs, `artworkCssPx`, a 64 MiB
  * budget. Every view shows a distinct synthetic 1024² artwork (`artwork.ts` — per-image variation,
  * so the hull cache never answers a swap). "Swap" is the call the playground makes when the reader
@@ -1047,7 +1047,7 @@ async function runRow(spec: RowSpec): Promise<RowResult | Error> {
   }
 
   const errors: string[] = []
-  const sheet = paperSheet({ edgeMode: 'hull', tiles, overscanHeadroom: 0.25 })
+  const sheet = paperSheet({ tiles, overscanHeadroom: 0.25 })
   const motion = bakedMotion({ packs: [pack1x1, pack2x3, pack3x2] })
   const acc: Acc = {}
   const uninstall = installPhaseTimers(sheet, motion, acc)

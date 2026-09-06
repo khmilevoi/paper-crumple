@@ -18,10 +18,9 @@ import {
   KNOB_REFERENCE_PX,
   marginFractionFor,
 } from '@paper-crumple/core/unstable'
-import type { EdgeParams, HandleFacts, SheetHandle } from '@paper-crumple/core/unstable'
+import type { EdgeParams, EdgeSpec, HandleFacts, SheetHandle } from '@paper-crumple/core/unstable'
 import { hullBuffers } from './hull-shape.js'
 import type { HullShape } from './hull-shape.js'
-import type { PaperEdgeMode } from './paper-knobs.js'
 
 export interface PaperSheetHandle extends SheetHandle {
   /** The key the artwork slot and the hull cache are both keyed by. */
@@ -53,12 +52,31 @@ export interface PaperSheetHandle extends SheetHandle {
   readonly srcH: number
   readonly aspect: number
   readonly exact: boolean
-  readonly edgeMode: PaperEdgeMode
+  /** Which cell of design 2026-09-05 §6's table this sprite was sourced under. */
+  readonly edgeSpec: EdgeSpec
+  /**
+   * `W` in reference px, as the TRACE ran at it (design 2026-09-05 §3.1). Under `smooth` this is
+   * the width `hullBandFor` derived the band from, and a caller who moves `edgeWidth` gets a
+   * `SourceExpiredError` out of `build()`'s hull-tier guard rather than a stale polygon. Under
+   * `torn` the width is front-tier and there is no trace, so this records only what `source()`'s
+   * own extent arithmetic used: `build()` resolves its own from the live `knobValues` and never
+   * uploads this one.
+   */
+  readonly widthRef: number
+  /**
+   * THIS sprite's own frozen reserve — the factory's defaults at THIS sprite's aspect
+   * (design 2026-09-05 §4.4). Under `edgeWidthUnit: 'px'` it is the factory's own reserve exactly;
+   * under `'percent'` a 1:4 tower's is strictly smaller than the `c = 1` ceiling
+   * `PaperSheet.overscan` reports, which is why `build()`'s `checkReserve` compares against this
+   * rather than against the factory's.
+   */
+  readonly reserve: OverscanReserve
   readonly hull: HullShape
   /**
-   * §6.3 — the hull-tier knob values (`invalidates: 'hull'`: `minDist`, `maxDist`, `angularity`
-   * and `seed` in this package, whichever of them the mode declares) the hull was traced at,
-   * keyed as the descriptors are. `build()` compares the values it is handed against these and
+   * §6.3 — the hull-tier knob values (`invalidates: 'hull'`: under `smooth`, `edgeWidth`,
+   * `edgeVariance`, `angularity` and `seed`; under `torn` the first two are front-tier instead and
+   * this bag is empty) the hull was traced at, keyed as the descriptors are. `build()` compares
+   * the values it is handed against these and
    * answers `SourceExpiredError` on any difference: the trace lives inside `source()` (§5.2), so
    * a moved hull-tier knob is a re-source at the new values, never a retrace `build()` does on
    * its own.

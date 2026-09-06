@@ -22,6 +22,13 @@ import { afterEach, describe, expect, it } from 'vitest'
 import { GlError, SheetError, isAborted } from '@paper-crumple/core'
 import type { CoreGlContext, Program } from '@paper-crumple/core/unstable'
 import { createGlFixture, type PaperGlFixture } from './testing/gl-fixture.js'
+import type { EdgeSpec } from '@paper-crumple/core/unstable'
+
+/**
+ * design 2026-09-05 §6's default cell. `EdgeMode` is gone; `hull` was this cell by its descriptor
+ * set (§2.4's 24 keys), so every `defaultsFor('hull')` in this file is `defaultsFor(SMOOTH_CLEAN)`.
+ */
+const SMOOTH_CLEAN: EdgeSpec = { shape: 'smooth', finish: 'clean', widthUnit: 'px' }
 import { defaultsFor } from './paper-knobs.js'
 import { paperSheet } from './sheet.js'
 
@@ -125,7 +132,7 @@ describe('source() and the deferred paper program link (P7, spec 5.2 amendment)'
     expect(r2 instanceof Error || isAborted(r2)).toBe(false)
     if (r1 instanceof Error || isAborted(r1) || r2 instanceof Error || isAborted(r2)) return
     // build() after the wait finds a linked program: the front renders.
-    const front = sheet.build(r2, { w: 128, h: 128 }, defaultsFor('hull') as never)
+    const front = sheet.build(r2, { w: 128, h: 128 }, defaultsFor(SMOOTH_CLEAN) as never)
     expect(front).not.toBeInstanceOf(Error)
     if (!(front instanceof Error)) sheet.releaseFront(front)
     sheet.release(r1)

@@ -23,6 +23,13 @@ import { GlError, SheetError, isAborted } from '@paper-crumple/core'
 import { defaultsFor } from './paper-knobs.js'
 import { paperSheet } from './sheet.js'
 import { createGlFixture, type PaperGlFixture } from './testing/gl-fixture.js'
+import type { EdgeSpec } from '@paper-crumple/core/unstable'
+
+/**
+ * design 2026-09-05 §6's default cell. `EdgeMode` is gone; `hull` was this cell by its descriptor
+ * set (§2.4's 24 keys), so every `defaultsFor('hull')` in this file is `defaultsFor(SMOOTH_CLEAN)`.
+ */
+const SMOOTH_CLEAN: EdgeSpec = { shape: 'smooth', finish: 'clean', widthUnit: 'px' }
 
 let fixture: PaperGlFixture | null = null
 afterEach(() => {
@@ -80,7 +87,7 @@ describe('the ambient pins survive a whole pipeline run (§7.4.1)', () => {
     if (GlError.is(handle) || SheetError.is(handle) || isAborted(handle)) {
       return expect.fail(`source() refused: ${String(handle)}`)
     }
-    const front = sheet.build(handle, { w: 128, h: 128 }, defaultsFor('hull') as never)
+    const front = sheet.build(handle, { w: 128, h: 128 }, defaultsFor(SMOOTH_CLEAN) as never)
     if (front instanceof Error) return expect.fail(front.message)
 
     expect(gl!.isEnabled(gl!.DITHER)).toBe(false)

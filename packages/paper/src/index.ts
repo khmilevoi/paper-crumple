@@ -151,5 +151,7 @@ export { createResampler } from './artwork.js'
 export type { ArtworkSlot, ResampleOptions, Resampler } from './artwork.js'
 
 // --- P10: the slot itself (§5.2) ---
-export { paperSheet } from './sheet.js'
+// `optionsFor` is design 2026-09-05's own `EdgeSpec` -> `PaperSheetOptions` conversion (ruling
+// R5); it lives in `sheet.ts` rather than `paper-knobs.ts` to keep the import edge one-way.
+export { optionsFor, paperSheet } from './sheet.js'
 export type { PaperSheet, PaperSheetOptions } from './sheet.js'
