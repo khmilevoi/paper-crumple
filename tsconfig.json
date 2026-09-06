@@ -2,7 +2,8 @@
   "extends": "@paper-crumple/tsconfig/base.json",
   "compilerOptions": {
     "noEmit": true,
-    "allowJs": true
+    "allowJs": true,
+    "jsx": "react-jsx"
   },
   "include": [
     "vitest.config.ts",
@@ -10,6 +11,7 @@
     "eslint.boundaries.js",
     "tests/**/*.ts",
     "packages/*/src/**/*.ts",
+    "packages/*/src/**/*.tsx",
     "packages/*/tsdown.config.ts",
     "tools/**/*.ts"
   ]

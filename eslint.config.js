@@ -40,11 +40,12 @@ export function makeEslintConfig(allowedToThrow) {
         ],
       },
     },
-    // The React demo in `examples/playground` is the only React code in the repository, and the
-    // rules of hooks are the one class of mistake TypeScript cannot catch there — an effect that
-    // reads a stale closure still compiles. Scoped to that directory so nothing else pays for it.
+    // The rules of hooks are the one class of mistake TypeScript cannot catch — an effect that
+    // reads a stale closure still compiles — and @paper-crumple/react's whole correctness
+    // argument (spec §2.1) is a hook convention. Scoped to the two React trees so nothing else
+    // pays for it.
     {
-      files: ['examples/playground/**/*.{ts,tsx}'],
+      files: ['examples/playground/**/*.{ts,tsx}', 'packages/react/**/*.{ts,tsx}'],
       plugins: { 'react-hooks': reactHooks },
       rules: reactHooks.configs.recommended.rules,
     },
