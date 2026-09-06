@@ -1,32 +1,41 @@
 import type { ReactNode } from 'react'
 import { SHARED_KNOBS } from '@paper-crumple/core'
-import type { PaperEdgeMode } from '@paper-crumple/paper'
+import type { IntKnob, NumberKnob } from '@paper-crumple/core'
+import type { EdgeSpec } from '@paper-crumple/paper'
 import type { Entry, KnobValues } from '../knobs'
 import { isNumberLike, stepOf } from '../knobs'
+import { ceilingsFor } from '../edge-ceilings'
 import { Segmented, Slider, SubCard } from './primitives'
 
-/** The three segments of the design's edge toggle are exactly the library's three edge modes. */
-export type UiEdgeMode = PaperEdgeMode
-
 /**
- * Literal labels + order from `Paper Crumple Control Panel v2.dc.html`'s `hullSliders` /
- * `tornSliders`, mapped onto the real descriptors that back them (`HULL_KNOBS` / `TORN_KNOBS`,
- * `packages/paper/src/paper-knobs.ts`) — confirmed by matching defaults: min distance 22, max
- * distance 72, angularity 0.7, thickness 22, looseness 0.5, amplitude 44, deckle width 7, every
- * one identical to the mockup's own `DEFAULTS`. `sheet.deckleWidth`, not `sheet.deckleTex`.
+ * design 2026-09-05 §2.2's shape-only knobs, one array per `edgeSpec.shape` — `HULL_ROWS` /
+ * `TORN_ROWS` keyed off the old three-way `edgeMode`, these are keyed off the new `spec.shape`.
+ * `angularity` is unchanged from the old `HULL_ROWS`; the other five replace it under `torn`.
  */
-const HULL_ROWS: readonly { readonly key: string; readonly label: string }[] = [
-  { key: 'sheet.minDist', label: 'min distance' },
-  { key: 'sheet.maxDist', label: 'max distance' },
+const SMOOTH_SHAPE_ROWS: readonly { readonly key: string; readonly label: string }[] = [
   { key: 'sheet.angularity', label: 'angularity' },
 ]
 
-const TORN_ROWS: readonly { readonly key: string; readonly label: string }[] = [
-  { key: 'sheet.thickness', label: 'thickness' },
+const TORN_SHAPE_ROWS: readonly { readonly key: string; readonly label: string }[] = [
+  { key: 'sheet.tearFreq', label: 'tear frequency' },
+  { key: 'sheet.tearAngular', label: 'tear angularity' },
   { key: 'sheet.looseness', label: 'looseness' },
-  { key: 'sheet.tearAmp', label: 'amplitude' },
-  { key: 'sheet.deckleWidth', label: 'deckle width' },
+  { key: 'sheet.tearMix', label: 'tear mix' },
+  { key: 'sheet.chew', label: 'chew' },
 ]
+
+/** design §2.3 — the six finish knobs, present only under `edgeFinish: 'paper'`. */
+const FINISH_ROWS: readonly { readonly key: string; readonly label: string }[] = [
+  { key: 'sheet.deckleWidth', label: 'deckle width' },
+  { key: 'sheet.deckleLight', label: 'deckle highlight' },
+  { key: 'sheet.deckleTex', label: 'deckle texture' },
+  { key: 'sheet.fibers', label: 'fibre density' },
+  { key: 'sheet.fiberLen', label: 'fibre length' },
+  { key: 'sheet.tearShadow', label: 'tear shadow' },
+]
+
+const WIDTH_KEY = 'sheet.edgeWidth'
+const VARIANCE_KEY = 'sheet.edgeVariance'
 
 /** `sheet.sheetCrumple` → the mockup's "sheet relief"; `sheet.seed` gets a Reroll button rather
  *  than a slider, exactly as the mockup's own seed row does. */
@@ -40,40 +49,52 @@ const SEED_KEY = 'sheet.seed'
 const PAPER_KEY = 'paperColor'
 const PAPER_BACK_KEY = 'paperBack'
 
-/** The design's units column: the three distance-like knobs carry `px`, the rest nothing. */
-const UNIT: ReadonlyMap<string, string> = new Map([
-  ['sheet.minDist', 'px'],
-  ['sheet.maxDist', 'px'],
-  ['sheet.thickness', 'px'],
-  ['sheet.tearAmp', 'px'],
-  ['sheet.deckleWidth', 'px'],
-])
+/**
+ * The design's units column: no more hard-coded per-key map. A descriptor's own `reference`
+ * already says whether it is quoted in sprite px, a percent of the artwork, or neither — the only
+ * descriptor either of the first two ever appears on today is `edgeWidth` itself.
+ */
+const unitOf = (k: NumberKnob | IntKnob): string | undefined =>
+  k.kind === 'number' && k.reference === 'sprite-px'
+    ? 'px'
+    : k.kind === 'number' && k.reference === 'artwork-pct'
+      ? '%'
+      : undefined
 
 export interface EdgeSectionProps {
   readonly entries: readonly Entry[]
   readonly knobs: KnobValues
-  readonly mode: UiEdgeMode
-  readonly onModeChange: (mode: UiEdgeMode) => void
+  readonly spec: EdgeSpec
+  readonly onSpecChange: (spec: EdgeSpec) => void
   readonly onSet: (key: string, value: string | number | boolean) => Error | undefined
+  /**
+   * NOT in the brief's own `EdgeSectionProps` (task-9 brief, "Produces"): computing the live
+   * ceiling below needs it and it is not otherwise derivable from `entries` / `knobs` / `spec`.
+   * Flagged as a deviation in the task-9 report.
+   */
+  readonly overscanHeadroom: number
 }
 
 /**
- * "02 Edge", built to match the design literally: a Hull/Torn/Both toggle over two edge-mode
- * sub-cards plus an always-visible Shared sub-card.
+ * "02 Edge": three segmented toggles (shape / finish / width unit) over two always-visible
+ * sliders (`edgeWidth`, `edgeVariance`), a shape sub-card, a finish sub-card and the unchanged
+ * Shared sub-card.
  *
- * `edgeMode` is a factory option (`paperSheet({ edgeMode })`), so each segment rebuilds the
- * stage rather than writing a knob. Which sub-cards carry sliders follows from
- * `descriptorsFor()` (`packages/paper/src/paper-knobs.ts`): `hull` -> `HULL_KNOBS`, `torn` ->
- * `TORN_KNOBS`, `both` -> both lists, so the section grows from three sliders to seven. The
- * "not available" note is the fallback for a build whose descriptors do not match the picked
- * segment - a state the toggle itself no longer produces.
+ * Each segment calls `onSpecChange` with the WHOLE spec and rebuilds the stage — `edgeShape`,
+ * `edgeFinish` and `edgeWidthUnit` are all factory options (design 2026-09-05 §6.5), exactly as
+ * the deleted `edgeMode` segment did. The `missing` / "not available" fallback the old
+ * `HULL_ROWS` / `TORN_ROWS` renderer carried is gone: the knob set now always matches the picked
+ * `spec` exactly (`descriptorsFor`), so an absent descriptor is a bug, not a state this component
+ * papers over — a row whose descriptor is absent renders nothing, silently, rather than a
+ * reassuring note.
  */
 export function EdgeSection({
   entries,
   knobs,
-  mode,
-  onModeChange,
+  spec,
+  onSpecChange,
   onSet,
+  overscanHeadroom,
 }: EdgeSectionProps): ReactNode {
   const byKey = (key: string): Entry | undefined => entries.find((e) => e.key === key)
   const valueOf = (key: string, fallback: number): number => {
@@ -82,16 +103,11 @@ export function EdgeSection({
   }
 
   function sliders(list: readonly { readonly key: string; readonly label: string }[]): ReactNode {
-    const rows: ReactNode[] = []
-    let missing = false
-    for (const { key, label } of list) {
+    return list.map(({ key, label }) => {
       const entry = byKey(key)
-      if (entry === undefined || !isNumberLike(entry.k)) {
-        missing = true
-        continue
-      }
+      if (entry === undefined || !isNumberLike(entry.k)) return null
       const k = entry.k
-      rows.push(
+      return (
         <Slider
           key={key}
           label={label}
@@ -99,21 +115,13 @@ export function EdgeSection({
           min={k.min}
           max={k.max}
           step={stepOf(k)}
-          unit={UNIT.get(key)}
+          unit={unitOf(k)}
           onChange={(v) => {
             onSet(key, v)
           }}
-        />,
+        />
       )
-    }
-    if (missing) {
-      rows.push(
-        <p className="note" key="missing">
-          not available — this build&apos;s sheet is not in a mode that carries these knobs
-        </p>,
-      )
-    }
-    return rows
+    })
   }
 
   // Narrowed once, out here: TypeScript cannot carry a narrowing on `entry.k` into the event
@@ -130,22 +138,149 @@ export function EdgeSection({
     return typeof v === 'string' ? v : fallback
   }
 
+  const widthEntry = byKey(WIDTH_KEY)
+  const widthKnob = widthEntry !== undefined && isNumberLike(widthEntry.k) ? widthEntry.k : null
+  const varianceEntry = byKey(VARIANCE_KEY)
+  const varianceKnob =
+    varianceEntry !== undefined && isNumberLike(varianceEntry.k) ? varianceEntry.k : null
+
+  // The live ceiling (task 9 brief): §8.6's frozen reserve bounds `edgeWidth` and `edgeVariance`
+  // on any given sheet, past which `build()` answers `SheetError` "re-add required" rather than
+  // rendering. Computed fresh every render — it is cheap, pure arithmetic (`edge-ceilings.ts`) —
+  // from the CURRENT spec, headroom and live knob values, so it tracks every drag on either
+  // slider and on the finish knobs that feed it (`fiberLen`, `deckleWidth`).
+  const ceilings = ceilingsFor(spec, overscanHeadroom, knobs)
+  const widthValue = valueOf(WIDTH_KEY, widthKnob?.default ?? 0)
+  const varianceValue = valueOf(VARIANCE_KEY, varianceKnob?.default ?? 0)
+
+  /**
+   * The raw ceiling (`edge-ceilings.ts`) is almost never step-aligned. `Slider`'s own `commit`
+   * (`primitives.tsx`) clamps to `max` FIRST and quantises to the descriptor's `step` SECOND
+   * (`Math.round(clamped / step) * step`) — quantising a ceiling that sits mid-step can round the
+   * committed value back UP past it (observed: a `torn`/`paper` ceiling of 67.96 with `step: 1`
+   * let a drag land on 68, which the reserve then refused). Snapping the ceiling DOWN to the
+   * nearest value the descriptor's own step can land on closes that gap: everything at or below
+   * `widthMax` / `varianceMax` is both within the reserve AND a value `commit` can produce exactly.
+   */
+  const clampedMax = (
+    declaredMax: number,
+    declaredMin: number,
+    step: number,
+    ceiling: number | undefined,
+  ): number => {
+    if (ceiling === undefined) return declaredMax
+    const bounded = Math.max(declaredMin, Math.min(declaredMax, ceiling))
+    const steps = Math.floor((bounded - declaredMin) / step)
+    return declaredMin + steps * step
+  }
+
+  const widthMax =
+    widthKnob === null
+      ? 0
+      : clampedMax(widthKnob.max, widthKnob.min, stepOf(widthKnob), ceilings.widthMax)
+  const varianceMax =
+    varianceKnob === null
+      ? 0
+      : clampedMax(varianceKnob.max, varianceKnob.min, stepOf(varianceKnob), ceilings.varianceMax)
+
   return (
     <>
       <Segmented
         fill
-        label="edge mode"
-        value={mode}
-        onChange={onModeChange}
+        label="edge shape"
+        value={spec.shape}
+        onChange={(shape) => {
+          if (shape !== spec.shape) onSpecChange({ ...spec, shape })
+        }}
         options={[
-          { id: 'hull', label: 'Hull', title: 'hull — polygon cut sheet' },
+          { id: 'smooth', label: 'Smooth', title: 'smooth — polygon cut sheet' },
           { id: 'torn', label: 'Torn', title: 'torn — procedural tear' },
-          { id: 'both', label: 'Both', title: 'hull + torn — cut sheet, torn edge' },
+        ]}
+      />
+      <Segmented
+        fill
+        label="edge finish"
+        value={spec.finish}
+        onChange={(finish) => {
+          if (finish !== spec.finish) onSpecChange({ ...spec, finish })
+        }}
+        options={[
+          { id: 'clean', label: 'Clean', title: 'clean — no paper decoration' },
+          { id: 'paper', label: 'Paper', title: 'paper — deckle, fibres and tear shadow' },
+        ]}
+      />
+      <Segmented
+        fill
+        label="edge width unit"
+        value={spec.widthUnit}
+        onChange={(widthUnit) => {
+          if (widthUnit !== spec.widthUnit) onSpecChange({ ...spec, widthUnit })
+        }}
+        options={[
+          { id: 'px', label: 'px', title: 'px — a fixed sprite-px width' },
+          { id: 'percent', label: '%', title: '% — a percent of the artwork' },
         ]}
       />
 
-      {mode !== 'torn' && <SubCard title="Hull — polygon cut sheet">{sliders(HULL_ROWS)}</SubCard>}
-      {mode !== 'hull' && <SubCard title="Torn — procedural tear">{sliders(TORN_ROWS)}</SubCard>}
+      {widthKnob !== null && (
+        <>
+          <Slider
+            label="edge width"
+            value={widthValue}
+            min={widthKnob.min}
+            max={widthMax}
+            step={stepOf(widthKnob)}
+            unit={unitOf(widthKnob)}
+            onChange={(v) => {
+              onSet(WIDTH_KEY, v)
+            }}
+          />
+          {widthValue === 0 && <p className="note">no edge — the sheet renders with no border</p>}
+          {ceilings.widthMax === undefined ? (
+            <p className="note">
+              this build's exact reachable ceiling is not shown under the % unit — see the task-9
+              report; dragging past it still reports the refusal on the status pill
+            </p>
+          ) : (
+            widthMax < widthKnob.max && (
+              <p className="note">
+                capped at {widthMax.toFixed(1)} of its {widthKnob.max} — past this the sheet's
+                frozen reserve refuses (design §8.6)
+              </p>
+            )
+          )}
+        </>
+      )}
+
+      {varianceKnob !== null && (
+        <>
+          <Slider
+            label="edge variance"
+            value={varianceValue}
+            min={varianceKnob.min}
+            max={varianceMax}
+            step={stepOf(varianceKnob)}
+            unit={unitOf(varianceKnob)}
+            onChange={(v) => {
+              onSet(VARIANCE_KEY, v)
+            }}
+          />
+          {ceilings.varianceMax !== undefined &&
+            Number.isFinite(ceilings.varianceMax) &&
+            varianceMax < varianceKnob.max && (
+              <p className="note">
+                capped at {varianceMax.toFixed(2)} of its {varianceKnob.max} — past this the sheet's
+                frozen reserve refuses (design §8.6)
+              </p>
+            )}
+        </>
+      )}
+
+      <SubCard title={spec.shape === 'smooth' ? 'Shape — smooth' : 'Shape — torn'}>
+        {sliders(spec.shape === 'smooth' ? SMOOTH_SHAPE_ROWS : TORN_SHAPE_ROWS)}
+      </SubCard>
+
+      {spec.finish === 'paper' && <SubCard title="Finish — paper">{sliders(FINISH_ROWS)}</SubCard>}
 
       <SubCard title="Shared" muted padded>
         {reliefKnob !== null && (

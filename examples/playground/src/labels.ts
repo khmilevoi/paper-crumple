@@ -25,8 +25,9 @@ export interface KnobLabel {
 
 export const GROUP_ORDER: readonly string[] = [
   'Paper',
-  'Silhouette — hull',
-  'Silhouette — torn',
+  'Silhouette',
+  'Silhouette — shape',
+  'Silhouette — finish',
   'Fold',
   'Ball',
   'Motion',
@@ -45,25 +46,30 @@ export const LABELS: ReadonlyMap<string, KnobLabel> = new Map([
   ['sheet.shadowBlur', { label: 'shadow blur', group: 'Paper', order: 6 }],
   ['sheet.seed', { label: 'seed', group: 'Paper', order: 7 }],
 
-  // Silhouette — hull
-  ['sheet.minDist', { label: 'min point spacing', group: 'Silhouette — hull', order: 0 }],
-  ['sheet.maxDist', { label: 'max point spacing', group: 'Silhouette — hull', order: 1 }],
-  ['sheet.angularity', { label: 'angularity', group: 'Silhouette — hull', order: 2 }],
+  // Silhouette — the width, present in every cell (design 2026-09-05 §2.1). `sheet.minDist` /
+  // `sheet.maxDist` / `sheet.thickness` / `sheet.tearAmp` / `sheet.midAmp` are gone: the old
+  // three-knob hull band and four-knob tear amplitude are replaced outright by `edgeWidth` +
+  // `edgeVariance` (spec §12, no compatibility shim).
+  ['sheet.edgeWidth', { label: 'edge width', group: 'Silhouette', order: 0 }],
+  ['sheet.edgeVariance', { label: 'edge variance', group: 'Silhouette', order: 1 }],
 
-  // Silhouette — torn
-  ['sheet.thickness', { label: 'edge thickness', group: 'Silhouette — torn', order: 0 }],
-  ['sheet.looseness', { label: 'edge looseness', group: 'Silhouette — torn', order: 1 }],
-  ['sheet.tearFreq', { label: 'tear frequency', group: 'Silhouette — torn', order: 2 }],
-  ['sheet.tearAmp', { label: 'tear amplitude', group: 'Silhouette — torn', order: 3 }],
-  ['sheet.midAmp', { label: 'mid-tear amplitude', group: 'Silhouette — torn', order: 4 }],
-  ['sheet.chew', { label: 'chew', group: 'Silhouette — torn', order: 5 }],
-  ['sheet.tearAngular', { label: 'tear angularity', group: 'Silhouette — torn', order: 6 }],
-  ['sheet.fibers', { label: 'fibre density', group: 'Silhouette — torn', order: 7 }],
-  ['sheet.fiberLen', { label: 'fibre length', group: 'Silhouette — torn', order: 8 }],
-  ['sheet.deckleWidth', { label: 'deckle width', group: 'Silhouette — torn', order: 9 }],
-  ['sheet.deckleLight', { label: 'deckle highlight', group: 'Silhouette — torn', order: 10 }],
-  ['sheet.deckleTex', { label: 'deckle texture', group: 'Silhouette — torn', order: 11 }],
-  ['sheet.tearShadow', { label: 'tear shadow', group: 'Silhouette — torn', order: 12 }],
+  // Silhouette — shape (design §2.2): `angularity` under `smooth`, the other five under `torn`.
+  // `tearMix` belongs here too (ruling R14) — every torn-shape knob does; there is no
+  // `Silhouette — torn` group.
+  ['sheet.angularity', { label: 'angularity', group: 'Silhouette — shape', order: 0 }],
+  ['sheet.looseness', { label: 'edge looseness', group: 'Silhouette — shape', order: 1 }],
+  ['sheet.tearFreq', { label: 'tear frequency', group: 'Silhouette — shape', order: 2 }],
+  ['sheet.tearAngular', { label: 'tear angularity', group: 'Silhouette — shape', order: 3 }],
+  ['sheet.chew', { label: 'chew', group: 'Silhouette — shape', order: 4 }],
+  ['sheet.tearMix', { label: 'tear mix', group: 'Silhouette — shape', order: 5 }],
+
+  // Silhouette — finish (design §2.3): the six knobs under `edgeFinish: 'paper'` only.
+  ['sheet.deckleWidth', { label: 'deckle width', group: 'Silhouette — finish', order: 0 }],
+  ['sheet.deckleLight', { label: 'deckle highlight', group: 'Silhouette — finish', order: 1 }],
+  ['sheet.deckleTex', { label: 'deckle texture', group: 'Silhouette — finish', order: 2 }],
+  ['sheet.fibers', { label: 'fibre density', group: 'Silhouette — finish', order: 3 }],
+  ['sheet.fiberLen', { label: 'fibre length', group: 'Silhouette — finish', order: 4 }],
+  ['sheet.tearShadow', { label: 'tear shadow', group: 'Silhouette — finish', order: 5 }],
 
   // Fold
   ['sheet.facetStrength', { label: 'facet strength', group: 'Fold', order: 0 }],

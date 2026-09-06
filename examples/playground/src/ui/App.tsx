@@ -4,6 +4,7 @@ import * as pc from '@paper-crumple/core'
 import { fitSheet } from '@paper-crumple/motion'
 import type { Pack } from '@paper-crumple/motion'
 import { evenKeyFrames } from '@paper-crumple/motion'
+import type { EdgeSpec } from '@paper-crumple/paper'
 
 import type { AudioHandle, SyncMode } from '../audio'
 import { createAudio, playSpec, swapSpec } from '../audio'
@@ -20,7 +21,6 @@ import type { StageStatus } from '../useStage'
 import { Diagnostics } from './Diagnostics'
 import type { Metric } from './Diagnostics'
 import { EdgeSection } from './EdgeSection'
-import type { UiEdgeMode } from './EdgeSection'
 import { Header } from './Header'
 import { FactorySection, KnobRows, libraryGroups } from './LibrarySections'
 import { LookSection } from './LookSection'
@@ -518,9 +518,9 @@ export function App(): ReactNode {
       },
       {
         label: 'hull',
-        // `hull` is the only edge mode that builds one; in `torn` the pass does not exist, and
-        // the design prints the same em dash for it.
-        value: config.edgeMode === 'torn' ? '—' : `${msText(live.addMs)} ms`,
+        // `smooth` is the only shape that builds a hull polygon; under `torn` the pass does not
+        // exist, and the design prints the same em dash for it.
+        value: config.edgeShape === 'torn' ? '—' : `${msText(live.addMs)} ms`,
         title: 'the front bake, which is where the hull polygon is built',
       },
       {
@@ -537,7 +537,7 @@ export function App(): ReactNode {
           'two scheduled renders',
       },
     ]
-  }, [config.edgeMode, fit, lastDrawMs, lastStepMs, live, sprite])
+  }, [config.edgeShape, fit, lastDrawMs, lastStepMs, live, sprite])
 
   /**
    * The design's own idle status: what the stage is, not what the last action was. `useStage`
@@ -576,12 +576,23 @@ export function App(): ReactNode {
     setConfig(next)
   }, [])
 
-  // `edgeMode` is a factory option, so every segment — `both` included — rebuilds the stage.
-  // `descriptorsFor('both')` is `[...HULL_KNOBS, ...TORN_KNOBS]`, which is what makes the two
-  // sub-cards below fill in rather than one of them reporting itself unavailable.
-  const onEdgeModeChange = useCallback(
-    (mode: UiEdgeMode) => {
-      if (mode !== config.edgeMode) applyConfig({ ...config, edgeMode: mode })
+  // `edgeShape`, `edgeFinish` and `edgeWidthUnit` are all factory options, so every segment
+  // rebuilds the stage (design 2026-09-05 §6.5) — `EdgeSection` calls this with the WHOLE spec,
+  // never one field at a time, so a reader flipping shape does not race a reader flipping finish.
+  const onSpecChange = useCallback(
+    (spec: EdgeSpec) => {
+      if (
+        spec.shape !== config.edgeShape ||
+        spec.finish !== config.edgeFinish ||
+        spec.widthUnit !== config.edgeWidthUnit
+      ) {
+        applyConfig({
+          ...config,
+          edgeShape: spec.shape,
+          edgeFinish: spec.finish,
+          edgeWidthUnit: spec.widthUnit,
+        })
+      }
     },
     [applyConfig, config],
   )
@@ -606,7 +617,7 @@ export function App(): ReactNode {
 
   // --- render -----------------------------------------------------------------------------------
 
-  const edgeChip = config.edgeMode === 'both' ? 'hull + torn' : config.edgeMode
+  const edgeChip = `${config.edgeShape} · ${config.edgeFinish}`
 
   return (
     <div className="page">
@@ -697,9 +708,14 @@ export function App(): ReactNode {
             <EdgeSection
               entries={entries}
               knobs={knobs}
-              mode={config.edgeMode}
-              onModeChange={onEdgeModeChange}
+              spec={{
+                shape: config.edgeShape,
+                finish: config.edgeFinish,
+                widthUnit: config.edgeWidthUnit,
+              }}
+              onSpecChange={onSpecChange}
               onSet={setKnob}
+              overscanHeadroom={config.overscanHeadroom}
             />
           </Section>
 
