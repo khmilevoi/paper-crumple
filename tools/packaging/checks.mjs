@@ -37,7 +37,10 @@ const entryTriple = (/** @type {string} */ base) => [
   `package/dist/${base}.d.ts`,
 ]
 
-/** The three published packages. Three, and not four: amendment 23 cancelled the bundle. */
+/**
+ * The four published packages. The fourth is `@paper-crumple/react`, the React binding; there is
+ * still no bundle package, because amendment 23 cancelled it.
+ */
 export const PACKAGES = /** @type {readonly PackageSpec[]} */ ([
   {
     dir: 'core',
@@ -68,6 +71,12 @@ export const PACKAGES = /** @type {readonly PackageSpec[]} */ ([
       ...entryTriple('index'),
       ...BUCKETS.flatMap((b) => [...entryTriple(`packs/${b}`), `package/dist/packs/${b}.bin`]),
     ],
+  },
+  {
+    dir: 'react',
+    name: '@paper-crumple/react',
+    subpaths: ['.'],
+    required: [...ALWAYS, ...entryTriple('index')],
   },
 ])
 

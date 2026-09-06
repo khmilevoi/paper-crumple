@@ -19,7 +19,11 @@ export default defineConfig({
         test: {
           name: 'unit',
           environment: 'node',
-          include: ['**/*.test.ts'],
+          // `.tsx` is here for @paper-crumple/react: its tests render components, and the task
+          // gate for this run is `--project unit`, so a separate DOM project would never run.
+          // The environment stays `node` and each React test file opts into jsdom with a
+          // `@vitest-environment jsdom` docblock, so no existing unit test changes environment.
+          include: ['**/*.test.ts', '**/*.test.tsx'],
           // `foo.gl.test.ts` also matches `**/*.test.ts`. Level 2 is not level 1.
           exclude: [...sharedExclude, '**/*.gl.test.ts'],
         },

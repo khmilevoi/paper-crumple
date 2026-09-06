@@ -45,7 +45,12 @@ describe('the deprecation stub at the freed unscoped name', () => {
   it('is invisible to Changesets, so the family’s fixed group cannot pick it up', () => {
     const config = readFileSync(new URL('.changeset/config.json', root), 'utf8')
     expect(JSON.parse(config).fixed).toEqual([
-      ['@paper-crumple/core', '@paper-crumple/paper', '@paper-crumple/motion'],
+      [
+        '@paper-crumple/core',
+        '@paper-crumple/paper',
+        '@paper-crumple/motion',
+        '@paper-crumple/react',
+      ],
     ])
     expect(config).not.toMatch(/"paper-crumple"/)
   })
