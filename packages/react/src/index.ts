@@ -7,7 +7,16 @@
  *
  * The convention (spec §7): nothing in this package throws, nothing reaches an error boundary,
  * and no promise this package returns rejects. `error` is a field and `status` is a value to
- * branch on.
+ * branch on. Cancellation is `ABORTED`, a sentinel, and it never reaches a consumer through an
+ * instance's own fields.
+ *
+ * `useEvent`, the versioned store and the fake stage are deliberately absent. The first two are
+ * internal conventions and the third is test scaffolding; nothing in this graph imports
+ * `src/testing/`, so none of it reaches `dist`.
  */
 
-export {}
+// --- P2: the scene (§4) ---
+export { PaperScene, useScene } from './scene-context.js'
+export type { PaperSceneProps } from './scene-context.js'
+export { usePaperScene } from './use-paper-scene.js'
+export type { KnobValue, Scene, SceneOptions, SceneSnapshot, SceneStatus } from './scene-types.js'
