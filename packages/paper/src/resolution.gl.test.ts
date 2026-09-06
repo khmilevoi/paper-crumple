@@ -15,14 +15,8 @@ import { afterEach, describe, expect, it } from 'vitest'
 import { frontCapFor, isAborted, paperStage } from '@paper-crumple/core'
 import type { DrawResult, KnobDescriptor, MotionSource, Rect } from '@paper-crumple/core'
 import type { MotionClip, MotionFit } from '@paper-crumple/core/unstable'
-import type { EdgeSpec } from '@paper-crumple/core/unstable'
 import { optionsFor, paperSheet } from './sheet.js'
-
-/**
- * design 2026-09-05 §6's default cell. `EdgeMode` is gone; `hull` was this cell by its descriptor
- * set (§2.4's 24 keys).
- */
-const SMOOTH_CLEAN: EdgeSpec = { shape: 'smooth', finish: 'clean', widthUnit: 'px' }
+import { SMOOTH_CLEAN } from './testing/edge-cells.js'
 
 const live: Array<{ dispose(): void }> = []
 afterEach(() => {

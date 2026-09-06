@@ -12,15 +12,10 @@ import { PAPER_FS, PAPER_UNIFORMS } from './paper-shader.js'
 import { mountNeutralTiles } from './paper-tiles.js'
 import type { MountedTiles } from './paper-tiles.js'
 import { defaultsFor, descriptorsFor } from './paper-knobs.js'
+import { SMOOTH_CLEAN } from './testing/edge-cells.js'
 
 type Err = InstanceType<typeof GlError>
 
-/**
- * design 2026-09-05 §6's four cells. `EdgeMode`'s three values are gone: the contour source is
- * `shape`, expressed by WHICH TEXTURES the renderer binds, and the decoration is `finish`,
- * expressed by `uEdgeFinish` alone.
- */
-const SMOOTH_CLEAN: EdgeSpec = { shape: 'smooth', finish: 'clean', widthUnit: 'px' }
 const SMOOTH_PAPER: EdgeSpec = { shape: 'smooth', finish: 'paper', widthUnit: 'px' }
 const TORN_CLEAN: EdgeSpec = { shape: 'torn', finish: 'clean', widthUnit: 'px' }
 const TORN_PAPER: EdgeSpec = { shape: 'torn', finish: 'paper', widthUnit: 'px' }

@@ -1,0 +1,141 @@
+The source that produced `hull-default.json`, kept beside it so the frame's provenance is a file
+rather than a paragraph. It is a `.txt` on purpose: as a `.gl.test.ts` Vitest would collect it and
+it would fail immediately, because `edgeMode` does not exist on this branch. It only runs on
+`develop`.
+
+To regenerate the frame:
+
+    git switch --detach 222eda7
+    mkdir -p packages/paper/src/__screenshots__/edge-redesign
+    cp packages/paper/src/__screenshots__/edge-redesign/hull-default.capture.ts.txt \
+       packages/paper/src/capture-hull-baseline.gl.test.ts
+    pnpm turbo run build --force \
+      --filter=@paper-crumple/core --filter=@paper-crumple/paper --filter=@paper-crumple/motion
+    pnpm exec vitest run --project gl packages/paper/src/capture-hull-baseline.gl.test.ts
+    rm packages/paper/src/capture-hull-baseline.gl.test.ts
+    git switch -
+
+One difference from the run that actually produced the committed frame, recorded for honesty: that
+run imported `server` from `@vitest/browser/context` and called `server.commands.writeFile`. Vitest
+4.1.11 deprecates that path; the source below uses `commands` from `vitest/browser`, which is the
+same command over the same channel and is what `edge-redesign.gl.test.ts` uses. Nothing about the
+rendered bytes depends on which of the two writes them.
+
+`GUARD_EPSILON_REFERENCE_PX = 2` (ruling R1) is the value `develop` carries and the value this frame
+was rendered under. Note that `edge-redesign.gl.test.ts` compares the frame in REFERENCE px and on
+the artwork's own interior, neither of which an epsilon change moves: epsilon changes the front's
+margin, the comparison is scale-free in one half and inside the artwork in the other.
+
+--- 8< --- packages/paper/src/capture-hull-baseline.gl.test.ts, on develop @ 222eda7 --- 8< ---
+
+/**
+ * The capture harness for Task 8's step 6a — run on `develop` @ 222eda7 only.
+ *
+ * `paperSheet({ edgeMode: 'hull' })` at its shipped defaults, over the same bitmap and the same
+ * source options Task 8's `cell` helper uses, read back and written to
+ * `packages/paper/src/__screenshots__/edge-redesign/hull-default.json`.
+ *
+ * Every parameter is pinned HERE rather than by reference to a helper that does not exist on this
+ * branch (ruling R14, Task 8 bullet).
+ *
+ * `exact: true` is load-bearing, not a convenience. Under `exact: false` the artwork's own long
+ * side is chosen so that artwork + margin fits `maxSize`, so it MOVES when the reserve moves — and
+ * design 2026-09-05 §4.2's guard margin does move on the redesign branch. The two frames would then
+ * carry the artwork at two different resolutions and an `artworkRect`-aligned comparison would be
+ * comparing two different resamples. Under `exact: true` the artwork is the source, 1:1, on both
+ * branches (`sheet.ts`: `aLongSide = sourceLongSide`), and only the margin — and with it the front
+ * — differs, which is exactly the difference §9.1 says to align away.
+ */
+import { describe, expect, it } from 'vitest'
+import { commands } from 'vitest/browser'
+import { GlError, SheetError, isAborted } from '@paper-crumple/core'
+import { defaultsFor } from './paper-knobs.js'
+import { paperSheet } from './sheet.js'
+import { logoAlpha } from './test-fixtures.js'
+import { createGlFixture } from './testing/gl-fixture.js'
+
+/** The baseline's own parameters. Task 8's `cell` helper repeats these three. */
+const SRC = 256
+const MAX_SIZE = 512
+const EXACT = true
+
+function logoBytes(size: number): Uint8ClampedArray {
+  const a = logoAlpha(size)
+  const out = new Uint8ClampedArray(size * size * 4)
+  for (let i = 0; i < a.length; i++) {
+    const p = i * 4
+    out[p] = 220
+    out[p + 1] = 190
+    out[p + 2] = 120
+    out[p + 3] = Math.round(a[i] * 255)
+  }
+  return out
+}
+
+async function gzipBase64(bytes: Uint8Array): Promise<string> {
+  const stream = new Blob([bytes]).stream().pipeThrough(new CompressionStream('gzip'))
+  const packed = new Uint8Array(await new Response(stream).arrayBuffer())
+  let binary = ''
+  for (let i = 0; i < packed.length; i += 0x8000) {
+    binary += String.fromCharCode(...packed.subarray(i, i + 0x8000))
+  }
+  return btoa(binary)
+}
+
+describe('step 6a: the hull-default golden frame', () => {
+  it('renders it on develop and writes it under __screenshots__/edge-redesign', async () => {
+    const fixture = createGlFixture(8, 8)
+    expect(fixture.gl, 'no WebGL2 context — check the SwiftShader launch flags').not.toBeNull()
+    const sheet = paperSheet({ edgeMode: 'hull' })
+    expect(sheet.mount(fixture.ctx)).toBeUndefined()
+    const bitmap = await createImageBitmap(new ImageData(logoBytes(SRC), SRC, SRC), {
+      premultiplyAlpha: 'none',
+      colorSpaceConversion: 'none',
+    })
+    const handle = await sheet.source(bitmap, { maxSize: MAX_SIZE, exact: EXACT })
+    bitmap.close()
+    if (GlError.is(handle) || SheetError.is(handle) || isAborted(handle)) {
+      return expect.fail(`source() refused: ${String(handle)}`)
+    }
+    const front = sheet.build(handle, handle.front, defaultsFor('hull') as never)
+    if (front instanceof Error) return expect.fail(front.message)
+
+    const pixels = new Uint8Array(front.width * front.height * 4)
+    const probe = fixture.ctx.gl.createFramebuffer()
+    fixture.ctx.scope(() => {
+      const { gl } = fixture.ctx
+      gl.bindFramebuffer(gl.READ_FRAMEBUFFER, probe)
+      gl.framebufferTexture2D(
+        gl.READ_FRAMEBUFFER,
+        gl.COLOR_ATTACHMENT0,
+        gl.TEXTURE_2D,
+        front.texture,
+        0,
+      )
+      gl.readPixels(0, 0, front.width, front.height, gl.RGBA, gl.UNSIGNED_BYTE, pixels)
+      gl.bindFramebuffer(gl.READ_FRAMEBUFFER, null)
+    })
+    fixture.ctx.gl.deleteFramebuffer(probe)
+
+    const payload = {
+      note: 'develop @ 222eda7, paperSheet({ edgeMode: hull }) at defaultsFor(hull)',
+      src: SRC,
+      maxSize: MAX_SIZE,
+      exact: EXACT,
+      size: { w: front.width, h: front.height },
+      artworkRect: front.artwork,
+      handleFront: handle.front,
+      handleArtwork: handle.artwork,
+      overscan: handle.overscan,
+      gzipBase64: await gzipBase64(pixels),
+    }
+    await commands.writeFile(
+      'packages/paper/src/__screenshots__/edge-redesign/hull-default.json',
+      JSON.stringify(payload),
+    )
+
+    sheet.releaseFront(front)
+    sheet.dispose()
+    fixture.dispose()
+  })
+})

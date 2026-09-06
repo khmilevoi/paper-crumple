@@ -15,14 +15,8 @@ import { HULL_USE_ALPHA } from './hull-shape.js'
 import { defaultsFor, edgeParamsFrom, WIDTH_PX_KNOB } from './paper-knobs.js'
 import { PAPER_UNIFORMS } from './paper-shader.js'
 import { optionsFor, paperSheet } from './sheet.js'
+import { SMOOTH_CLEAN } from './testing/edge-cells.js'
 
-/**
- * design 2026-09-05 §6's cells, as this file uses them. `EdgeMode`'s three values are gone; the
- * three legacy modes map onto three of the four cells by their descriptor sets (§2.4's count
- * table): `hull` (24 knobs) is `smooth`/`clean`, `both` (30) is `smooth`/`paper`, and `torn` (34)
- * is `torn`/`paper`.
- */
-const SMOOTH_CLEAN: EdgeSpec = { shape: 'smooth', finish: 'clean', widthUnit: 'px' }
 const SMOOTH_PAPER: EdgeSpec = { shape: 'smooth', finish: 'paper', widthUnit: 'px' }
 const TORN_PAPER: EdgeSpec = { shape: 'torn', finish: 'paper', widthUnit: 'px' }
 /** The shipped `edgeWidth` default under `edgeWidthUnit: 'px'`, in reference px (ruling R10). */

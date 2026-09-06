@@ -22,15 +22,10 @@ import { afterEach, describe, expect, it } from 'vitest'
 import { GlError, SheetError, isAborted } from '@paper-crumple/core'
 import type { CoreGlContext, Program } from '@paper-crumple/core/unstable'
 import { createGlFixture, type PaperGlFixture } from './testing/gl-fixture.js'
-import type { EdgeSpec } from '@paper-crumple/core/unstable'
 
-/**
- * design 2026-09-05 §6's default cell. `EdgeMode` is gone; `hull` was this cell by its descriptor
- * set (§2.4's 24 keys), so every `defaultsFor('hull')` in this file is `defaultsFor(SMOOTH_CLEAN)`.
- */
-const SMOOTH_CLEAN: EdgeSpec = { shape: 'smooth', finish: 'clean', widthUnit: 'px' }
 import { defaultsFor } from './paper-knobs.js'
 import { paperSheet } from './sheet.js'
+import { SMOOTH_CLEAN } from './testing/edge-cells.js'
 
 let fixture: PaperGlFixture | null = null
 

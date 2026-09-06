@@ -25,13 +25,7 @@ import { NEUTRAL_TILE_BYTE } from './paper-tiles.js'
 import { paperSheet } from './sheet.js'
 import type { PaperTileSet } from './tile-set.js'
 import { createGlFixture, type PaperGlFixture } from './testing/gl-fixture.js'
-import type { EdgeSpec } from '@paper-crumple/core/unstable'
-
-/**
- * design 2026-09-05 §6's default cell. `EdgeMode` is gone; `hull` was this cell by its descriptor
- * set (§2.4's 24 keys), so every `defaultsFor('hull')` in this file is `defaultsFor(SMOOTH_CLEAN)`.
- */
-const SMOOTH_CLEAN: EdgeSpec = { shape: 'smooth', finish: 'clean', widthUnit: 'px' }
+import { SMOOTH_CLEAN } from './testing/edge-cells.js'
 
 let fixture: PaperGlFixture | null = null
 const revoke: string[] = []

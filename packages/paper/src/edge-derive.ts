@@ -31,6 +31,25 @@
  *   the clamp only engages when the unclamped budget would already have gone negative, i.e. exactly
  *   when `W - CHEW_REACH*chew < W(1 - v)`. `edgeVariance` sweeps starting at 0 walk straight into
  *   this regime at the defaults — do not gate a sweep assertion on `W(1 - v)` holding down there.
+ *
+ * - `baseAngular` (`paper-shader.ts`) breaks the identity from a THIRD direction, on the `tearFreq`
+ *   axis, and this module does not model that term at all. That block replaces the base field
+ *   `tight + W` with its piecewise-linear interpolant on a lattice of side
+ *   `KNOB_REFERENCE_PX / (tearFreq * ANG_FREQ)` reference px — 417 at `tearFreq 2`, 93 at the
+ *   shipped 9, 35 at 24 — and blends the two at weight `tearAngular`; `tearOf` then adds the
+ *   octaves computed here on top of `baseAng`, NOT on top of `base`. On a convex arc of radius
+ *   `rho` the interpolant of a concave function lies below it by the chord sag, so the contour is
+ *   pulled INWARD by about `tearAngular * L^2 / (8 rho)` — a `1 / tearFreq^2` law, which is why the
+ *   shipped `tearFreq 9` barely notices (2.5 reference px on a 343-reference-px arc) and the
+ *   descriptor's own minimum of 2 does not: 51 reference px there, more than `W v` itself, so the
+ *   contour is dragged down until the shader's `tearFloor = tight + 0.4*W` catches it. At a REFLEX
+ *   vertex the same interpolant pushes OUTWARD instead, which is a reserve question rather than a
+ *   width one (`paper-shader.ts`'s own header for `baseAngular` states that direction).
+ *   So: at `tearAngular > 0` and low `tearFreq` the lower reach is `max(0.4*W, W(1 - v) - the pull
+ *   above)`, not `W(1 - v)`. Measured and pinned in `edge-redesign.gl.test.ts` ("is pulled to the
+ *   tear floor by baseAngular at low tearFreq, and stops there"); at `tearFreq 2, tearAngular 0.8`
+ *   the rendered inward reach sits on the floor, in three independent configurations, against the
+ *   22.09 the identity would give.
  */
 
 /**

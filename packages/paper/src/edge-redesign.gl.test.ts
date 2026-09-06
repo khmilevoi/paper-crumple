@@ -31,15 +31,33 @@
  * mistake for a contour. Measured on the disc, `looseness` 0 / 0.5 / 1 give the same reach to the
  * last texel — which is exactly what §6.1 claims and what the logo could not have shown.
  *
- * ## The instrument calibrates itself
+ * ## The instrument calibrates itself, and there are TWO of them
  *
- * The rendered reach is read off an RGBA8 raster whose coverage comes from an 8-bit-encoded field
- * built at `sdfRes`, so it carries an error the library's own arithmetic does not. That error is
- * MEASURED in the same run rather than guessed: `edgeVariance 0` clamps `tearAmpsFor`'s budget to
- * zero (`edge-derive.ts`'s "Known boundaries"), so the true band there is exactly
- * `W +- CHEW_REACH * chew` and whatever the instrument reads instead of that is its own error.
- * The sweep is gated on the band widened by that measured error plus two texels. The numbers are
- * in this task's report.
+ * Neither measurement is exact, and both errors are MEASURED in the same run rather than guessed.
+ * `edgeVariance 0` clamps `tearAmpsFor`'s budget to zero (`edge-derive.ts`'s "Known boundaries"),
+ * so the true band there is the single pair `W +- CHEW_REACH * chew` under `torn` and the single
+ * distance `W` under `smooth` — and whatever an instrument reads instead of that is its own error.
+ *
+ * - The **raster** instrument (`reachOf`, for `torn`) reads coverage off an RGBA8 front whose field
+ *   is 8-bit-encoded at `sdfRes`. Measured: 5.11 reference px low, 0.14 high. Its control is taken
+ *   at `tearAngular 0`, which is load-bearing — at the shipped `0.8` the control is contaminated by
+ *   the very `baseAngular` term the sweep exists to bound, and reads 1.9 reference px lower for
+ *   that reason alone.
+ * - The **vertex** instrument (`vertexReachOf`, for `smooth`) reads `measureHull` over the traced
+ *   polygon against a reproduced CPU field. Its error depends on `angularity`, because the
+ *   Douglas-Peucker tolerance does: measured 6.21 reference px at 0, 2.89 at 0.7 and at 1. It gets
+ *   its own control at each swept value. Borrowing the raster's number for it, which is what the
+ *   first version of this file did, calibrates nothing.
+ *
+ * Both are then given half a texel on top, and no more.
+ *
+ * ## The third known boundary
+ *
+ * `edge-derive.ts` documents two regimes where `W (1 +- v)` is not the law. This file found a third
+ * and `edge-derive.ts` now documents that one too: `baseAngular` (`paper-shader.ts`) replaces the
+ * base field with its piecewise-linear interpolant on a `tearFreq`-sized lattice, and `tearOf` adds
+ * its octaves on top of THAT. The derivation models the octaves and not the interpolant. See
+ * `angPullRef` below, and the case that pins it.
  *
  * ## `exact: true` is load-bearing
  *
@@ -51,6 +69,7 @@
  * branches; only the margin, and with it the front, differs.
  */
 import { afterEach, describe, expect, it } from 'vitest'
+import { commands } from 'vitest/browser'
 import { GlError, KNOB_REFERENCE_PX, SheetError, isAborted } from '@paper-crumple/core'
 import type { Knobs, Rect, Size } from '@paper-crumple/core'
 import { CHEW_REACH, tearAmpsFor } from './edge-derive.js'
@@ -63,7 +82,8 @@ import type { PackedHull } from './hull-shape.js'
 import { VARIANCE_KNOB, WIDTH_PX_KNOB, defaultsFor } from './paper-knobs.js'
 import { optionsFor, paperSheet } from './sheet.js'
 import type { PaperSheet } from './sheet.js'
-import { discAlpha, logoAlpha } from './test-fixtures.js'
+import { discAlpha, logoAlpha, unionAlpha } from './test-fixtures.js'
+import { ALL_FOUR_CELLS, SMOOTH_CLEAN, TORN_CLEAN } from './testing/edge-cells.js'
 import { createGlFixture, type PaperGlFixture } from './testing/gl-fixture.js'
 import type { EdgeSpec } from '@paper-crumple/core/unstable'
 
@@ -71,18 +91,6 @@ import type { EdgeSpec } from '@paper-crumple/core/unstable'
 // The helper block (§10's harness). `cell` is the only helper that touches GL; the rest are pure
 // over its result.
 // ---------------------------------------------------------------------------------------------
-
-/** design 2026-09-05 §6's default cell — the one `develop`'s `hull` was, by its descriptor set. */
-const SMOOTH_CLEAN: EdgeSpec = { shape: 'smooth', finish: 'clean', widthUnit: 'px' }
-const TORN_CLEAN: EdgeSpec = { shape: 'torn', finish: 'clean', widthUnit: 'px' }
-
-/** The four `shape x finish` combinations at `widthUnit: 'px'` — §6's table, in reading order. */
-const ALL_FOUR_CELLS: readonly EdgeSpec[] = [
-  SMOOTH_CLEAN,
-  { shape: 'smooth', finish: 'paper', widthUnit: 'px' },
-  TORN_CLEAN,
-  { shape: 'torn', finish: 'paper', widthUnit: 'px' },
-]
 
 /**
  * `W` and `v`, read from the descriptors that declare them rather than written as `47` / `0.53`
@@ -101,6 +109,27 @@ const LOGO_ALPHA = logoAlpha(SRC)
 /** The convex control. Radius chosen so `W (1 + v)` of paper still fits inside the front margin. */
 const DISC_R = 96
 const DISC_ALPHA = discAlpha(SRC, SRC, SRC / 2, SRC / 2, DISC_R)
+
+/**
+ * The CONCAVE control: two overlapping discs, so the silhouette has two reflex vertices.
+ *
+ * `baseAngular`'s interpolant is the reason this fixture exists. `paper-shader.ts`'s own header for
+ * that block says it: "the interpolant of a convex SDF exceeds it outside every reflex vertex". On
+ * the convex disc that term pulls the contour INWARD, which threatens nothing but the width claim;
+ * at a reflex vertex it pushes OUTWARD, which threatens §4's reserve — and a reach past the reserve
+ * is visible clipping, not a cosmetic difference. A disc cannot see that direction at all.
+ *
+ * Centres 64 texels apart at radius 56 give an interior angle of ~70 degrees at each reflex vertex,
+ * which is the sharpest notch this fixture family reaches (further apart is blunter, closer fills
+ * in).
+ */
+const LOBE_R = 56
+const LOBE_A = { x: 96, y: 128 }
+const LOBE_B = { x: 160, y: 128 }
+const CONCAVE_ALPHA = unionAlpha(
+  discAlpha(SRC, SRC, LOBE_A.x, LOBE_A.y, LOBE_R),
+  discAlpha(SRC, SRC, LOBE_B.x, LOBE_B.y, LOBE_R),
+)
 
 // The return type is inferred on purpose, as in `testing/fixture-sources.ts`: an explicit
 // `Uint8ClampedArray` annotation widens the buffer parameter to `ArrayBufferLike` and `ImageData`
@@ -121,8 +150,9 @@ interface Cell {
   readonly front: Uint8Array
   readonly size: Size
   readonly artworkRect: Rect
-  readonly handle: PaperSheetHandle
-  /** The source plane this cell was built over — `LOGO_ALPHA` or `DISC_ALPHA`. */
+  /** `null` only for a `loadBaseline` frame, which is bytes on disk and never had a handle. */
+  readonly handle: PaperSheetHandle | null
+  /** The source plane this cell was built over. */
   readonly alpha: Float32Array
 }
 
@@ -154,11 +184,11 @@ function context() {
  * input, not a factory one — reusing the sheet is what production does, and mounting eighty of them
  * would spend eighty scratch-pool allocations on nothing.
  */
-function sheetFor(spec: EdgeSpec): PaperSheet {
-  const key = `${spec.shape}/${spec.finish}/${spec.widthUnit}`
+function sheetFor(spec: EdgeSpec, headroom: number): PaperSheet {
+  const key = `${spec.shape}/${spec.finish}/${spec.widthUnit}/${headroom}`
   const known = sheets.get(key)
   if (known !== undefined) return known
-  const sheet = paperSheet(optionsFor(spec))
+  const sheet = paperSheet({ ...optionsFor(spec), overscanHeadroom: headroom })
   expect(sheet.mount(context())).toBeUndefined()
   sheets.set(key, sheet)
   return sheet
@@ -195,9 +225,20 @@ function readFront(texture: WebGLTexture, w: number, h: number): Uint8Array {
  * `optionsFor` is how an `EdgeSpec` becomes `PaperSheetOptions`: the field names differ
  * (`shape`/`finish`/`widthUnit` against `edgeShape`/`edgeFinish`/`edgeWidthUnit`) and the two are
  * not assignable (ruling R5).
+ *
+ * `headroom` is not decoration. `freezeOverscan` takes its reserve from the factory's DEFAULT knob
+ * values (§4.4), so any `edgeVariance` above `VARIANCE_KNOB.default` leaves it and `build()`
+ * answers "re-add required" — measured, `edgeVariance 0.8` asks for 87.2 reference px against the
+ * 83.9 a default sheet reserved. The variance-boundary case below therefore mounts its own sheet
+ * with headroom, which is what a caller who wants those values has to do too.
  */
-async function cell(spec: EdgeSpec, knobs: Knobs = {}, alpha = LOGO_ALPHA): Promise<Cell> {
-  const sheet = sheetFor(spec)
+async function cell(
+  spec: EdgeSpec,
+  knobs: Knobs = {},
+  alpha = LOGO_ALPHA,
+  headroom = 0,
+): Promise<Cell> {
+  const sheet = sheetFor(spec, headroom)
   const values = { ...defaultsFor(spec), ...knobs }
   const bitmap = await createImageBitmap(new ImageData(bytesFor(alpha), SRC, SRC), {
     premultiplyAlpha: 'none',
@@ -225,6 +266,12 @@ async function cell(spec: EdgeSpec, knobs: Knobs = {}, alpha = LOGO_ALPHA): Prom
 
 /** One texel of this front, in reference px — the frame every knob is quoted in. */
 const refPerTexel = (size: Size): number => KNOB_REFERENCE_PX / size.h
+
+/** The handle of a cell that was actually built, as opposed to a `loadBaseline` frame. */
+function handleOf(r: Cell): PaperSheetHandle {
+  if (r.handle === null) expect.fail('this cell came from loadBaseline and has no handle')
+  return r.handle
+}
 
 /**
  * The artwork's own alpha plane, at an arbitrary resolution, placed exactly where `build()` places
@@ -272,16 +319,24 @@ function artworkAlphaPlane(
  */
 const outsideCache = new Map<string, Float32Array>()
 function outsideDistance(r: Cell): Float32Array {
-  const key = `${r.alpha === DISC_ALPHA ? 'disc' : 'logo'}:${r.size.w}x${r.size.h}@${r.artworkRect.x},${r.artworkRect.y}`
+  const kind = r.alpha === DISC_ALPHA ? 'disc' : r.alpha === CONCAVE_ALPHA ? 'concave' : 'logo'
+  const key = `${kind}:${r.size.w}x${r.size.h}@${r.artworkRect.x},${r.artworkRect.y}`
   const known = outsideCache.get(key)
   if (known !== undefined) return known
   const out = new Float32Array(r.size.w * r.size.h)
-  if (r.alpha === DISC_ALPHA) {
-    const cx = r.artworkRect.x + SRC / 2
-    const cy = r.artworkRect.y + SRC / 2
+  if (kind === 'disc' || kind === 'concave') {
+    const lobes =
+      kind === 'disc'
+        ? [{ x: r.artworkRect.x + SRC / 2, y: r.artworkRect.y + SRC / 2, r: DISC_R }]
+        : [
+            { x: r.artworkRect.x + LOBE_A.x, y: r.artworkRect.y + LOBE_A.y, r: LOBE_R },
+            { x: r.artworkRect.x + LOBE_B.x, y: r.artworkRect.y + LOBE_B.y, r: LOBE_R },
+          ]
     for (let y = 0; y < r.size.h; y++) {
       for (let x = 0; x < r.size.w; x++) {
-        out[y * r.size.w + x] = Math.max(0, Math.hypot(x + 0.5 - cx, y + 0.5 - cy) - DISC_R)
+        let d = Infinity
+        for (const l of lobes) d = Math.min(d, Math.hypot(x + 0.5 - l.x, y + 0.5 - l.y) - l.r)
+        out[y * r.size.w + x] = Math.max(0, d)
       }
     }
   } else {
@@ -375,9 +430,45 @@ function vertexReachOf(
   expect(handle.hull.kind, 'vertexReachOf wants a traced polygon').toBe('polygons')
   const texel = handle.front.w / dims.w
   const k = handle.front.h / KNOB_REFERENCE_PX / texel
-  const m = measureHull(field, dims.w, dims.h, handle.hull as PackedHull, 4 / texel)
+  // No `sampleStep`: it only refines `segmentMin`, which this measurement does not read, and the
+  // value `source()` traces at is `HULL_SAMPLE_PX / texel` — a private constant in `sheet.ts` that
+  // this file has no business mirroring for an argument that changes nothing it looks at.
+  const m = measureHull(field, dims.w, dims.h, handle.hull as PackedHull)
   return { min: m.vertexMin / k, max: m.vertexMax / k }
 }
+
+/**
+ * `paper-shader.ts`'s own `ANG_FREQ`, mirrored here the way ruling R11 mirrors `CHEW_REACH`: it is
+ * a GLSL constant inside the shader source string and there is no TS export to import. The two must
+ * move together — if `ANG_FREQ` changes in `paper-shader.ts`, this changes with it.
+ */
+const ANG_FREQ = 1.2
+
+/**
+ * The side of the lattice `baseAngular` interpolates the base field on, in REFERENCE px.
+ *
+ * `paper-shader.ts` writes the cell as `uPlanePx / (uTearFreq * ANG_FREQ)` working px and
+ * `uPlanePx` is the front's height, so the front cancels out of the reference-px form entirely and
+ * this depends on `tearFreq` alone: 417 reference px at `tearFreq 2`, 93 at the shipped 9 (the
+ * figure the shader's own comment quotes), 35 at 24.
+ */
+const angCellRef = (tearFreq: number): number =>
+  KNOB_REFERENCE_PX / (Math.max(tearFreq, 1e-4) * ANG_FREQ)
+
+/**
+ * How far `baseAngular` pulls the contour INWARD on a convex arc of radius `rhoRef`, in reference px
+ * — **the third known boundary of `edge-derive.ts`**, and the one this task found.
+ *
+ * `baseAngular` replaces the base field `tight + W` with its piecewise-linear interpolant on that
+ * lattice and blends the two with weight `uTearAngular`; `tearOf` then adds its octaves on top of
+ * `baseAng`, not on top of `base`. `edge-derive.ts` models the octaves and not this term. On a
+ * convex arc the interpolant of a concave function lies below it by the chord sag `L^2 / (8 rho)`,
+ * so the contour is pulled in by `ang * L^2 / (8 rho)`: 51 reference px at `tearFreq 2` on this
+ * fixture, 2.5 at the shipped 9, 0.4 at 24 — a `1 / tearFreq^2` law, which is why the shipped
+ * default is barely touched and the descriptor's minimum is not.
+ */
+const angPullRef = (tearFreq: number, tearAngular: number, rhoRef: number): number =>
+  (tearAngular * angCellRef(tearFreq) ** 2) / (8 * rhoRef)
 
 /** The field dimensions `source()` derives for this handle (`fieldDimsFor` in `sheet.ts`). */
 const fieldDims = (handle: PaperSheetHandle): Size =>
@@ -528,6 +619,28 @@ function cross(o: Record<string, readonly number[]>): readonly Knobs[] {
 }
 
 /**
+ * Writes a measurement table where a reader can find it, and logs it.
+ *
+ * Vitest's browser mode swallows `console.log` under the default reporter — verified, `grep` over a
+ * full run finds no trace of it — so a measurement that only logs is a measurement nobody can
+ * reproduce. The `console.log` is kept because a non-default reporter does surface it, but the file
+ * is what makes the tables real: `packages/paper/src/__screenshots__/<name>.txt`, beside the failure
+ * frames Vitest itself writes there and gitignored on the same line. They are the evidence behind
+ * this task's report and re-running one `it` regenerates them.
+ *
+ * A run that cannot write — a fresh clone with no `__screenshots__` directory yet — is not a failing
+ * run: these tables are a readout, not a gate, and the assertions above them do not depend on the
+ * write succeeding.
+ */
+async function publish(name: string, rows: readonly string[]): Promise<void> {
+  const text = rows.join('\n') + '\n'
+  console.log(`[edge-redesign] ${name}, reference px\n${text}`)
+  await commands
+    .writeFile(`packages/paper/src/__screenshots__/${name}.txt`, text)
+    .catch(() => undefined)
+}
+
+/**
  * A frame committed under `packages/paper/src/__screenshots__/edge-redesign/`, gzipped and base64'd
  * at capture time — a raw 308x308 RGBA readback is 380 kB and does not belong in the history at
  * that size.
@@ -543,7 +656,7 @@ async function loadBaseline(name: string): Promise<Cell> {
     front: new Uint8Array(await new Response(stream).arrayBuffer()),
     size: json.size,
     artworkRect: json.artworkRect,
-    handle: null as unknown as PaperSheetHandle,
+    handle: null,
     alpha: LOGO_ALPHA,
   }
 }
@@ -553,10 +666,45 @@ async function loadBaseline(name: string): Promise<Cell> {
 // ---------------------------------------------------------------------------------------------
 
 describe('the width does not depend on the shape knobs (design 2026-09-05 §10)', () => {
+  const chewReach = () => CHEW_REACH * Number(defaultsFor(TORN_CLEAN).chew)
+  /** The radius of the disc's own PAPER contour, in reference px: the disc plus one width. */
+  const DISC_RHO_REF = DISC_R * (KNOB_REFERENCE_PX / 324) + W
+  /** `tearFloor = tight + 0.4 * uBaseBias` (`paper-shader.ts`), as a fraction of `W`. */
+  const FLOOR_FRACTION = 0.4
+
+  /**
+   * The instrument's own error, measured in this run rather than guessed.
+   *
+   * At `edgeVariance 0` the tear budget clamps to zero (`edge-derive.ts`'s "Known boundaries"), so
+   * the true band is exactly `W +- CHEW_REACH * chew` and whatever the raster reads instead of that
+   * is its own error: the coverage threshold, the 8-bit distance encode and the field's resolution.
+   *
+   * **At `tearAngular 0`, and that is load-bearing.** A control taken at the shipped `0.8` is
+   * contaminated by `baseAngular` — the very term the sweep is trying to bound — and reads 1.9
+   * reference px lower for that reason alone (measured: 37.13 against 39.01). Calibrating on a
+   * contaminated control is how the first version of this case came to pass a cell whose contour was
+   * sitting on the shader's floor.
+   *
+   * The control is an ASSERTION as well as a calibration, and it has to be: a defect in the
+   * derivation would otherwise widen the control and the tolerance together and the sweep would
+   * absorb its own regression. Verified by negative probe (ruling R3's own defect, a literal
+   * variance in place of the resolved knob) — it is caught HERE, before the sweep runs.
+   */
+  async function instrumentError() {
+    const c = await cell(TORN_CLEAN, { edgeVariance: 0, tearAngular: 0 }, DISC_ALPHA)
+    const control = reachOf(c)
+    const bound = 3 * refPerTexel(c.size)
+    expect(Math.abs(control.min - (W - chewReach())), 'control min').toBeLessThanOrEqual(bound)
+    expect(Math.abs(control.max - (W + chewReach())), 'control max').toBeLessThanOrEqual(bound)
+    return {
+      lo: Math.max(0, W - chewReach() - control.min),
+      hi: Math.max(0, control.max - (W + chewReach())),
+      slack: 0.5 * refPerTexel(c.size),
+      control,
+    }
+  }
+
   it('keeps the reach inside W (1 +- v) across every shape knob', async () => {
-    // The instrument's own error, measured in this run rather than guessed (see the header). At
-    // `edgeVariance 0` the tear budget clamps to zero, so the true band is exactly `W +- chewReach`.
-    const chewReach = CHEW_REACH * Number(defaultsFor(TORN_CLEAN).chew)
     const amps = tearAmpsFor({
       widthRef: W,
       variance: 0,
@@ -564,90 +712,229 @@ describe('the width does not depend on the shape knobs (design 2026-09-05 §10)'
       tearAngular: Number(defaultsFor(TORN_CLEAN).tearAngular),
       chew: Number(defaultsFor(TORN_CLEAN).chew),
     })
-    expect(amps, 'the clamp is what makes the control a control').toEqual({
-      tearAmp: 0,
-      midAmp: 0,
-    })
-    const controlCell = await cell(TORN_CLEAN, { edgeVariance: 0 }, DISC_ALPHA)
-    const control = reachOf(controlCell)
-    // The control is an ASSERTION as well as a calibration, and it has to be: a defect in the
-    // derivation would otherwise widen the control and the tolerance together, and the sweep below
-    // would absorb its own regression. Verified by negative probe — forcing `variance: 1` into both
-    // `tearAmpsFor` and `hullBandFor` (ruling R3's own defect) is caught HERE, on the control,
-    // before the sweep runs. Three texels is the whole of what the raster owes: the coverage
-    // threshold, the 8-bit distance encode and the field's own resolution.
-    const bound = 3 * refPerTexel(controlCell.size)
-    expect(Math.abs(control.min - (W - chewReach)), 'control min').toBeLessThanOrEqual(bound)
-    expect(Math.abs(control.max - (W + chewReach)), 'control max').toBeLessThanOrEqual(bound)
-    const errLo = Math.max(0, W - chewReach - control.min)
-    const errHi = Math.max(0, control.max - (W + chewReach))
+    expect(amps, 'the clamp is what makes the control a control').toEqual({ tearAmp: 0, midAmp: 0 })
+    const err = await instrumentError()
 
-    const rows: string[] = []
-    for (const shape of ['smooth', 'torn'] as const) {
-      const spec: EdgeSpec = { shape, finish: 'clean', widthUnit: 'px' }
-      const sweep =
-        shape === 'torn'
-          ? cross({
-              tearFreq: [2, 9, 24],
-              tearAngular: [0, 0.8, 1],
-              looseness: [0, 0.5, 1],
-              tearMix: [0, 0.6, 1],
-            })
-          : cross({ angularity: [0, 0.7, 1] })
-      for (const knobs of sweep) {
-        const r = await cell(spec, knobs, DISC_ALPHA)
-        const dims = fieldDims(r.handle)
-        const measured =
-          shape === 'torn'
-            ? reachOf(r)
-            : vertexReachOf(r.handle, cpuField(r.handle, dims, DISC_ALPHA), dims)
-        // Two texels on top of the instrument's measured error: the raster resolves nothing finer
-        // than one, and under `smooth` the polygon was traced on the GPU flood's field and measured
-        // against the CPU one, which disagree by up to the flood's own half texel.
-        const slack = 2 * refPerTexel(r.size)
-        const where = `${shape} ${JSON.stringify(knobs)}`
-        rows.push(`${where} -> [${measured.min.toFixed(2)}, ${measured.max.toFixed(2)}]`)
-        expect(measured.min, where).toBeGreaterThanOrEqual(W * (1 - V) - errLo - slack)
-        expect(measured.max, where).toBeLessThanOrEqual(W * (1 + V) + errHi + slack)
-      }
+    const rows: string[] = [
+      `control (torn, edgeVariance 0, tearAngular 0) [${err.control.min.toFixed(2)}, ${err.control.max.toFixed(2)}]` +
+        ` -> errLo ${err.lo.toFixed(2)} errHi ${err.hi.toFixed(2)} slack ${err.slack.toFixed(2)}`,
+    ]
+
+    // `smooth` is measured on VERTICES and calibrates per `angularity`: the Douglas-Peucker
+    // tolerance is `toleranceFor(angularity)`, so the vertex instrument is a different one at each
+    // value (measured: 6.21 reference px of error at 0, 2.89 at 0.7 and at 1). Borrowing the
+    // RASTER's own `errLo` for a measurement that never touches a raster, which is what the first
+    // version of this case did, is not a calibration of anything.
+    for (const angularity of [0, 0.7, 1]) {
+      const control = await cell(SMOOTH_CLEAN, { angularity, edgeVariance: 0 }, DISC_ALPHA)
+      const cd = fieldDims(handleOf(control))
+      const c = vertexReachOf(handleOf(control), cpuField(handleOf(control), cd, DISC_ALPHA), cd)
+      // At `edgeVariance 0` the band `hullBandFor` hands the tracer collapses onto the single
+      // distance `W`, so every vertex must sit there.
+      const bound = 3 * refPerTexel(control.size)
+      expect(Math.abs(c.min - W), `smooth control min @ ${angularity}`).toBeLessThanOrEqual(bound)
+      expect(Math.abs(c.max - W), `smooth control max @ ${angularity}`).toBeLessThanOrEqual(bound)
+      const lo = Math.max(0, W - c.min)
+      const hi = Math.max(0, c.max - W)
+      rows.push(
+        `control (smooth, edgeVariance 0, angularity ${angularity}) [${c.min.toFixed(2)}, ${c.max.toFixed(2)}]` +
+          ` -> errLo ${lo.toFixed(2)} errHi ${hi.toFixed(2)}`,
+      )
+      const r = await cell(SMOOTH_CLEAN, { angularity }, DISC_ALPHA)
+      const rd = fieldDims(handleOf(r))
+      const m = vertexReachOf(handleOf(r), cpuField(handleOf(r), rd, DISC_ALPHA), rd)
+      const where = `smooth angularity ${angularity}`
+      rows.push(`${where} -> [${m.min.toFixed(2)}, ${m.max.toFixed(2)}]`)
+      expect(m.min, where).toBeGreaterThanOrEqual(W * (1 - V) - lo - err.slack)
+      expect(m.max, where).toBeLessThanOrEqual(W * (1 + V) + hi + err.slack)
     }
-    // measurement, not a gate — the band above is the gate; this is the readout the report quotes.
-    expect(rows).toHaveLength(84)
+
+    const sweep = cross({
+      tearFreq: [2, 9, 24],
+      tearAngular: [0, 0.8, 1],
+      looseness: [0, 0.5, 1],
+      tearMix: [0, 0.6, 1],
+    })
+    for (const knobs of sweep) {
+      const r = await cell(TORN_CLEAN, knobs, DISC_ALPHA)
+      const m = reachOf(r)
+      const pull = angPullRef(Number(knobs.tearFreq), Number(knobs.tearAngular), DISC_RHO_REF)
+      // The law each cell is held to, in reference px:
+      //
+      //  - `W (1 - v)`, the invariant itself, wherever `baseAngular` cannot move the contour by more
+      //    than the raster can resolve — every `tearAngular 0` cell, and every cell whose lattice is
+      //    fine enough that the chord sag is under half a texel;
+      //  - `W (1 - v) - pull` where that term bites, which is the THIRD known boundary and is not
+      //    part of §10's claim. It is asserted rather than skipped so that every cell of the sweep
+      //    is still held to a bound, and the boundary itself is pinned by the case below;
+      //  - and, under both, the shader's own `tearFloor` — `0.4 W`, less the teeth `chew` puts under
+      //    it — which is what actually stops the contour at `tearFreq 2`.
+      const floor = FLOOR_FRACTION * W - chewReach()
+      const invariant = W * (1 - V)
+      const holds = pull <= err.slack
+      const low = (holds ? invariant : Math.max(floor, invariant - pull)) - err.lo - err.slack
+      const where = `torn ${JSON.stringify(knobs)}`
+      rows.push(
+        `${where} -> [${m.min.toFixed(2)}, ${m.max.toFixed(2)}] pull ${pull.toFixed(2)}` +
+          ` law ${holds ? 'W(1-v)' : 'boundary'} low ${low.toFixed(2)}`,
+      )
+      expect(m.min, where).toBeGreaterThanOrEqual(low)
+      expect(m.max, where).toBeLessThanOrEqual(W * (1 + V) + err.hi + err.slack)
+    }
+
+    // measurement, not a gate — the laws above are the gate. Printed so the report's table can be
+    // reproduced by re-running this one case.
+    await publish('reach-sweep', rows)
+    expect(rows).toHaveLength(sweep.length + 7)
+  }, 900_000)
+
+  /**
+   * **The third known boundary, and the finding this task exists to have produced.**
+   *
+   * `baseAngular` (`paper-shader.ts`) replaces the base field with its piecewise-linear interpolant
+   * on a `KNOB_REFERENCE_PX / (tearFreq * ANG_FREQ)` lattice, blended at weight `uTearAngular`, and
+   * `tearOf` then adds its octaves on top of THAT. `edge-derive.ts` does not model the term at all,
+   * so `W (1 - v)` is not the law at low `tearFreq` and non-zero `tearAngular`: the contour is
+   * pulled inward by the chord sag until the shader's own `tearFloor` catches it.
+   *
+   * The mechanism is asserted, not only its symptom:
+   *
+   * 1. at `tearFreq 2` the reach depends on `tearAngular` and on nothing else this case varies — at
+   *    `0` the contour is where the control is, at the shipped `0.8` it is on the floor, and the
+   *    whole band TRANSLATES rather than widening, which scatter would not do;
+   * 2. the swing follows `1 / tearFreq^2`, so the same swing at `tearFreq 24` is an order of
+   *    magnitude smaller;
+   * 3. the floor is where it stops — pinned from BOTH sides, so halving or removing `tearFloor`
+   *    fails this case rather than quietly widening the band.
+   */
+  it('is pulled to the tear floor by baseAngular at low tearFreq, and stops there', async () => {
+    const err = await instrumentError()
+    const floor = FLOOR_FRACTION * W - chewReach()
+    const at = async (tearFreq: number, tearAngular: number) =>
+      reachOf(await cell(TORN_CLEAN, { edgeVariance: 0, tearFreq, tearAngular }, DISC_ALPHA))
+
+    const ang = Number(defaultsFor(TORN_CLEAN).tearAngular)
+    const lowFlat = await at(2, 0)
+    const lowAngular = await at(2, ang)
+    const highFlat = await at(24, 0)
+    const highAngular = await at(24, ang)
+
+    // 1. `tearAngular` alone moves it, and at `tearFreq 2` it moves it out of the band entirely.
+    expect(
+      Math.abs(lowFlat.min - err.control.min),
+      'at tearAngular 0 the frequency changes nothing',
+    ).toBeLessThanOrEqual(err.slack)
+    expect(
+      lowAngular.min,
+      'the band is breached — this is the boundary, not a defect in the test',
+    ).toBeLessThan(W * (1 - V) - err.lo - err.slack)
+    expect(lowAngular.max, 'the band translates, it does not widen').toBeLessThan(
+      lowFlat.max - err.lo,
+    )
+
+    // 2. `1 / tearFreq^2`: the same swing twelve times finer is at least ten times smaller.
+    const lowDrop = lowFlat.min - lowAngular.min
+    const highDrop = Math.abs(highFlat.min - highAngular.min)
+    expect(lowDrop, `drop at freq 2 ${lowDrop} against at 24 ${highDrop}`).toBeGreaterThan(
+      10 * highDrop,
+    )
+    expect(angPullRef(2, ang, DISC_RHO_REF) / angPullRef(24, ang, DISC_RHO_REF)).toBeCloseTo(144, 6)
+
+    // 3. It stops ON the floor: not below it, and not above it either.
+    expect(lowAngular.min, 'below the floor').toBeGreaterThanOrEqual(floor - err.lo - err.slack)
+    expect(lowAngular.min, 'above the floor').toBeLessThanOrEqual(floor + err.hi + err.slack)
   }, 600_000)
 
   /**
-   * `edge-derive.ts`'s "Known boundaries": below `W v = CHEW_REACH * chew` the tear budget clamps to
-   * zero and the lower reach becomes `W - CHEW_REACH * chew`, STRICTLY BELOW the `W (1 - v)` the
-   * band identity would give. A variance sweep starting at 0 walks straight into that regime, so
-   * the identity is gated outside it above, and the clamped behaviour is asserted here instead
-   * rather than left as a hole. The clamp itself is exact arithmetic and is asserted as such; what
-   * the raster adds is that the rendered band really does collapse with it.
+   * `edge-derive.ts`'s FIRST known boundary: below `W v = CHEW_REACH * chew` the tear budget clamps
+   * to zero and the lower reach becomes `W - CHEW_REACH * chew`, below the `W (1 - v)` the band
+   * identity would give. Its SECOND: past `v > 0.6` the floor `tearFloor = tight + 0.4 W` binds
+   * first and the true lower reach is `max(W (1 - v), 0.4 W)`.
+   *
+   * Both are walked here, at the boundary values themselves and on either side, because
+   * `edgeVariance` is not a shape knob and so is absent from the sweep above — neither boundary was
+   * otherwise visited.
    */
-  it('clamps the tear budget to zero below W v = CHEW_REACH * chew, and the contour collapses with it', async () => {
+  it('walks the edgeVariance axis across both of edge-derive.ts own known boundaries', async () => {
     const chew = Number(defaultsFor(TORN_CLEAN).chew)
-    const boundary = (CHEW_REACH * chew) / W // 0.0613 at the defaults
-    expect(V, 'the shipped variance is well outside the clamped regime').toBeGreaterThan(boundary)
-    for (const v of [0, boundary * 0.5]) {
-      const amps = tearAmpsFor({
+    const clampBoundary = (CHEW_REACH * chew) / W // 0.0613 at the defaults
+    const floorBoundary = 1 - FLOOR_FRACTION // where `W (1 - v)` meets `0.4 W`
+    expect(clampBoundary).toBeCloseTo(0.0613, 4)
+    expect(floorBoundary).toBeCloseTo(0.6, 12)
+    expect(V, 'the shipped variance sits between the two boundaries').toBeGreaterThan(clampBoundary)
+    expect(V).toBeLessThan(floorBoundary)
+
+    for (const v of [0, clampBoundary * 0.5, clampBoundary]) {
+      const a = tearAmpsFor({
         widthRef: W,
         variance: v,
-        tearMix: 0.6,
-        tearAngular: 0.8,
+        tearMix: Number(defaultsFor(TORN_CLEAN).tearMix),
+        tearAngular: Number(defaultsFor(TORN_CLEAN).tearAngular),
         chew,
       })
-      expect(amps.tearAmp, `v ${v}`).toBe(0)
-      expect(amps.midAmp, `v ${v}`).toBe(0)
-      // `W - CHEW_REACH * chew` is strictly below `W (1 - v)` exactly where the clamp engages.
-      expect(W - CHEW_REACH * chew).toBeLessThan(W * (1 - v))
+      expect(a.tearAmp, `v ${v}`).toBe(0)
+      expect(a.midAmp, `v ${v}`).toBe(0)
+      expect(W - CHEW_REACH * chew, `v ${v}`).toBeLessThanOrEqual(W * (1 - v))
     }
-    const clamped = reachOf(await cell(TORN_CLEAN, { edgeVariance: 0 }, DISC_ALPHA))
-    const full = reachOf(await cell(TORN_CLEAN, {}, DISC_ALPHA))
-    // The rendered band collapses onto `chew` alone: at least three times narrower than the shipped
-    // one, and sitting inside it rather than beside it.
-    expect(clamped.max - clamped.min).toBeLessThan((full.max - full.min) / 3)
-    expect(clamped.min).toBeGreaterThan(full.min)
-    expect(clamped.max).toBeLessThan(full.max)
-  }, 300_000)
+
+    // Above the shipped default the RESERVE is the binding constraint, not the band: `freezeOverscan`
+    // froze it at `VARIANCE_KNOB.default`, so these values need a sheet of their own (see `cell`).
+    const err = await instrumentError()
+    const floor = FLOOR_FRACTION * W - chewReach()
+    const pull = angPullRef(
+      Number(defaultsFor(TORN_CLEAN).tearFreq),
+      Number(defaultsFor(TORN_CLEAN).tearAngular),
+      DISC_RHO_REF,
+    )
+    const rows: string[] = []
+    for (const v of [clampBoundary, 0.3, V, floorBoundary, 0.8]) {
+      const m = reachOf(await cell(TORN_CLEAN, { edgeVariance: v }, DISC_ALPHA, 0.25))
+      rows.push(`edgeVariance ${v.toFixed(4)} -> [${m.min.toFixed(2)}, ${m.max.toFixed(2)}]`)
+      // `max(W (1 - v), 0.4 W)` is the law across the whole axis — the identity below 0.6, the floor
+      // above it — less the shipped `tearFreq`'s own `baseAngular` allowance, which every one of
+      // these cells carries.
+      const low = Math.max(floor, W * (1 - v) - pull) - err.lo - err.slack
+      expect(m.min, `edgeVariance ${v}`).toBeGreaterThanOrEqual(low)
+    }
+    await publish('edge-variance-axis', rows)
+    expect(rows).toHaveLength(5)
+  }, 600_000)
+
+  /**
+   * **The outward direction, which a disc cannot see.**
+   *
+   * The same interpolant that pulls inward on a convex arc pushes OUTWARD at a reflex vertex —
+   * `paper-shader.ts`'s own header for `baseAngular` says so: "the interpolant of a convex SDF
+   * exceeds it outside every reflex vertex". Inward costs the width claim; outward costs §4's
+   * reserve, and a reach past the reserve is visible clipping rather than a cosmetic difference.
+   *
+   * Only the UPPER bound is asserted, against the sprite's own frozen reserve radius. The inward
+   * side of a concave fixture is not a width measurement at all — the sheet closes over the notch —
+   * and is left to the disc.
+   */
+  it('never reaches past the frozen reserve, on a silhouette with reflex vertices', async () => {
+    const rows: string[] = []
+    const cases: readonly Knobs[] = [
+      {},
+      { tearFreq: 2 },
+      { tearFreq: 24 },
+      { tearAngular: 1 },
+      { tearMix: 1 },
+    ]
+    for (const knobs of cases) {
+      const r = await cell(TORN_CLEAN, knobs, CONCAVE_ALPHA)
+      const m = reachOf(r)
+      const reserve = handleOf(r).reserve.radius
+      rows.push(
+        `concave ${JSON.stringify(knobs)} -> max ${m.max.toFixed(2)} of reserve ${reserve.toFixed(2)}`,
+      )
+      // The reserve is the paint radius PLUS `EDGE_SLOP_REFERENCE_PX`; the reach has to fit inside
+      // the whole of it, which is what `checkGuardBand` protects and what clips when it does not.
+      expect(m.max, `concave ${JSON.stringify(knobs)}`).toBeLessThanOrEqual(reserve)
+    }
+    await publish('concave-outward-reach', rows)
+    expect(rows).toHaveLength(cases.length)
+  }, 600_000)
 })
 
 describe('both contour shapes leave a solid annulus (design 2026-09-05 §5.1, §8)', () => {
@@ -673,8 +960,8 @@ describe('edgeWidth 0 (design 2026-09-05 §7, §2.5)', () => {
     const decorated = await cell(spec, { edgeWidth: 0, deckleWidth: 40, fibers: 1, tearShadow: 1 })
     const plain = await cell(spec, { edgeWidth: 0, deckleWidth: 0, fibers: 0, tearShadow: 0 })
     expect(pixelsDiffer(decorated.front, plain.front)).toBe(false) // §2.5's zero rule
-    expect(zero.handle.hull).toBe(HULL_USE_ALPHA) // no polygon
-    expect(zero.handle.sdfRes).toBeGreaterThan(0) // the tight field still IS built
+    expect(handleOf(zero).hull).toBe(HULL_USE_ALPHA) // no polygon
+    expect(handleOf(zero).sdfRes).toBeGreaterThan(0) // the tight field still IS built
   }, 300_000)
 })
 
