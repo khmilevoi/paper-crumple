@@ -61,20 +61,20 @@ test('ABORTED never reaches the consumer through the fields (§7)', async () => 
 })
 
 test('unmount aborts the in-flight build', async () => {
-  let seen: AbortSignal | null = null
+  const seen: { current: AbortSignal | null } = { current: null }
   const gate = deferred<BlitStage>()
   const harness = await renderHook(() =>
     usePaperScene({
       create: (signal) => {
-        seen = signal
+        seen.current = signal
         return gate.promise
       },
       deps: [1],
     }),
   )
-  expect(seen?.aborted).toBe(false)
+  expect(seen.current?.aborted).toBe(false)
   await harness.unmount()
-  expect(seen?.aborted).toBe(true)
+  expect(seen.current?.aborted).toBe(true)
 })
 
 test('unmount disposes the landed stage — §1 covers the loser only', async () => {

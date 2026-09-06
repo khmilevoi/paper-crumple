@@ -32,11 +32,11 @@ test('the handed-down listener carries a pre-mount error to SceneOptions.onError
 
 test('the handed-down listener stops forwarding the moment create resolves (§7)', async () => {
   const onError = vi.fn()
-  let handedDown: ((e: StageEvent<'error'>) => void) | null = null
+  const handedDown: { current: ((e: StageEvent<'error'>) => void) | null } = { current: null }
   const harness = await renderHook(() =>
     usePaperScene({
       create: async (_signal, forward) => {
-        handedDown = forward
+        handedDown.current = forward
         return createFakeStage().stage
       },
       deps: [1],
@@ -45,7 +45,7 @@ test('the handed-down listener stops forwarding the moment create resolves (§7)
   )
   await flush()
   expect(onError).not.toHaveBeenCalled()
-  handedDown?.(errorEvent('after resolve'))
+  handedDown.current?.(errorEvent('after resolve'))
   expect(onError).not.toHaveBeenCalled()
   await harness.unmount()
 })
@@ -53,11 +53,11 @@ test('the handed-down listener stops forwarding the moment create resolves (§7)
 test('a post-resolve error arrives exactly once, through stage.on', async () => {
   const onError = vi.fn()
   const fake = createFakeStage()
-  let handedDown: ((e: StageEvent<'error'>) => void) | null = null
+  const handedDown: { current: ((e: StageEvent<'error'>) => void) | null } = { current: null }
   const harness = await renderHook(() =>
     usePaperScene({
       create: async (_signal, forward) => {
-        handedDown = forward
+        handedDown.current = forward
         // What a real consumer does: spread it into paperStage, which registers it permanently.
         fake.stage.on('error', forward)
         return fake.stage
@@ -67,7 +67,7 @@ test('a post-resolve error arrives exactly once, through stage.on', async () => 
     }),
   )
   await flush()
-  expect(handedDown).not.toBeNull()
+  expect(handedDown.current).not.toBeNull()
   fake.emit('error', errorEvent('post-resolve'))
   expect(onError).toHaveBeenCalledTimes(1)
   await harness.unmount()
@@ -124,11 +124,11 @@ test('a superseded build stops forwarding through its own stage listener', async
 test('a pre-mount error on a build that is then aborted is not forwarded after cleanup', async () => {
   const onError = vi.fn()
   const gate = deferred<BlitStage>()
-  let handedDown: ((e: StageEvent<'error'>) => void) | null = null
+  const handedDown: { current: ((e: StageEvent<'error'>) => void) | null } = { current: null }
   const harness = await renderHook(() =>
     usePaperScene({
       create: (_signal, forward) => {
-        handedDown = forward
+        handedDown.current = forward
         return gate.promise
       },
       deps: [1],
@@ -136,7 +136,7 @@ test('a pre-mount error on a build that is then aborted is not forwarded after c
     }),
   )
   await harness.unmount()
-  handedDown?.(errorEvent('too late'))
+  handedDown.current?.(errorEvent('too late'))
   expect(onError).not.toHaveBeenCalled()
   gate.resolve(createFakeStage().stage)
   await flush()
