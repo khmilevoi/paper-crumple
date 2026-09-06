@@ -63,9 +63,10 @@ export type ViewTarget = BlitTarget | DirectTarget | HostedTarget
  * comes back.
  *
  * `budget` is a bare byte count and is sugar for `stage.budget({ bytes })`, which keeps its
- * object form because it also carries `artworkSlots`. `onError` is the pre-mount form of
- * `stage.on('error')`: a listener attached after the factory resolves cannot observe an error
- * raised inside it. Both methods remain — the options are a shorthand and not a replacement.
+ * object form as a stable, additive extension point for a future budget field (§15). `onError`
+ * is the pre-mount form of `stage.on('error')`: a listener attached after the factory resolves
+ * cannot observe an error raised inside it. Both methods remain — the options are a shorthand
+ * and not a replacement.
  */
 export interface StageOptionsBase {
   sheet: SheetRenderer

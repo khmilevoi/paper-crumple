@@ -164,7 +164,7 @@ export interface StageCommon {
    *  still saves and restores. Renamed from `stage.frame` because `frame` means a stored geometry
    *  frame everywhere else in the design (§7.3). */
   batch<T>(fn: () => T): T
-  budget(o: { bytes?: number; artworkSlots?: number }): void
+  budget(o: { bytes?: number }): void
   usage(): FrontLruUsage & { readonly handles: number; readonly attached: number }
   pin(key: string): void
   unpin(key: string): void
@@ -2282,15 +2282,12 @@ function buildStage(p: StageParts): BuiltStage {
       }
     },
 
-    budget: (o: { bytes?: number; artworkSlots?: number }) => {
+    budget: (o: { bytes?: number }) => {
       if (o.bytes !== undefined) {
         budgetedBytes = o.bytes
         p.lru.setBudget(o.bytes)
         checkUnreclaimable()
       }
-      // `artworkSlots` tunes Pool A's slot count (§8.5), but `ArtworkPool` (P6, on the trunk)
-      // exposes no setter for it — inventing one here would be an edit to a neighbour's module.
-      // Accepted and currently a no-op.
     },
     usage: () => ({
       ...p.lru.usage(),
