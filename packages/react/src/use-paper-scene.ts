@@ -2,6 +2,7 @@ import { ABORTED, assertSingleCore, GlError } from '@paper-crumple/core'
 import type {
   BlitStage,
   PoseRef,
+  StageEvent,
   StagePlayOptions,
   StagePlayReport,
   View,
@@ -68,6 +69,10 @@ function duplicateCore(): Error | undefined {
 
 export function usePaperScene(o: SceneOptions): Scene {
   const create = useEvent(o.create)
+  /** One dispatcher fed from two places, and the binding keeps it single (§7). */
+  const dispatchError = useEvent((e: StageEvent<'error'>): void => {
+    o.onError?.(e)
+  })
 
   const [core] = useState<SceneCore>(() => ({
     status: 'building',
@@ -82,7 +87,20 @@ export function usePaperScene(o: SceneOptions): Scene {
 
   useEffect(() => {
     const controller = new AbortController()
+    const offs: Array<() => void> = []
     let landed: BlitStage | null = null
+    let resolved = false
+
+    /**
+     * Handed down so the consumer can spread it into `paperStage`'s own `onError`, which core
+     * registers on the bus permanently. It therefore forwards only while the scene is still
+     * building; `stage.on('error')` takes over the moment `create` resolves, and nobody sees an
+     * error twice (§7).
+     */
+    const preMount = (e: StageEvent<'error'>): void => {
+      if (resolved || controller.signal.aborted) return
+      dispatchError(e)
+    }
 
     // eslint-disable-next-line react-hooks/immutability -- `core` is an intentionally mutable record held once per hook instance and never replaced; `store.bump()` publishes each write (§5.5).
     core.status = 'building'
@@ -103,7 +121,8 @@ export function usePaperScene(o: SceneOptions): Scene {
     }
 
     void (async () => {
-      const built = await create(controller.signal, () => {})
+      const built = await create(controller.signal, preMount)
+      resolved = true
 
       if (controller.signal.aborted) {
         // A `create` that ignores its signal still must not leak: §1's self-cleanup covers the
@@ -122,6 +141,7 @@ export function usePaperScene(o: SceneOptions): Scene {
       }
 
       landed = built
+      offs.push(built.on('error', dispatchError))
       core.stage = built
       core.status = 'ready'
       core.error = null
@@ -135,6 +155,7 @@ export function usePaperScene(o: SceneOptions): Scene {
       // change is nobody else's to release, and reading §1 as "cleanup is handled" leaks one
       // WebGL2 context per rebuild against the ~16 the ceiling allows.
       controller.abort()
+      for (const off of offs) off()
       landed?.dispose()
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps -- §4.1: a rebuild is decided by
