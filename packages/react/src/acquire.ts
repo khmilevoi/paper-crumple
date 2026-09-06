@@ -56,6 +56,18 @@ function isLiveKeyRefusal(error: unknown, key: string): boolean {
 }
 
 /**
+ * `prepare() has no sprite under that key; add() it first` — the key is reserved (winner's `add`
+ * still in flight) and not yet in `p.sprites`. This is a symptom, not a cause: the true cause is
+ * the live-key refusal from `add`. See `stage.ts:1896-1901`.
+ */
+function isPrepareNoSpriteError(error: unknown, key: string): boolean {
+  return (
+    error instanceof SheetError &&
+    error.message.startsWith(`prepare('${key}') has no sprite under that key`)
+  )
+}
+
+/**
  * The one shape that turns a (key, source) pair into a sprite. Every place this package needs a
  * sprite goes through it — the first mount (§5.4) and the degraded swap alike (§5.3).
  */
@@ -87,7 +99,13 @@ export async function acquire(
   if (isLiveKeyRefusal(got, key)) {
     // Retryable exactly once, and only through `prepare`, which joins the winner of the race
     // instead of failing a correct sequence.
-    got = await stage.prepare(key, { signal: controller.signal })
+    const prepared = await stage.prepare(key, { signal: controller.signal })
+    // If `prepare` itself fails with the "has no sprite" error, it means the key is reserved
+    // (the winner's `add` is still in flight), so the original live-key refusal is the true cause.
+    // Keep the original error, not the symptom.
+    if (!isPrepareNoSpriteError(prepared, key)) {
+      got = prepared
+    }
   }
   // Each joiner checks its own signal after the await; "React changed its mind" is not a
   // condition a component renders, so the caller turns this into nothing at all.

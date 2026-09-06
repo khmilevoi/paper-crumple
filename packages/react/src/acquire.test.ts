@@ -105,3 +105,18 @@ test('two stages keep separate registries', () => {
   const b = createFakeStage()
   expect(stageSignal(a.stage)).not.toBe(stageSignal(b.stage))
 })
+
+test('when prepare returns "has no sprite" error, the original live-key refusal is returned (clause 5)', async () => {
+  const key = 'hero'
+  const liveKeyError = liveKeyRefusal(key)
+  const noSpriteError = new SheetError(
+    `prepare('${key}') has no sprite under that key; add() it first`,
+  )
+  const fake = createFakeStage({
+    add: async () => liveKeyError,
+    prepare: async () => noSpriteError,
+  })
+  const got = await acquire(fake.stage, key, 'hero.png', undefined, never)
+  expect(got).toBe(liveKeyError)
+  expect(fake.calls.map((c) => c.method)).toEqual(['get', 'add', 'prepare'])
+})
