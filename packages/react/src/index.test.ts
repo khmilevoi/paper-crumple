@@ -2,7 +2,7 @@ import { describe, expect, it } from 'vitest'
 import * as api from './index.js'
 
 describe('the public surface (§3)', () => {
-  it('exports exactly the scene layer, and no internals', () => {
+  it('exports exactly the scene layer and the crumple layer, and no internals', () => {
     expect(Object.keys(api).sort()).toEqual([
       'Crumple',
       'PaperScene',

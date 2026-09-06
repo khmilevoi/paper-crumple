@@ -165,6 +165,9 @@ export function useCrumple<S extends SpriteSource>(o: CrumpleOptions<S>): Crumpl
           signal: controller.signal,
         })
         store.bump()
+        // No `result instanceof Error` branch here, unlike the swap's below: the `draw('ball')`
+        // above has already resolved the same pose the entrance plays, so the failure mode the
+        // swap guards against — a target whose sprite errors mid-run — cannot arise on this path.
         void run.done.then(() => {
           if (seq === live.seq) store.bump()
         })
@@ -314,7 +317,10 @@ export function useCrumple<S extends SpriteSource>(o: CrumpleOptions<S>): Crumpl
       // returns, and `prepare` is the one demand that waits for it — reading `View.frame` any
       // earlier reads the frame the sprite is about to leave.
       const joined = await stage.prepare(sprite.key, { signal: stageSignal(stage) })
-      if (cancelled) return
+      // A detach that leaves `knobEpoch` unmoved — the scene leaving `ready` disposes the view
+      // without bumping the epoch — never runs this effect's cleanup, so `cancelled` alone is not
+      // enough: `core.view` may already have moved past `active` by the time this settles.
+      if (cancelled || core.view !== active) return
       if (joined instanceof Error) {
         report(joined)
         return

@@ -3,7 +3,8 @@
  */
 import { SheetError } from '@paper-crumple/core'
 import type { Sprite, ViewFrame } from '@paper-crumple/core'
-import { expect, test } from 'vitest'
+import { expect, test, vi } from 'vitest'
+import type { Scene } from './scene-types.js'
 import { createFakeStage } from './testing/fake-stage.js'
 import { readyScene, renderCrumple } from './testing/crumple-probe.js'
 import { deferred } from './testing/deferred.js'
@@ -121,6 +122,39 @@ test('a detached crumple joins nothing', async () => {
   const probe = await renderCrumple({ spriteKey: 'hero', src: 'hero.png' }, { scene: null })
   await probe.rerender({ scene: null })
   expect(fake.calls.filter((c) => c.method === 'prepare')).toHaveLength(0)
+  await probe.unmount()
+})
+
+test('a join that settles after a detach with no epoch move reports nothing (§4.3)', async () => {
+  const gate = deferred<Sprite | InstanceType<typeof SheetError>>()
+  const fake = createFakeStage({ prepare: () => gate.promise })
+  const onError = vi.fn()
+  const probe = await renderCrumple(
+    { spriteKey: 'hero', src: 'hero.png', onError },
+    { scene: readyScene(fake.stage) },
+  )
+  // Bump the epoch once so the join actually calls `prepare` on the now-resident sprite, and gate
+  // it open so the continuation is still pending when the detach below happens.
+  await probe.rerender({ scene: readyScene(fake.stage, { knobEpoch: 1 }) })
+  // The scene leaves 'ready' — the view is disposed by the OTHER effect, the one keyed on `stage`
+  // — while `knobEpoch` stays exactly 1, so the knobEpoch effect's cleanup never runs.
+  const detached: Scene = {
+    status: 'building',
+    stage: null,
+    error: null,
+    warnings: [],
+    lost: false,
+    generation: 1,
+    knobEpoch: 1,
+    play: async () => ({ started: [], skipped: [], failed: [], completed: false }),
+    stop: () => {},
+  }
+  await probe.rerender({ scene: detached })
+  expect(probe.current.state).toBe('detached')
+  gate.resolve(new SheetError('no record for sprite hero'))
+  await flush()
+  expect(probe.current.error).toBeNull()
+  expect(onError).not.toHaveBeenCalled()
   await probe.unmount()
 })
 

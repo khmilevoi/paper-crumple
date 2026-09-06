@@ -94,8 +94,9 @@ The scene and the crumple:
   the `scene` option, for a second scene on one page). It opens a `View` when a `ready` scene and
   an attached canvas coincide, disposes it when either goes away, acquires `spriteKey`/`src`
   through one per-stage, in-flight-deduplicated path, plays the entrance, and swaps to a new `src`
-  under the same key through `view.swapTo` (or `view.crumpleTo` if the target acquisition is already in flight) — reduced motion is consulted at the swap, not cached
-  at mount. It returns a `Crumple`: a reactive snapshot (`state`, `parked`, `pose`, `shown`, `requested`,
+  under the same key through `view.swapTo` (or `view.crumpleTo` if the target acquisition is
+  already in flight) — reduced motion is consulted at the swap, not cached at mount. It returns
+  a `Crumple`: a reactive snapshot (`state`, `parked`, `pose`, `shown`, `requested`,
   `error`, `frame`, `frameStyle`, `view`) plus the identity-stable `ref`, `play`, `stop` and
   `refresh`. `state` is one of the core's own view states while a view exists, and `'detached'`
   while none does. The `Crumple` object itself is deliberately **not** identity-stable — it is a
@@ -108,8 +109,9 @@ The scene and the crumple:
   the type level, because `size` is always `'managed'` and nobody but the stage writes `width` and
   `height` on the canvas.
 
-`CrumpleOptions`, `CrumpleProps`, `CrumpleSnapshot`, `CrumpleState` and `CrumpleFrameStyle` are exported too, for
-typing a wrapper around `useCrumple` or `<Crumple>` without redeclaring its shapes.
+`CrumpleOptions`, `CrumpleProps`, `CrumpleSnapshot`, `CrumpleState` and `CrumpleFrameStyle` are
+exported too, for typing a wrapper around `useCrumple` or `<Crumple>` without redeclaring its
+shapes.
 
 `scene.play(from, to)` and `scene.stop()` are the scene's own imperative surface; both are no-ops
 (an empty, `completed: false` report from `play`) on a scene that is not `'ready'`, so a consumer
