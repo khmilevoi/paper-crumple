@@ -11,7 +11,7 @@ import type {
 } from '@paper-crumple/core'
 import { ABORTED } from '@paper-crumple/core'
 import { useEffect, useState, useSyncExternalStore } from 'react'
-import { acquire } from './acquire.js'
+import { acquire, pendingAcquisition } from './acquire.js'
 import type { Crumple } from './crumple.js'
 import { createCrumpleCore, onRunEnd, onRunStart, onRunStep, readCrumple } from './crumple-state.js'
 import type { CrumpleOptions, CrumpleSnapshot, ReducedMotion } from './crumple-types.js'
@@ -173,6 +173,71 @@ export function useCrumple<S extends SpriteSource>(o: CrumpleOptions<S>): Crumpl
   )
 
   /**
+   * A view that is already showing something swaps rather than enters. Not `async`, and no `await`
+   * may be introduced above `swapTo`: `start` is emitted synchronously inside the call, and an
+   * `AudioContext.resume()` in a start handler only runs inside the user gesture because of it
+   * (§5.3, §7.1). Settlement is handled in a `.then` on the returned `Run`.
+   */
+  const swap = useEvent(
+    (
+      view: View,
+      stage: BlitStage,
+      opts: ResolvedOptions,
+      controller: AbortController,
+      seq: number,
+    ): void => {
+      if (prefersReducedMotion(opts.reducedMotion)) {
+        // `show()` IS the degraded swap — instant, pose 0, no run — so the accommodation needs no
+        // API of its own, and it goes through `acquire` exactly as the entrance does.
+        void (async () => {
+          const got = await acquire(stage, opts.spriteKey, opts.src, opts.pin, controller.signal)
+          if (got === ABORTED || seq !== live.seq) return
+          if (got instanceof Error) {
+            report(got)
+            return
+          }
+          const refused = view.show(got)
+          if (refused !== undefined) {
+            report(refused)
+            return
+          }
+          store.bump()
+        })()
+        return
+      }
+
+      // The in-flight map gates `swapTo` too: a concurrent second `swapTo` on a key whose `add` is
+      // still in flight is refused by `reserved`, which is private to the core. Joining the
+      // existing acquisition and handing the promise to `crumpleTo` is the same park, and costs
+      // one ingest rather than two.
+      const pending = pendingAcquisition(stage, opts.spriteKey)
+      const run =
+        pending === undefined
+          ? view.swapTo(opts.src, {
+              key: opts.spriteKey,
+              duration: opts.duration,
+              signal: controller.signal,
+            })
+          : view.crumpleTo(pending, { duration: opts.duration, signal: controller.signal })
+      store.bump()
+      void run.done.then((result) => {
+        if (seq !== live.seq) return
+        // A swap whose target fails rolls back to the previous sprite and the Run returns the
+        // target's Error, so the prop says B while the canvas shows A. Reported through `report`,
+        // the same route every other failure in this hook takes, so `onError` sees it too;
+        // `report` already bumps, so this branch and the success branch below each bump exactly
+        // once. Reported, never retried: a retry policy inside an animation library is a network
+        // policy nobody asked for.
+        if (result instanceof Error) {
+          report(result)
+          return
+        }
+        store.bump()
+      })
+    },
+  )
+
+  /**
    * The one entry point for "this view should be showing this key". Called when a view appears and
    * whenever `spriteKey` or `src` changes. Whether that is an entrance or a swap is decided by
    * whether this view is showing anything at all — which is also what makes a scene rebuild replay
@@ -203,7 +268,14 @@ export function useCrumple<S extends SpriteSource>(o: CrumpleOptions<S>): Crumpl
     const controller = new AbortController()
     live.run = controller
     store.bump()
-    enter(view, stage, opts, controller, seq)
+    // Whether this is the entrance or a swap is decided by whether the view is showing anything:
+    // `crumpleTo` on an empty view degenerates to `show()`, so there is no ball to park at before
+    // the first sprite exists, and a rebuilt stage hands back a view with nothing in it (§5.4).
+    if (view.sprite === null) {
+      enter(view, stage, opts, controller, seq)
+      return
+    }
+    swap(view, stage, opts, controller, seq)
   })
 
   const view = snapshot.view

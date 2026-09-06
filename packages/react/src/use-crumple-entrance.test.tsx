@@ -164,10 +164,18 @@ test('a scene rebuild re-acquires and replays the entrance (§5.2)', async () =>
   await probe.unmount()
 })
 
+// Rescoped by ruling (P3 task 8, 2026-09-06): this test used to reach the refusal by rerendering
+// an already-shown view with a new key, which was a second-key-on-a-shown-view rerender — that
+// is a swap since Task 8, not a re-entrance, so it no longer reaches `enter()`'s `view.show` at
+// all. The refusal it asserts is specifically the ENTRANCE's own `view.show` handling, so it is
+// rewritten to exercise that refusal on the first mount, while `view.sprite` is still `null`: the
+// acquisition is gated open so the view exists (created by `ensure()`) before its sprite is
+// resolved, `view.show` is stubbed to refuse, and only then is the acquisition allowed to settle.
 test('a show refusal is reported on error, reaches onError, and starts no run', async () => {
   stubReducedMotion(false)
+  const gate = deferred<Sprite>()
   const refused = new SheetError('this view already shows a sprite pinned elsewhere')
-  const fake = createFakeStage()
+  const fake = createFakeStage({ add: () => gate.promise })
   const onError = vi.fn()
   const probe = await renderCrumple(
     { spriteKey: 'hero', src: 'hero.png', onError },
@@ -176,14 +184,10 @@ test('a show refusal is reported on error, reaches onError, and starts no run', 
   const view = fake.views[0]?.view
   expect(view).toBeDefined()
   if (view === undefined) return
-  const originalShow = view.show.bind(view)
-  view.show = (next) => {
-    originalShow(next)
-    return refused
-  }
-  await probe.rerender({
-    options: { spriteKey: 'hero2', src: 'hero2.png', entrance: 'uncrumple', onError },
-  })
+  expect(view.sprite).toBeNull()
+  view.show = () => refused
+  gate.resolve({ key: 'hero' } as Sprite)
+  await flush()
   expect(probe.current.error).toBe(refused)
   expect(onError).toHaveBeenCalledTimes(1)
   expect(fake.calls.map((c) => c.method)).not.toContain('view.draw')
