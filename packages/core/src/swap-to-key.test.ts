@@ -132,7 +132,11 @@ describe('view.swapTo with a key that IS resident', () => {
     expect(typeof run.stop).toBe('function')
 
     await settle(timers)
-    await run
+    // The two assertions that make this a resident-branch pin rather than a restatement of
+    // `crumpleTo`'s own synchronous-`start` guarantee: pre-fix, `add()` refused the live key `b`
+    // and this run settled a `SheetError` instead of adopting.
+    expect(await run).toBeUndefined()
+    expect(view.sprite?.key).toBe('b')
     stage.dispose()
   })
 
