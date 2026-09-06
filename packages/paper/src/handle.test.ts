@@ -6,10 +6,12 @@ import {
   guardMarginsFor,
   handleBytes,
   KNOB_REFERENCE_PX,
+  overscanFromRadius,
+  percentWidthReserve,
 } from '@paper-crumple/core/unstable'
 import type { EdgeParams } from '@paper-crumple/core/unstable'
 import { packPolygons } from './hull-shape.js'
-import { VARIANCE_KNOB, WIDTH_PX_KNOB } from './paper-knobs.js'
+import { VARIANCE_KNOB, WIDTH_PCT_KNOB, WIDTH_PX_KNOB } from './paper-knobs.js'
 import {
   checkReserve,
   dimsForLongSide,
@@ -466,5 +468,56 @@ describe('checkReserve (spec 8.6)', () => {
     expect(SheetError.is(err)).toBe(true)
     expect(err?.message).toContain('re-add required')
     expect(err?.message).toContain('overscanHeadroom')
+  })
+})
+
+/**
+ * design 2026-09-05 §3.2's actual claim, and Task 8's step 1: the number on the `percent` slider is
+ * a percentage of the ARTWORK's short side, in artwork texels.
+ *
+ * Inverting the closure's own algebra would prove nothing — it would only restate
+ * `percentWidthReserve`. So this frames a real artwork under the reserve the closure produces,
+ * converts `W` back through THAT front's own `pxScale`, and checks the result against
+ * `pct * min(A.w, A.h)`, which is what the slider promises.
+ *
+ * It lives in `paper` rather than beside `percentWidthReserve` in `core` because it needs
+ * `frontForArtwork`, and `core` must not import from `paper`.
+ */
+describe('the percent width round-trip (design 2026-09-05 §3.2)', () => {
+  const number = (v: InstanceType<typeof KnobError> | number): number => {
+    expect(v).not.toBeInstanceOf(KnobError)
+    return v as number
+  }
+
+  it('lands the width the label promises, measured in artwork texels', () => {
+    // The sweep spans `WIDTH_PCT_KNOB`'s own range, with its default in the middle of the list
+    // (ruling R10: the descriptor, not the number).
+    for (const pct of [0.5, 2, Number(WIDTH_PCT_KNOB.default), 12, Number(WIDTH_PCT_KNOB.max)]) {
+      for (const [srcW, srcH] of [
+        [800, 800],
+        [1200, 400],
+        [400, 1600],
+      ]) {
+        const r = percentWidthReserve({
+          pct: pct / 100,
+          aspect: Math.min(1, srcW / srcH),
+          variance: Number(VARIANCE_KNOB.default),
+          finishTerms: 0,
+          headroom: 0,
+        })
+        const framing = frontForArtwork({
+          overscan: number(overscanFromRadius(r.radius)),
+          srcW,
+          srcH,
+          maxSize: 1024,
+          exact: false,
+        })
+        if (framing instanceof Error) return expect.fail(framing.message)
+        const widthTexels = (r.widthRef * framing.front.h) / KNOB_REFERENCE_PX
+        const shortSide = Math.min(framing.artwork.w, framing.artwork.h)
+        // One texel of tolerance: `frontForArtwork` rounds the short side and both margins.
+        expect(widthTexels, `${pct}% on ${srcW}x${srcH}`).toBeCloseTo((pct / 100) * shortSide, 0)
+      }
+    }
   })
 })

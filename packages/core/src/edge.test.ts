@@ -1,7 +1,13 @@
 import { describe, expect, it } from 'vitest'
 import { KnobError } from './errors.js'
 import { percentWidthReserve } from './edge.js'
-import { EDGE_SLOP_REFERENCE_PX, overscanFromRadius, RADIUS_CAP_REFERENCE_PX } from './overscan.js'
+import { KNOB_REFERENCE_PX } from './knobs.js'
+import {
+  EDGE_SLOP_REFERENCE_PX,
+  GUARD_MARGIN_G,
+  overscanFromRadius,
+  RADIUS_CAP_REFERENCE_PX,
+} from './overscan.js'
 
 // R14: mirrors the local `number` unwrap helper at `overscan.test.ts:31` — a new file, same
 // pattern rather than a fresh import surface for one assertion.
@@ -100,6 +106,49 @@ describe('percentWidthReserve (design 2026-09-05 §4.3)', () => {
     // "improving" the closure to hit a slightly-off target.
     expect(r.widthRef).toBeCloseTo(46.9785, 4)
     expect(r.radius).toBeCloseTo(83.8771, 4)
+  })
+
+  /**
+   * design 2026-09-05 §3.2's short-side choice, as a rotation invariance (Task 8, step 1).
+   *
+   * `W_ref` is NOT proportional to `c`: `W = pct c (S - 2 R(c))` and `R` moves with `c` too, so
+   * `a.widthRef * 768/433` is 50.6 against `b.widthRef`'s 47.0 and the naive scaling claim is
+   * simply false. The invariant is the width as a fraction of the front's own REFERENCE plane,
+   * which is what `pxScale` makes it mean downstream.
+   *
+   * The regression this is here for is `sprite-px`: quoted in reference px of front height, the
+   * same knob value gives an `avatar` and its 90-degree rotation border widths that differ by
+   * `768/433 = 1.77x` in artwork texels, because the front's height is the long side in one frame
+   * and the short side in the other. §3.2 chose the short side to make percent rotation-invariant,
+   * and this is the case that would have caught the other choice. Kept as this comment rather than
+   * as a skipped test, on the brief's own instruction: there is no `sprite-px` percent path left to
+   * call, so the failing half can only be stated, not executed.
+   *
+   * The literals here are `WIDTH_PCT_KNOB.default / 100` and `VARIANCE_KNOB.default`
+   * (`packages/paper/src/paper-knobs.ts`). Ruling R10 asks for the descriptors rather than the
+   * numbers, and this file cannot have them: `@paper-crumple/core` must not import from
+   * `@paper-crumple/paper`. Named here instead, so the two move together by review.
+   */
+  it('gives an image and its 90-degree rotation the same border width, as a fraction', () => {
+    const pct = 0.059
+    const variance = 0.53
+    const a = percentWidthReserve({
+      pct,
+      aspect: Math.min(1, 433 / 768),
+      variance,
+      finishTerms: 0,
+      headroom: 0,
+    })
+    const b = percentWidthReserve({
+      pct,
+      aspect: Math.min(1, 768 / 433),
+      variance,
+      finishTerms: 0,
+      headroom: 0,
+    })
+    const s = KNOB_REFERENCE_PX * (1 - 2 * GUARD_MARGIN_G)
+    expect(a.widthRef / (s - 2 * a.radius)).toBeCloseTo(pct * (433 / 768), 12)
+    expect(b.widthRef / (s - 2 * b.radius)).toBeCloseTo(pct, 12)
   })
 
   it('is the identity at pct 0', () => {
