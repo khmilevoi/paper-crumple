@@ -1413,6 +1413,16 @@ function buildStage(p: StageParts): BuiltStage {
      */
     function swapToMethod(src: SpriteSource, o?: SwapToOptions): Run<SwapResult> {
       if (p.isDisposed() || state === 'disposed') return settledRun(ABORTED)
+      // §5.3 — a key that is already resident is a CACHE HIT, not a failure. `add()` refuses a
+      // live key (the hull cache is keyed on (sprite key, sdfRes, hull knobs) and the bitmap is
+      // not in that key), so without this the commonest sequence in the library — A -> B -> A —
+      // fails on its third step. Adopting instead costs no fetch and no byte budget, and `src` is
+      // never read. It must sit ABOVE the mint so a cache hit does not bump `swapCounter`, and
+      // above the abort gate below, which exists only to abort an `add()` there is none of here.
+      // `p.reserved` is deliberately not consulted: a key whose add is still in flight is still
+      // refused, and joining that add is the consumer's job.
+      const resident = o?.key !== undefined ? p.sprites.get(o.key) : undefined
+      if (resident !== undefined) return view.crumpleTo(resident.sprite, o)
       // §5.3 — the caller's key when there is one, so the fold preset (`presetForImageId(key)` at
       // fit time) is stable per picture. The counter is only bumped on the minted path: a
       // caller-supplied key must not perturb the numbering of the swaps that do mint.
