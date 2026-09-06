@@ -158,9 +158,10 @@ export function usePaperScene(o: SceneOptions): Scene {
       for (const off of offs) off()
       landed?.dispose()
     }
-    // eslint-disable-next-line react-hooks/exhaustive-deps -- §4.1: a rebuild is decided by
-    // `deps` and by nothing else. `create` is useEvent-stable, and `core` and `store` are
-    // created once by useState and never replaced.
+    // §4.1: a rebuild is decided by `deps` and by nothing else. `create` is useEvent-stable, and
+    // `core` and `store` are created once by useState and never replaced, and `dispatchError` is
+    // useEvent-stable too, so none of them belongs in the dependency list.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, o.deps)
 
   const play = useEvent(
