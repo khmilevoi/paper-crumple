@@ -696,10 +696,10 @@ that is both rotation-invariant and gives a 3:1 banner the same relative border 
 than the roughly 3x mismatch a long-side or height base would produce.
 
 Worked number: at the library's default `overscanHeadroom: 0`, the percent unit's default of `5.9`
-reproduces `W = 46.9785` reference px on a square — matching the px unit's own default of `47` to
-within its 0.01 step. (An earlier draft of this default was `5.7`, derived at `edgeVariance: 0`;
-that value does not reproduce once the shipped `edgeVariance` default of `0.53` is folded in — see
-the changeset.)
+(its own step is `0.1`) reproduces `W = 46.9785` reference px on a square — a gap of `0.0215`
+reference px against the px unit's own default of `47` (step `1`). (An earlier draft of this
+default was `5.7`, derived at `edgeVariance: 0`; that value does not reproduce once the shipped
+`edgeVariance` default of `0.53` is folded in — see the changeset.)
 
 ## 8. Errors in anger
 
