@@ -12,14 +12,14 @@ import { PAPER_FS, PAPER_UNIFORMS } from './paper-shader.js'
 import { mountNeutralTiles } from './paper-tiles.js'
 import type { MountedTiles } from './paper-tiles.js'
 import { defaultsFor, descriptorsFor } from './paper-knobs.js'
-import { SMOOTH_CLEAN } from './testing/edge-cells.js'
+import {
+  ALL_FOUR_CELLS as CELLS,
+  SMOOTH_CLEAN,
+  SMOOTH_PAPER,
+  TORN_PAPER,
+} from './testing/edge-cells.js'
 
 type Err = InstanceType<typeof GlError>
-
-const SMOOTH_PAPER: EdgeSpec = { shape: 'smooth', finish: 'paper', widthUnit: 'px' }
-const TORN_CLEAN: EdgeSpec = { shape: 'torn', finish: 'clean', widthUnit: 'px' }
-const TORN_PAPER: EdgeSpec = { shape: 'torn', finish: 'paper', widthUnit: 'px' }
-const CELLS: readonly EdgeSpec[] = [SMOOTH_CLEAN, SMOOTH_PAPER, TORN_CLEAN, TORN_PAPER]
 
 // Arrays, not a single mutable slot: `scene()` runs once per `renderInto()` call, and the one
 // test below (`'produces a different silhouette under torn than under smooth'`) calls

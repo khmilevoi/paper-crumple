@@ -1,7 +1,7 @@
 import { afterEach, describe, expect, it } from 'vitest'
 import { GlError, KNOB_REFERENCE_PX } from '@paper-crumple/core'
 import { createScratchPools, drawTargetFor, FULLSCREEN_VS } from '@paper-crumple/core/unstable'
-import type { EdgeSpec } from '@paper-crumple/core/unstable'
+import { TORN_PAPER as TORN_PAPER_SPEC } from './testing/edge-cells.js'
 import { createGlFixture, type PaperGlFixture } from './testing/gl-fixture.js'
 import { silhouetteBytes } from './testing/silhouette.js'
 import { createSdfBuilder, SDF_POOL_SLOTS, sigmaFor } from './gl-sdf.js'
@@ -132,8 +132,7 @@ const FIELD = 128
 /** Working px per reference px at this front, i.e. `pxScale(FRONT.h)`. */
 const PXS = FRONT.h / KNOB_REFERENCE_PX
 
-/** The cell every measurement below is quoted against. */
-const TORN_PAPER_SPEC: EdgeSpec = { shape: 'torn', finish: 'paper', widthUnit: 'px' }
+/** The cell every measurement below is quoted against (`testing/edge-cells.ts` owns the four). */
 const TORN_PAPER_DEFAULTS = defaultsFor(TORN_PAPER_SPEC)
 
 /**

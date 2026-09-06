@@ -228,9 +228,11 @@ function readFront(texture: WebGLTexture, w: number, h: number): Uint8Array {
  *
  * `headroom` is not decoration. `freezeOverscan` takes its reserve from the factory's DEFAULT knob
  * values (§4.4), so any `edgeVariance` above `VARIANCE_KNOB.default` leaves it and `build()`
- * answers "re-add required" — measured, `edgeVariance 0.8` asks for 87.2 reference px against the
- * 83.9 a default sheet reserved. The variance-boundary case below therefore mounts its own sheet
- * with headroom, which is what a caller who wants those values has to do too.
+ * answers "re-add required". The reserve radius a value asks for is `(1 + v) W + F + e`, so against
+ * the 83.91 reference px a default sheet froze: `edgeVariance 0.6` asks for **87.2** — that is the
+ * first value of the axis case below that gets refused, and the number in its error message — and
+ * `edgeVariance 0.8` asks for **96.6**. The axis case therefore mounts its own sheet with headroom,
+ * which is what a caller who wants those values has to do too.
  */
 async function cell(
   spec: EdgeSpec,
@@ -801,7 +803,8 @@ describe('the width does not depend on the shape knobs (design 2026-09-05 §10)'
    *
    * 1. at `tearFreq 2` the reach depends on `tearAngular` and on nothing else this case varies — at
    *    `0` the contour is where the control is, at the shipped `0.8` it is on the floor, and the
-   *    whole band TRANSLATES rather than widening, which scatter would not do;
+   *    CEILING comes down with the floor, which noise cannot do (see the assertion's own comment for
+   *    why the band also widens, and why that is the interpolant's signature rather than scatter);
    * 2. the swing follows `1 / tearFreq^2`, so the same swing at `tearFreq 24` is an order of
    *    magnitude smaller;
    * 3. the floor is where it stops — pinned from BOTH sides, so halving or removing `tearFloor`
@@ -828,7 +831,16 @@ describe('the width does not depend on the shape knobs (design 2026-09-05 §10)'
       lowAngular.min,
       'the band is breached — this is the boundary, not a defect in the test',
     ).toBeLessThan(W * (1 - V) - err.lo - err.slack)
-    expect(lowAngular.max, 'the band translates, it does not widen').toBeLessThan(
+    // The MAX comes down too, which is the half that rules scatter out: noise widens a band from
+    // both ends, and a term that only added noise could not have lowered the ceiling.
+    //
+    // The band does WIDEN as well — measured, 10.35 reference px at `tearAngular 0` against 23.42 at
+    // 0.8 — and that is the interpolant's own signature rather than a contradiction. `baseAngular`
+    // is EXACT at the lattice nodes and wrong only between them, so the parts of the contour that
+    // land on a node keep their old distance while the parts mid-cell are pulled the full chord sag
+    // down. The floor catches the second group and not the first, so the two ends move by different
+    // amounts. What is asserted is only the ceiling coming down.
+    expect(lowAngular.max, 'the ceiling comes down, which noise cannot do').toBeLessThan(
       lowFlat.max - err.lo,
     )
 
@@ -932,8 +944,29 @@ describe('the width does not depend on the shape knobs (design 2026-09-05 §10)'
       // the whole of it, which is what `checkGuardBand` protects and what clips when it does not.
       expect(m.max, `concave ${JSON.stringify(knobs)}`).toBeLessThanOrEqual(reserve)
     }
+
+    // ATTRIBUTION. The concave fixture's worst outward reach is larger than the disc's at the same
+    // knobs, and without a control that difference cannot be told apart from the noise landing on a
+    // different phase against a different silhouette. `baseAngular` is gated on `uTearAngular`, so
+    // switching it off while holding everything else fixed isolates it: what survives at
+    // `tearAngular 0` is the noise, and what the swing to the shipped 0.8 adds is the interpolant.
+    // Doing it on BOTH fixtures separates the reflex-vertex part from the part the disc already
+    // shows. Reported, not gated — the bound above is the gate.
+    const at = async (alpha: Float32Array, tearAngular: number) =>
+      reachOf(await cell(TORN_CLEAN, { tearFreq: 24, tearAngular }, alpha)).max
+    const ang = Number(defaultsFor(TORN_CLEAN).tearAngular)
+    const concaveFlat = await at(CONCAVE_ALPHA, 0)
+    const concaveAngular = await at(CONCAVE_ALPHA, ang)
+    const discFlat = await at(DISC_ALPHA, 0)
+    const discAngular = await at(DISC_ALPHA, ang)
+    rows.push(
+      `attribution at tearFreq 24: concave ${concaveFlat.toFixed(2)} -> ${concaveAngular.toFixed(2)}` +
+        ` (delta ${(concaveAngular - concaveFlat).toFixed(2)}), disc ${discFlat.toFixed(2)} -> ${discAngular.toFixed(2)}` +
+        ` (delta ${(discAngular - discFlat).toFixed(2)}), reflex share ` +
+        `${(concaveAngular - concaveFlat - (discAngular - discFlat)).toFixed(2)}`,
+    )
     await publish('concave-outward-reach', rows)
-    expect(rows).toHaveLength(cases.length)
+    expect(rows).toHaveLength(cases.length + 1)
   }, 600_000)
 })
 

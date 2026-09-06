@@ -8,17 +8,15 @@ import {
   overscanRadius,
   RADIUS_CAP_REFERENCE_PX,
 } from '@paper-crumple/core/unstable'
-import type { EdgeSpec, GlContext } from '@paper-crumple/core/unstable'
+import type { GlContext } from '@paper-crumple/core/unstable'
 import { createGlFixture, type PaperGlFixture } from './testing/gl-fixture.js'
 import { dimsForLongSide } from './handle.js'
 import { HULL_USE_ALPHA } from './hull-shape.js'
 import { defaultsFor, edgeParamsFrom, WIDTH_PX_KNOB } from './paper-knobs.js'
 import { PAPER_UNIFORMS } from './paper-shader.js'
 import { optionsFor, paperSheet } from './sheet.js'
-import { SMOOTH_CLEAN } from './testing/edge-cells.js'
+import { SMOOTH_CLEAN, SMOOTH_PAPER, TORN_PAPER } from './testing/edge-cells.js'
 
-const SMOOTH_PAPER: EdgeSpec = { shape: 'smooth', finish: 'paper', widthUnit: 'px' }
-const TORN_PAPER: EdgeSpec = { shape: 'torn', finish: 'paper', widthUnit: 'px' }
 /** The shipped `edgeWidth` default under `edgeWidthUnit: 'px'`, in reference px (ruling R10). */
 const WIDTH_PX_DEFAULT = Number(WIDTH_PX_KNOB.default)
 
