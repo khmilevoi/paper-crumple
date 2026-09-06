@@ -2,16 +2,23 @@ import { afterEach, describe, expect, it, vi } from 'vitest'
 import { ABORTED, GlError, SheetError, SourceExpiredError, isAborted } from '@paper-crumple/core'
 import {
   checkGuardBand,
+  EDGE_SLOP_REFERENCE_PX,
   frontBytes,
-  GUARD_BAND_INNER,
-  KNOB_REFERENCE_PX,
+  guardMarginsFor,
   overscanRadius,
+  RADIUS_CAP_REFERENCE_PX,
 } from '@paper-crumple/core/unstable'
 import type { GlContext } from '@paper-crumple/core/unstable'
 import { createGlFixture, type PaperGlFixture } from './testing/gl-fixture.js'
 import { dimsForLongSide } from './handle.js'
-import { defaultsFor, edgeParamsFrom } from './paper-knobs.js'
-import { paperSheet } from './sheet.js'
+import { HULL_USE_ALPHA } from './hull-shape.js'
+import { defaultsFor, edgeParamsFrom, WIDTH_PX_KNOB } from './paper-knobs.js'
+import { PAPER_UNIFORMS } from './paper-shader.js'
+import { optionsFor, paperSheet } from './sheet.js'
+import { SMOOTH_CLEAN, SMOOTH_PAPER, TORN_PAPER } from './testing/edge-cells.js'
+
+/** The shipped `edgeWidth` default under `edgeWidthUnit: 'px'`, in reference px (ruling R10). */
+const WIDTH_PX_DEFAULT = Number(WIDTH_PX_KNOB.default)
 
 // The `source`/`build` suites are added by tasks 11 and 12; this file stays additive across all
 // three (task 10's own brief).
@@ -31,30 +38,28 @@ function open() {
 }
 
 describe('paperSheet as a factory (spec 6.5, 14)', () => {
-  it("defaults to edgeMode 'hull', which is paper.js's own default", () => {
-    expect(paperSheet().edgeMode).toBe('hull')
+  it("defaults to the smooth/clean cell with the 'px' unit (design 2026-09-05 §2)", () => {
+    expect(paperSheet().edgeSpec).toEqual(SMOOTH_CLEAN)
   })
 
-  it('exposes 24 descriptors in hull mode and 34 in torn mode', () => {
+  it('exposes 24 descriptors under smooth/clean and 34 under torn/paper (design §2.4)', () => {
     expect(paperSheet().knobs).toHaveLength(24)
-    expect(paperSheet({ edgeMode: 'torn' }).knobs).toHaveLength(34)
+    expect(paperSheet(optionsFor(TORN_PAPER)).knobs).toHaveLength(34)
+    expect(paperSheet(optionsFor(SMOOTH_PAPER)).knobs).toHaveLength(30)
+    // `tearAmp` and `midAmp` ceased to be knobs at all (design §2.2): they are derived from the
+    // width and the variance by `tearAmpsFor`, in every cell.
     expect(paperSheet().knobs.map((k) => k.key)).not.toContain('tearAmp')
+    expect(paperSheet(optionsFor(TORN_PAPER)).knobs.map((k) => k.key)).not.toContain('tearAmp')
   })
 
-  // §8.6's headline figures (hull ~= 0.09, torn ~= 0.17) are worked from an illustrative
-  // maxDist of 64 reference px (core's own `overscan.test.ts` says so explicitly: "the default
-  // *values* of these knobs belong to the paper slot"). This package's own `HULL_KNOBS` default
-  // is `maxDist: 72` (paper-knobs.ts, task 3, already landed), and `TORN_KNOBS`'s defaults carry
-  // through the rest of the formula, so the number this factory actually reports is
-  // `84 / (1000 - 168) ≈ 0.1010` for hull and `≈ 0.2139` for torn — both computed here from the
-  // real, already-landed knob defaults and `EDGE_SLOP_REFERENCE_PX = 12` (core, unmodifiable),
-  // not from §8.6's illustrative example. See task 10's own report for the arithmetic.
-  it('reports the factory-level overscan: ~0.10 for hull, ~0.21 for torn (spec 8.6)', () => {
+  // Both figures are computed from the real, already-landed knob defaults and
+  // `EDGE_SLOP_REFERENCE_PX` (core, unmodifiable) rather than from §8.6's illustrative example.
+  // `smooth`/`clean` reserves `W(1 + v) + e` alone; `torn`/`paper` adds `4*fiberLen + deckleWidth`
+  // on top of the same band, which is what widens it.
+  it('reports the factory-level overscan: ~0.10 under smooth/clean, more under torn/paper (spec 8.6, design §4.1)', () => {
     expect(paperSheet().overscan).toBeGreaterThan(0.09)
     expect(paperSheet().overscan).toBeLessThan(0.11)
-    const torn = paperSheet({ edgeMode: 'torn' }).overscan
-    expect(torn).toBeGreaterThan(0.19)
-    expect(torn).toBeLessThan(0.22)
+    expect(paperSheet(optionsFor(TORN_PAPER)).overscan).toBeGreaterThan(paperSheet().overscan)
   })
 
   it('reserves more when overscanHeadroom is given', () => {
@@ -65,14 +70,16 @@ describe('paperSheet as a factory (spec 6.5, 14)', () => {
   // `overscan: 0` (a plausible-looking "no margin needed"), and `mount()` — the earliest call
   // with an error channel — must refuse rather than mount with an unusable reserve. The threshold
   // is computed from the same `overscanRadius`/`freezeOverscan` arithmetic the factory itself
-  // uses (`radius * (1 + headroom) >= KNOB_REFERENCE_PX / 2`), not guessed, so this test tracks
-  // `hull`'s own defaults if they ever change. No `GlContext` is needed: `mount()`'s guard runs
+  // uses (`radius * (1 + headroom) >= RADIUS_CAP_REFERENCE_PX`), not guessed, so this test tracks
+  // `smooth`/`clean`'s own defaults if they ever change. No `GlContext` is needed: `mount()`'s guard runs
   // before it ever touches `ctx` — the factory is synchronous and creates no GL objects — so this
   // whole test needs no live WebGL2 context (and does not count against the ~sixteen-context cap
   // `createGlFixture`'s `dispose()` otherwise manages here).
   it('overscan reads Infinity, and mount() returns a GlError, when overscanHeadroom pushes the reserve past the reference plane (spec 8.6)', () => {
-    const radius = overscanRadius(edgeParamsFrom('hull', defaultsFor('hull')))
-    const headroom = KNOB_REFERENCE_PX / (2 * radius) - 1 + 1e-6
+    const radius = overscanRadius(
+      edgeParamsFrom(SMOOTH_CLEAN, defaultsFor(SMOOTH_CLEAN), WIDTH_PX_DEFAULT),
+    )
+    const headroom = RADIUS_CAP_REFERENCE_PX / radius - 1 + 1e-6
     const sheet = paperSheet({ overscanHeadroom: headroom })
     expect(sheet.overscan).toBe(Number.POSITIVE_INFINITY)
 
@@ -182,12 +189,19 @@ describe('source() (spec 5.2, 8.5, 8.6)', () => {
     expect(handle instanceof Error || isAborted(handle)).toBe(false)
     if (handle instanceof Error || isAborted(handle)) return
     expect(Math.max(handle.front.w, handle.front.h)).toBeLessThanOrEqual(128)
-    expect(handle.front.w - handle.artwork.w).toBe(
-      2 * Math.ceil(handle.overscan * handle.artwork.h),
-    )
-    // Exact, not `- 1`: that tolerance covered `frontForArtwork`'s closed-form estimate
-    // under-shooting the true maximum by one texel, which the `capA + 1` probe (F3) now corrects.
-    expect(handle.artwork.w).toBe(Math.floor(128 / (1 + 2 * handle.overscan)))
+    // design 2026-09-05 §4.2: the margin is paint plus guard band, per axis (`guardMarginsFor`),
+    // not the plain `ceil(overscan * artwork.h)` figure both axes used to share.
+    const margins = guardMarginsFor({ artwork: handle.artwork, overscan: handle.overscan })
+    expect(handle.front.w - handle.artwork.w).toBe(2 * margins.x)
+    expect(handle.front.h - handle.artwork.h).toBe(2 * margins.y)
+    // Maximal: one more texel of artwork would not have fit `maxSize` (F3's `capA + 1` probe).
+    const bigger = dimsForLongSide(Math.max(handle.artwork.w, handle.artwork.h) + 1, 64, 64)
+    const biggerMargins = guardMarginsFor({ artwork: bigger, overscan: handle.overscan })
+    const biggerFront = {
+      w: bigger.w + 2 * biggerMargins.x,
+      h: bigger.h + 2 * biggerMargins.y,
+    }
+    expect(Math.max(biggerFront.w, biggerFront.h)).toBeGreaterThan(128)
     sheet.dispose()
   })
 
@@ -202,7 +216,9 @@ describe('source() (spec 5.2, 8.5, 8.6)', () => {
     if (handle instanceof Error || isAborted(handle)) return
     expect(handle.exact).toBe(true)
     expect(handle.artwork).toEqual({ w: 40, h: 40 })
-    expect(handle.front.w).toBe(40 + 2 * Math.ceil(handle.overscan * 40))
+    const margins = guardMarginsFor({ artwork: { w: 40, h: 40 }, overscan: handle.overscan })
+    expect(handle.front.w).toBe(40 + 2 * margins.x)
+    expect(handle.front.h).toBe(40 + 2 * margins.y)
     sheet.dispose()
   })
 
@@ -224,11 +240,14 @@ describe('source() (spec 5.2, 8.5, 8.6)', () => {
     for (const handle of handles) {
       expect(handle instanceof Error || isAborted(handle)).toBe(false)
       if (handle instanceof Error || isAborted(handle)) continue
-      expect(handle.overscan).toBe(sheet.overscan)
-      expect(handle.front.w - handle.artwork.w).toBe(handle.front.h - handle.artwork.h)
-      expect(handle.front.w - handle.artwork.w).toBe(
-        2 * Math.ceil(handle.overscan * handle.artwork.h),
-      )
+      expect(handle.overscan).toBeLessThanOrEqual(sheet.overscan)
+      // design 2026-09-05 §4.2: `frontForArtwork` no longer applies the same texel count on both
+      // axes — the two per-axis identities replace the old x/y symmetry assertion.
+      expect(handle.front.w - handle.artwork.w).toBe(2 * handle.marginX)
+      expect(handle.front.h - handle.artwork.h).toBe(2 * handle.marginY)
+      const margins = guardMarginsFor({ artwork: handle.artwork, overscan: handle.overscan })
+      expect(handle.marginX).toBe(margins.x)
+      expect(handle.marginY).toBe(margins.y)
       expect(Math.max(handle.front.w, handle.front.h)).toBeLessThanOrEqual(128)
     }
     sheet.dispose()
@@ -267,7 +286,11 @@ describe('source() (spec 5.2, 8.5, 8.6)', () => {
     expect(Math.max(portraitHandle.artwork.w, portraitHandle.artwork.h)).toBe(400)
     expect(Math.max(portraitHandle.front.w, portraitHandle.front.h)).toBeLessThanOrEqual(640)
 
-    const built = sheet.build(portraitHandle, portraitHandle.front, defaultsFor('hull') as never)
+    const built = sheet.build(
+      portraitHandle,
+      portraitHandle.front,
+      defaultsFor(SMOOTH_CLEAN) as never,
+    )
     expect(built instanceof Error, String((built as Error)?.message)).toBe(false)
     if (!(built instanceof Error)) {
       expect(built.artwork).toEqual({
@@ -292,7 +315,9 @@ describe('source() (spec 5.2, 8.5, 8.6)', () => {
     if (handle instanceof Error || isAborted(handle)) return
     expect(Math.max(handle.front.w, handle.front.h)).toBeLessThanOrEqual(256)
     expect(Math.max(handle.artwork.w, handle.artwork.h)).toBeLessThan(400)
-    expect(Math.max(handle.artwork.w, handle.artwork.h)).toBe(212)
+    // design 2026-09-05 §4.2: the guard band widens the margin, so the artwork this maxSize can
+    // hold is smaller than the pre-§4.2 figure.
+    expect(Math.max(handle.artwork.w, handle.artwork.h)).toBe(202)
     sheet.dispose()
   })
 
@@ -443,11 +468,15 @@ async function boxSprite(w: number, h: number, inset: number): Promise<ImageBitm
  * Before the §8.6 per-axis amendment, the reserve was a single uv FRACTION applied to both axes,
  * so on a portrait front the x margin held only `w / h` of it and every 2:3 demo sample (trench,
  * jeans, avatar, camel coat) was refused with "the hull reaches 0.5000 of the front on axis x"
- * while the landscape ones (sweater, sneakers) sailed through. Now the margin is `ceil(p * A.h)`
- * TEXELS on every side of the artwork, so the x margin holds the same number of texels as the y
- * margin and nothing needs scaling by `h / w`; the guard band still reads the sheet's real,
- * unrounded reach rather than §8.3's rect — whose 4 % margin is bucket-decision safety, not
- * paint, and whose clamp to the plane can never report more than 0.5000.
+ * while the landscape ones (sweater, sneakers) sailed through. §8.6's fix made the margin
+ * `ceil(p * A.h)` TEXELS on every side of the artwork, closing that hole for the paint reserve.
+ * design 2026-09-05 §4.2 closes a second, pre-existing hole in the same spot: the TEXTURE guard
+ * band itself (`checkGuardBand`'s 1.8 % outer band) was additive-and-per-axis while the paint
+ * reserve above was multiplicative-and-isotropic, so the margin is now `guardMarginsFor`'s
+ * per-axis total (paint plus guard band), which coincides with `ceil(p * A.h)` on x and y only
+ * for a square artwork. The guard band still reads the sheet's real, unrounded reach rather than
+ * §8.3's rect — whose 4 % margin is bucket-decision safety, not paint, and whose clamp to the
+ * plane can never report more than 0.5000.
  */
 describe('portrait sprites and the guard band (spec 8.6)', () => {
   function refused(handle: unknown): handle is Error {
@@ -456,16 +485,18 @@ describe('portrait sprites and the guard band (spec 8.6)', () => {
 
   it('sources a 2:3 torn sprite with a 12 % transparent border at zero headroom (the trench coat)', async () => {
     const ctx = open()
-    const sheet = paperSheet({ edgeMode: 'torn' })
+    const sheet = paperSheet(optionsFor(TORN_PAPER))
     sheet.mount(ctx)
     const bitmap = await boxSprite(64, 96, 8)
     const handle = await sheet.source(bitmap, { maxSize: 128, exact: false })
     bitmap.close()
     expect(refused(handle), String((handle as Error)?.message)).toBe(false)
     if (GlError.is(handle) || SheetError.is(handle) || isAborted(handle)) return
-    // §8.6 amendment (2026-09-04): the reserve is per axis, in texels, so it is the SAME number
-    // for every aspect — no longer scaled up for a portrait sprite.
-    expect(handle.overscan).toBe(sheet.overscan)
+    // §8.6 amendment (2026-09-04): the reserve is applied per axis, in texels, so a portrait
+    // sprite no longer has it scaled up by `h / w`. Under `'px'` it is also the same number for
+    // every aspect and this bound is tight; under `'percent'` design 2026-09-05 §4.4 makes it a
+    // ceiling instead, which is why the assertion is `<=` rather than `toBe`.
+    expect(handle.overscan).toBeLessThanOrEqual(sheet.overscan)
     sheet.dispose()
   })
 
@@ -473,7 +504,7 @@ describe('portrait sprites and the guard band (spec 8.6)', () => {
     const ctx = open()
     // 0.25 × ~150 reference px of torn-default radius is ~37 px of clearance beyond the paint,
     // against the band's 18 — the demo's own `DEFAULT_CONFIG.overscanHeadroom`.
-    const sheet = paperSheet({ edgeMode: 'torn', overscanHeadroom: 0.25 })
+    const sheet = paperSheet({ ...optionsFor(TORN_PAPER), overscanHeadroom: 0.25 })
     sheet.mount(ctx)
     const bitmap = await boxSprite(64, 96, 0)
     const handle = await sheet.source(bitmap, { maxSize: 128, exact: false })
@@ -482,31 +513,35 @@ describe('portrait sprites and the guard band (spec 8.6)', () => {
     sheet.dispose()
   })
 
-  it('still refuses a full-bleed photo at zero headroom, naming a reach inside the band', async () => {
+  it('now sources a full-bleed photo at zero headroom, which design 2026-09-05 §4.2 fixes', async () => {
+    // Before §4.2, the reserve left exactly zero clearance for a silhouette that fills its own
+    // bitmap beyond the paint radius itself: the margin was paint alone, so the guard band's own
+    // 1.8 % outer strip had nothing reserving it, and the paint reached to within the half texel
+    // between the silhouette's own texel centres and its true edge — a real figure just inside the
+    // band (measured at the time: 0.4962, where the clamped §8.3 rect the check used to read could
+    // only ever say a flat 0.5000) — and `source()` refused with "guard band" / "re-add required".
+    // §4.2 folds the guard band `g` into the reserved margin itself (`guardMarginsFor`), so this
+    // exact case — the pre-existing hole this task closes — now has real clearance and succeeds.
     const ctx = open()
-    const sheet = paperSheet({ edgeMode: 'torn' })
+    const sheet = paperSheet(optionsFor(TORN_PAPER))
     sheet.mount(ctx)
     const bitmap = await boxSprite(64, 96, 0)
     const handle = await sheet.source(bitmap, { maxSize: 128, exact: false })
     bitmap.close()
-    expect(SheetError.is(handle)).toBe(true)
-    if (!SheetError.is(handle)) return
-    expect(handle.message).toContain('guard band')
-    expect(handle.message).toContain('re-add required')
-    // The reserve leaves exactly zero clearance for a silhouette that fills its own bitmap, so
-    // the paint reaches the front's edge to within the half texel between the silhouette's own
-    // texel centres and its true edge — a real figure inside the band (measured: 0.4962 here),
-    // where the clamped §8.3 rect the check used to read could only ever say a flat 0.5000.
-    const reached = Number(/reaches (\d+\.\d+)/.exec(handle.message)?.[1])
-    expect(reached).toBeGreaterThan(GUARD_BAND_INNER)
-    expect(reached).toBeLessThanOrEqual(0.5)
+    expect(refused(handle), String((handle as Error)?.message)).toBe(false)
     sheet.dispose()
   })
 
-  it('sources a full-bleed square in hull mode once the headroom covers the band', async () => {
+  it('sources a full-bleed square in the smooth/clean cell, headroom no longer required after §4.2', async () => {
     const ctx = open()
-    // `ambient-pins.gl.test.ts` documents this exact refusal and pads its fixture around it;
-    // 0.4 × 84 reference px is ~34 of clearance against the band's 18.
+    // `ambient-pins.gl.test.ts` documents the pre-§4.2 refusal this fixture reproduced and pads
+    // its own fixture around it. The `overscanHeadroom: 0.4` here predates §4.2: at the time, the
+    // base reserve was paint alone, so only headroom bought clearance against the band's own 18
+    // reference px (`0.4 x 84` reference px is ~34 of it). Design 2026-09-05 §4.2 folds the guard
+    // band into the base reserve itself (`guardMarginsFor`), so this exact fixture now clears the
+    // band at `overscanHeadroom: 0` too (confirmed directly) — the headroom kept here is no
+    // longer load-bearing, only harmless, and stays to keep this case distinct from the
+    // zero-headroom case pinned above.
     const sheet = paperSheet({ overscanHeadroom: 0.4 })
     sheet.mount(ctx)
     const bitmap = await boxSprite(48, 48, 0)
@@ -539,7 +574,7 @@ describe('build() (spec 5.2, 8.1, 8.5, 8.7)', () => {
     if (m === undefined) return
     const { sheet, handle } = m
     const size = { w: 128, h: 128 }
-    const front = sheet.build(handle, size, defaultsFor('hull') as never)
+    const front = sheet.build(handle, size, defaultsFor(SMOOTH_CLEAN) as never)
     expect(front instanceof Error, (front as Error).message).toBe(false)
     if (front instanceof Error) return
     expect(front.width).toBe(128)
@@ -554,7 +589,7 @@ describe('build() (spec 5.2, 8.1, 8.5, 8.7)', () => {
     expect(m).toBeDefined()
     if (m === undefined) return
     const { ctx, sheet, handle } = m
-    const front = sheet.build(handle, { w: 128, h: 128 }, defaultsFor('hull') as never)
+    const front = sheet.build(handle, { w: 128, h: 128 }, defaultsFor(SMOOTH_CLEAN) as never)
     expect(front instanceof Error, (front as Error).message).toBe(false)
     if (front instanceof Error) return
     // The returned texture is drawable: reading it back through a fresh target shows the paper.
@@ -591,7 +626,7 @@ describe('build() (spec 5.2, 8.1, 8.5, 8.7)', () => {
     const bad = GlError.is(second) || SheetError.is(second) || isAborted(second)
     expect(bad, 'source() must succeed for this fixture').toBe(false)
     if (bad) return
-    const front = sheet.build(handle, { w: 128, h: 128 }, defaultsFor('hull') as never)
+    const front = sheet.build(handle, { w: 128, h: 128 }, defaultsFor(SMOOTH_CLEAN) as never)
     expect(SourceExpiredError.is(front)).toBe(true)
     sheet.dispose()
   })
@@ -624,7 +659,7 @@ describe('build() (spec 5.2, 8.1, 8.5, 8.7)', () => {
     expect(second.spriteKey).toBe(first.spriteKey)
 
     sheet.release(first)
-    const front = sheet.build(second, { w: 128, h: 96 }, defaultsFor('hull') as never)
+    const front = sheet.build(second, { w: 128, h: 96 }, defaultsFor(SMOOTH_CLEAN) as never)
     expect(front instanceof Error, String((front as Error)?.message)).toBe(false)
     if (front instanceof Error) {
       sheet.dispose()
@@ -633,18 +668,19 @@ describe('build() (spec 5.2, 8.1, 8.5, 8.7)', () => {
     sheet.releaseFront(front)
     // A second release of the same handle is inert too: the key it carries is the live one's.
     sheet.release(first)
-    const again = sheet.build(second, { w: 128, h: 96 }, defaultsFor('hull') as never)
+    const again = sheet.build(second, { w: 128, h: 96 }, defaultsFor(SMOOTH_CLEAN) as never)
     expect(again instanceof Error, String((again as Error)?.message)).toBe(false)
     if (!(again instanceof Error)) sheet.releaseFront(again)
     sheet.dispose()
   })
 
-  // Spec 8.6 freezes the reserve for the sprite's life, and `maxDist` is both a hull-tier knob and
-  // the whole of `r_hull` — so a reserve derived from the live values was re-frozen on every
-  // hull-tier re-source, and the artwork `A = maxSize / (1 + 2p)` shrank inside a bucket `fit`
-  // had sized once. Two `source()` calls at different `maxDist` must agree on everything the fit
-  // and the artwork slot were sized over, and differ in the trace alone.
-  it('freezes the reserve at the factory defaults: a re-source at another maxDist keeps p and A (spec 8.6)', async () => {
+  // Spec 8.6 freezes the reserve for the sprite's life, and under `smooth` `edgeWidth` is both a
+  // hull-tier knob and the whole of the band `overscanRadius` is built from — so a reserve derived
+  // from the live values was re-frozen on every hull-tier re-source, and the artwork
+  // `A = maxSize / (1 + 2p)` shrank inside a bucket `fit` had sized once. Two `source()` calls at
+  // different `edgeWidth` must agree on everything the fit and the artwork slot were sized over,
+  // and differ in the trace alone.
+  it('freezes the reserve at the factory defaults: a re-source at another edgeWidth keeps p and A (spec 8.6)', async () => {
     const ctx = open()
     const sheet = paperSheet({ overscanHeadroom: 0.25 })
     sheet.mount(ctx)
@@ -652,12 +688,12 @@ describe('build() (spec 5.2, 8.1, 8.5, 8.7)', () => {
     const atDefaults = await sheet.source(bitmap, { maxSize: 128, exact: false })
     expect(GlError.is(atDefaults) || SheetError.is(atDefaults) || isAborted(atDefaults)).toBe(false)
     if (GlError.is(atDefaults) || SheetError.is(atDefaults) || isAborted(atDefaults)) return
-    const lower = { ...defaultsFor('hull'), maxDist: 40 }
+    const lower = { ...defaultsFor(SMOOTH_CLEAN), edgeWidth: 30 }
     const atLower = await sheet.source(bitmap, { maxSize: 128, exact: false, knobs: lower })
     bitmap.close()
     expect(GlError.is(atLower) || SheetError.is(atLower) || isAborted(atLower)).toBe(false)
     if (GlError.is(atLower) || SheetError.is(atLower) || isAborted(atLower)) return
-    expect(atLower.hullKnobs['maxDist']).toBe(40)
+    expect(atLower.hullKnobs['edgeWidth']).toBe(30)
     expect(atLower.overscan).toBe(atDefaults.overscan)
     expect(atLower.artwork).toEqual(atDefaults.artwork)
     expect(atLower.front).toEqual(atDefaults.front)
@@ -682,14 +718,14 @@ describe('build() (spec 5.2, 8.1, 8.5, 8.7)', () => {
     expect(m).toBeDefined()
     if (m === undefined) return
     const { sheet, handle } = m
-    const past = { ...defaultsFor('hull'), maxDist: 140 }
+    const past = { ...defaultsFor(SMOOTH_CLEAN), edgeWidth: 140 }
     const front = sheet.build(handle, { w: 128, h: 128 }, past as never)
     expect(SheetError.is(front)).toBe(true)
     expect((front as Error).message).toContain('re-add required')
     sheet.dispose()
   })
 
-  // Spec 6.3: a hull-tier knob (minDist/maxDist/angularity/seed) moving off the value the hull was
+  // Spec 6.3: a hull-tier knob (edgeWidth/edgeVariance/angularity/seed under `smooth`) moving off the value the hull was
   // traced at is `invalidates: 'hull'` — "invalidate the hull cache, then front" — and the
   // hull, its cache and its key live inside `source()` (spec 5.2). So the answer is the same
   // re-source row of spec 8.5's table the displaced artwork slot takes, and it has to be the same
@@ -701,11 +737,17 @@ describe('build() (spec 5.2, 8.1, 8.5, 8.7)', () => {
     expect(m).toBeDefined()
     if (m === undefined) return
     const { sheet, handle } = m
-    // `maxDist` moves DOWN: at this factory's zero headroom any increase is §8.6's reserve
-    // check first (step 4 precedes step 6), which is the other error class on purpose.
-    for (const moved of [{ minDist: 40 }, { maxDist: 60 }, { angularity: 0.2 }, { seed: 9 }]) {
+    // `edgeWidth` and `edgeVariance` move DOWN: at this factory's zero headroom any increase is
+    // §8.6's reserve check first (step 4 precedes step 6), which is the other error class on
+    // purpose.
+    for (const moved of [
+      { edgeWidth: 30 },
+      { edgeVariance: 0.2 },
+      { angularity: 0.2 },
+      { seed: 9 },
+    ]) {
       const front = sheet.build(handle, { w: 128, h: 128 }, {
-        ...defaultsFor('hull'),
+        ...defaultsFor(SMOOTH_CLEAN),
         ...moved,
       } as never)
       expect(SourceExpiredError.is(front), JSON.stringify(moved)).toBe(true)
@@ -722,28 +764,34 @@ describe('build() (spec 5.2, 8.1, 8.5, 8.7)', () => {
     const atDefaults = await sheet.source(bitmap, { maxSize: 128, exact: false })
     expect(GlError.is(atDefaults) || SheetError.is(atDefaults) || isAborted(atDefaults)).toBe(false)
     if (GlError.is(atDefaults) || SheetError.is(atDefaults) || isAborted(atDefaults)) return
-    // `minDist` and `seed` leave the reserve alone (r_hull = maxDist + slop, spec 8.6), so the
-    // only thing that can differ between the two handles is the trace itself.
-    const moved = { ...defaultsFor('hull'), minDist: 40, seed: 9 }
+    // The reserve is frozen from this factory's DEFAULTS whatever the caller projects (design
+    // §4.4), and both moves are DOWNWARD in reach, so the only thing that can differ between the
+    // two handles is the trace itself.
+    const moved = { ...defaultsFor(SMOOTH_CLEAN), edgeWidth: 30, seed: 9 }
     const at = await sheet.source(bitmap, { maxSize: 128, exact: false, knobs: moved })
     bitmap.close()
     expect(GlError.is(at) || SheetError.is(at) || isAborted(at)).toBe(false)
     if (GlError.is(at) || SheetError.is(at) || isAborted(at)) return
-    expect(at.hullKnobs).toEqual({ minDist: 40, maxDist: 72, angularity: 0.7, seed: 9 })
-    expect(atDefaults.hullKnobs).toEqual({ minDist: 22, maxDist: 72, angularity: 0.7, seed: 3 })
+    expect(at.hullKnobs).toEqual({ edgeWidth: 30, edgeVariance: 0.53, angularity: 0.7, seed: 9 })
+    expect(atDefaults.hullKnobs).toEqual({
+      edgeWidth: WIDTH_PX_DEFAULT,
+      edgeVariance: 0.53,
+      angularity: 0.7,
+      seed: 3,
+    })
     expect(at.hull).not.toEqual(atDefaults.hull)
     const front = sheet.build(at, { w: 128, h: 128 }, moved as never)
     expect(front instanceof Error, String((front as Error)?.message)).toBe(false)
     if (!(front instanceof Error)) sheet.releaseFront(front)
     // The defaults are now the drifted values, for this handle.
-    const drifted = sheet.build(at, { w: 128, h: 128 }, defaultsFor('hull') as never)
+    const drifted = sheet.build(at, { w: 128, h: 128 }, defaultsFor(SMOOTH_CLEAN) as never)
     expect(SourceExpiredError.is(drifted)).toBe(true)
     sheet.dispose()
   })
 
   it('source() ignores knob keys this mode does not declare; a torn sheet records seed alone as its hull tier', async () => {
     const ctx = open()
-    const sheet = paperSheet({ edgeMode: 'torn' })
+    const sheet = paperSheet(optionsFor(TORN_PAPER))
     sheet.mount(ctx)
     const bitmap = await sprite()
     const handle = await sheet.source(bitmap, {
@@ -757,7 +805,7 @@ describe('build() (spec 5.2, 8.1, 8.5, 8.7)', () => {
     // `seed` is a common knob at the hull tier; the hull-only three are absent in torn mode.
     expect(handle.hullKnobs).toEqual({ seed: 9 })
     const front = sheet.build(handle, { w: 128, h: 128 }, {
-      ...defaultsFor('torn'),
+      ...defaultsFor(TORN_PAPER),
       seed: 9,
     } as never)
     expect(front instanceof Error, String((front as Error)?.message)).toBe(false)
@@ -775,7 +823,7 @@ describe('build() (spec 5.2, 8.1, 8.5, 8.7)', () => {
     const dragged = await sheet.source(tall, {
       maxSize: 128,
       exact: false,
-      knobs: { ...defaultsFor('torn'), tearAmp: 60, thickness: 40, looseness: 0.8, seed: 9 },
+      knobs: { ...defaultsFor(TORN_PAPER), tearAmp: 60, thickness: 40, looseness: 0.8, seed: 9 },
     })
     tall.close()
     expect(
@@ -797,7 +845,7 @@ describe('build() (spec 5.2, 8.1, 8.5, 8.7)', () => {
     if (m === undefined) return
     const { sheet, handle } = m
     sheet.release(handle)
-    const front = sheet.build(handle, { w: 128, h: 128 }, defaultsFor('hull') as never)
+    const front = sheet.build(handle, { w: 128, h: 128 }, defaultsFor(SMOOTH_CLEAN) as never)
     expect(SheetError.is(front)).toBe(true)
     sheet.dispose()
   })
@@ -807,7 +855,7 @@ describe('build() (spec 5.2, 8.1, 8.5, 8.7)', () => {
     expect(m).toBeDefined()
     if (m === undefined) return
     const { sheet, handle } = m
-    const front = sheet.build(handle, { w: 128, h: 128 }, defaultsFor('hull') as never)
+    const front = sheet.build(handle, { w: 128, h: 128 }, defaultsFor(SMOOTH_CLEAN) as never)
     expect(front instanceof Error, (front as Error).message).toBe(false)
     if (front instanceof Error) return
     sheet.releaseFront(front)
@@ -825,20 +873,21 @@ describe('build() (spec 5.2, 8.1, 8.5, 8.7)', () => {
   // A must draw at most a handful of times, and one that silently re-ran it cannot.
   it('re-runs pass B alone when only looseness moved', async () => {
     const ctx = open()
-    // Fix round 1, finding 2: `checkReserve` now sees the LIVE `looseness` (core's own
-    // `overscanRadius` genuinely takes it as a term of `r_torn`), so the 0.65 build below needs
-    // enough `overscanHeadroom` to still clear the reserve frozen at this factory's defaults —
-    // computed from the same formula `checkReserve` itself uses, not guessed. Kept well short of
-    // `overscanFromRadius`'s own asymmetric-margin regime at large `p` (checked empirically while
-    // writing this round: `source()`'s pre-existing `artworkUv` mapping only centres the artwork
-    // for small `p`, and a `looseness` delta as large as 0.9 pushes `p` far enough to trip the
-    // guard band on its own, independent of the reserve check this test is actually about).
-    const radiusAtDefault = overscanRadius(edgeParamsFrom('torn', defaultsFor('torn')))
-    const radiusAtLooser = overscanRadius(
-      edgeParamsFrom('torn', { ...defaultsFor('torn'), looseness: 0.65 }),
+    // design 2026-09-05 §6.1 items 2 and 3 removed `looseness` from the reserve entirely:
+    // `uLoosePush` is deleted and `gateReach` lost its looseness factor, so `overscanRadius` is
+    // now `W(1 + v) + 4*fiberLen + deckleWidth + e` and dragging `looseness` cannot move it. The
+    // headroom this test used to compute for exactly that reason is therefore zero; it is pinned
+    // here as an assertion rather than deleted, because `looseness` silently re-entering the
+    // reserve is precisely what would make the 0.65 build below fail for a reason that has nothing
+    // to do with pass B.
+    const radiusAtDefault = overscanRadius(
+      edgeParamsFrom(TORN_PAPER, defaultsFor(TORN_PAPER), WIDTH_PX_DEFAULT),
     )
-    const headroom = radiusAtLooser / radiusAtDefault - 1 + 0.05
-    const sheet = paperSheet({ edgeMode: 'torn', overscanHeadroom: headroom })
+    const radiusAtLooser = overscanRadius(
+      edgeParamsFrom(TORN_PAPER, { ...defaultsFor(TORN_PAPER), looseness: 0.65 }, WIDTH_PX_DEFAULT),
+    )
+    expect(radiusAtLooser).toBe(radiusAtDefault)
+    const sheet = paperSheet({ ...optionsFor(TORN_PAPER), overscanHeadroom: 0.05 })
     sheet.mount(ctx)
     const bitmap = await compactSprite()
     const handle = await sheet.source(bitmap, { maxSize: 128, exact: false })
@@ -857,12 +906,12 @@ describe('build() (spec 5.2, 8.1, 8.5, 8.7)', () => {
     // a genuinely cold pass A here — the scenario this assertion is about (a same-size, same-knob
     // `build()` reusing `source()`'s own work outright is covered separately, below).
     drawArrays.mockClear()
-    const a = sheet.build(handle, { w: 140, h: 100 }, defaultsFor('torn') as never)
+    const a = sheet.build(handle, { w: 140, h: 100 }, defaultsFor(TORN_PAPER) as never)
     const firstDraws = drawArrays.mock.calls.length
 
     drawArrays.mockClear()
     const b = sheet.build(handle, { w: 140, h: 100 }, {
-      ...defaultsFor('torn'),
+      ...defaultsFor(TORN_PAPER),
       looseness: 0.65,
     } as never)
     const secondDraws = drawArrays.mock.calls.length
@@ -929,10 +978,10 @@ describe('source() spends pass A alone; the first build() at its framing reuses 
 
     const field = dimsForLongSide(handle.sdfRes, handle.front.w, handle.front.h, 2)
     const drawArrays = vi.spyOn(ctx.gl, 'drawArrays')
-    const first = sheet.build(handle, handle.front, defaultsFor('hull') as never)
+    const first = sheet.build(handle, handle.front, defaultsFor(SMOOTH_CLEAN) as never)
     const firstDraws = drawArrays.mock.calls.length
     drawArrays.mockClear()
-    const second = sheet.build(handle, handle.front, defaultsFor('hull') as never)
+    const second = sheet.build(handle, handle.front, defaultsFor(SMOOTH_CLEAN) as never)
     const secondDraws = drawArrays.mock.calls.length
     drawArrays.mockRestore()
     expect(first instanceof Error || second instanceof Error).toBe(false)
@@ -966,34 +1015,42 @@ describe('source() spends pass A alone; the first build() at its framing reuses 
   }
 
   /**
-   * The front `build(handle, handle.front)` rendered right after `source()` at 5f61a46 — when the
-   * loose field it sampled was the one `source()` had blurred — hashed over its RGBA bytes on the
+   * The front `build(handle, handle.front)` rendered right after `source()` — when the loose
+   * field it sampled was the one `source()` had blurred — hashed over its RGBA bytes on the
    * level-2 suite's own SwiftShader (the same rasteriser the `__screenshots__` suite pins pixels
-   * on). Regenerate only for a deliberate change to the fields or the paper shader, by running
-   * this test at the commit being pinned and copying the hash the failure prints.
+   * on). Regenerated for the design 2026-09-05 edge redesign (previously pinned for §4.2, before
+   * that at 5f61a46): the two cells are no longer `edgeMode` `hull`/`torn` but `smooth`/`clean`
+   * and `torn`/`paper`, the reserve is now `W(1 + v) + 4*fiberLen + deckleWidth + e` rather than
+   * the old `r_hull`, and `smooth`/`clean` draws no deckle and no fibre at all — so `handle.front`
+   * moves and every pixel this hash covers reflows. Regenerate only for a deliberate change to the
+   * fields, the paper shader, or the margin, by running this test at the commit being pinned and
+   * copying the hash the failure prints.
    */
-  const FRONT_AT_HANDLE_FRONT_GOLDEN = { hull: 'c890972d', torn: '43b1fbf8' } as const
+  const FRONT_AT_HANDLE_FRONT_GOLDEN = { smooth: '98a737a9', torn: 'a7d7b4ea' } as const
 
-  it('renders, at handle.front, the front the source-time blur used to produce (golden from 5f61a46)', async () => {
+  it('renders, at handle.front, the front the source-time blur used to produce (golden regenerated for the design 2026-09-05 edge redesign)', async () => {
     const ctx = open()
-    for (const edgeMode of ['hull', 'torn'] as const) {
-      const sheet = paperSheet({ edgeMode })
+    for (const [cell, spec] of [
+      ['smooth', SMOOTH_CLEAN],
+      ['torn', TORN_PAPER],
+    ] as const) {
+      const sheet = paperSheet(optionsFor(spec))
       sheet.mount(ctx)
       const bitmap = await compactSprite()
       const handle = await sheet.source(bitmap, { maxSize: 128, exact: false })
       bitmap.close()
       expect(GlError.is(handle) || SheetError.is(handle) || isAborted(handle)).toBe(false)
       if (GlError.is(handle) || SheetError.is(handle) || isAborted(handle)) return
-      const front = sheet.build(handle, handle.front, defaultsFor(edgeMode) as never)
+      const front = sheet.build(handle, handle.front, defaultsFor(spec) as never)
       expect(front instanceof Error, String((front as Error)?.message)).toBe(false)
       if (front instanceof Error) return
       const bytes = readRect(ctx, front.texture, 0, 0, front.width, front.height)
       // Not a blank: the paper is there.
       expect(bytes.some((b, i) => i % 4 === 3 && b > 0)).toBe(true)
-      // `soft`, so a regeneration run prints both modes' hashes at once.
+      // `soft`, so a regeneration run prints both cells' hashes at once.
       expect
-        .soft(fnv1a(bytes), `${edgeMode} front at handle.front`)
-        .toBe(FRONT_AT_HANDLE_FRONT_GOLDEN[edgeMode])
+        .soft(fnv1a(bytes), `${cell} front at handle.front`)
+        .toBe(FRONT_AT_HANDLE_FRONT_GOLDEN[cell])
       sheet.releaseFront(front)
       sheet.dispose()
     }
@@ -1009,7 +1066,7 @@ describe('source() spends pass A alone; the first build() at its framing reuses 
     expect(GlError.is(handle) || SheetError.is(handle) || isAborted(handle)).toBe(false)
     if (GlError.is(handle) || SheetError.is(handle) || isAborted(handle)) return
     expect(handle.hull.kind).toBe('polygons')
-    const warm = sheet.build(handle, handle.front, defaultsFor('hull') as never)
+    const warm = sheet.build(handle, handle.front, defaultsFor(SMOOTH_CLEAN) as never)
     expect(warm instanceof Error).toBe(false)
     if (warm instanceof Error) return
     sheet.releaseFront(warm)
@@ -1019,7 +1076,7 @@ describe('source() spends pass A alone; the first build() at its framing reuses 
     // refused texture and a `GlError` out of `buildField`. Nothing else in `build()` reads
     // `getError` before that point.
     const getError = vi.spyOn(ctx.gl, 'getError').mockReturnValueOnce(ctx.gl.OUT_OF_MEMORY)
-    const failed = sheet.build(handle, { w: 140, h: 100 }, defaultsFor('hull') as never)
+    const failed = sheet.build(handle, { w: 140, h: 100 }, defaultsFor(SMOOTH_CLEAN) as never)
     getError.mockRestore()
     expect(GlError.is(failed), String((failed as Error)?.message)).toBe(true)
 
@@ -1028,7 +1085,7 @@ describe('source() spends pass A alone; the first build() at its framing reuses 
     // starts from pass A — tight, blur, the hull field and the front — rather than the cached 1.
     const field = dimsForLongSide(handle.sdfRes, handle.front.w, handle.front.h, 2)
     const drawArrays = vi.spyOn(ctx.gl, 'drawArrays')
-    const again = sheet.build(handle, handle.front, defaultsFor('hull') as never)
+    const again = sheet.build(handle, handle.front, defaultsFor(SMOOTH_CLEAN) as never)
     const draws = drawArrays.mock.calls.length
     drawArrays.mockRestore()
     expect(again instanceof Error, String((again as Error)?.message)).toBe(false)
@@ -1065,7 +1122,7 @@ describe('task 12 fix round 1 (findings 1, 2, 3)', () => {
     // the same size `source()` itself used, so this test does not also exercise finding 3's own
     // same-size reuse path; the two are independent claims.
     const size = { w: 128, h: 96 }
-    const frontA1 = sheet.build(handleA, size, defaultsFor('hull') as never)
+    const frontA1 = sheet.build(handleA, size, defaultsFor(SMOOTH_CLEAN) as never)
     expect(frontA1 instanceof Error, String((frontA1 as Error)?.message)).toBe(false)
     if (frontA1 instanceof Error) {
       sheet.dispose()
@@ -1081,7 +1138,7 @@ describe('task 12 fix round 1 (findings 1, 2, 3)', () => {
     bitmapB.close()
     expect(GlError.is(handleB) || SheetError.is(handleB) || isAborted(handleB)).toBe(false)
 
-    const frontA2 = sheet.build(handleA, size, defaultsFor('hull') as never)
+    const frontA2 = sheet.build(handleA, size, defaultsFor(SMOOTH_CLEAN) as never)
     // Never a silently-wrong front built from B's field: A's own artwork slot was displaced the
     // moment source(B) ran, and build() must say so rather than render something.
     expect(SourceExpiredError.is(frontA2)).toBe(true)
@@ -1093,11 +1150,11 @@ describe('task 12 fix round 1 (findings 1, 2, 3)', () => {
   // Finding 2 (was wrong before this round): a build() that drags `looseness` past what the
   // frozen reserve can cover must be refused, naming "re-add required" and `overscanHeadroom` —
   // never silently pass because the check was reading a pinned default instead of the live value.
-  it('names "re-add required" and overscanHeadroom when looseness drags past the frozen reserve (finding 2)', async () => {
+  it('names "re-add required" and overscanHeadroom when a front-tier edgeWidth drags past the frozen reserve (finding 2)', async () => {
     const ctx = open()
     // Zero overscanHeadroom (this factory's own default): the reserve is exactly this mode's own
     // default-knob radius, with no room to spare for a live drag.
-    const sheet = paperSheet({ edgeMode: 'torn' })
+    const sheet = paperSheet(optionsFor(TORN_PAPER))
     sheet.mount(ctx)
     const bitmap = await compactSprite()
     const handle = await sheet.source(bitmap, { maxSize: 128, exact: false })
@@ -1106,16 +1163,21 @@ describe('task 12 fix round 1 (findings 1, 2, 3)', () => {
     if (GlError.is(handle) || SheetError.is(handle) || isAborted(handle)) return
 
     const size = { w: 128, h: 128 }
-    const first = sheet.build(handle, size, defaultsFor('torn') as never)
+    const first = sheet.build(handle, size, defaultsFor(TORN_PAPER) as never)
     expect(first instanceof Error, String((first as Error)?.message)).toBe(false)
     if (first instanceof Error) {
       sheet.dispose()
       return
     }
 
+    // `edgeWidth` under `torn` is a FRONT-tier knob (design 2026-09-05 §2.1), so it is exactly the
+    // live drag this check exists for — and, unlike the `looseness` this case used to drag,
+    // `overscanRadius` genuinely takes it as a term (§6.1 items 2 and 3 removed the looseness
+    // terms entirely). At 140 reference px the radius is `140 * 1.53 + 4*4 + 7 + 12 = 249.2`,
+    // against the 106.91 this factory froze at its own defaults.
     const dragged = sheet.build(handle, size, {
-      ...defaultsFor('torn'),
-      looseness: 0.9,
+      ...defaultsFor(TORN_PAPER),
+      edgeWidth: 140,
     } as never)
     expect(SheetError.is(dragged)).toBe(true)
     if (!SheetError.is(dragged)) {
@@ -1136,7 +1198,7 @@ describe('task 12 fix round 1 (findings 1, 2, 3)', () => {
   // uses a different size so it keeps testing a genuinely cold pass A).
   it("consumes source()'s own field build when the first build() matches its size and knobs exactly (finding 3)", async () => {
     const ctx = open()
-    const sheet = paperSheet({ edgeMode: 'hull' })
+    const sheet = paperSheet(optionsFor(SMOOTH_CLEAN))
     sheet.mount(ctx)
     const bitmap = await compactSprite()
     const handle = await sheet.source(bitmap, { maxSize: 128, exact: false })
@@ -1146,8 +1208,9 @@ describe('task 12 fix round 1 (findings 1, 2, 3)', () => {
 
     const drawArrays = vi.spyOn(ctx.gl, 'drawArrays')
     drawArrays.mockClear()
-    // 128x128: exactly this sprite's own `front` (a square 64x64 source at maxSize 128).
-    const front = sheet.build(handle, { w: 128, h: 128 }, defaultsFor('hull') as never)
+    // Exactly this sprite's own `front` — read off the handle rather than written out, because
+    // `handle.front` is a function of the frozen reserve and moves whenever the reserve does.
+    const front = sheet.build(handle, handle.front, defaultsFor(SMOOTH_CLEAN) as never)
     const draws = drawArrays.mock.calls.length
     drawArrays.mockRestore()
 
@@ -1160,8 +1223,9 @@ describe('task 12 fix round 1 (findings 1, 2, 3)', () => {
     // pass B's two draws — and nothing from the tight pass, which is consumed from `source()`'s
     // own build. (`source()` builds no loose field any more: nothing reads one before `build()`,
     // so the first `build()` at this framing is where pass B runs — `lastFieldBuild.loose`'s doc
-    // comment.) The count is exact rather than approximate: the hull field is the built size,
-    // 128x128, so `scheduleFor` (gl-sdf.ts) gives `levels = ceil(log2(128)) = 7`, a schedule of
+    // comment.) The count is exact rather than approximate: the hull field is the built size
+    // (`handle.front`, 126x126 for this fixture under the redesigned reserve), so `scheduleFor`
+    // (gl-sdf.ts) gives `levels = ceil(log2(126)) = 7`, a schedule of
     // `[64,32,16,8,4,2,1]` plus the extra unit pass = 8 entries, and pass A therefore spends
     // `2 * (8 + 1) + 1 = 19` draws. 19 + pass B's 2 + renderFront's 1 = 22. A regression that
     // stopped reusing `source()`'s tight field would add pass A a second time, which this exact
@@ -1185,7 +1249,7 @@ describe("task 12 fix round 2 (build()'s rect conversion)", () => {
   // wobble.
   it("build()'s rect moves with the artwork's 1:1 placement at THIS build's size, not a uniform handle.rect scale", async () => {
     const ctx = open()
-    const sheet = paperSheet({ edgeMode: 'torn' })
+    const sheet = paperSheet(optionsFor(TORN_PAPER))
     sheet.mount(ctx)
     const bitmap = await compactSprite(64, 64)
     const handle = await sheet.source(bitmap, { maxSize: 128, exact: false })
@@ -1202,7 +1266,7 @@ describe("task 12 fix round 2 (build()'s rect conversion)", () => {
     // Deliberately NOT the add-time front (128x128, `maxSize` above): a size mismatch is exactly
     // what makes the uniform-scale formula and the exact affine inverse disagree.
     const size = { w: 200, h: 200 }
-    const front = sheet.build(handle, size, defaultsFor('torn') as never)
+    const front = sheet.build(handle, size, defaultsFor(TORN_PAPER) as never)
     expect(front instanceof Error, String((front as Error)?.message)).toBe(false)
     if (front instanceof Error) {
       sheet.dispose()
@@ -1211,7 +1275,7 @@ describe("task 12 fix round 2 (build()'s rect conversion)", () => {
 
     const srcW = handle.srcW
     const srcH = handle.srcH
-    expect(handle.overscan).toBeGreaterThan(0.15) // torn's own headline figure; a real margin to move
+    expect(handle.overscan).toBeGreaterThan(0.12) // torn/paper's own reserve; a real margin to move
     // The front is the artwork plus its per-axis margin (§8.6 amendment), so it need not hit
     // `maxSize` exactly the way the old uniform-front scheme always did — only fit inside it.
     expect(Math.max(handle.front.w, handle.front.h)).toBeLessThanOrEqual(128)
@@ -1396,7 +1460,7 @@ describe('fix round 1 — the CPU-fallback field (findings 1, 2, 3, 4)', () => {
   // rounding wobble.
   it('handle.rect subtracts the artwork placement and scales by src / artwork, not a uniform frontRect scale (finding 3)', async () => {
     const ctx = open()
-    const sheet = paperSheet({ edgeMode: 'torn' })
+    const sheet = paperSheet(optionsFor(TORN_PAPER))
     sheet.mount(ctx)
     const bitmap = await compactSprite(64, 64)
     const handle = await sheet.source(bitmap, { maxSize: 128, exact: false })
@@ -1416,7 +1480,7 @@ describe('fix round 1 — the CPU-fallback field (findings 1, 2, 3, 4)', () => {
     const front = handle.front
     const srcW = 64
     const srcH = 64
-    expect(handle.overscan).toBeGreaterThan(0.15) // torn's own headline figure; a real margin
+    expect(handle.overscan).toBeGreaterThan(0.12) // torn/paper's own reserve; a real margin
     expect(Math.max(front.w, front.h)).toBeLessThanOrEqual(128)
     // `source()`'s own `artworkPlacement`, then `src / artwork` per axis — the resample maps the
     // full source onto the full artwork, so that is the whole of the scale.
@@ -1487,12 +1551,13 @@ function readRect(
 
 describe('the hull polygon as a real paper field (design 2026-09-02, §2-§3)', () => {
   /**
-   * The defect this fixes: `build()` hardcoded `paperField: null`, so the default `hull` mode
-   * always reached `uEdgeMode = 2` — "the sheet IS the artwork alpha" — and the paper was cut
-   * along the garment's own outline. Under `uEdgeMode = 1` the sheet follows the hull polygon,
-   * which sits `minDist`..`maxDist` OUTSIDE the silhouette, so a texel just beyond the artwork's
-   * own alpha is opaque paper. Mode 2 cannot produce that by construction: its coverage mask IS
-   * the alpha, so anything the alpha does not cover reads exactly (0,0,0,0).
+   * The defect this fixes: `build()` hardcoded `paperField: null`, so the default cell always
+   * fell back to the ARTWORK's own tight/loose pair — "the sheet IS the artwork alpha" — and the
+   * paper was cut along the garment's own outline. When `paperField` is non-null the renderer
+   * binds the POLYGON's field to both `uSdf*` slots (design 2026-09-05 §6), so the sheet follows
+   * the hull polygon, which sits `W (1 -+ v)` OUTSIDE the silhouette, and a texel just beyond the
+   * artwork's own alpha is opaque paper. The alpha fallback cannot produce that by construction:
+   * its coverage mask IS the alpha, so anything the alpha does not cover reads exactly (0,0,0,0).
    */
   it('draws paper outside the artwork silhouette at the factory defaults', async () => {
     const ctx = open()
@@ -1504,20 +1569,21 @@ describe('the hull polygon as a real paper field (design 2026-09-02, §2-§3)', 
     expect(GlError.is(handle) || SheetError.is(handle) || isAborted(handle)).toBe(false)
     if (GlError.is(handle) || SheetError.is(handle) || isAborted(handle)) return
 
-    const front = sheet.build(handle, { w: 128, h: 128 }, defaultsFor('hull') as never)
+    const front = sheet.build(handle, { w: 128, h: 128 }, defaultsFor(SMOOTH_CLEAN) as never)
     expect(front instanceof Error, String((front as Error)?.message)).toBe(false)
     if (front instanceof Error) return
 
     // The oracle is the artwork's own SILHOUETTE, not the artwork RECT. The rect cannot
-    // discriminate the two modes here and the difference is arithmetic, not taste: the reserve
-    // `source()` freezes is exactly the hull's own dilation radius (`maxDist` plus the edge slop),
+    // discriminate the two contour sources here and the difference is arithmetic, not taste: the
+    // reserve `source()` freezes is exactly the hull's own dilation radius (`W (1 + v)` plus the
+    // edge slop),
     // so the margin between the artwork rect and the front edge is exactly the distance the hull
     // grows by — and a hull can only reach past that rect for a sprite whose alpha touches its own
     // bounding box. Neither fixture in this file is such a sprite (`compactSprite`'s ellipse stops
     // at half its box), and measured on this fixture, "opaque beyond the artwork rect" is 0 both
     // before and after the fix. The silhouette is the honest line: the hull polygon sits
-    // `minDist`..`maxDist` OUTSIDE it by construction, while mode 2's coverage mask IS the alpha,
-    // so a texel clear of the silhouette is exactly (0,0,0,0) under mode 2. Measured on the same
+    // `W (1 -+ v)` OUTSIDE it by construction, while the alpha fallback's coverage mask IS the
+    // alpha, so a texel clear of the silhouette is exactly (0,0,0,0) under it. Measured on the same
     // fixture: 0 such texels before this change, 382 after.
     //
     // `compactSprite`'s ellipse has radius `w / 4` at the centre of a square source, and `build()`
@@ -1584,7 +1650,7 @@ describe('the hull polygon as a real paper field (design 2026-09-02, §2-§3)', 
     expect(GlError.is(handle) || SheetError.is(handle) || isAborted(handle)).toBe(false)
     if (GlError.is(handle) || SheetError.is(handle) || isAborted(handle)) return
 
-    const front = sheet.build(handle, { w: 128, h: 128 }, defaultsFor('hull') as never)
+    const front = sheet.build(handle, { w: 128, h: 128 }, defaultsFor(SMOOTH_CLEAN) as never)
     expect(front instanceof Error, String((front as Error)?.message)).toBe(false)
     if (front instanceof Error) return
 
@@ -1664,13 +1730,13 @@ describe('the hull polygon as a real paper field (design 2026-09-02, §2-§3)', 
     expect(GlError.is(handle) || SheetError.is(handle) || isAborted(handle)).toBe(false)
     if (GlError.is(handle) || SheetError.is(handle) || isAborted(handle)) return
 
-    const first = sheet.build(handle, { w: 128, h: 128 }, defaultsFor('hull') as never)
+    const first = sheet.build(handle, { w: 128, h: 128 }, defaultsFor(SMOOTH_CLEAN) as never)
     expect(first instanceof Error, String((first as Error)?.message)).toBe(false)
     if (first instanceof Error) return
 
     const drawArrays = vi.spyOn(ctx.gl, 'drawArrays')
     drawArrays.mockClear()
-    const second = sheet.build(handle, { w: 128, h: 128 }, defaultsFor('hull') as never)
+    const second = sheet.build(handle, { w: 128, h: 128 }, defaultsFor(SMOOTH_CLEAN) as never)
     const draws = drawArrays.mock.calls.length
     drawArrays.mockRestore()
     expect(second instanceof Error).toBe(false)
@@ -1687,18 +1753,19 @@ describe('the hull polygon as a real paper field (design 2026-09-02, §2-§3)', 
   })
 
   /**
-   * Acceptance criterion 3, at the only scope the public API can reach it. `source()` passes no
-   * per-sprite knob values (`sheet.ts`'s own §5.2 note), so a `hull` handle is always traced at
-   * `minDist: 22` / `maxDist: 72` and there is no route to a `use-alpha` hull in `hull` mode.
-   * `torn` forces both distances to 0 (`sheet.ts`'s "torn mode declares no hull-only descriptors
-   * at all"), so `buildHull` returns `HULL_USE_ALPHA` and this is the degenerate case in the
-   * flesh: no mask is filled, no field is built, and the render is the one that shipped. The
-   * mode-2 render itself is covered where it is driven directly, in `paper-renderer.gl.test.ts`,
-   * which this change does not touch.
+   * Acceptance criterion 3, at the only scope the public API can reach it. `torn` builds no
+   * polygon at all — `sheet.ts` hands `buildHull` a `{0, 0}` band under that shape — so
+   * `buildHull` returns `HULL_USE_ALPHA` and this is the degenerate case in the flesh: no mask is
+   * filled, no field is built, and the render falls back to the artwork's own tight/loose pair.
+   *
+   * `smooth` reaches the same state whenever `edgeWidth` is 0, since `hullBandFor(0, v)` is
+   * `{0, 0}` for every `v` (design §7) — that route is pinned separately, in
+   * `builds no polygon at edgeWidth 0 but still builds the tight field`. The renderer's own side
+   * of the fallback is covered where it is driven directly, in `paper-renderer.gl.test.ts`.
    */
   it('builds no hull mask for a use-alpha hull, and renders as it did before', async () => {
     const ctx = open()
-    const sheet = paperSheet({ edgeMode: 'torn' })
+    const sheet = paperSheet(optionsFor(TORN_PAPER))
     sheet.mount(ctx)
     const bitmap = await compactSprite()
     const handle = await sheet.source(bitmap, { maxSize: 128, exact: false })
@@ -1714,7 +1781,7 @@ describe('the hull polygon as a real paper field (design 2026-09-02, §2-§3)', 
     // build's jump-flood schedule would be the only other thing left to count.
     const drawArrays = vi.spyOn(ctx.gl, 'drawArrays')
     drawArrays.mockClear()
-    const front = sheet.build(handle, handle.front, defaultsFor('torn') as never)
+    const front = sheet.build(handle, handle.front, defaultsFor(TORN_PAPER) as never)
     const draws = drawArrays.mock.calls.length
     drawArrays.mockRestore()
     expect(front instanceof Error, String((front as Error)?.message)).toBe(false)
@@ -1743,8 +1810,8 @@ describe('the hull polygon as a real paper field (design 2026-09-02, §2-§3)', 
    */
   it("reserves the torn path's outward reach in both mode's sheet rect (F1)", async () => {
     const ctx = open()
-    const hullSheet = paperSheet({ edgeMode: 'hull' })
-    const bothSheet = paperSheet({ edgeMode: 'both' })
+    const hullSheet = paperSheet(optionsFor(SMOOTH_CLEAN))
+    const bothSheet = paperSheet(optionsFor(SMOOTH_PAPER))
     hullSheet.mount(ctx)
     bothSheet.mount(ctx)
 
@@ -1773,11 +1840,12 @@ describe('the hull polygon as a real paper field (design 2026-09-02, §2-§3)', 
       return
     }
 
-    const params = edgeParamsFrom('both', defaultsFor('both'))
+    const params = edgeParamsFrom(SMOOTH_PAPER, defaultsFor(SMOOTH_PAPER), WIDTH_PX_DEFAULT)
     // Reference px are a fraction of the front's HEIGHT, not its long side — `sheet.ts`'s own
     // `pxScale = front.h / KNOB_REFERENCE_PX`, with `KNOB_REFERENCE_PX` at 1000. This sprite is
     // square at maxSize 128, so the two readings coincide here at 128 either way.
-    const reachFrontPx = ((overscanRadius(params) - params.maxDist) * 128) / 1000
+    const reachFrontPx =
+      ((overscanRadius(params) - params.widthRef * (1 + params.variance)) * 128) / 1000
     expect(reachFrontPx).toBeGreaterThan(1)
 
     // The reach is added on each side, then `sheetRect`'s own 4 % margin applies to both rects
@@ -1866,11 +1934,14 @@ describe('build() at a bucket-shaped size (spec 5.4, 8.6)', () => {
   // (spec 7.4.2), so the paper — the fields the shader cuts it from, the hull mask, and the rect
   // the motion layer centres on — has to follow the artwork's pixel placement. Framing the fields
   // by a flat `p` inset instead scaled the silhouette to `size / (1 + 2p)`: at this size that was
-  // a paper smaller than the artwork, which in hull mode vanished behind it entirely.
-  for (const edgeMode of ['torn', 'hull'] as const) {
-    it(`keeps the paper around the 1:1 artwork and centred on front.rect (${edgeMode})`, async () => {
+  // a paper smaller than the artwork, which under a polygon hull vanished behind it entirely.
+  for (const [cell, spec] of [
+    ['torn', TORN_PAPER],
+    ['smooth', SMOOTH_CLEAN],
+  ] as const) {
+    it(`keeps the paper around the 1:1 artwork and centred on front.rect (${cell})`, async () => {
       const ctx = open()
-      const sheet = paperSheet({ edgeMode })
+      const sheet = paperSheet(optionsFor(spec))
       sheet.mount(ctx)
       const bitmap = await paddedRect()
       const handle = await sheet.source(bitmap, { maxSize: 384, exact: false })
@@ -1887,7 +1958,7 @@ describe('build() at a bucket-shaped size (spec 5.4, 8.6)', () => {
       const size = { w: handle.frontRect.w, h: handle.frontRect.h }
       expect(size.w).toBeLessThan(384)
       expect(size.h).toBeLessThan(192)
-      const front = sheet.build(handle, size, defaultsFor(edgeMode) as never)
+      const front = sheet.build(handle, size, defaultsFor(spec) as never)
       expect(front instanceof Error, String((front as Error)?.message)).toBe(false)
       if (front instanceof Error) {
         sheet.dispose()
@@ -1957,44 +2028,50 @@ type ReadbackGolden = {
 }
 
 /**
- * What `source()` answered for three fixtures in both edge modes at perf/2x @ 653d394 — the
- * synchronous `readBackField` path, on the level-2 suite's own SwiftShader — right before the
- * field readback became asynchronous (`PIXEL_PACK_BUFFER` + `fenceSync`, spec §8.10). The pin is
- * that the decode, the hull traced off it and the two rects it feeds did not move by a byte: the
- * hull digest is over the polygon's raw `Float32Array`, and `frontRect` / `rect` are the exact
- * integers. Regenerate only for a deliberate change to pass A or the decode, by running this test
- * at the commit being pinned and copying what the failures print.
+ * What `source()` answers for three fixtures in two of design 2026-09-05 §6's cells at that
+ * cell's own default reserve — the synchronous `readBackField` path, on the level-2 suite's own
+ * SwiftShader. Regenerated for the edge redesign (previously pinned for §4.2's per-axis guard
+ * margin, before that at perf/2x @ 653d394, right before the field readback became asynchronous,
+ * `PIXEL_PACK_BUFFER` + `fenceSync`, spec §8.10): the reserve is now
+ * `W(1 + v) + 4*fiberLen + deckleWidth + e` off `edgeWidth`/`edgeVariance` rather than the old
+ * `r_hull` off `maxDist`, `smooth`/`clean` carries no finish terms at all, and the trace band is
+ * `hullBandFor(W, v)` rather than the two raw `minDist`/`maxDist` knobs — so both the front's size
+ * and the polygon itself move. The pin is that the decode, the
+ * hull traced off it and the two rects it feeds do not move by a byte ACROSS RUNS: the hull digest
+ * is over the polygon's raw `Float32Array`, and `frontRect` / `rect` are the exact integers.
+ * Regenerate only for a deliberate change to pass A, the decode, or the margin, by running this
+ * test at the commit being pinned and copying what the failures print.
  */
 const READBACK_GOLDEN: Record<string, ReadbackGolden> = {
-  'ellipse/hull': {
-    hull: '2bbbd370',
-    frontRect: { x: 22, y: 14, w: 89, h: 63 },
-    rect: { x: 6, y: 3, w: 38, h: 27 },
+  'ellipse/smooth': {
+    hull: '7ac80f14',
+    frontRect: { x: 19, y: 14, w: 91, h: 64 },
+    rect: { x: 4, y: 2, w: 41, h: 29 },
   },
   'ellipse/torn': {
     hull: 'use-alpha',
-    frontRect: { x: 10, y: 6, w: 108, h: 82 },
-    rect: { x: -2, y: -4, w: 53, h: 40 },
+    frontRect: { x: 16, y: 11, w: 98, h: 72 },
+    rect: { x: 1, y: -0, w: 46, h: 34 },
   },
-  'top/hull': {
-    hull: '9e56b7ea',
-    frontRect: { x: 27, y: 11, w: 81, h: 73 },
-    rect: { x: 10, y: 0, w: 49, h: 44 },
+  'top/smooth': {
+    hull: 'cf5a91c7',
+    frontRect: { x: 26, y: 11, w: 78, h: 68 },
+    rect: { x: 8, y: -1, w: 50, h: 44 },
   },
   'top/torn': {
     hull: 'use-alpha',
-    frontRect: { x: 13, y: 2, w: 102, h: 91 },
-    rect: { x: -4, y: -12, w: 74, h: 66 },
+    frontRect: { x: 18, y: 7, w: 91, h: 79 },
+    rect: { x: 1, y: -6, w: 62, h: 54 },
   },
-  'square/hull': {
-    hull: '639f583f',
-    frontRect: { x: 16, y: 13, w: 95, h: 101 },
-    rect: { x: 3, y: 1, w: 57, h: 61 },
+  'square/smooth': {
+    hull: '66c79d19',
+    frontRect: { x: 15, y: 13, w: 95, h: 101 },
+    rect: { x: 1, y: 0, w: 61, h: 65 },
   },
   'square/torn': {
     hull: 'use-alpha',
-    frontRect: { x: 5, y: 5, w: 116, h: 116 },
-    rect: { x: -10, y: -10, w: 84, h: 84 },
+    frontRect: { x: 9, y: 9, w: 108, h: 108 },
+    rect: { x: -5, y: -5, w: 74, h: 74 },
   },
 }
 
@@ -2053,18 +2130,21 @@ describe('async field readback (spec §8.10)', () => {
     ['square', () => boxSprite(64, 64, 8)],
   ] as const
 
-  it('answers the hull, frontRect and rect the synchronous readback answered (golden from 653d394)', async () => {
+  it('answers the hull, frontRect and rect the synchronous readback answered (golden regenerated for design 2026-09-05 §4.2)', async () => {
     const ctx = open()
     for (const [name, make] of fixtures) {
-      for (const edgeMode of ['hull', 'torn'] as const) {
-        const sheet = paperSheet({ edgeMode })
+      for (const [cell, spec] of [
+        ['smooth', SMOOTH_CLEAN],
+        ['torn', TORN_PAPER],
+      ] as const) {
+        const sheet = paperSheet(optionsFor(spec))
         sheet.mount(ctx)
         const bitmap = await make()
         const handle = await sheet.source(bitmap, { maxSize: 128, exact: false })
         bitmap.close()
         expect(
           GlError.is(handle) || SheetError.is(handle) || isAborted(handle),
-          `${name}/${edgeMode}: ${String((handle as Error)?.message)}`,
+          `${name}/${cell}: ${String((handle as Error)?.message)}`,
         ).toBe(false)
         if (GlError.is(handle) || SheetError.is(handle) || isAborted(handle)) {
           sheet.dispose()
@@ -2076,7 +2156,7 @@ describe('async field readback (spec §8.10)', () => {
           rect: { ...handle.rect },
         }
         // `soft`, so a regeneration run prints every fixture's values at once.
-        expect.soft(actual, `${name}/${edgeMode}`).toEqual(READBACK_GOLDEN[`${name}/${edgeMode}`])
+        expect.soft(actual, `${name}/${cell}`).toEqual(READBACK_GOLDEN[`${name}/${cell}`])
         sheet.dispose()
       }
     }
@@ -2115,8 +2195,8 @@ describe('async field readback (spec §8.10)', () => {
     again.close()
     expect(GlError.is(handle) || SheetError.is(handle) || isAborted(handle)).toBe(false)
     if (GlError.is(handle) || SheetError.is(handle) || isAborted(handle)) return
-    expect(handle.frontRect).toEqual(READBACK_GOLDEN['ellipse/hull'].frontRect)
-    expect(hullDigest(handle.hull)).toBe(READBACK_GOLDEN['ellipse/hull'].hull)
+    expect(handle.frontRect).toEqual(READBACK_GOLDEN['ellipse/smooth'].frontRect)
+    expect(hullDigest(handle.hull)).toBe(READBACK_GOLDEN['ellipse/smooth'].hull)
     sheet.dispose()
   })
 
@@ -2164,7 +2244,7 @@ describe('async field readback (spec §8.10)', () => {
       'two fast turns: the split between the artwork and the field passes, then the poll that settles the fence',
     ).toEqual([0, 0])
     // The extra task boundary moves no byte: same calls, same order, one turn between them.
-    expect(hullDigest(handle.hull)).toBe(READBACK_GOLDEN['top/hull'].hull)
+    expect(hullDigest(handle.hull)).toBe(READBACK_GOLDEN['top/smooth'].hull)
     drawArrays.mockRestore()
     clientWaitSync.mockRestore()
     sheet.dispose()
@@ -2213,8 +2293,8 @@ describe('async field readback (spec §8.10)', () => {
     again.close()
     expect(GlError.is(handle) || SheetError.is(handle) || isAborted(handle)).toBe(false)
     if (GlError.is(handle) || SheetError.is(handle) || isAborted(handle)) return
-    expect(handle.frontRect).toEqual(READBACK_GOLDEN['ellipse/hull'].frontRect)
-    expect(hullDigest(handle.hull)).toBe(READBACK_GOLDEN['ellipse/hull'].hull)
+    expect(handle.frontRect).toEqual(READBACK_GOLDEN['ellipse/smooth'].frontRect)
+    expect(hullDigest(handle.hull)).toBe(READBACK_GOLDEN['ellipse/smooth'].hull)
     sheet.dispose()
   })
 
@@ -2242,7 +2322,9 @@ describe('async field readback (spec §8.10)', () => {
     expect(bufferData, 'the first readback sizes the pack buffer').toHaveBeenCalledTimes(1)
     // `cpuFieldFallback`'s own rect: within the JFA-vs-EDT tolerance the "findings 1, 4" test
     // states, and not the readback's exact integers.
-    expect(Math.abs(handle.frontRect.y - READBACK_GOLDEN['top/hull'].frontRect.y)).toBeLessThan(10)
+    expect(Math.abs(handle.frontRect.y - READBACK_GOLDEN['top/smooth'].frontRect.y)).toBeLessThan(
+      10,
+    )
     expect(ctx.scope(() => ctx.gl.getParameter(ctx.gl.PIXEL_PACK_BUFFER_BINDING))).toBeNull()
     // A refusal drops the recorded buffer size, so the next readback sizes the buffer again
     // rather than trusting a `bufferData` that may have been the refusal.
@@ -2278,7 +2360,9 @@ describe('async field readback (spec §8.10)', () => {
     expect(clientWaitSync).toHaveBeenCalledTimes(1)
     expect(deleteSync, 'the fence is deleted on the failed exit').toHaveBeenCalledTimes(1)
     expect(getBufferSubData, 'a failed wait never reads the buffer').not.toHaveBeenCalled()
-    expect(Math.abs(handle.frontRect.y - READBACK_GOLDEN['top/hull'].frontRect.y)).toBeLessThan(10)
+    expect(Math.abs(handle.frontRect.y - READBACK_GOLDEN['top/smooth'].frontRect.y)).toBeLessThan(
+      10,
+    )
     clientWaitSync.mockRestore()
     deleteSync.mockRestore()
     getBufferSubData.mockRestore()
@@ -2329,8 +2413,8 @@ describe('async field readback (spec §8.10)', () => {
     expect(ArrayBuffer.isView(calls[1][6])).toBe(true)
     // Each hull is its own: A's readPixels was queued ahead of B's pass A, so GL ordering gave
     // it A's field even though B had overwritten the slot by the time A's continuation ran.
-    expect(hullDigest(ha.hull)).toBe(READBACK_GOLDEN['ellipse/hull'].hull)
-    expect(ha.frontRect).toEqual(READBACK_GOLDEN['ellipse/hull'].frontRect)
+    expect(hullDigest(ha.hull)).toBe(READBACK_GOLDEN['ellipse/smooth'].hull)
+    expect(ha.frontRect).toEqual(READBACK_GOLDEN['ellipse/smooth'].frontRect)
     expect(hullDigest(hb.hull)).toBe(hullDigest(soloHandle.hull))
     expect(hb.frontRect).toEqual(soloHandle.frontRect)
     expect(ctx.scope(() => ctx.gl.getParameter(ctx.gl.PIXEL_PACK_BUFFER_BINDING))).toBeNull()
@@ -2339,7 +2423,7 @@ describe('async field readback (spec §8.10)', () => {
 
   it('torn mode issues one readback per add, not two', async () => {
     const ctx = open()
-    const sheet = paperSheet({ edgeMode: 'torn' })
+    const sheet = paperSheet(optionsFor(TORN_PAPER))
     sheet.mount(ctx)
     const bitmap = await sprite()
     const readPixels = vi.spyOn(ctx.gl, 'readPixels')
@@ -2361,7 +2445,7 @@ describe('async field readback (spec §8.10)', () => {
     deleteBuffer.mockRestore()
   })
 
-  it('the cached-hull path in hull mode issues no readback', async () => {
+  it('the cached-hull path under smooth issues no readback', async () => {
     const ctx = open()
     const sheet = paperSheet()
     sheet.mount(ctx)
@@ -2376,7 +2460,7 @@ describe('async field readback (spec §8.10)', () => {
     if (GlError.is(second) || SheetError.is(second) || isAborted(second)) return
     expect(readPixels).not.toHaveBeenCalled()
     expect(fenceSync).not.toHaveBeenCalled()
-    expect(hullDigest(second.hull)).toBe(READBACK_GOLDEN['ellipse/hull'].hull)
+    expect(hullDigest(second.hull)).toBe(READBACK_GOLDEN['ellipse/smooth'].hull)
     readPixels.mockRestore()
     fenceSync.mockRestore()
     sheet.dispose()
@@ -2415,7 +2499,7 @@ describe('async field readback (spec §8.10)', () => {
     expect(GlError.is(again) || SheetError.is(again) || isAborted(again)).toBe(false)
     if (GlError.is(again) || SheetError.is(again) || isAborted(again)) return
     expect(readPixels, 'a fresh mount has no cached hull').toHaveBeenCalledTimes(1)
-    expect(hullDigest(again.hull)).toBe(READBACK_GOLDEN['ellipse/hull'].hull)
+    expect(hullDigest(again.hull)).toBe(READBACK_GOLDEN['ellipse/smooth'].hull)
     readPixels.mockRestore()
     sheet.dispose()
   })
@@ -2441,7 +2525,7 @@ describe('async field readback (spec §8.10)', () => {
       delays,
       'the whole wait is fast turns: the back-off costs a signalled fence nothing (the first is S12’s split between the artwork and the field passes)',
     ).toEqual([0, 0])
-    expect(hullDigest(handle.hull)).toBe(READBACK_GOLDEN['top/hull'].hull)
+    expect(hullDigest(handle.hull)).toBe(READBACK_GOLDEN['top/smooth'].hull)
     clientWaitSync.mockRestore()
     sheet.dispose()
   })
@@ -2472,7 +2556,7 @@ describe('async field readback (spec §8.10)', () => {
       1, 1, 1, 1, 1,
     ])
     // The late signal changes when the bytes are decoded, not what they say.
-    expect(hullDigest(handle.hull)).toBe(READBACK_GOLDEN['top/hull'].hull)
+    expect(hullDigest(handle.hull)).toBe(READBACK_GOLDEN['top/smooth'].hull)
     clientWaitSync.mockRestore()
     sheet.dispose()
   })
@@ -2510,7 +2594,9 @@ describe('async field readback (spec §8.10)', () => {
     expect(deleteSync, 'the fence is deleted on the exhausted exit').toHaveBeenCalledTimes(1)
     expect(getBufferSubData, 'an exhausted wait never reads the buffer').not.toHaveBeenCalled()
     expect(getContext, 'the CPU fallback runs exactly once').toHaveBeenCalledTimes(1)
-    expect(Math.abs(handle.frontRect.y - READBACK_GOLDEN['top/hull'].frontRect.y)).toBeLessThan(10)
+    expect(Math.abs(handle.frontRect.y - READBACK_GOLDEN['top/smooth'].frontRect.y)).toBeLessThan(
+      10,
+    )
     clientWaitSync.mockRestore()
     deleteSync.mockRestore()
     getBufferSubData.mockRestore()
@@ -2563,7 +2649,7 @@ describe('S7 — allocation batches (spec 7.3, 8.1, 10.8): one getError per phas
 
     getError.mockClear()
     texStorage2D.mockClear()
-    const front = sheet.build(handle, handle.front, defaultsFor('hull') as never)
+    const front = sheet.build(handle, handle.front, defaultsFor(SMOOTH_CLEAN) as never)
     const buildReads = getError.mock.calls.length
     const buildStores = texStorage2D.mock.calls.length
     getError.mockRestore()
@@ -2628,9 +2714,9 @@ describe('S7 — allocation batches (spec 7.3, 8.1, 10.8): one getError per phas
     bitmap.close()
     expect(GlError.is(handle) || SheetError.is(handle) || isAborted(handle)).toBe(false)
     if (GlError.is(handle) || SheetError.is(handle) || isAborted(handle)) return
-    expect(handle.frontRect).toEqual(READBACK_GOLDEN['ellipse/hull'].frontRect)
-    expect(hullDigest(handle.hull)).toBe(READBACK_GOLDEN['ellipse/hull'].hull)
-    const front = sheet.build(handle, handle.front, defaultsFor('hull') as never)
+    expect(handle.frontRect).toEqual(READBACK_GOLDEN['ellipse/smooth'].frontRect)
+    expect(hullDigest(handle.hull)).toBe(READBACK_GOLDEN['ellipse/smooth'].hull)
+    const front = sheet.build(handle, handle.front, defaultsFor(SMOOTH_CLEAN) as never)
     expect(front instanceof Error, String((front as Error)?.message)).toBe(false)
     if (!(front instanceof Error)) sheet.releaseFront(front)
     sheet.dispose()
@@ -2664,3 +2750,214 @@ describe('S7 — allocation batches (spec 7.3, 8.1, 10.8): one getError per phas
     sheet.dispose()
   })
 })
+
+/**
+ * design 2026-09-05 §3.1 / §4.4 / §7 — one width, three consumers, and the two lifetimes.
+ *
+ * The RESERVE is frozen from the factory's DEFAULTS at this sprite's aspect; the WIDTH follows the
+ * live knob values on every call that needs it. These cases pin both halves and the boundary
+ * between them.
+ */
+describe('paperSheet: one width, three consumers (design 2026-09-05 §3.1, §4.4, §7)', () => {
+  it('freezes one width per sprite and hands it to the handle (design §3.1)', async () => {
+    const ctx = open()
+    const sheet = paperSheet({ edgeShape: 'smooth', edgeFinish: 'clean', edgeWidthUnit: 'px' })
+    sheet.mount(ctx)
+    const bitmap = await sprite()
+    const handle = await sheet.source(bitmap, { maxSize: 512, exact: false })
+    bitmap.close()
+    if (handle instanceof Error || isAborted(handle)) return expect.fail('source() refused')
+    // The `'px'` unit is the identity: the knob IS the reference-px width, with no sprite input.
+    expect(handle.widthRef).toBe(WIDTH_PX_DEFAULT)
+    expect(handle.edgeSpec).toEqual({ shape: 'smooth', finish: 'clean', widthUnit: 'px' })
+    sheet.dispose()
+  })
+
+  it('resolves the percent unit against the sprite and never past the factory ceiling (§4.4)', async () => {
+    const ctx = open()
+    const sheet = paperSheet({ edgeWidthUnit: 'percent', overscanHeadroom: 0.25 })
+    sheet.mount(ctx)
+    const towerBitmap = await sprite(200, 800)
+    const tower = await sheet.source(towerBitmap, { maxSize: 512, exact: false })
+    towerBitmap.close()
+    const squareBitmap = await sprite(512, 512)
+    const square = await sheet.source(squareBitmap, { maxSize: 512, exact: false })
+    squareBitmap.close()
+    // Narrowed one at a time rather than in the brief's own `for` loop: `isAborted` narrows the
+    // loop variable, not the two bindings the assertions below read.
+    if (tower instanceof Error || isAborted(tower)) return expect.fail('source() refused')
+    if (square instanceof Error || isAborted(square)) return expect.fail('source() refused')
+    expect(tower.overscan).toBeLessThanOrEqual(sheet.overscan)
+    expect(square.overscan).toBeLessThanOrEqual(sheet.overscan)
+    // c = 0.25 for the tower, 1 for the square: a smaller reserve, more artwork.
+    expect(tower.overscan).toBeLessThan(square.overscan)
+    // The square IS the ceiling under `percent`: `reserveFor(1)` is exactly what the factory froze.
+    expect(square.overscan).toBe(sheet.overscan)
+    sheet.dispose()
+  })
+
+  it('builds no polygon at edgeWidth 0 but still builds the tight field (design §7)', async () => {
+    const ctx = open()
+    const sheet = paperSheet({ edgeShape: 'smooth' })
+    sheet.mount(ctx)
+    const bitmap = await sprite()
+    const handle = await sheet.source(bitmap, {
+      maxSize: 512,
+      exact: false,
+      knobs: { edgeWidth: 0 },
+    })
+    bitmap.close()
+    if (handle instanceof Error || isAborted(handle)) return expect.fail('source() refused')
+    expect(handle.hull).toBe(HULL_USE_ALPHA)
+    expect(handle.widthRef).toBe(0)
+    // §7's "the reserve is one slop" is a statement about the RADIUS FUNCTION, not about this
+    // handle: the reserve is frozen from the factory's DEFAULTS (edgeWidth 47), never from a
+    // sprite's live knobs, so this sprite still carries the factory's own reserve.
+    expect(handle.overscan).toBe(sheet.overscan)
+    expect(overscanRadius({ widthRef: 0, variance: 0.53, fiberLen: 0, deckleWidth: 0 })).toBe(
+      EDGE_SLOP_REFERENCE_PX,
+    )
+    // The tight field is still built unconditionally — the fold loop needs a distance (§7) — so a
+    // build at `edgeWidth 0` is a normal front, not a refusal.
+    const front = sheet.build(handle, handle.front, {
+      ...defaultsFor(SMOOTH_CLEAN),
+      edgeWidth: 0,
+    } as never)
+    expect(front instanceof Error, String((front as Error)?.message)).toBe(false)
+    if (!(front instanceof Error)) sheet.releaseFront(front)
+    sheet.dispose()
+  })
+
+  /**
+   * Ruling R6. `build()` resolves the percent width as
+   * `widthRefFrom(knobValues, handle.artwork, size)` — the SOURCE front's artwork against THIS
+   * build's front — and the shader receives `uEdgeWidth = W_ref * size.h / 1000`, in which
+   * `size.h` cancels: `(pct / 100) * min(artwork)`, invariant across every bucket the same handle
+   * is built into. That is the property design §3.2 rejected "percent of the front" in order to
+   * obtain, and it is what would break if `handle.artwork` were rescaled by
+   * `size.h / handle.front.h` — `W_ref` would then be constant in reference px and the rendered
+   * border would grow with the bucket.
+   *
+   * A LARGER bucket here, and a smaller one in the case below it — the reserve check reads its own
+   * width against `handle.front`, so neither direction is refused. (An earlier round of this task
+   * resolved one width for both readers and this comment claimed the smaller direction was
+   * "correctly refused". It was not: `fit.frontSize` is the paper's own box, so shrinking is the
+   * ORDINARY core path, and the refusal was a defect. See `build()`'s step 4.)
+   */
+  it('renders the same working-px edge width into two buckets of the same handle (percent unit, ruling R6)', async () => {
+    const ctx = open()
+    const sheet = paperSheet({ edgeWidthUnit: 'percent' })
+    sheet.mount(ctx)
+    const bitmap = await compactSprite(64, 64)
+    const handle = await sheet.source(bitmap, { maxSize: 128, exact: false })
+    bitmap.close()
+    if (handle instanceof Error || isAborted(handle)) return expect.fail('source() refused')
+
+    const big = { w: handle.front.w * 2, h: handle.front.h * 2 }
+    const values = defaultsFor(sheet.edgeSpec) as never
+    const seen = captureUniform(ctx, PAPER_UNIFORMS.edgeWidth, () => {
+      const a = sheet.build(handle, handle.front, values)
+      expect(a instanceof Error, String((a as Error)?.message)).toBe(false)
+      if (!(a instanceof Error)) sheet.releaseFront(a)
+      const b = sheet.build(handle, big, values)
+      expect(b instanceof Error, String((b as Error)?.message)).toBe(false)
+      if (!(b instanceof Error)) sheet.releaseFront(b)
+    })
+    expect(seen).toHaveLength(2)
+    // The two fronts genuinely differ, so this is not a vacuous "same size twice" pass.
+    expect(handle.front.h).not.toBe(big.h)
+    expect(seen[0]).toBeGreaterThan(0)
+    expect(seen[0]).toBeCloseTo(seen[1], 4)
+    // …and it is the artwork's own short side times the percent, exactly (design §3.2).
+    const pct = Number(defaultsFor(sheet.edgeSpec).edgeWidth)
+    expect(seen[0]).toBeCloseTo((pct / 100) * Math.min(handle.artwork.w, handle.artwork.h), 4)
+    sheet.dispose()
+  })
+
+  /**
+   * Fix round 1. **The ordinary core path builds into a front SMALLER than `handle.front`.**
+   * `motion.fit` sizes the bucket over the paper's own box — `stage.ts:1629`, `:1647` pass
+   * `fit.frontSize`, which is derived from `handle.frontRect` — and that box is strictly inside
+   * the trace front for any sprite whose paper does not fill it.
+   *
+   * Under `edgeWidthUnit: 'percent'` a smaller front is a smaller denominator, so `W_ref` in
+   * reference px is LARGER there. Resolving one width for both readers therefore handed
+   * `checkReserve` a number quoted in this build's plane and compared it against a radius frozen
+   * in the trace front's plane: for this fixture the check saw ≈101.8 reference px against a
+   * permitted 83.9 and answered "re-add required" for a build that reserves nothing extra at all —
+   * every stage-driven build of a percent sheet, refused. `build()` now resolves the reserve's
+   * width against `handle.front`, the plane the reserve was frozen in, and the shader's against
+   * `size` (ruling R6). Zero headroom on purpose: with headroom the defect would be masked on some
+   * fixtures and not others.
+   */
+  it('builds into a front smaller than handle.front under the percent unit (the ordinary fit path)', async () => {
+    const ctx = open()
+    const sheet = paperSheet({ edgeWidthUnit: 'percent' })
+    sheet.mount(ctx)
+    const bitmap = await compactSprite(64, 64)
+    const handle = await sheet.source(bitmap, { maxSize: 128, exact: false })
+    bitmap.close()
+    if (handle instanceof Error || isAborted(handle)) return expect.fail('source() refused')
+
+    // Exactly what `motion.fit` hands the core: the paper's own box, rounded up to whole texels.
+    const fitted = { w: Math.ceil(handle.frontRect.w), h: Math.ceil(handle.frontRect.h) }
+    expect(fitted.h, 'the fixture must actually exercise a SMALLER front').toBeLessThan(
+      handle.front.h,
+    )
+
+    // The build runs INSIDE the capture, not after a warm-up one: `gl-context.ts` memoises each
+    // uniform location on first use, so a location resolved before the patch is installed is never
+    // seen again and `seen` comes back empty.
+    let front: ReturnType<typeof sheet.build> | undefined
+    const seen = captureUniform(ctx, PAPER_UNIFORMS.edgeWidth, () => {
+      front = sheet.build(handle, fitted, defaultsFor(sheet.edgeSpec) as never)
+    })
+    expect(front instanceof Error, String((front as Error)?.message)).toBe(false)
+    if (front === undefined || front instanceof Error) {
+      sheet.dispose()
+      return
+    }
+    // And the width the shader receives is still the bucket-invariant one (ruling R6): the same
+    // `(pct / 100) * min(artwork)` the two larger fronts above produced, from a SMALLER front.
+    expect(seen).toHaveLength(1)
+    const pct = Number(defaultsFor(sheet.edgeSpec).edgeWidth)
+    expect(seen[0]).toBeCloseTo((pct / 100) * Math.min(handle.artwork.w, handle.artwork.h), 4)
+
+    sheet.releaseFront(front)
+    sheet.dispose()
+  })
+})
+
+/**
+ * Every `gl.uniform1f` upload to the named uniform inside `run`, in order.
+ *
+ * The location objects are per-program and opaque, so the NAME has to be learned from
+ * `getUniformLocation` itself — `gl-context.ts` memoises each location on first use, which is why
+ * both builds run inside ONE capture rather than one apiece. Both patches are restored in a
+ * `finally`: a leaked patch would follow the fixture's context into every later test in this file.
+ */
+function captureUniform(ctx: GlContext, uniform: string, run: () => void): number[] {
+  const gl = ctx.gl
+  const wasGet = gl.getUniformLocation
+  const wasF = gl.uniform1f
+  const realGet = wasGet.bind(gl)
+  const realF = wasF.bind(gl)
+  const named = new Set<WebGLUniformLocation>()
+  const seen: number[] = []
+  gl.getUniformLocation = (program, name) => {
+    const loc = realGet(program, name)
+    if (loc !== null && name === uniform) named.add(loc)
+    return loc
+  }
+  gl.uniform1f = (loc, v) => {
+    if (loc !== null && named.has(loc)) seen.push(v)
+    realF(loc, v)
+  }
+  try {
+    run()
+  } finally {
+    gl.getUniformLocation = wasGet
+    gl.uniform1f = wasF
+  }
+  return seen
+}

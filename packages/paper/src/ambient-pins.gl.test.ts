@@ -23,6 +23,7 @@ import { GlError, SheetError, isAborted } from '@paper-crumple/core'
 import { defaultsFor } from './paper-knobs.js'
 import { paperSheet } from './sheet.js'
 import { createGlFixture, type PaperGlFixture } from './testing/gl-fixture.js'
+import { SMOOTH_CLEAN } from './testing/edge-cells.js'
 
 let fixture: PaperGlFixture | null = null
 afterEach(() => {
@@ -80,7 +81,7 @@ describe('the ambient pins survive a whole pipeline run (§7.4.1)', () => {
     if (GlError.is(handle) || SheetError.is(handle) || isAborted(handle)) {
       return expect.fail(`source() refused: ${String(handle)}`)
     }
-    const front = sheet.build(handle, { w: 128, h: 128 }, defaultsFor('hull') as never)
+    const front = sheet.build(handle, { w: 128, h: 128 }, defaultsFor(SMOOTH_CLEAN) as never)
     if (front instanceof Error) return expect.fail(front.message)
 
     expect(gl!.isEnabled(gl!.DITHER)).toBe(false)

@@ -96,18 +96,22 @@ export {
 } from './mask.js'
 export type { AlphaBox, HolesReport } from './mask.js'
 
-// --- P10: the knob descriptors and the edgeMode factory option (§6.4-§6.7) ---
+// --- design 2026-09-05 §2.1-§2.4: the knob descriptors, composed from edgeShape/edgeFinish/edgeWidthUnit ---
 export {
   COMMON_KNOBS,
   defaultsFor,
   descriptorsFor,
   edgeParamsFrom,
-  HULL_KNOBS,
+  PAPER_FINISH_KNOBS,
   resolveSdfRes,
   SDF_RES_KNOB,
+  SMOOTH_KNOBS,
   TORN_KNOBS,
+  VARIANCE_KNOB,
+  WIDTH_PCT_KNOB,
+  WIDTH_PX_KNOB,
 } from './paper-knobs.js'
-export type { PaperEdgeMode } from './paper-knobs.js'
+export type { EdgeFinish, EdgeShape, EdgeSpec, EdgeWidthUnit } from '@paper-crumple/core/unstable'
 
 // --- P10: the rect §8.3 derives without a readback ---
 export { growBox, scaleBox, sheetRectFromExtent, signedFieldExtent } from './extent.js'
@@ -136,7 +140,6 @@ export type {
 export {
   DEBUG_MODES,
   FIBRE_TILE_PX,
-  LOOSE_PUSH,
   MAX_FOLDS,
   PAPER_FS,
   PAPER_UNIFORMS,
@@ -148,5 +151,7 @@ export { createResampler } from './artwork.js'
 export type { ArtworkSlot, ResampleOptions, Resampler } from './artwork.js'
 
 // --- P10: the slot itself (§5.2) ---
-export { paperSheet } from './sheet.js'
+// `optionsFor` is design 2026-09-05's own `EdgeSpec` -> `PaperSheetOptions` conversion (ruling
+// R5); it lives in `sheet.ts` rather than `paper-knobs.ts` to keep the import edge one-way.
+export { optionsFor, paperSheet } from './sheet.js'
 export type { PaperSheet, PaperSheetOptions } from './sheet.js'

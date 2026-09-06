@@ -41,10 +41,11 @@ import {
   KNOB_REFERENCE_PX,
   nextTurn,
   overscanRadius,
+  percentWidthReserve,
   raceAbort,
   uploadBytes,
 } from '@paper-crumple/core/unstable'
-import type { GlContext, ScratchPools, Texture } from '@paper-crumple/core/unstable'
+import type { EdgeSpec, GlContext, ScratchPools, Texture } from '@paper-crumple/core/unstable'
 import { createResampler } from './artwork.js'
 import type { Resampler } from './artwork.js'
 import { cpuSdfFromAlpha } from './field.js'
@@ -60,14 +61,14 @@ import {
   frontForArtwork,
   handleBytesFor,
 } from './handle.js'
-import type { PaperSheetHandle } from './handle.js'
+import type { OverscanReserve, PaperSheetHandle } from './handle.js'
+import { hullBandFor } from './edge-derive.js'
 import { hullCache } from './hull-cache.js'
 import type { HullCache, HullCacheKey } from './hull-cache.js'
 import { DISTANCE_WAVELENGTH_PX, buildHull, fillHullMask, toleranceFor } from './hull.js'
 import { boundsExtent, hullBounds, hullComponentCount } from './hull-shape.js'
 import type { HullShape, VertexBounds } from './hull-shape.js'
 import { defaultsFor, descriptorsFor, edgeParamsFrom, resolveSdfRes } from './paper-knobs.js'
-import type { PaperEdgeMode } from './paper-knobs.js'
 import { createPaperRenderer } from './paper-renderer.js'
 import type { PaperRenderer } from './paper-renderer.js'
 import { loadTileBitmaps, mountNeutralTiles, TILE_NAMES, uploadTiles } from './paper-tiles.js'
@@ -78,61 +79,94 @@ import type { PaperTileSet } from './tile-set.js'
 const HULL_SAMPLE_PX = 4
 
 /**
- * Factory options for `paperSheet()` (spec 6.5, 14).
+ * Factory options for `paperSheet()` (design 2026-09-05 §2, spec 6.5, 14).
  *
- * **`edgeMode` is a factory option, not a knob.** Spec 6.5's rule: "a setting that changes …
- * the set of other knobs is a factory option." `edgeMode` changes which of the 34 possible
- * descriptors `sheet.knobs` even contains — a `hull` factory's array (24 entries) simply has no
- * `tearAmp` in it, rather than an inert one a `hull` consumer's autocomplete still offers.
- * Default: `'hull'` — `paper.js:2029`'s own default, "the polygon cut sheet".
+ * **`edgeShape` and `edgeFinish` are factory options; the width is a knob.** Spec 6.5's rule: "a
+ * setting that changes … the set of other knobs is a factory option." Each of the two changes
+ * which of the 34 possible descriptors `sheet.knobs` even contains — a `smooth`/`clean` factory's
+ * array (24 entries) simply has no `tearFreq` and no `deckleWidth` in it, rather than inert ones a
+ * `smooth` consumer's autocomplete still offers (§2.4's count table). The WIDTH is deliberately
+ * NOT one: §2.1 requires "no edge" to be reachable by animating a value to zero without a
+ * rebuild, which a factory option cannot do.
+ *
+ * `edgeWidthUnit` is the third, and it is a factory option for the same reason with a smaller
+ * blast radius: it swaps `WIDTH_PX_KNOB` for `WIDTH_PCT_KNOB` — one descriptor for another, with
+ * a different default, range and `reference` — so it changes the descriptor array without
+ * changing the set of KEYS in it (`edgeWidth` either way), which is what lets §3.2 treat it as a
+ * unit rather than as a second knob.
+ *
+ * Defaults: `edgeShape: 'smooth'`, `edgeFinish: 'clean'`, `edgeWidthUnit: 'px'` — the plainest of
+ * §6's four cells, and what `paperSheet()` with no options at all must produce.
  *
  * **`tiles` defaults to `null` (spec 14).** Not for weight — the four re-encoded tiles are
  * 397 478 B, 0.74x one motion pack, so weight alone no longer carries the default — but because
- * the default edge mode is `hull`, which needs no tear, no teeth and no fibre at all: the modal
- * consumer would be charged for an asset their own configuration cannot use. A build before the
- * (opt-in) tiles land renders with the 1x1 neutral planes, which is exactly the render with the
- * photograph turned off (`paper.js:2085-2091`'s own comment, reproduced in `paper-tiles.ts`).
+ * the default cell is `smooth`/`clean`, which needs no tear, no teeth and no fibre at all: the
+ * modal consumer would be charged for an asset their own configuration cannot use. A build before
+ * the (opt-in) tiles land renders with the 1x1 neutral planes, which is exactly the render with
+ * the photograph turned off (`paper.js:2085-2091`'s own comment, reproduced in `paper-tiles.ts`).
  *
  * `overscanHeadroom` defaults to `0` and is the factory-level room a consumer can reserve for a
  * live edge-knob slider before any sprite exists; see `PaperSheet.overscan`'s own doc comment for
  * how this differs from the per-sprite reserve `add()` freezes (spec 8.6, `handle.ts`).
  */
 export interface PaperSheetOptions {
-  readonly edgeMode?: PaperEdgeMode
+  readonly edgeShape?: EdgeSpec['shape']
+  readonly edgeFinish?: EdgeSpec['finish']
+  readonly edgeWidthUnit?: EdgeSpec['widthUnit']
   readonly tiles?: PaperTileSet | null
   readonly overscanHeadroom?: number
 }
 
 /**
+ * The factory options that reproduce one `EdgeSpec` (ruling R5).
+ *
+ * `EdgeSpec` (`shape` / `finish` / `widthUnit`) and `PaperSheetOptions` (`edgeShape` /
+ * `edgeFinish` / `edgeWidthUnit`) carry the same three settings under different names, and are
+ * not assignable to one another in either direction. Anything that iterates over §6's four cells —
+ * a test's `cell(spec)` helper, the playground's own cell switch — would otherwise repeat the
+ * three-key rename at every site, which is three chances per site to pair the wrong two.
+ *
+ * It lives HERE rather than in `paper-knobs.ts` because `PaperSheetOptions` is declared here and
+ * `sheet.ts` already imports `paper-knobs.ts`: the reverse edge would be an import cycle.
+ */
+export function optionsFor(spec: EdgeSpec): PaperSheetOptions {
+  return { edgeShape: spec.shape, edgeFinish: spec.finish, edgeWidthUnit: spec.widthUnit }
+}
+
+/**
  * `paperSheet()`'s own contract: `SheetRenderer` plus the two names this slot adds.
  *
- * **`overscan` is THE reserve: every sprite's, not only a square one's.** It is computed once,
- * synchronously, as `freezeOverscan(edgeParamsFrom(edgeMode, defaultsFor(edgeMode)),
- * overscanHeadroom).overscan` — this factory's *default* knob values plus the headroom, before
- * any sprite exists — and `source()` freezes exactly this number onto every handle. Spec 5.2
- * puts one readonly number on `SheetRenderer` because the core reads `sheet.overscan` to size
- * its surface before `add()` has produced a handle to ask instead, and with an aspect-free
- * reserve that number is exact: the margin is `ceil(overscan × artwork.h)` texels on every side
- * of the artwork, so a front's long side is exactly `artwork.long + 2 × ceil(overscan ×
- * artwork.h)` for every aspect (`frontForArtwork` in `handle.ts`) — not, in general,
- * `artwork.long × (1 + 2·overscan)`, which the two agree on only for a portrait or square
- * source, where `artwork.h` is the long side.
+ * **`overscan` is an UPPER BOUND**, not every sprite's exact reserve — `frontCapFor` needs one
+ * number before any bitmap exists, and `R(c)` is monotone in the aspect, so `R(c = 1)` is a true
+ * ceiling (design 2026-09-05 §4.4). It is computed once, synchronously, as `reserveFor(1)`: this
+ * factory's *default* knob values plus its headroom, at a square sprite's aspect. Under
+ * `edgeWidthUnit: 'px'` the width does not depend on the sprite at all, so every handle's own
+ * `overscan` IS this number and the bound is tight; under `'percent'` the width — and with it the
+ * reserve — genuinely depends on `c = min(1, srcW / srcH)`, and a 1:4 tower reserves strictly
+ * less (§4.4's whole point: it would otherwise overpay roughly 8 % of its artwork resolution).
+ * `handle.overscan <= sheet.overscan` is the invariant that survives in both units. Spec 5.2 puts
+ * one readonly number on `SheetRenderer` because the core reads `sheet.overscan` to size its
+ * surface before `add()` has produced a handle to ask instead; a ceiling is the only honest answer
+ * that early.
  *
- * The reserve is applied as `ceil(overscan × artwork.h)` texels on every side of the artwork,
- * not as a uv fraction, so a tall sprite's x margin holds the paint radius without the radius
- * being scaled by `h / w`. Spec 8.6's "derived per sprite from its edge parameters and frozen at
- * `add()`" is read here as: derived from THIS FACTORY'S edge parameters — its defaults and its
- * headroom — and frozen for the sprite's life. It is deliberately NOT
- * read as "from whatever the knobs held when the sprite was added": `maxDist` is a hull-tier
- * knob, every hull-tier write re-runs `source()` (spec 6.3), and `source()` has no memory of an
- * earlier handle — a reserve taken from the live values would be re-frozen on every re-source,
- * which is exactly the silent artwork rescale the frozen reserve exists to forbid. The one
- * consistent reading is the one `build()`'s step-4 `checkReserve` already implements: the
- * factory's reserve is the ceiling, a knob past it is "re-add required", and `overscanHeadroom`
- * is the way to buy room before any sprite exists.
+ * The reserve is applied as `guardMarginsFor`'s per-axis texel count around the artwork, not as a
+ * uv fraction, so a tall sprite's x margin holds the paint radius without the radius being scaled
+ * by `h / w` (design 2026-09-05 §4.2, `frontForArtwork` in `handle.ts`).
+ *
+ * Spec 8.6's "derived per sprite from its edge parameters and frozen at `add()`" is read here as:
+ * derived from THIS FACTORY'S edge parameters — its DEFAULTS and its headroom, at this sprite's
+ * aspect — and frozen for the sprite's life. It is deliberately NOT read as "from whatever the
+ * knobs held when the sprite was added": under `smooth` `edgeWidth` is a hull-tier knob, every
+ * hull-tier write re-runs `source()` (spec 6.3), and `source()` has no memory of an earlier handle
+ * — a reserve taken from the live values would be re-frozen on every re-source, which is exactly
+ * the silent artwork rescale the frozen reserve exists to forbid. The one consistent reading is
+ * the one `build()`'s step-4 `checkReserve` already implements: the frozen reserve is the ceiling,
+ * a live width past it is "re-add required", and `overscanHeadroom` is the way to buy room before
+ * any sprite exists.
  */
 export interface PaperSheet extends SheetRenderer<Knobs, PaperSheetHandle> {
-  readonly edgeMode: PaperEdgeMode
+  /** Which cell of design 2026-09-05 §6's table this factory builds. Replaces `edgeMode`. */
+  readonly edgeSpec: EdgeSpec
   /**
    * Resolves once the tile fetch this `mount()` started has landed: `true` on a successful
    * swap-in of the real tiles, or immediately to `true` when `tiles` is `null` (nothing to
@@ -343,9 +377,9 @@ function reachRect(centres: VertexBounds, radius: number, field: Size, front: Si
 
 /**
  * A numeric knob value, or `fallback` when the key is absent from `values` — which happens for
- * real here: `values` is `defaultsFor(edgeMode)` under whatever the caller projected into
- * `SourceOptions.knobs` (§6.3), declared keys only, and a `torn`-only or `hull`-only descriptor
- * is simply not in the other mode's set (`edgeParamsFrom`'s own `num` helper makes the same
+ * real here: `values` is `defaultsFor(edgeSpec)` under whatever the caller projected into
+ * `SourceOptions.knobs` (§6.3), declared keys only, and a `torn`-only or `smooth`-only descriptor
+ * is simply not in the other shape's set (`edgeParamsFrom`'s own `num` helper makes the same
  * allowance).
  */
 function numKnob(values: Knobs, key: string, fallback: number): number {
@@ -985,31 +1019,117 @@ function cpuFieldFallback(
 }
 
 export function paperSheet(options?: PaperSheetOptions): PaperSheet {
-  const edgeMode: PaperEdgeMode = options?.edgeMode ?? 'hull'
+  const edgeSpec: EdgeSpec = {
+    shape: options?.edgeShape ?? 'smooth',
+    finish: options?.edgeFinish ?? 'clean',
+    widthUnit: options?.edgeWidthUnit ?? 'px',
+  }
   const tileSet: PaperTileSet | null = options?.tiles ?? null
   const overscanHeadroom = options?.overscanHeadroom ?? 0
-  const knobDescriptors = descriptorsFor(edgeMode)
+  const knobDescriptors = descriptorsFor(edgeSpec)
+  const factoryDefaults = defaultsFor(edgeSpec)
 
   /**
-   * §6.3 — the values a trace runs at: this mode's defaults, with the HULL TIER alone taken from
-   * the caller's projection of §6.6's ladder for the sprite (`SourceOptions.knobs`) — declared
-   * keys only, so a torn sheet handed `minDist` keeps ignoring it, exactly as `build()` does. No
-   * projection traces at the defaults.
+   * The frozen reserve for one aspect, always from THIS FACTORY'S DEFAULTS (design 2026-09-05
+   * §4.4). `aspect` is `c = min(1, srcW / srcH)`, the artwork's short side over its height;
+   * `reserveFor(1)` is the factory-level ceiling every sprite's own reserve sits under.
    *
-   * Nothing else in `source()` may follow the live knobs — and that includes `maxDist`, which IS
-   * in the hull tier this function lets through: the reserve is derived from `reserveParams`,
-   * the defaults, and never from the values this returns. The reserve and the overscan `p` it
-   * derives — and with `p` the artwork's own resolution, the largest long side whose front still
-   * fits `maxSize` under `p` (`frontForArtwork` in `handle.ts`, §8.6) — are frozen at add() for
-   * the sprite's life: a re-source that read the live `tearAmp` or `looseness`
-   * handed back a handle with another `p` than the fit was sized over, so `build()` placed a
-   * smaller artwork in the same bucket, and on a portrait sprite the `h / w`-scaled reserve ran
-   * off the reference plane and `source()` itself refused ("could not derive overscan") where
-   * `build()`'s own reserve check (step 4) is the honest surface. `sdfRes` and `looseness` stay
-   * at the defaults for the same reason `build()` re-blurs at the live `looseness` itself.
+   * Under `'px'` the knob IS the reference-px width, nothing here depends on the sprite, and
+   * `reserveFor` is constant in `aspect` — the per-sprite freeze is then a no-op that returns the
+   * factory's own number. Under `'percent'` the width and the reserve are mutually defined (the
+   * percent is a fraction of the artwork, and the artwork is what is left after the reserve), and
+   * `percentWidthReserve` closes them in one linear form (§4.3).
+   *
+   * DEFAULTS and never the live values: `sheet.ts`'s `source()` step 1 records what happened
+   * otherwise — a re-source that read the live width re-froze `p`, `A` shrank, and the artwork
+   * visibly rescaled inside a bucket `fit` had already sized once.
+   */
+  function reserveFor(aspect: number): InstanceType<typeof KnobError> | OverscanReserve {
+    const raw = numKnob(factoryDefaults, 'edgeWidth', 0)
+    const variance = numKnob(factoryDefaults, 'edgeVariance', 0)
+    const finishTerms =
+      edgeSpec.finish === 'paper' && raw > 0
+        ? 4 * numKnob(factoryDefaults, 'fiberLen', 0) + numKnob(factoryDefaults, 'deckleWidth', 0)
+        : 0
+    const widthRef =
+      edgeSpec.widthUnit === 'px'
+        ? Math.max(0, raw)
+        : percentWidthReserve({
+            pct: Math.max(0, raw) / 100,
+            aspect,
+            variance,
+            finishTerms,
+            headroom: overscanHeadroom,
+          }).widthRef
+    return freezeOverscan(edgeParamsFrom(edgeSpec, factoryDefaults, widthRef), overscanHeadroom)
+  }
+
+  /**
+   * design 2026-09-05 §3.1 — the ONE conversion, from LIVE knob values against a front that is
+   * already sized. `scaleKnob` returns a non-`'sprite-px'` value UNCHANGED (spec §12), so a raw
+   * `5.9` reaching the shader would be 5.9 working px; every consumer of the width — the reserve
+   * check, the hull band, and `renderFront`'s `widthRef` — reads this instead.
+   *
+   * Under `'px'` the knob IS the reference-px width. Under `'percent'` it is a fraction of the
+   * ARTWORK's short side, and once the framing is fixed the conversion is direct:
+   * `W_ref = (pct / 100) * min(artwork) * KNOB_REFERENCE_PX / front.h`. The closure inside
+   * `percentWidthReserve` exists only to break the mutual definition WHILE the front is still
+   * being sized against itself; here `artwork` and `front` are both already known.
+   *
+   * **`front` is the plane the answer is quoted in, and the caller picks it.** A reference px is a
+   * fraction of a front's height, so the same knob resolves to different reference-px numbers
+   * against different fronts. `build()` calls this TWICE and deliberately: once with
+   * `handle.front`, for `checkReserve` — which compares against a radius `source()` froze in that
+   * plane, and a comparison across two planes is meaningless — and once with `size`, for
+   * `renderFront`, whose `pxScale` is `size.h / KNOB_REFERENCE_PX`. Under `'px'` the two coincide
+   * exactly, because no denominator enters. See `build()`'s step 4 for the failure the single
+   * resolution caused.
+   *
+   * **`artwork` is not rescaled against `front`, and must not be** (ruling R6). The shader-side
+   * call is `widthRefFrom(knobValues, handle.artwork, size)` — the SOURCE front's artwork paired
+   * with THIS build's front — and that is correct, not a texel-space mix: `artworkPlacement`
+   * (below, and its call site in `build()`'s step 6b region around `sheet.ts:1826`) places the
+   * artwork **1:1 and centred in whatever front the build was asked for** (spec §7.4.2), so a
+   * bucket PADS the front and never rescales the artwork. `handle.artwork` is therefore already
+   * in this build's texel space. The consequence is the property §3.2 rejected "percent of the
+   * front" in order to obtain: the working-px width the shader receives is
+   * `uEdgeWidth = W_ref * front.h / KNOB_REFERENCE_PX = (pct / 100) * min(artwork)`, in which
+   * `front.h` cancels — invariant across every bucket the same handle is built into. Rescaling by
+   * `size.h / handle.front.h` would make `W_ref` constant instead, and the rendered border would
+   * grow with the bucket.
+   */
+  function widthRefFrom(values: Knobs, artwork: Size, front: Size): number {
+    const raw = Math.max(0, numKnob(values, 'edgeWidth', 0))
+    if (edgeSpec.widthUnit === 'px') return raw
+    return ((raw / 100) * Math.min(artwork.w, artwork.h) * KNOB_REFERENCE_PX) / front.h
+  }
+
+  /**
+   * §6.3 — the values a trace runs at: this cell's defaults, with the HULL TIER alone taken from
+   * the caller's projection of §6.6's ladder for the sprite (`SourceOptions.knobs`) — declared
+   * keys only, so a `torn` sheet handed a hull-tier key keeps ignoring it, exactly as `build()`
+   * does. No projection traces at the defaults.
+   *
+   * Under `smooth`, `edgeWidth` and `edgeVariance` ARE hull-tier (design 2026-09-05 §2.1,
+   * `descriptorsFor`), so this is where a caller's width reaches the trace — and, through
+   * `widthRefFrom` below, the band `hullBandFor` hands to `hull.ts`. Under `torn` both are
+   * front-tier, so the trace never sees them and `build()` resolves the width again from its own
+   * `knobValues`.
+   *
+   * Nothing else in `source()` may follow the live knobs — and that includes the hull-tier keys
+   * this function lets through: the RESERVE is derived from `factoryDefaults` by `reserveFor`,
+   * never from the values this returns. The reserve and the overscan `p` it derives — and with
+   * `p` the artwork's own resolution, the largest long side whose front still fits `maxSize`
+   * under `p` (`frontForArtwork` in `handle.ts`, §8.6) — are frozen at add() for the sprite's
+   * life: a re-source that read the live width handed back a handle with another `p` than the fit
+   * was sized over, so `build()` placed a smaller artwork in the same bucket, and on a portrait
+   * sprite the `h / w`-scaled reserve ran off the reference plane and `source()` itself refused
+   * ("could not derive overscan") where `build()`'s own reserve check (step 4) is the honest
+   * surface. `sdfRes` and `looseness` stay at the defaults for the same reason `build()` re-blurs
+   * at the live `looseness` itself.
    */
   function valuesFor(knobs: Knobs | undefined): Knobs {
-    const out = defaultsFor(edgeMode)
+    const out = defaultsFor(edgeSpec)
     if (knobs === undefined) return out
     for (const d of knobDescriptors) {
       const v = knobs[d.key]
@@ -1028,17 +1148,17 @@ export function paperSheet(options?: PaperSheetOptions): PaperSheet {
     return out
   }
 
-  // §6.5/§8.6: the edge parameters every reserve in this factory is derived from — the mode's
-  // defaults, never a sprite's live values (`source()`'s step 1 says why) — and the factory-level
-  // baseline itself. See `PaperSheet.overscan`'s doc comment: a sprite's own handle carries this
-  // same number.
-  const reserveParams = edgeParamsFrom(edgeMode, defaultsFor(edgeMode))
-  const reserve = freezeOverscan(reserveParams, overscanHeadroom)
-  // Every mode's own *default* knob values alone reserve well under the 500 reference-px ceiling
+  // §6.5/§8.6/§4.4: the FACTORY-LEVEL reserve — this cell's defaults at `c = 1`, never a sprite's
+  // live values (`source()`'s step 1 says why). `R(c)` is monotone in the aspect (`core/edge.ts`'s
+  // own derivation, pinned by Task 2's test), so `reserveFor(1)` is a true ceiling over every
+  // sprite this factory will ever be handed. See `PaperSheet.overscan`'s doc comment: under `'px'`
+  // a sprite's own handle carries this same number, under `'percent'` it carries no more.
+  const reserve = reserveFor(1)
+  // Every cell's own *default* knob values alone reserve well under the reference-px ceiling
   // `overscanFromRadius` guards — but `overscanHeadroom` is a user-supplied factory option with no
   // upper bound (`freezeOverscan` scales the radius by `1 + headroom`), so this branch genuinely IS
-  // reachable: past a headroom of roughly 4.95 for `hull`'s own defaults (roughly 2.34 for
-  // `torn`'s), the scaled radius leaves no artwork inside the reference frame. `overscan` is never
+  // reachable: past a headroom of a few units at the shipped defaults, the scaled radius leaves no
+  // artwork inside the reference frame. `overscan` is never
   // actually read in that case — `mount()` below is the earliest call with an error channel
   // (`PaperSheet.overscan` itself has none, spec 5.2: a plain `readonly number`) and refuses to
   // mount, returning the wrapped `KnobError` first. The field still needs *a* value for the narrow
@@ -1279,20 +1399,30 @@ export function paperSheet(options?: PaperSheetOptions): PaperSheet {
     // reserve, `p` and the artwork size derived below stay at the defaults (`valuesFor`'s own doc
     // comment: §8.6 freezes them at add()).
     const values = valuesFor(o.knobs)
-    const edgeParams = edgeParamsFrom(edgeMode, values)
 
     const info = spriteInfoFor(bitmap)
     const spriteKey = info.key
     const srcW = info.srcW
     const srcH = info.srcH
 
-    // Step 1: the frozen reserve — this factory's DEFAULTS plus `overscanHeadroom`, never the
-    // live hull tier (`maxDist` is both a hull-tier knob and the whole of `r_hull`, so a reserve
-    // taken from `edgeParams` would be re-frozen on every hull-tier re-source: `p` grew, `A`
-    // shrank, and the artwork visibly rescaled inside a bucket `fit` had sized once). Aspect-free
-    // (`handle.ts`'s `freezeOverscan`), so it IS `overscan` above; `mount()` already refused when
-    // that derivation failed, and `source()` returns before this line without a mount.
-    const p = overscan
+    // Step 1: the frozen reserve — this factory's DEFAULTS plus `overscanHeadroom`, at THIS
+    // sprite's aspect, never the live hull tier (under `smooth` `edgeWidth` is both a hull-tier
+    // knob and the whole of the band, so a reserve taken from the live values would be re-frozen
+    // on every hull-tier re-source: `p` grew, `A` shrank, and the artwork visibly rescaled inside
+    // a bucket `fit` had sized once).
+    //
+    // design §4.4: `PaperSheet.overscan` is an UPPER BOUND — `reserveFor(1)`. The exact `p(c)` is
+    // frozen HERE, per sprite, because under the percent unit `c` is the only sprite input the
+    // width depends on, and a 1:4 tower otherwise overpays roughly 8 % of its artwork resolution.
+    // Under `'px'` the two coincide and this is a no-op that returns the factory's own number.
+    const aspect = Math.min(1, srcW / srcH)
+    const frozen = reserveFor(aspect)
+    if (KnobError.is(frozen)) {
+      return new SheetError("paperSheet: source() could not derive this sprite's reserve", {
+        cause: frozen,
+      })
+    }
+    const p = frozen.overscan
 
     // Steps 2-3: the artwork, its per-axis margin and the front it sits in (§8.6, `handle.ts`).
     // `artworkLongSide` (optional on `SourceOptions`) is `artworkCssPx`'s own channel from the
@@ -1306,8 +1436,17 @@ export function paperSheet(options?: PaperSheetOptions): PaperSheet {
       artworkLongSide: o.artworkLongSide,
     })
     if (SheetError.is(framing)) return framing
-    const { artwork, front } = framing
+    const { artwork, marginX, marginY, front } = framing
     const frontLongSide = Math.max(front.w, front.h)
+
+    // The WIDTH follows the LIVE knobs; the RESERVE above does not (design §3.1's two lifetimes).
+    // Under `smooth` `edgeWidth` is hull-tier, so `values` already carries the caller's projection
+    // of it and `build()`'s hull-tier guard turns any later change into a re-source; under `torn`
+    // there is no trace to run and `build()` resolves its own from `knobValues`, which is what
+    // keeps the knob live at §2.1's `'front'` level. `handle.widthRef` records THIS number — what
+    // the trace ran at — and is never uploaded.
+    const widthRef = widthRefFrom(values, artwork, front)
+    const edgeParams = edgeParamsFrom(edgeSpec, values, widthRef)
 
     // Step 4: sdfRes, off the front's long side (§7.4.3).
     const sdfRes = resolveSdfRes(numKnob(values, 'sdfRes', 0), frontLongSide)
@@ -1501,7 +1640,7 @@ export function paperSheet(options?: PaperSheetOptions): PaperSheet {
     const knobKey = hullCacheKey(knobDescriptors, values)
     const cacheKey: HullCacheKey = { spriteKey, sdfRes, knobKey }
     const texel = front.w / field.w
-    const needField = edgeMode === 'torn' || m.cache.get(cacheKey) === undefined
+    const needField = edgeSpec.shape === 'torn' || m.cache.get(cacheKey) === undefined
 
     /**
      * The CPU signed field for the hull trace (§8.2.1), from whichever branch succeeds:
@@ -1618,11 +1757,24 @@ export function paperSheet(options?: PaperSheetOptions): PaperSheet {
         cpu = got
       }
 
-      // `torn` mode declares no hull-only descriptors at all — `values.minDist`/`maxDist` are
-      // simply absent — so it always passes 0/0, which is what makes `buildHull` return
-      // `HULL_USE_ALPHA` (the brief's own instruction).
-      const minDist = edgeMode === 'torn' ? 0 : numKnob(values, 'minDist', 0)
-      const maxDist = edgeMode === 'torn' ? 0 : numKnob(values, 'maxDist', 0)
+      // design §5: `smooth` derives the band `W (1 -+ v)` from the ONE width and hands it to
+      // `hull.ts` unchanged — the marching-squares contour, the Douglas-Peucker simplification and
+      // the repair pass are all untouched. `torn` builds no polygon: 0/0 is what makes `buildHull`
+      // return `HULL_USE_ALPHA`, and so is `edgeWidth 0` under either shape (§7), because
+      // `hullBandFor(0, v)` is exactly `{0, 0}` for every `v` (`edge-derive.ts`, Task 3's test) —
+      // no extra branch is needed for the zero case.
+      const band =
+        edgeSpec.shape === 'smooth'
+          ? // `NaN`, not `0`, to match `edgeParamsFrom`'s own `num` helper (`paper-knobs.ts`) —
+            // ruling R3 picked the loud fallback, and the width and the variance must not be read
+            // here under one philosophy and there under the other. The branch is unreachable
+            // either way: `values` is `defaultsFor(edgeSpec)` under the caller's hull-tier
+            // projection, and `descriptorsFor` declares `edgeVariance` in every cell. Note that
+            // `hullBandFor`'s own `clamp01` maps a non-finite variance to 0, so the two fallbacks
+            // would in fact produce the SAME band here — this is an alignment of the reading
+            // convention at the call site, not a behaviour change.
+            hullBandFor(widthRef, numKnob(values, 'edgeVariance', Number.NaN))
+          : { minDist: 0, maxDist: 0 }
       const angularity = numKnob(values, 'angularity', 0)
       const seed = numKnob(values, 'seed', 0)
 
@@ -1630,8 +1782,8 @@ export function paperSheet(options?: PaperSheetOptions): PaperSheet {
         field: cpu,
         width: field.w,
         height: field.h,
-        minDist: minDist * k,
-        maxDist: maxDist * k,
+        minDist: band.minDist * k,
+        maxDist: band.maxDist * k,
         angularity,
         seed,
         tolerance: toleranceFor(angularity) * k,
@@ -1650,9 +1802,9 @@ export function paperSheet(options?: PaperSheetOptions): PaperSheet {
     afterHullForTest?.()
     if (signalAborted(o.signal)) return ABORTED
 
-    // The rect (§8.3, no source-sized readback): hull/both take it from the polygon's own
-    // extent; torn (and any use-alpha hull) take it from the silhouette's own box, grown by the
-    // overscan radius. `reach` is the SAME two terms — silhouette plus paint radius — kept for
+    // The rect (§8.3, no source-sized readback): a polygon hull takes it from the polygon's own
+    // extent; `torn` (and any use-alpha hull, including `edgeWidth 0` under `smooth`) takes it
+    // from the silhouette's own box, grown by the overscan radius. `reach` is the SAME two terms — silhouette plus paint radius — kept for
     // the guard band as continuous front px, neither rounded nor clamped: `growBox`, `scaleBox`
     // and `sheetRect` each round outward (a texel or a pixel per step — quantisation the reserve
     // never promised to cover), `sheetRect`'s 4 % is §8.3's bucket-decision safety rather than
@@ -1662,10 +1814,11 @@ export function paperSheet(options?: PaperSheetOptions): PaperSheet {
     let box: AlphaBox
     let reach: Rect
     if (bounds === undefined) {
-      // Only reachable for `torn` (always `use-alpha`) or a degenerate empty trace. Torn mode
-      // read its field above, so the extent takes it from the same readback the trace used —
-      // one readback per add where two used to be spent (§8.10); a cached use-alpha hull in
-      // hull mode read none and reads it now, off the hot (cached-polygon) path for hull/both.
+      // Reachable under `torn` (always `use-alpha`), under `edgeWidth 0` in either shape (§7:
+      // `hullBandFor(0, v)` is `{0, 0}`), and for a degenerate empty trace. `torn` read its field
+      // above, so the extent takes it from the same readback the trace used — one readback per add
+      // where two used to be spent (§8.10); a cached use-alpha hull under `smooth` read none and
+      // reads it now, off the hot (cached-polygon) path.
       if (cpu === null) {
         const got = await readField()
         if (isAborted(got)) return ABORTED
@@ -1676,7 +1829,7 @@ export function paperSheet(options?: PaperSheetOptions): PaperSheet {
       if (raw === undefined) {
         return new SheetError('paperSheet: source() found an empty silhouette')
       }
-      // `overscanRadius` is reference px (like `minDist`/`maxDist`); `k` is the same
+      // `overscanRadius` is reference px (like the band `hullBandFor` derives); `k` is the same
       // reference-px-to-field-texel conversion the hull trace uses above.
       const radius = overscanRadius(edgeParams) * k
       box = growBox(raw, radius, field.w, field.h)
@@ -1688,19 +1841,20 @@ export function paperSheet(options?: PaperSheetOptions): PaperSheet {
       )
     } else {
       box = boundsExtent(bounds, field.w, field.h)
-      // Finding F1. `extent.ts:5-7` says the polygon's vertices already sit `maxDist` past the
-      // silhouette, so the polygon's own box is the sheet's extent. That holds for `hull` and
-      // fails for `both`: there the torn path draws outward FROM the contour, by exactly the
-      // terms `overscanRadius` collects as `r_both - maxDist`: the leading `thickness`, the tear
-      // bracket `[thickness + 0.6*looseness*tearAmp + midAmp]*edgeK`, four fibre lengths and the
-      // slop — roughly 111 reference px at this package's own knob defaults (22 + 61.2 + 16 + 12),
-      // against roughly 36 from `SHEET_MARGIN_FRAC`'s 4 %. Derived from the same function the frozen
-      // reserve is derived from, so the two can never drift apart. Until the hull polygon became
-      // a real field this was invisible, because `both` never reached the polygon at all. For
-      // `hull` the same expression is the slop alone (`r_hull - maxDist`): the antialiasing the
-      // reach carries past the polygon, which the rect leaves to `sheetRect`'s 4 %.
-      const beyond = (overscanRadius(edgeParams) - edgeParams.maxDist) * k
-      if (edgeMode === 'both') box = growBox(box, beyond, field.w, field.h)
+      // Finding F1, design §5.1 / §4.1. `extent.ts`'s header says the polygon's vertices already
+      // sit at the band's far edge, so the polygon's own box is the sheet's extent — for a contour
+      // with nothing drawn past it. The polygon's vertices sit at `maxDist = W (1 + v)`, but the FINISH
+      // draws outward from there — four fibre lengths and a deckle band — which is exactly what
+      // `overscanRadius` collects beyond the band. Under `clean` the difference is the slop alone,
+      // which the rect leaves to `sheetRect`'s 4 %. Derived from the same function the frozen
+      // reserve is derived from, so the two can never drift apart.
+      //
+      // The `growBox` is now gated on the FINISH, not on a shape: `smooth` decorates its polygon
+      // exactly as the old `both` mode did (design §6's table gives `smooth`/`paper` the deckle and
+      // the fibre), so the finish terms have to reach past the contour in that cell too.
+      const beyond =
+        (overscanRadius(edgeParams) - edgeParams.widthRef * (1 + edgeParams.variance)) * k
+      if (edgeSpec.finish === 'paper') box = growBox(box, beyond, field.w, field.h)
       reach = reachRect(bounds, beyond, field, front)
     }
 
@@ -1725,13 +1879,17 @@ export function paperSheet(options?: PaperSheetOptions): PaperSheet {
       frontRect,
       front,
       artwork,
+      marginX,
+      marginY,
       overscan: p,
       sdfRes,
       srcW,
       srcH,
       aspect: srcW / srcH,
       exact: o.exact,
-      edgeMode,
+      edgeSpec,
+      widthRef,
+      reserve: frozen,
       hull,
       hullKnobs: hullTierOf(values),
       alive: true,
@@ -1787,32 +1945,61 @@ export function paperSheet(options?: PaperSheetOptions): PaperSheet {
       )
     }
 
-    // Step 4 (spec 8.6): checkReserve catches a front-class slider dragged past the frozen
-    // margin. `reserve` (this factory's own closure variable, above) carries the same RADIUS
-    // `source()` freezes onto every handle: both are `freezeOverscan(reserveParams,
-    // overscanHeadroom)`, which is aspect-free, so the radius is
-    // deterministic in (mode, defaults, headroom), none of which vary per sprite or over a sheet's
-    // life, and re-reading it here is exactly "the handle's own frozen reserve" without a field
-    // added to the handle for it. `KnobError` is unreachable here (mount() above already refused
-    // whenever `reserve` is one), kept because §10.8 forbids unwrapping an `Error | T` unchecked
-    // even on a branch believed dead.
-    if (KnobError.is(reserve)) {
-      return new SheetError('paperSheet: build() could not derive the frozen overscan reserve', {
-        cause: reserve,
-      })
-    }
+    // Step 4 (spec 8.6, design §4.4): checkReserve catches a front-class slider dragged past the
+    // frozen margin. It compares against **the handle's own** reserve, not this factory's closure
+    // variable: under `edgeWidthUnit: 'percent'` the two genuinely differ per sprite, because the
+    // reserve depends on `c = min(1, srcW / srcH)` and the factory's is the `c = 1` ceiling.
+    // Reading the factory's here would let a tower spend the square's margin, which it never
+    // reserved.
+    //
     // Fix round 1, finding 2 (was wrong): a previous version pinned every field-tier knob
-    // (`looseness`, `sdfRes`) back to this factory's default before deriving `edgeParams`, on the
+    // (`looseness`, `sdfRes`) back to this factory's default before deriving the params, on the
     // theory that `checkReserve` is a "front-class slider" guard and `looseness` is field-tier.
-    // That is false: core's own `overscanRadius` (`overscan.ts`) takes the LIVE `looseness` as a
-    // real term of `r_torn`/`r_both` (the `0.45*sigma` blur lead and the `0.6*looseness*tearAmp`
-    // tear bracket) — pinning it silently disabled the one guard `overscanHeadroom` exists to be
-    // the escape hatch from. `checkReserve` gets the sprite's live `knobValues` verbatim, exactly
-    // as the brief's own step 4 states; a caller who genuinely needs to drag `looseness` past the
-    // frozen reserve gets the "re-add required" `SheetError` this check exists to produce, and one
-    // who needs the room reserves it up front with a larger `overscanHeadroom` (spec 8.6).
-    const reserveCheck = checkReserve(reserve, edgeParamsFrom(edgeMode, knobValues))
+    // That is false for the same reason it is still false today, though the terms have changed:
+    // `checkReserve` must see the LIVE knob values, or it silently disables the one guard
+    // `overscanHeadroom` exists to be the escape hatch from. What it reads live is now
+    // `overscanRadius`'s own set — `edgeWidth` (through `widthRef` below), `edgeVariance`, and,
+    // under `finish: 'paper'`, `fiberLen` and `deckleWidth`. A caller who genuinely needs to drag
+    // one of those past the frozen reserve gets the "re-add required" `SheetError` this check
+    // exists to produce, and one who needs the room reserves it up front with a larger
+    // `overscanHeadroom` (spec 8.6).
+    //
+    // §2.1: under `torn` the width is a FRONT-tier knob, so it may have moved since `source()` and
+    // this is the only place that can see it. Reading `handle.widthRef` instead would make
+    // `edgeWidth` inert in exactly the cell the redesign exists for — and would void the
+    // "animatable to zero without a rebuild" premise. Both resolutions below therefore start from
+    // the LIVE `knobValues`; what differs is the DENOMINATOR, and deliberately so.
+    //
+    // **Two fronts, two readers, one width.** Reference px are a fraction of a front's height, so
+    // "a width in reference px" is meaningless without saying which front. Under
+    // `edgeWidthUnit: 'percent'` the two readers below need different ones, and handing either of
+    // them the other's number is a bug:
+    //
+    //   - `checkReserve` compares a radius against `handle.reserve.radius`, which `source()` froze
+    //     with `handle.front` as its denominator. A comparison is only meaningful inside one plane,
+    //     so this side must use `handle.front` too. `size` here made every ordinary core build fail:
+    //     `fit.frontSize` is the paper's own box (`stage.ts:1629`, `:1647`), which is SMALLER than
+    //     the trace front, and a smaller denominator inflates `W_ref` — the `square` fixture
+    //     resolved to a radius near 101.8 against a permitted 83.9 and was refused "re-add
+    //     required" for a build that reserves nothing extra at all.
+    //   - `renderFront` (below) uploads `uEdgeWidth = W_ref * pxScale` with
+    //     `pxScale = size.h / KNOB_REFERENCE_PX`, so ITS number must be quoted against `size` — that
+    //     is ruling R6's invariant, and it is what makes the painted border the same working width
+    //     in every bucket.
+    //
+    // The two agree exactly under `'px'`, where `widthRefFrom` is the identity on the knob and no
+    // denominator enters at all; they diverge only in the percent unit, which is the only place
+    // either front is read.
+    const reserveWidthRef = widthRefFrom(knobValues, handle.artwork, handle.front)
+    const reserveCheck = checkReserve(
+      handle.reserve,
+      edgeParamsFrom(edgeSpec, knobValues, reserveWidthRef),
+    )
     if (reserveCheck !== undefined) return reserveCheck
+
+    // The width the SHADER gets: this build's own front as the denominator (ruling R6). See the
+    // block above for why this is a second resolution rather than a reuse of `reserveWidthRef`.
+    const widthRef = widthRefFrom(knobValues, handle.artwork, size)
 
     // Step 5 (spec 6.3, engine.js's own setLooseness): pass A (the tight SDF field) depends only
     // on the artwork and the handle-frozen geometry, never on any knob — so it is reused whenever
@@ -1903,7 +2090,8 @@ export function paperSheet(options?: PaperSheetOptions): PaperSheet {
         }
         m.lastFieldBuild = fieldRecord
 
-        // Step 6 (spec 6.3): a hull-tier knob (`minDist`, `maxDist`, `angularity`, `seed`) moving off
+        // Step 6 (spec 6.3): a hull-tier knob (`edgeWidth`, `edgeVariance`, `angularity`, `seed`
+        // under `smooth`; none under `torn`, where the width is front-tier instead) moving off
         // the value `source()` traced the handle's hull at is `invalidates: 'hull'`, which the core
         // resolves by calling `source()` again, at the current knobs — `build()` never silently
         // retraces, which would hide a cache miss the invalidation ladder exists to surface. The
@@ -1920,14 +2108,16 @@ export function paperSheet(options?: PaperSheetOptions): PaperSheet {
         const hullChanged = hullTierKeys.some((d) => knobValues[d.key] !== handle.hullKnobs[d.key])
         if (hullChanged) {
           return new SourceExpiredError(
-            'paperSheet: build() — a hull-invalidating knob (minDist/maxDist/angularity/seed) moved ' +
+            'paperSheet: build() — a hull-invalidating knob (edgeWidth/edgeVariance/angularity/seed) moved ' +
               "off the value this handle's hull was traced at (spec 6.3); source() again, with the " +
               'current knobs',
           )
         }
 
-        // Step 6b (design §2, §3, §5): the hull polygon's own field, and the reason `uEdgeMode`
-        // becomes 1 rather than 2. The polygon lives in the texels of the field `source()` traced on,
+        // Step 6b (design 2026-09-05 §2, §3, §5, §6): the hull polygon's own field — what
+        // `paper-renderer.ts` binds to BOTH `uSdf*` slots under `smooth`, so the silhouette becomes
+        // the polygon's contour rather than the tight/loose union. The polygon lives in the texels
+        // of the field `source()` traced on,
         // around the artwork placed 1:1 in `handle.front`; this build's field is over `size`, with the
         // artwork placed 1:1 again but at another origin. So a hull texel goes to that front's px,
         // then to artwork px (minus the trace placement), back to this front's px (plus this
@@ -1955,9 +2145,10 @@ export function paperSheet(options?: PaperSheetOptions): PaperSheet {
           hullComponentCount(handle.hull) > 0
         ) {
           const bytes = fillHullMask(handle.hull, field.w, field.h, hullSx, hullSy, hullTx, hullTy)
-          // `undefined` is "no drawable component", not a failure (design §7): the sheet stays on
-          // `uEdgeMode = 2` and renders exactly as it does today. A GL failure below is a different
-          // thing and is never swallowed into this branch.
+          // `undefined` is "no drawable component", not a failure (design §7): `paperField` stays
+          // `null`, the renderer falls back to the artwork's own tight/loose pair, and the sheet
+          // renders off the alpha silhouette. A GL failure below is a different thing and is never
+          // swallowed into this branch.
           if (bytes !== undefined) {
             const mask = m.ctx.texture({
               width: field.w,
@@ -2037,19 +2228,18 @@ export function paperSheet(options?: PaperSheetOptions): PaperSheet {
           tight,
           loose,
           // The hull polygon's own field (design 2026-09-02 §3): non-null exactly when the handle
-          // carries a polygon hull with at least one drawable component — in `hull` AND `both` modes
-          // alike, since step 6b above reads the handle, never `edgeMode`. In `hull` mode that is what
-          // makes `paper-renderer.ts:169` select `uEdgeMode = 1`. `use-alpha` and an all-dropped hull
-          // keep `null`, and so keep mode 2, bit-identical to before this change.
-          //
-          // `both` mode changes here too, and deliberately: `paper-renderer.ts:168-172` already
-          // substitutes this field for BOTH `tightField` and `looseTexture` when `edgeMode === 'both'`
-          // (its own port of the ancestor spike's `edge.js:104-110`), so the silhouette becomes the
-          // polygon's contour rather than the tight/loose union. That path was written but never
-          // exercised, because `build()` hardcoded `null` until now. Growing `both`'s sheet extent to
-          // match is Task 4's concern, not this one's — this is not a "no change" claim for `both`.
+          // carries a polygon hull with at least one drawable component — under `smooth` in both
+          // finishes alike, since step 6b above reads the handle, never `edgeSpec`. That is what
+          // makes `paper-renderer.ts` bind it to BOTH `uSdf*` slots (design 2026-09-05 §6), so the
+          // silhouette becomes the polygon's own contour rather than the tight/loose union.
+          // `use-alpha` and an all-dropped hull keep `null` and fall back to the artwork's pair.
           paperField,
-          edgeMode,
+          // design 2026-09-05 §6's cell, and §3.1's ONE width in reference px. `widthRef` here is
+          // the LIVE value resolved at step 4 above, never `handle.widthRef` (which is what the
+          // TRACE ran at and is never uploaded): under `torn` the width is front-tier, so this is
+          // the only place that can see a value the caller has moved since `source()`.
+          edgeSpec,
+          widthRef,
           values: knobValues,
           descriptors: knobDescriptors,
         })
@@ -2161,7 +2351,7 @@ export function paperSheet(options?: PaperSheetOptions): PaperSheet {
   }
 
   return {
-    edgeMode,
+    edgeSpec,
     knobs: knobDescriptors,
     overscan,
     get tilesReady() {

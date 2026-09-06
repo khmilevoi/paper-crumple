@@ -1,4 +1,5 @@
 import { describe, expect, it } from 'vitest'
+import { GUARD_EPSILON_REFERENCE_PX, KNOB_REFERENCE_PX, marginFractionFor } from './overscan.js'
 import {
   FRONT_LONG_SIDE_CAP,
   SDF_RES_MAX,
@@ -97,8 +98,10 @@ describe('FRONT_LONG_SIDE_CAP and frontCapFor', () => {
   })
 
   it('sizes the front so artworkLongSide artwork texels fit for every aspect, rounded to 64', () => {
-    expect(frontCapFor({ artworkLongSide: 540, overscan: 0.13291, cap: 2048 })).toBe(704)
-    expect(frontCapFor({ artworkLongSide: 540, overscan: 0.08, cap: 2048 })).toBe(640)
+    // design 2026-09-05 §4.2: the front cap now reserves paint plus the guard band
+    // (`marginFractionFor`), not paint alone, so these are larger than the pre-§4.2 figures.
+    expect(frontCapFor({ artworkLongSide: 540, overscan: 0.13291, cap: 2048 })).toBe(768)
+    expect(frontCapFor({ artworkLongSide: 540, overscan: 0.08, cap: 2048 })).toBe(704)
     expect(frontCapFor({ artworkLongSide: 2000, overscan: 0.1, cap: 2048 })).toBe(2048)
   })
 
@@ -107,12 +110,25 @@ describe('FRONT_LONG_SIDE_CAP and frontCapFor', () => {
     expect(frontCapFor({ artworkLongSide: 100, overscan: Number.NaN, cap: 2048 })).toBe(2048)
   })
 
-  it('requests enough front for the sheet to actually deliver artworkLongSide texels (the sheet needs A + 2*ceil(p*A), not ceil(A*(1+2p)))', () => {
-    // p = 105/790, A = 151: ceil(A*(1+2p)) = 192, which paperSheet()'s frontForArtwork can only
+  it('requests enough front for the sheet to actually deliver artworkLongSide texels (the sheet needs A + 2*ceil(A*(marginFractionFor(p)+eps)), not ceil(A*(1+2p)))', () => {
+    // p = 105/790, A = 151: ceil(A*(1+2p)) = 192, which the pre-§4.2 `frontForArtwork` could only
     // fill with 150 artwork texels on a portrait or square sprite (2*ceil(x) - ceil(2x) can be 1,
-    // and rounding up to a multiple of 64 does not always absorb it). The true requirement,
-    // A + 2*ceil(p*A) = 193, rounds up to 256 and leaves room for the full 151.
+    // and rounding up to a multiple of 64 does not always absorb it). The off-by-one-texel
+    // structural bug this pins predates design §4.2's guard margin and survives it unchanged —
+    // 256 (the smallest 64-multiple above 193) is still what `guardMarginsFor`'s larger margin
+    // (design 2026-09-05 §4.2) requests here too, so the figure is unchanged even though the
+    // margin itself is now bigger than plain paint.
     const overscan = 105 / 790
     expect(frontCapFor({ artworkLongSide: 151, overscan, cap: 2048 })).toBe(256)
+  })
+
+  it('sizes the front cap over the guard margin too (design 2026-09-05 §4.2)', () => {
+    const p = 0.132731
+    const a = 640
+    const eps = GUARD_EPSILON_REFERENCE_PX / KNOB_REFERENCE_PX
+    const wanted = a + 2 * Math.ceil(a * (marginFractionFor(p) + eps))
+    expect(frontCapFor({ artworkLongSide: a, overscan: p, cap: 4096 })).toBe(
+      SIZE_QUANTUM * Math.ceil(wanted / SIZE_QUANTUM),
+    )
   })
 })

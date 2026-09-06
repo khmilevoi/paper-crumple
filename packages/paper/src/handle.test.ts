@@ -1,9 +1,17 @@
 import { describe, expect, it } from 'vitest'
 import { KnobError, SheetError } from '@paper-crumple/core'
 import type { Size } from '@paper-crumple/core'
-import { handleBytes } from '@paper-crumple/core/unstable'
+import {
+  checkGuardBand,
+  guardMarginsFor,
+  handleBytes,
+  KNOB_REFERENCE_PX,
+  overscanFromRadius,
+  percentWidthReserve,
+} from '@paper-crumple/core/unstable'
 import type { EdgeParams } from '@paper-crumple/core/unstable'
 import { packPolygons } from './hull-shape.js'
+import { VARIANCE_KNOB, WIDTH_PCT_KNOB, WIDTH_PX_KNOB } from './paper-knobs.js'
 import {
   checkReserve,
   dimsForLongSide,
@@ -13,14 +21,17 @@ import {
 } from './handle.js'
 import type { PaperSheetHandle } from './handle.js'
 
-const hullDefaults: EdgeParams = {
-  mode: 'hull',
-  maxDist: 72,
-  thickness: 0,
-  looseness: 0,
-  tearAmp: 0,
-  midAmp: 0,
+/**
+ * design 2026-09-05 §4.1's bag, at the shipped `smooth`/`clean` defaults: the width and the
+ * variance from `WIDTH_PX_KNOB` / `VARIANCE_KNOB`, and no finish terms — `clean` draws neither a
+ * deckle nor a fibre, and `edgeParamsFrom` zeroes both in that cell rather than letting a knob
+ * value the shader ignores widen the reserve.
+ */
+const smoothDefaults: EdgeParams = {
+  widthRef: Number(WIDTH_PX_KNOB.default),
+  variance: Number(VARIANCE_KNOB.default),
   fiberLen: 0,
+  deckleWidth: 0,
 }
 
 /** ~40 vertices, which is what a 2 600 px perimeter yields at the default angularity (spec 8.5). */
@@ -40,15 +51,24 @@ function handleAt(srcW: number, srcH: number): PaperSheetHandle {
     frontRect: { x: 2, y: 2, w: 380, h: 380 },
     front: { w: 384, h: 384 },
     artwork: { w: 326, h: 326 },
+    marginX: 29,
+    marginY: 29,
     overscan: 0.09,
     sdfRes: 192,
     srcW,
     srcH,
     aspect: srcW / srcH,
     exact: false,
-    edgeMode: 'hull',
+    edgeSpec: { shape: 'smooth', finish: 'clean', widthUnit: 'px' },
+    widthRef: Number(WIDTH_PX_KNOB.default),
+    reserve: { overscan: 0.09, radius: 84 },
     hull: fortyVertexHull(),
-    hullKnobs: { minDist: 22, maxDist: 72, angularity: 0.7, seed: 3 },
+    hullKnobs: {
+      edgeWidth: Number(WIDTH_PX_KNOB.default),
+      edgeVariance: Number(VARIANCE_KNOB.default),
+      angularity: 0.7,
+      seed: 3,
+    },
     alive: true,
     bytes: 0,
   }
@@ -80,12 +100,12 @@ describe('the handle holds no image data (spec 8.5, 11)', () => {
 })
 
 describe('freezeOverscan (spec 8.6)', () => {
-  // §8.6's "Defaults: hull ~ 0.09" is reachable only from maxDist = 64 - exactly the input
-  // core's own overscan.test.ts picks to reproduce that sentence. The spike ships
-  // DEFAULT_PARAMS.maxDist = 72, so r = maxDist + slop = 72 + 12 = 84 and
-  // p = r / (1000 - 2r) = 84 / 832 ~= 0.10096. This asserts the true derived default.
-  it('derives the hull default at about 0.10', () => {
-    const reserve = freezeOverscan(hullDefaults, 0)
+  // design 2026-09-05 §4.1: `r = W(1 + v) + 4*fiberLen + deckleWidth + slop`. At the shipped
+  // `smooth`/`clean` defaults that is `47 * 1.53 + 0 + 0 + 12 = 83.91`, so
+  // `p = r / (1000 - 2r) = 83.91 / 832.18 ~= 0.10083` — within a thousandth of the pre-redesign
+  // `hull` figure (`maxDist 72 + slop 12 = 84`), which is why the band below still holds.
+  it('derives the smooth/clean default at about 0.10', () => {
+    const reserve = freezeOverscan(smoothDefaults, 0)
     expect(KnobError.is(reserve)).toBe(false)
     if (KnobError.is(reserve)) return
     expect(reserve.overscan).toBeGreaterThan(0.08)
@@ -93,8 +113,8 @@ describe('freezeOverscan (spec 8.6)', () => {
   })
 
   it('adds headroom to the frozen radius rather than to the overscan', () => {
-    const plain = freezeOverscan(hullDefaults, 0)
-    const roomy = freezeOverscan(hullDefaults, 0.5)
+    const plain = freezeOverscan(smoothDefaults, 0)
+    const roomy = freezeOverscan(smoothDefaults, 0.5)
     expect(KnobError.is(plain)).toBe(false)
     expect(KnobError.is(roomy)).toBe(false)
     if (KnobError.is(plain) || KnobError.is(roomy)) return
@@ -103,30 +123,60 @@ describe('freezeOverscan (spec 8.6)', () => {
   })
 
   it('returns a KnobError rather than NaN when the radius cannot fit the reference plane', () => {
-    expect(KnobError.is(freezeOverscan({ ...hullDefaults, maxDist: 600 }, 0))).toBe(true)
+    expect(KnobError.is(freezeOverscan({ ...smoothDefaults, widthRef: 600 }, 0))).toBe(true)
   })
 })
 
-/** `freezeOverscan(hullDefaults, 0)`'s `overscan`, non-throwing (spec 10.8: no boundary throws). */
-function hullOverscan(): number {
-  const reserve = freezeOverscan(hullDefaults, 0)
+/** `freezeOverscan(smoothDefaults, 0)`'s `overscan`, non-throwing (spec 10.8: no boundary throws). */
+function smoothOverscan(): number {
+  const reserve = freezeOverscan(smoothDefaults, 0)
   return KnobError.is(reserve) ? Number.NaN : reserve.overscan
 }
 
 describe('frontForArtwork (spec 8.6, per axis)', () => {
-  const p = hullOverscan()
+  const p = smoothOverscan()
 
-  it('derives a finite reserve from the hull defaults (precondition for every case below)', () => {
+  it('derives a finite reserve from the smooth/clean defaults (precondition for every case below)', () => {
     expect(Number.isFinite(p)).toBe(true)
   })
 
-  it('reserves the same number of texels on every side, for portrait, square and landscape', () => {
-    const cases: Array<{ srcW: number; srcH: number; artwork: Size; margin: number; front: Size }> =
-      [
-        { srcW: 64, srcH: 96, artwork: { w: 71, h: 106 }, margin: 11, front: { w: 93, h: 128 } },
-        { srcW: 64, srcH: 64, artwork: { w: 106, h: 106 }, margin: 11, front: { w: 128, h: 128 } },
-        { srcW: 96, srcH: 64, artwork: { w: 112, h: 75 }, margin: 8, front: { w: 128, h: 91 } },
-      ]
+  it('reserves a per-axis margin, coinciding on a square and diverging off it, for portrait, square and landscape', () => {
+    // design 2026-09-05 §4.2 supersedes the pre-§4.2 uniform-margin figures this test used to
+    // pin: the margin is now paint plus guard band, per axis, so it is no longer a single
+    // `ceil(overscan * artwork.h)` on every side.
+    const cases: Array<{
+      srcW: number
+      srcH: number
+      artwork: Size
+      marginX: number
+      marginY: number
+      front: Size
+    }> = [
+      {
+        srcW: 64,
+        srcH: 96,
+        artwork: { w: 67, h: 100 },
+        marginX: 13,
+        marginY: 13,
+        front: { w: 93, h: 126 },
+      },
+      {
+        srcW: 64,
+        srcH: 64,
+        artwork: { w: 100, h: 100 },
+        marginX: 13,
+        marginY: 13,
+        front: { w: 126, h: 126 },
+      },
+      {
+        srcW: 96,
+        srcH: 64,
+        artwork: { w: 107, h: 71 },
+        marginX: 10,
+        marginY: 10,
+        front: { w: 127, h: 91 },
+      },
+    ]
     for (const c of cases) {
       const result = frontForArtwork({
         overscan: p,
@@ -138,11 +188,14 @@ describe('frontForArtwork (spec 8.6, per axis)', () => {
       expect(SheetError.is(result)).toBe(false)
       if (SheetError.is(result)) continue
       expect(Math.max(result.front.w, result.front.h)).toBeLessThanOrEqual(128)
-      expect(result.front.w - result.artwork.w).toBe(2 * result.margin)
-      expect(result.front.h - result.artwork.h).toBe(2 * result.margin)
-      expect(result.margin).toBe(Math.ceil(p * result.artwork.h))
+      expect(result.front.w - result.artwork.w).toBe(2 * result.marginX)
+      expect(result.front.h - result.artwork.h).toBe(2 * result.marginY)
+      const margins = guardMarginsFor({ artwork: result.artwork, overscan: p })
+      expect(result.marginX).toBe(margins.x)
+      expect(result.marginY).toBe(margins.y)
       expect(result.artwork).toEqual(c.artwork)
-      expect(result.margin).toBe(c.margin)
+      expect(result.marginX).toBe(c.marginX)
+      expect(result.marginY).toBe(c.marginY)
       expect(result.front).toEqual(c.front)
 
       // Maximality: one more texel on the long side would not fit `maxSize`. Computed directly
@@ -155,20 +208,19 @@ describe('frontForArtwork (spec 8.6, per axis)', () => {
         c.srcW,
         c.srcH,
       )
-      const longMargin = Math.ceil(p * longArtwork.h)
+      const longMargins = guardMarginsFor({ artwork: longArtwork, overscan: p })
       const longFront = {
-        w: longArtwork.w + 2 * longMargin,
-        h: longArtwork.h + 2 * longMargin,
+        w: longArtwork.w + 2 * longMargins.x,
+        h: longArtwork.h + 2 * longMargins.y,
       }
       expect(Math.max(longFront.w, longFront.h)).toBeGreaterThan(128)
     }
   })
 
   it('is maximal at these realistic parameters: capA + 1 is tried before stepping down, finding the texel the closed form alone would leave on the table', () => {
-    // Regression for the closed-form estimate under-shooting by exactly one texel: at the hull
-    // overscan (p = 84/832), a 96x64 source's front cap `floor(maxSize / (1 + 2p·(64/96)))` is
-    // one texel below the true maximum for these four `maxSize` values. Confirmed by hand:
-    // 135 -> 118 (119 fits), 152 -> 133 (134 fits), 169 -> 148 (149 fits), 489 -> 430 (431 fits).
+    // Regression for the closed-form estimate under-shooting by exactly one texel, now measured
+    // against `guardMarginsFor`'s per-axis margin (design 2026-09-05 §4.2) rather than the
+    // pre-§4.2 uniform one.
     for (const maxSize of [135, 152, 169, 489]) {
       const result = frontForArtwork({ overscan: p, srcW: 96, srcH: 64, maxSize, exact: false })
       expect(SheetError.is(result)).toBe(false)
@@ -177,19 +229,21 @@ describe('frontForArtwork (spec 8.6, per axis)', () => {
 
       // Maximality, computed directly (not through frontForArtwork's own clamp — see above).
       const longArtwork = dimsForLongSide(Math.max(result.artwork.w, result.artwork.h) + 1, 96, 64)
-      const longMargin = Math.ceil(p * longArtwork.h)
+      const longMargins = guardMarginsFor({ artwork: longArtwork, overscan: p })
       const longFront = {
-        w: longArtwork.w + 2 * longMargin,
-        h: longArtwork.h + 2 * longMargin,
+        w: longArtwork.w + 2 * longMargins.x,
+        h: longArtwork.h + 2 * longMargins.y,
       }
       expect(Math.max(longFront.w, longFront.h)).toBeGreaterThan(maxSize)
     }
   })
 
   it('honours artworkLongSide and clamps it to what maxSize can hold', () => {
+    // design 2026-09-05 §4.2: larger fronts than the pre-§4.2 figures, since the margin now
+    // includes the guard band on top of paint.
     for (const { srcW, srcH, front } of [
-      { srcW: 64, srcH: 96, front: { w: 349, h: 482 } },
-      { srcW: 96, srcH: 64, front: { w: 454, h: 321 } },
+      { srcW: 64, srcH: 96, front: { w: 367, h: 504 } },
+      { srcW: 96, srcH: 64, front: { w: 476, h: 337 } },
     ]) {
       const result = frontForArtwork({
         overscan: p,
@@ -216,9 +270,10 @@ describe('frontForArtwork (spec 8.6, per axis)', () => {
     expect(SheetError.is(clamped)).toBe(false)
     if (SheetError.is(clamped)) return
     expect(Math.max(clamped.front.w, clamped.front.h)).toBeLessThanOrEqual(256)
-    expect(clamped.artwork).toEqual({ w: 141, h: 212 })
-    expect(clamped.margin).toBe(22)
-    expect(clamped.front).toEqual({ w: 185, h: 256 })
+    expect(clamped.artwork).toEqual({ w: 135, h: 202 })
+    expect(clamped.marginX).toBe(26)
+    expect(clamped.marginY).toBe(27)
+    expect(clamped.front).toEqual({ w: 187, h: 256 })
   })
 
   it('under exact keeps the source and ignores maxSize and artworkLongSide', () => {
@@ -233,9 +288,10 @@ describe('frontForArtwork (spec 8.6, per axis)', () => {
     expect(SheetError.is(result)).toBe(false)
     if (SheetError.is(result)) return
     expect(result.artwork).toEqual({ w: 40, h: 40 })
-    const margin = Math.ceil(p * 40)
-    expect(result.margin).toBe(margin)
-    expect(result.front).toEqual({ w: 40 + 2 * margin, h: 40 + 2 * margin })
+    const margins = guardMarginsFor({ artwork: { w: 40, h: 40 }, overscan: p })
+    expect(result.marginX).toBe(margins.x)
+    expect(result.marginY).toBe(margins.y)
+    expect(result.front).toEqual({ w: 40 + 2 * margins.x, h: 40 + 2 * margins.y })
   })
 
   it('returns a SheetError when nothing fits', () => {
@@ -313,23 +369,155 @@ describe('frontForArtwork (spec 8.6, per axis)', () => {
       expect(SheetError.is(result)).toBe(true)
     }
   })
+
+  it('reserves a wider x margin than y on a landscape source (design 2026-09-05 §4.2)', () => {
+    const framing = frontForArtwork({
+      overscan: 0.132731,
+      srcW: 1200,
+      srcH: 400,
+      maxSize: 1024,
+      exact: false,
+    })
+    expect(framing).not.toBeInstanceOf(SheetError)
+    if (framing instanceof Error) return
+    expect(framing.marginX).toBeGreaterThan(framing.marginY)
+    expect(framing.front.w).toBe(framing.artwork.w + 2 * framing.marginX)
+    expect(framing.front.h).toBe(framing.artwork.h + 2 * framing.marginY)
+    expect(Math.max(framing.front.w, framing.front.h)).toBeLessThanOrEqual(1024)
+    // The probe must follow the LONG axis: with the y fraction it lands on 770 here (R14),
+    // not the 902 the correct long-axis fraction finds.
+    expect(framing.artwork.w).toBeGreaterThanOrEqual(900)
+  })
+
+  it('never leaves a whole texel of artwork on the table on any aspect', () => {
+    // The loop only steps down, so an under-sized `capA` is unrecoverable. Sweep both orientations
+    // and assert that one more texel of artwork would NOT have fitted.
+    for (const [srcW, srcH] of [
+      [800, 800],
+      [1200, 400],
+      [2400, 800],
+      [400, 1600],
+      [531, 271],
+    ]) {
+      const framing = frontForArtwork({
+        overscan: 0.132731,
+        srcW,
+        srcH,
+        maxSize: 1024,
+        exact: false,
+      })
+      expect(framing, `${srcW}x${srcH}: ${String((framing as Error)?.message)}`).not.toBeInstanceOf(
+        SheetError,
+      )
+      if (framing instanceof Error) continue
+      const aLong = Math.max(framing.artwork.w, framing.artwork.h)
+      const bigger = dimsForLongSide(aLong + 1, srcW, srcH)
+      const m = guardMarginsFor({ artwork: bigger, overscan: 0.132731 })
+      expect(
+        Math.max(bigger.w + 2 * m.x, bigger.h + 2 * m.y),
+        `${srcW}x${srcH} left a texel unused`,
+      ).toBeGreaterThan(1024)
+    }
+  })
+
+  it('leaves the guard band clear for every aspect it frames', () => {
+    for (const [srcW, srcH] of [
+      [800, 800],
+      [1200, 400],
+      [400, 1600],
+      [531, 271],
+      [433, 768],
+    ]) {
+      const framing = frontForArtwork({
+        overscan: 0.132731,
+        srcW,
+        srcH,
+        maxSize: 1024,
+        exact: false,
+      })
+      expect(framing).not.toBeInstanceOf(SheetError)
+      if (framing instanceof Error) continue
+      const rho = (105 * framing.front.h) / KNOB_REFERENCE_PX
+      const check = checkGuardBand({
+        frontSize: framing.front,
+        hullExtent: {
+          x: framing.marginX - rho,
+          y: framing.marginY - rho,
+          w: framing.artwork.w + 2 * rho,
+          h: framing.artwork.h + 2 * rho,
+        },
+      })
+      expect(check, `${srcW}x${srcH}: ${String(check?.message)}`).toBeUndefined()
+    }
+  })
 })
 
 describe('checkReserve (spec 8.6)', () => {
   it('passes a knob that moves inside the reserve', () => {
-    const reserve = freezeOverscan(hullDefaults, 0.5)
+    const reserve = freezeOverscan(smoothDefaults, 0.5)
     expect(KnobError.is(reserve)).toBe(false)
     if (KnobError.is(reserve)) return
-    expect(checkReserve(reserve, { ...hullDefaults, maxDist: 80 })).toBeUndefined()
+    expect(checkReserve(reserve, { ...smoothDefaults, widthRef: 60 })).toBeUndefined()
   })
 
   it('names "re-add required" rather than clamping when a knob leaves it', () => {
-    const reserve = freezeOverscan(hullDefaults, 0)
+    const reserve = freezeOverscan(smoothDefaults, 0)
     expect(KnobError.is(reserve)).toBe(false)
     if (KnobError.is(reserve)) return
-    const err = checkReserve(reserve, { ...hullDefaults, maxDist: 140 })
+    const err = checkReserve(reserve, { ...smoothDefaults, widthRef: 140 })
     expect(SheetError.is(err)).toBe(true)
     expect(err?.message).toContain('re-add required')
     expect(err?.message).toContain('overscanHeadroom')
+  })
+})
+
+/**
+ * design 2026-09-05 §3.2's actual claim, and Task 8's step 1: the number on the `percent` slider is
+ * a percentage of the ARTWORK's short side, in artwork texels.
+ *
+ * Inverting the closure's own algebra would prove nothing — it would only restate
+ * `percentWidthReserve`. So this frames a real artwork under the reserve the closure produces,
+ * converts `W` back through THAT front's own `pxScale`, and checks the result against
+ * `pct * min(A.w, A.h)`, which is what the slider promises.
+ *
+ * It lives in `paper` rather than beside `percentWidthReserve` in `core` because it needs
+ * `frontForArtwork`, and `core` must not import from `paper`.
+ */
+describe('the percent width round-trip (design 2026-09-05 §3.2)', () => {
+  const number = (v: InstanceType<typeof KnobError> | number): number => {
+    expect(v).not.toBeInstanceOf(KnobError)
+    return v as number
+  }
+
+  it('lands the width the label promises, measured in artwork texels', () => {
+    // The sweep spans `WIDTH_PCT_KNOB`'s own range, with its default in the middle of the list
+    // (ruling R10: the descriptor, not the number).
+    for (const pct of [0.5, 2, Number(WIDTH_PCT_KNOB.default), 12, Number(WIDTH_PCT_KNOB.max)]) {
+      for (const [srcW, srcH] of [
+        [800, 800],
+        [1200, 400],
+        [400, 1600],
+      ]) {
+        const r = percentWidthReserve({
+          pct: pct / 100,
+          aspect: Math.min(1, srcW / srcH),
+          variance: Number(VARIANCE_KNOB.default),
+          finishTerms: 0,
+          headroom: 0,
+        })
+        const framing = frontForArtwork({
+          overscan: number(overscanFromRadius(r.radius)),
+          srcW,
+          srcH,
+          maxSize: 1024,
+          exact: false,
+        })
+        if (framing instanceof Error) return expect.fail(framing.message)
+        const widthTexels = (r.widthRef * framing.front.h) / KNOB_REFERENCE_PX
+        const shortSide = Math.min(framing.artwork.w, framing.artwork.h)
+        // One texel of tolerance: `frontForArtwork` rounds the short side and both margins.
+        expect(widthTexels, `${pct}% on ${srcW}x${srcH}`).toBeCloseTo((pct / 100) * shortSide, 0)
+      }
+    }
   })
 })

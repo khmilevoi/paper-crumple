@@ -1,19 +1,18 @@
 /**
- * §6.7's knob count arithmetic: The spike's `DEFAULT_PARAMS` (paper.js:2027) has 42 entries.
- * Six are not slot knobs: `edgeMode` (factory option), `preset` (demo-app UI state), `pose`
- * (view state), `crumpleFill` (commented in source as "driven per pose from `poses.CRUMPLE_FILL`,
- * not a knob"), and `paperColor` / `paperBack` (core-declared shared, §6.2). That leaves 36:
- * 20 common, 3 hull-only, 13 torn-only, exactly as §6.7 states. `sdfRes` is a 37th descriptor
- * that §6.7 does not count because it was never in `DEFAULT_PARAMS` — §5.2 moves it out of
- * `SourceOptions` and makes it "`sheet.sdfRes`, a knob with `invalidates: 'field'`".
+ * design 2026-09-05 §2.4's descriptor count table: `descriptorsFor` produces 24 keys for
+ * `smooth`/`clean`, 30 for `smooth`/`paper`, 28 for `torn`/`clean` and 34 for `torn`/`paper` — the
+ * 20 `COMMON_KNOBS`, one `edgeWidth` and one `edgeVariance` (both universal, present in every
+ * cell), the shape-only set (`SMOOTH_KNOBS`'s 1 or `TORN_KNOBS`'s 5), `PAPER_FINISH_KNOBS`'s 6
+ * under `finish: 'paper'` only, and `SDF_RES_KNOB`: `20 + 2 + 1 + 0 + 1 = 24`, `+6 = 30`,
+ * `20 + 2 + 5 + 0 + 1 = 28`, `+6 = 34`.
  *
  * §6.5's factory-option rule: "A setting that changes the shape of the program, the set of
- * resources, or the set of other knobs is a factory option." `edgeMode` changes the set of other
- * knobs, so it is `paperSheet({ edgeMode })` and a `hull` factory's `knobs` array simply does
- * not contain the 13 torn-only descriptors.
+ * resources, or the set of other knobs is a factory option." `edgeShape` and `edgeFinish` each
+ * change the set of other knobs, so both are `paperSheet({ … })` options.
  *
- * Two derived bounds, justified in the brief: `shadowBlur` is 0–40 (scale with `thickness` and
- * `deckleWidth`), and `photoFibre` is 0–1 (a mix factor, matching `photoCrumple`).
+ * Two derived bounds, justified in the brief: `shadowBlur` is 0–40 (scale with `edgeWidth` and
+ * `deckleWidth` — the old `thickness` this bound was originally pinned against is gone, folded
+ * into `edgeWidth`, §2.3), and `photoFibre` is 0–1 (a mix factor, matching `photoCrumple`).
  *
  * No `binds` on any paper descriptor. Core's `SharedKnob` union is exactly `'paperColor' |
  * 'paperBack'` (packages/core/src/shared-knobs.ts), and `paperColor` / `paperBack` are
@@ -22,24 +21,12 @@
  * `grain` as the canonical *ambiguous* key with two separately-tuned values (paper 0.09 over
  * 0–0.5, motion 0.18 over 0–0.6) reachable only as `sheet.grain` and `motion.grain`. Declaring
  * it as a shared knob would require a third member of `SharedKnob` in P3's file.
- *
- * §6.5's "31 knobs rather than 46": This does not reconcile with 46 − 13 = 33. The plan report
- * raises that conflict; the derived composition stands instead.
  */
 
 import { knobs } from '@paper-crumple/core'
-import type { KnobDescriptor } from '@paper-crumple/core'
+import type { Invalidates, KnobDescriptor } from '@paper-crumple/core'
 import { SDF_RES_MAX, SDF_RES_MIN, SIZE_QUANTUM, sdfResFor } from '@paper-crumple/core/unstable'
-import type { EdgeMode, EdgeParams } from '@paper-crumple/core/unstable'
-
-/**
- * Core's `EdgeMode`, re-exported under this package's name. Never re-declare the union.
- *
- * The three front modes. `hull` and `torn` are `paper.js:25`'s own `EDGE_MODES`; `both` is the
- * third mode `edge.js` adds on top of them — the hull polygon as the silhouette, decorated by the
- * torn shader path — and it never crosses into the 2D engine's own `edgeMode` uniform.
- */
-export type PaperEdgeMode = EdgeMode
+import type { EdgeParams, EdgeSpec } from '@paper-crumple/core/unstable'
 
 export const COMMON_KNOBS = knobs([
   {
@@ -194,27 +181,54 @@ export const COMMON_KNOBS = knobs([
   { key: 'debug', kind: 'int', invalidates: 'front', default: 0, min: 0, max: 7, dev: true },
 ])
 
-export const HULL_KNOBS = knobs([
-  {
-    key: 'minDist',
-    kind: 'number',
-    invalidates: 'hull',
-    default: 22,
-    min: 0,
-    max: 80,
-    step: 1,
-    reference: 'sprite-px',
-  },
-  {
-    key: 'maxDist',
-    kind: 'number',
-    invalidates: 'hull',
-    default: 72,
-    min: 0,
-    max: 140,
-    step: 1,
-    reference: 'sprite-px',
-  },
+/**
+ * design 2026-09-05 §2.1 — the width, present in every combination, and the only knob that
+ * decides how far the paper reaches past the artwork.
+ *
+ * `47 / 0.53` reproduces today's `hull` band `[22, 72]` to within a tenth of a reference px
+ * (§9.1); the exact parity variance is `25/47 = 0.5319`, below this descriptor's own 0.01 step.
+ *
+ * The percent default is the value that reproduces `W = 47` on a SQUARE at the library's own
+ * default `overscanHeadroom` of 0 (`percentWidthReserve({ pct: 0.059, aspect: 1, variance: 0.53,
+ * finishTerms: 0, headroom: 0 })` gives `W = 46.98`). The design document's `5.7` derives from a
+ * `p` taken at `variance: 0` and does not reproduce; see the plan's correction 4.
+ *
+ * Neither base declares `invalidates` (ruling R5): `KnobBase.invalidates` is required, so typing
+ * these as `KnobDescriptor` does not check against a literal missing it. `descriptorsFor` attaches
+ * `invalidates` when it composes the array, because the level is shape-dependent, not a property
+ * of the width or variance in isolation.
+ */
+export const WIDTH_PX_KNOB = {
+  key: 'edgeWidth',
+  kind: 'number',
+  default: 47,
+  min: 0,
+  max: 140,
+  step: 1,
+  reference: 'sprite-px',
+} as const
+
+export const WIDTH_PCT_KNOB = {
+  key: 'edgeWidth',
+  kind: 'number',
+  default: 5.9,
+  min: 0,
+  max: 15,
+  step: 0.1,
+  reference: 'artwork-pct',
+} as const
+
+export const VARIANCE_KNOB = {
+  key: 'edgeVariance',
+  kind: 'number',
+  default: 0.53,
+  min: 0,
+  max: 1,
+  step: 0.01,
+} as const
+
+/** design 2026-09-05 §2.2. `angularity` is unchanged from the old `HULL_KNOBS`. */
+export const SMOOTH_KNOBS = knobs([
   {
     key: 'angularity',
     kind: 'number',
@@ -226,16 +240,24 @@ export const HULL_KNOBS = knobs([
   },
 ])
 
+/**
+ * design 2026-09-05 §2.2. `looseness` survives as a PURE SHAPE knob: after §6.1's edits its only remaining
+ * effect is that the blurred field fills concavities (`scrapUnguarded`'s `max(tight, loose)`),
+ * which is a shape role, not a width one. `tearMix` is new — how the variance splits between the
+ * coarse tear and the mid-frequency wobble. `tearMix` is consumed only by `edge-derive.ts`'s
+ * `tearAmpsFor` on the CPU side (Task 6); the shader never sees it and no `uTearMix` uniform
+ * exists.
+ */
 export const TORN_KNOBS = knobs([
+  { key: 'tearFreq', kind: 'number', invalidates: 'front', default: 9, min: 2, max: 24, step: 0.5 },
   {
-    key: 'thickness',
+    key: 'tearAngular',
     kind: 'number',
     invalidates: 'front',
-    default: 22,
+    default: 0.8,
     min: 0,
-    max: 40,
-    step: 1,
-    reference: 'sprite-px',
+    max: 1,
+    step: 0.01,
   },
   {
     key: 'looseness',
@@ -245,27 +267,6 @@ export const TORN_KNOBS = knobs([
     min: 0,
     max: 1,
     step: 0.01,
-  },
-  { key: 'tearFreq', kind: 'number', invalidates: 'front', default: 9, min: 2, max: 24, step: 0.5 },
-  {
-    key: 'tearAmp',
-    kind: 'number',
-    invalidates: 'front',
-    default: 44,
-    min: 0,
-    max: 90,
-    step: 1,
-    reference: 'sprite-px',
-  },
-  {
-    key: 'midAmp',
-    kind: 'number',
-    invalidates: 'front',
-    default: 26,
-    min: 0,
-    max: 50,
-    step: 0.5,
-    reference: 'sprite-px',
   },
   {
     key: 'chew',
@@ -278,25 +279,24 @@ export const TORN_KNOBS = knobs([
     reference: 'sprite-px',
   },
   {
-    key: 'tearAngular',
+    key: 'tearMix',
     kind: 'number',
     invalidates: 'front',
-    default: 0.8,
+    default: 0.6,
     min: 0,
     max: 1,
     step: 0.01,
   },
-  { key: 'fibers', kind: 'number', invalidates: 'front', default: 0.8, min: 0, max: 1, step: 0.01 },
-  {
-    key: 'fiberLen',
-    kind: 'number',
-    invalidates: 'front',
-    default: 4,
-    min: 0,
-    max: 12,
-    step: 0.25,
-    reference: 'sprite-px',
-  },
+])
+
+/**
+ * design 2026-09-05 §2.3. Every dimensional finish knob stays in `sprite-px`: a fibre hair and a deckle band
+ * are small absolute features of the rim, not a fraction of the picture (§3, §12).
+ *
+ * `thickness` is NOT here. The shader has no thickness slab — `uThickness` was the contour's own
+ * width in all four of its uses — so it becomes `W` and stops being a knob (§2.3, §6.1).
+ */
+export const PAPER_FINISH_KNOBS = knobs([
   {
     key: 'deckleWidth',
     kind: 'number',
@@ -325,6 +325,17 @@ export const TORN_KNOBS = knobs([
     max: 1.2,
     step: 0.01,
   },
+  { key: 'fibers', kind: 'number', invalidates: 'front', default: 0.8, min: 0, max: 1, step: 0.01 },
+  {
+    key: 'fiberLen',
+    kind: 'number',
+    invalidates: 'front',
+    default: 4,
+    min: 0,
+    max: 12,
+    step: 0.25,
+    reference: 'sprite-px',
+  },
   {
     key: 'tearShadow',
     kind: 'number',
@@ -351,15 +362,24 @@ export const SDF_RES_KNOB: KnobDescriptor = {
   dev: true,
 }
 
-export function descriptorsFor(mode: PaperEdgeMode): readonly KnobDescriptor[] {
-  const edge =
-    mode === 'hull' ? HULL_KNOBS : mode === 'torn' ? TORN_KNOBS : [...HULL_KNOBS, ...TORN_KNOBS]
-  return [...COMMON_KNOBS, ...edge, SDF_RES_KNOB]
+/**
+ * design 2026-09-05 §2.1's per-shape `invalidates`: a width change under `smooth` rebuilds the hull polygon,
+ * under `torn` it only rebuilds the front. Legal because the descriptor array is built by the
+ * factory, so a given sheet carries exactly one answer (ruling R5).
+ */
+export function descriptorsFor(spec: EdgeSpec): readonly KnobDescriptor[] {
+  const level: Invalidates = spec.shape === 'smooth' ? 'hull' : 'front'
+  const base = spec.widthUnit === 'percent' ? WIDTH_PCT_KNOB : WIDTH_PX_KNOB
+  const width: KnobDescriptor = { ...base, invalidates: level }
+  const variance: KnobDescriptor = { ...VARIANCE_KNOB, invalidates: level }
+  const shape: readonly KnobDescriptor[] = spec.shape === 'smooth' ? SMOOTH_KNOBS : TORN_KNOBS
+  const finish: readonly KnobDescriptor[] = spec.finish === 'paper' ? PAPER_FINISH_KNOBS : []
+  return [...COMMON_KNOBS, width, variance, ...shape, ...finish, SDF_RES_KNOB]
 }
 
-export function defaultsFor(mode: PaperEdgeMode): Record<string, string | number | boolean> {
+export function defaultsFor(spec: EdgeSpec): Record<string, string | number | boolean> {
   const out: Record<string, string | number | boolean> = {}
-  for (const d of descriptorsFor(mode)) out[d.key] = d.default
+  for (const d of descriptorsFor(spec)) out[d.key] = d.default
   return out
 }
 
@@ -371,24 +391,45 @@ export function resolveSdfRes(knobValue: number, frontLongSide: number): number 
 }
 
 /**
- * The bag core's `overscanFor` / `overscanRadius` read (§8.6). `'both'` maps to core's `'both'`;
- * `'hull'` reports only `maxDist`, which is the whole of `r_hull = maxDist + slop`.
+ * The bag core's `overscanRadius` reads (design §4.1). `widthRef` is resolved by the CALLER —
+ * `paperSheet`'s `build()` / `source()` — because the percent unit's conversion needs the sprite's
+ * aspect and the frozen reserve, neither of which a knob bag carries (§3.1).
+ *
+ * §2.5's zero rule is enforced here as well as in the shader: at `widthRef === 0` the finish terms
+ * are zero, so the reserve is one `slop`.
+ *
+ * Ruling R3: every value this reads from `values` falls back to `defaultsFor(spec)`, never to a
+ * bare literal. An incomplete knob bag (a caller that only ever set `edgeWidth`, say) must still
+ * resolve to the SAME defaults `descriptorsFor(spec)` declares — Task 6 feeds this same resolved
+ * number to `tearAmpsFor` and to the shader's uniform upload, and a literal `0` there would break
+ * the `W(1 ± v)` invariant instead of reproducing the shipped default.
  */
 export function edgeParamsFrom(
-  mode: PaperEdgeMode,
+  spec: EdgeSpec,
   values: Readonly<Record<string, unknown>>,
+  widthRef: number,
 ): EdgeParams {
-  const num = (key: string, fallback: number): number => {
+  const defaults = defaultsFor(spec)
+  const num = (key: string): number => {
     const v = values[key]
-    return typeof v === 'number' && Number.isFinite(v) ? v : fallback
+    if (typeof v === 'number' && Number.isFinite(v)) return v
+    const d = defaults[key]
+    // `defaults` is `defaultsFor(spec)`, and `descriptorsFor(spec)` declares `edgeVariance` in
+    // every cell and `fiberLen` / `deckleWidth` in every cell this function actually reads them
+    // in (`decorated` gates both on `finish === 'paper'`), so `d` is always a number here — this
+    // branch is unreachable for the three keys this file calls `num` with. It stays NaN, not `0`,
+    // on purpose: ruling R3 exists because a missing knob value must never look like that knob
+    // being deliberately zeroed, and `0` is exactly indistinguishable from a real zero variance —
+    // `NaN` propagates loudly through `overscanRadius` instead. If this ever fires, the caller
+    // passed a key `descriptorsFor(spec)` does not declare, which is a bug in the caller.
+    return typeof d === 'number' ? d : NaN
   }
+  const w = Number.isFinite(widthRef) && widthRef > 0 ? widthRef : 0
+  const decorated = spec.finish === 'paper' && w > 0
   return {
-    mode,
-    maxDist: num('maxDist', 0),
-    thickness: num('thickness', 0),
-    looseness: num('looseness', 0),
-    tearAmp: num('tearAmp', 0),
-    midAmp: num('midAmp', 0),
-    fiberLen: num('fiberLen', 0),
+    widthRef: w,
+    variance: num('edgeVariance'),
+    fiberLen: decorated ? num('fiberLen') : 0,
+    deckleWidth: decorated ? num('deckleWidth') : 0,
   }
 }

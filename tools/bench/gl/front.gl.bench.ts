@@ -22,7 +22,7 @@ import {
   sigmaFor,
   uploadBytes,
 } from './deps.js'
-import type { GlContext, MountedTiles, PaperEdgeMode, Texture } from './deps.js'
+import type { EdgeSpec, GlContext, MountedTiles, Texture } from './deps.js'
 import { flush, measure, openFixture, silhouetteBytes } from './harness.js'
 
 afterAll(flush)
@@ -137,8 +137,14 @@ describe('gl.front', () => {
       expect(tiles).not.toBeInstanceOf(Error)
       if (tiles instanceof Error) return
 
-      for (const mode of ['hull', 'torn'] as const satisfies readonly PaperEdgeMode[]) {
-        await measure(`gl.front.render.${N}.${mode}`, {
+      // design 2026-09-05 §6's two extreme cells: `smooth`/`clean` binds the polygon's own field
+      // to both `uSdf*` slots and draws no decoration, `torn`/`paper` binds the artwork's pair and
+      // draws every one. The pair that used to be `edgeMode` `hull` and `torn`.
+      for (const [cell, spec] of [
+        ['smooth', { shape: 'smooth', finish: 'clean', widthUnit: 'px' }],
+        ['torn', { shape: 'torn', finish: 'paper', widthUnit: 'px' }],
+      ] as const satisfies ReadonlyArray<readonly [string, EdgeSpec]>) {
+        await measure(`gl.front.render.${N}.${cell}`, {
           gl: f.gl,
           timer: f.timer,
           profile: N === 1024,
@@ -150,12 +156,16 @@ describe('gl.front', () => {
               artwork,
               tight,
               loose,
-              paperField: mode === 'hull' ? paperField : null,
-              edgeMode: mode,
-              values: defaultsFor(mode),
-              descriptors: descriptorsFor(mode),
+              paperField: spec.shape === 'smooth' ? paperField : null,
+              edgeSpec: spec,
+              // design 2026-09-05 §3.1: the width reaches `renderFront` already resolved to
+              // reference px. Under the `'px'` unit `paperSheet`'s own `widthRefFrom` is the
+              // identity on the knob, so the descriptor default IS what the library would pass.
+              widthRef: Number(defaultsFor(spec).edgeWidth),
+              values: defaultsFor(spec),
+              descriptors: descriptorsFor(spec),
             }),
-          extra: () => ({ sdfRes: res, artworkSide: A, uEdgeMode: mode === 'hull' ? 1 : 0 }),
+          extra: () => ({ sdfRes: res, artworkSide: A, cell }),
           note: 'one fullscreen triangle through PAPER_FS; clear + 8 texture binds + ~60 uniforms',
         })
       }

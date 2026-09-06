@@ -9,9 +9,13 @@
  */
 import { KnobError, SheetError } from './errors.js'
 import type { Rect, Size } from './geometry.js'
+import { KNOB_REFERENCE_PX } from './knobs.js'
 
-/** Every bounded edge knob is quoted against this frame (`paper.js:39`). */
-export const KNOB_REFERENCE_PX = 1000
+// Every bounded edge knob is quoted against this frame (`paper.js:39`). ONE declaration, in
+// `./knobs.ts` beside `scaleKnob`, which is the module that defines what the frame means;
+// re-exported here so `unstable.ts`'s P5 block keeps its shape and every consumer that reached for
+// it through this module still gets the same binding rather than a second constant of equal value.
+export { KNOB_REFERENCE_PX }
 
 /**
  * The fixed slop for the JFA half-texel and antialiasing, in reference pixels. Spec 8.6 gives
@@ -21,87 +25,124 @@ export const KNOB_REFERENCE_PX = 1000
  */
 export const EDGE_SLOP_REFERENCE_PX = 12
 
-/**
- * The conservative `maxDim / H` bound from the widest bucket (spec 8.6). Spec 8.6 offers either
- * this or one fixed-point iteration; the bound is taken because it is stated as a number, while
- * the iteration needs `maxDim` and `H` in a coordinate space 8.6 never defines. Overscan is a
- * reserve, so over-estimating is safe and under-estimating is the failure this whole section
- * exists to prevent.
- */
-export const ASPECT_BOUND = 1.3
-
 /** Where `paper.js:319-322`'s hard cut begins, in centred normalised texture coordinates. */
 export const GUARD_BAND_INNER = 0.482
 
 /** Where it is complete: the field has collapsed to -1e4 by here. */
 export const GUARD_BAND_OUTER = 0.5
 
-export type EdgeMode = 'hull' | 'torn' | 'both'
+/**
+ * The band's own width, as a fraction of the texture: `0.5 - 0.482`. Never write `0.018`.
+ * design 2026-09-05 §4.2.
+ */
+export const GUARD_MARGIN_G = GUARD_BAND_OUTER - GUARD_BAND_INNER
 
-/** Every term of spec 8.6's radius formulae, in reference pixels unless noted. */
+/**
+ * Insurance on top of the closed form, stated as ε reference px out of the
+ * `KNOB_REFERENCE_PX` (1000 px) reference frame — but `guardMarginsFor` applies it as
+ * `A.h · ε / KNOB_REFERENCE_PX` TEXELS (a fraction of the artwork's height), not as a flat
+ * `ε`-texel reserve, so it comes out to well under 2 texels at realistic artwork sizes (≈1.5 at
+ * the hull defaults, `A.h ≈ 790`).
+ *
+ * **It is load-bearing on the x axis, and not on the y axis.** On y the derivation is exact and
+ * every rounding in the pipeline (`reachRect`'s `+0.5`, the inclusive `signedFieldExtent` box, the
+ * `ceil` below) runs in the check's favour, so ε is pure insurance there. On x it is not: the x
+ * closed form in `guardMarginsFor` takes the paint reach as `A.h · p / Q`, i.e. evaluated at the
+ * IDEAL `m_y`, while the front the pipeline actually builds is taller than that — the y margin is
+ * `ceil(A.h · (m_y/A.h + ε/1000))`, so the real front carries up to `2 (A.h·ε/1000 + 1)` texels of
+ * height the closed form did not price, and the real paint reach `p · F.h` grows with it. The
+ * `A.h · ε / KNOB_REFERENCE_PX` term on the x line is what pays for that: it has to cover
+ * `2p (A.h·ε/1000 + 1) / (1 - 2g)`, which at any realistic `p` is a fraction of the term itself.
+ * The shortfall it covers is under one texel and only bites on small artwork, where the `ceil`'s
+ * own `+1` dominates — so the code is right as written, but ε cannot be dropped to zero on the
+ * strength of the y-axis argument alone. Design §11's fourth measurement is that question, and this
+ * is half its answer.
+ *
+ * Frozen at 2 by controller ruling R1 for the whole branch — a second reason to leave it alone:
+ * changing it after Task 8 would invalidate the committed `hull-default.json` golden frame, which
+ * cannot be recaptured once `develop`'s `edgeMode` is gone.
+ */
+export const GUARD_EPSILON_REFERENCE_PX = 2
+
+/**
+ * Where the guard margin diverges: `1 - 2g - 2R/1000 = 0`. Past it no front is large enough to
+ * hold the reserve outside the band, so `overscanFromRadius` refuses here rather than at 500.
+ */
+export const RADIUS_CAP_REFERENCE_PX = KNOB_REFERENCE_PX * (GUARD_BAND_OUTER - GUARD_MARGIN_G)
+
+/** design 2026-09-05 §4.1's single radius. Every term is reference px unless noted. */
 export interface EdgeParams {
-  readonly mode: EdgeMode
-  /** The hull's maximum distance - the only consumer of the margin in the default mode. */
-  readonly maxDist: number
-  /** The paper's thickness. */
-  readonly thickness: number
-  /** 0..1. Drives both the blur sigma and the tear bracket. */
-  readonly looseness: number
-  /** Tear amplitude. */
-  readonly tearAmp: number
-  /** Mid-frequency amplitude. */
-  readonly midAmp: number
-  /** Fibre length; the margin reserves four of them. */
+  /** `W` — the contour's own width, design §3. */
+  readonly widthRef: number
+  /** `v` — `edgeVariance`, 0..1. */
+  readonly variance: number
+  /** `0` under finish `'clean'`; the margin reserves four of them. */
   readonly fiberLen: number
-  /** Overrides `EDGE_SLOP_REFERENCE_PX`. */
+  /** `0` under finish `'clean'`. */
+  readonly deckleWidth: number
   readonly slop?: number
 }
 
-function smoothstep(edge0: number, edge1: number, x: number): number {
-  const t = Math.min(1, Math.max(0, (x - edge0) / (edge1 - edge0)))
-  return t * t * (3 - 2 * t)
-}
-
 /**
- * The reserved radius `r`, in reference pixels, for a front build (pose 0, shadow 0):
+ * `r = W (1 + v) + 4 fiberLen + deckleWidth + e`.
  *
- * ```
- * r_hull = maxDist + e
- * r_torn = 0.45*sigma + thickness + [thickness + 0.6*looseness*tearAmp + midAmp]*edgeK
- *          + 4*fiberLen + e
- * r_both = maxDist  + thickness + [same bracket]                                 + 4*fiberLen + e
- *          sigma = 200*looseness^1.6*(maxDim/H),  edgeK = smoothstep(0, 6, thickness)
- * ```
- *
- * `r_both` is `r_torn` with `maxDist` substituted for the `0.45*sigma` blur term - the hull radius
- * standing in for the looseness blur - so `[same bracket]` reproduces the bracket whole, `edgeK`
- * included. The two readings coincide for any `thickness >= 6`, where `edgeK` saturates.
+ * `ASPECT_BOUND` and the `0.45 * sigma` blur lead are gone with `looseness`'s contribution to the
+ * width (design §6.1 item 2 zeroes `uLoosePush` in every cell), and `thickness` is gone because it
+ * has BECOME `W` (§2.3). What is left is the honest outward reach: the band's far edge, plus the
+ * two finish decorations that draw past it.
  */
 export function overscanRadius(p: EdgeParams): number {
   const slop = p.slop ?? EDGE_SLOP_REFERENCE_PX
-  if (p.mode === 'hull') return p.maxDist + slop
-
-  const edgeK = smoothstep(0, 6, p.thickness)
-  const bracket = (p.thickness + 0.6 * p.looseness * p.tearAmp + p.midAmp) * edgeK
-  const lead =
-    p.mode === 'torn' ? 0.45 * (200 * Math.pow(p.looseness, 1.6) * ASPECT_BOUND) : p.maxDist
-  return lead + p.thickness + bracket + 4 * p.fiberLen + slop
+  return p.widthRef * (1 + p.variance) + 4 * p.fiberLen + p.deckleWidth + slop
 }
 
 /**
  * `p = r / (1000 - 2r)`, the reserved radius expressed as a fraction of the artwork's long side.
  *
- * At `r >= 500` the reserve leaves no artwork inside the reference frame and `p` is undefined or
- * negative. Spec 8.6 forbids a silent clamp and spec 10.8 forbids a throw, so it returns.
+ * At `r >= RADIUS_CAP_REFERENCE_PX` (482, design 2026-09-05 §4.2 — narrowed from the pre-§4.2
+ * 500, a documented breaking change per ruling R2) the guard margin diverges and the reserve
+ * leaves no artwork outside the shader's guard band inside the reference frame. Spec 8.6 forbids
+ * a silent clamp and spec 10.8 forbids a throw, so it returns.
  */
 export function overscanFromRadius(r: number): InstanceType<typeof KnobError> | number {
-  if (!Number.isFinite(r) || r < 0 || 2 * r >= KNOB_REFERENCE_PX) {
+  if (!Number.isFinite(r) || r < 0 || r >= RADIUS_CAP_REFERENCE_PX) {
     return new KnobError(
-      `edge parameters reserve ${r} reference px per side, which leaves no artwork inside the ` +
+      `edge parameters reserve ${r} reference px per side as the reserve radius, at or past the ` +
+        `${RADIUS_CAP_REFERENCE_PX} px cap (design 2026-09-05 §4.2, R2) where the guard margin ` +
+        `diverges and leaves no artwork outside the shader's guard band inside the ` +
         `${KNOB_REFERENCE_PX} px reference frame - re-add required with smaller edge knobs`,
     )
   }
   return r / (KNOB_REFERENCE_PX - 2 * r)
+}
+
+/**
+ * The TOTAL per-side margin on the front's height axis, as a fraction of the artwork's height —
+ * paint plus guard, `epsilon` NOT included. design 2026-09-05 §4.2's y-axis solve:
+ * `m_y / A.h = (p(1 + 2g) + g) / Q`, `Q = 1 - 2g(1 + 2p)`.
+ */
+export function marginFractionFor(overscan: number): number {
+  const p = Math.max(0, overscan)
+  const g = GUARD_MARGIN_G
+  return (p * (1 + 2 * g) + g) / (1 - 2 * g * (1 + 2 * p))
+}
+
+/**
+ * The TOTAL per-side margin in texels on each axis. `y` carries the self-referential solve; `x`
+ * follows from it, because the paint reach is isotropic in texels but quoted against the front's
+ * HEIGHT, while `axisIntrusion` is relative to each axis's own dimension.
+ */
+export function guardMarginsFor(o: { readonly artwork: Size; readonly overscan: number }): {
+  readonly x: number
+  readonly y: number
+} {
+  const p = Math.max(0, o.overscan)
+  const g = GUARD_MARGIN_G
+  const eps = GUARD_EPSILON_REFERENCE_PX / KNOB_REFERENCE_PX
+  const q = 1 - 2 * g * (1 + 2 * p)
+  const y = Math.ceil(o.artwork.h * (marginFractionFor(p) + eps))
+  const x = Math.ceil((g * o.artwork.w + (o.artwork.h * p) / q) / (1 - 2 * g) + o.artwork.h * eps)
+  return { x, y }
 }
 
 /**

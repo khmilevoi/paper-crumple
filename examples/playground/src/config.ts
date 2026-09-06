@@ -1,6 +1,6 @@
 import * as pc from '@paper-crumple/core'
-import { paperSheet } from '@paper-crumple/paper'
-import type { PaperEdgeMode, PaperSheet } from '@paper-crumple/paper'
+import { optionsFor, paperSheet } from '@paper-crumple/paper'
+import type { EdgeFinish, EdgeShape, EdgeWidthUnit, PaperSheet } from '@paper-crumple/paper'
 import { tiles } from '@paper-crumple/paper/tiles'
 import { bakedMotion } from '@paper-crumple/motion'
 import pack1x1 from '@paper-crumple/motion/packs/1x1'
@@ -25,7 +25,9 @@ export const BUCKET_NAMES: readonly BucketName[] = ['1x1', '2x3', '3x2']
  * by contrast, are live and cost one draw.
  */
 export interface DemoConfig {
-  readonly edgeMode: PaperEdgeMode
+  readonly edgeShape: EdgeShape
+  readonly edgeFinish: EdgeFinish
+  readonly edgeWidthUnit: EdgeWidthUnit
   readonly tiles: boolean
   readonly packs: readonly BucketName[]
   readonly present: PresentMode
@@ -35,12 +37,13 @@ export interface DemoConfig {
 }
 
 export const DEFAULT_CONFIG: DemoConfig = {
-  // `hull` because that is what the control panel this demo is built to
-  // (`Paper Crumple Control Panel v2.dc.html`) boots into — its own `DEFAULTS.edgeMode`. `torn`
-  // and `both` are one segment away in "02 Edge" and rebuild the stage the same way; `both`
-  // carries `HULL_KNOBS` and `TORN_KNOBS` at once (`descriptorsFor()`), so the section grows
-  // from three sliders to seven.
-  edgeMode: 'hull',
+  // The control panel this demo is built to (`Paper Crumple Control Panel v2.dc.html`) boots into
+  // the plain cut sheet — `smooth`/`clean`, `paperSheet()`'s own default cell (design 2026-09-05
+  // §6, `sheet.ts`'s `PaperSheetOptions` doc comment). `Torn` and `Paper` are one toggle away in
+  // "02 Edge" and each rebuilds the stage, exactly as the deleted `edgeMode` segment did.
+  edgeShape: 'smooth',
+  edgeFinish: 'clean',
+  edgeWidthUnit: 'px',
   tiles: true,
   packs: ['1x1', '2x3', '3x2'],
   present: 'blit',
@@ -53,10 +56,18 @@ export const DEFAULT_CONFIG: DemoConfig = {
   // leaves a silhouette that fills its own bitmap — `camel-coat`, "a photo that still carries
   // its background" — no clearance at all for the shader's guard band, the outer 1.8 % of the
   // front (`GUARD_BAND_INNER = 0.482`) that it cuts flat. Headroom buys that clearance as a
-  // fraction of the radius: 0.25 is ~37 reference px at `torn`'s defaults (r ~ 150) and ~21 at
-  // `hull`'s (r = 84), both past the band's 18 with room for the field's texel rounding. The
-  // samples with a transparent border of their own (every other one) need none of it.
-  overscanHeadroom: 0.25,
+  // fraction of the radius.
+  //
+  // Raised from 0.25 to 0.3 for task 9 (edge redesign, §9): at 0.25 the live `edgeVariance`
+  // ceiling (design §8.6's frozen reserve, `examples/playground/src/edge-ceilings.ts`) tops out
+  // at 0.976 of its 0..1 range on `torn`/`clean` — just short of the descriptor's own maximum, so
+  // the slider's top few percent silently refused. `torn`/`clean` needs 0.263 of headroom to reach
+  // `edgeVariance = 1` exactly (solving `R * (1 + room) = 2 * W_default + 2 * slop` for `room`);
+  // 0.3 clears that with margin and, at the library's own defaults, costs about 1.4 additional
+  // reference px of guard-margin texels per side on a 324-texel front (`overscanHeadroom` only
+  // widens the SLIDER's live room — a build with no live edge knobs moved pays nothing extra). The
+  // samples with a transparent border of their own (every other one) need none of it either way.
+  overscanHeadroom: 0.3,
 }
 
 /**
@@ -108,7 +119,11 @@ export async function buildStage(
   const started = performance.now()
 
   const sheet = paperSheet({
-    edgeMode: config.edgeMode,
+    ...optionsFor({
+      shape: config.edgeShape,
+      finish: config.edgeFinish,
+      widthUnit: config.edgeWidthUnit,
+    }),
     tiles: config.tiles ? tiles : null,
     overscanHeadroom: config.overscanHeadroom,
   })

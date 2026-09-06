@@ -17,13 +17,7 @@ import { readFileSync } from 'node:fs'
 import { fileURLToPath } from 'node:url'
 import { performance } from 'node:perf_hooks'
 import { DWELL_MS } from '@paper-crumple/core'
-import {
-  cpuSdfFromAlpha,
-  defaultsFor,
-  edgeParamsFrom,
-  freezeOverscan,
-  paperSheet,
-} from '@paper-crumple/paper'
+import { cpuSdfFromAlpha, freezeOverscan, paperSheet } from '@paper-crumple/paper'
 import { frontForArtwork } from '../../../packages/paper/src/handle.ts'
 import { bakedMotion } from '@paper-crumple/motion'
 import pack1x1 from '../../../packages/motion/src/packs/1x1.ts'
@@ -60,6 +54,20 @@ function viewCanvas() {
 }
 
 /**
+ * Fix round 1 (Task 2): core's `EdgeParams` is now the single-radius shape (design 2026-09-05
+ * §4.1) — `edgeParamsFrom` (paper-knobs.ts) still builds the OLD `{ mode, maxDist, ... }` shape
+ * and is itself Task 4/7's rebuild, so this bench's direct `freezeOverscan` composition (bypassing
+ * `paperSheet()`, used only to size the synthetic readback field below) cannot route through it
+ * any more. Reproduces the plan's own library defaults instead — `widthRef 47`, `variance 0.53`,
+ * zero finish terms under a clean finish — the same reserve `paperSheet()`'s defaults build once
+ * Task 7 rewires it. Task 7 should revisit this once `edgeParamsFrom` exists in the new
+ * vocabulary, so the bench derives its params the same way the library does.
+ */
+function readbackEdgeParams() {
+  return { widthRef: 47, variance: 0.53, fiberLen: 0, deckleWidth: 0 }
+}
+
+/**
  * What `readPixels` hands back for pass A: the CPU signed field of the logo at the field's own
  * size, in FRONT pixels (`readBackField` divides by the texel size), with the artwork sitting
  * inside the front at the margin the mode's frozen reserve gives it (`frontForArtwork`, spec
@@ -67,8 +75,8 @@ function viewCanvas() {
  * a real full-bleed artwork does. Memoised per mode and size — the hull trace is the point, not
  * the field's provenance.
  */
-function readbackFor(edgeMode) {
-  const reserve = freezeOverscan(edgeParamsFrom(edgeMode, defaultsFor(edgeMode)), 0)
+function readbackFor() {
+  const reserve = freezeOverscan(readbackEdgeParams(), 0)
   const framing = frontForArtwork({
     overscan: reserve.overscan,
     srcW: ARTWORK,
@@ -76,7 +84,7 @@ function readbackFor(edgeMode) {
     maxSize: MAX_SIZE,
     exact: false,
   })
-  const inset = framing.margin / framing.front.w
+  const inset = framing.marginX / framing.front.w
   const fields = new Map()
   return (w, h, out) => {
     const key = `${w}x${h}`
@@ -101,7 +109,7 @@ const traceAllocations = process.env.BENCH_TRACE_ALLOCATIONS === '1'
 
 async function realStage(edgeMode) {
   const rec = createRecordingGl({
-    readback: readbackFor(edgeMode),
+    readback: readbackFor(),
     traceCaptures,
     traceAllocations,
   })

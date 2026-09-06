@@ -153,9 +153,11 @@ export function useStage(
   /**
    * Re-frame after a write that moved the sprite's geometry, once that move has actually landed.
    *
-   * A hull-tier knob (`minDist`, `maxDist`, `angularity`, `seed`) makes the next demand on the
-   * front answer `SourceExpiredError`, which the stage turns into a **re-source** at the live
-   * values — a new `SheetHandle`, and with it a new paper box for the sheet to be centred on. That
+   * A hull-tier knob (`edgeWidth`, `edgeVariance`, `angularity`, `seed`) makes the next demand on
+   * the front answer `SourceExpiredError`, which the stage turns into a **re-source** at the live
+   * values — a new `SheetHandle`, and with it a new paper box for the sheet to be centred on. Under
+   * `torn`, `edgeWidth` and `edgeVariance` are front-tier instead (`descriptorsFor`'s per-shape
+   * `invalidates`, design 2026-09-05 §2.1) and do not trigger this path at all. That
    * work is still in flight when `stage.set()` returns, so re-framing there reads the frame the
    * sprite is about to leave. `prepare(key)` is the one demand that joins a re-source rather than
    * returning around it, so it is the honest place to wait; the library redraws the idle view

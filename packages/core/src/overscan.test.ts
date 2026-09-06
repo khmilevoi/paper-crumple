@@ -2,31 +2,31 @@ import { describe, expect, it } from 'vitest'
 import { KnobError, SheetError } from './errors.js'
 import type { EdgeParams } from './overscan.js'
 import {
-  ASPECT_BOUND,
   artworkLongSide,
   checkGuardBand,
   EDGE_SLOP_REFERENCE_PX,
   exactFrontLongSide,
   GUARD_BAND_INNER,
+  GUARD_EPSILON_REFERENCE_PX,
+  GUARD_MARGIN_G,
+  guardMarginsFor,
   KNOB_REFERENCE_PX,
+  marginFractionFor,
   overscanFor,
   overscanFromRadius,
   overscanRadius,
+  RADIUS_CAP_REFERENCE_PX,
 } from './overscan.js'
 
-/**
- * A parameter set that lands spec 8.6's headline `hull ~= 0.09`. The default *values* of these
- * knobs belong to the paper slot (P10); this file asserts the arithmetic, not the defaults.
- */
-const hullParams: EdgeParams = {
-  mode: 'hull',
-  maxDist: 64,
-  thickness: 8,
-  looseness: 0.35,
-  tearAmp: 30,
-  midAmp: 12,
-  fiberLen: 6,
+/** design 2026-09-05 §4.1's single radius: `cleanParams` under finish `'clean'`. */
+const cleanParams: EdgeParams = {
+  widthRef: 47,
+  variance: 0.53,
+  fiberLen: 0,
+  deckleWidth: 0,
 }
+/** Same width and variance, under finish `'paper'`. */
+const paperParams: EdgeParams = { ...cleanParams, fiberLen: 4, deckleWidth: 7 }
 
 const number = (v: InstanceType<typeof KnobError> | number): number => {
   expect(v).not.toBeInstanceOf(KnobError)
@@ -40,10 +40,6 @@ describe('the reference frame', () => {
 
   it('takes the conservative end of the 8-12 reference px slop band', () => {
     expect(EDGE_SLOP_REFERENCE_PX).toBe(12)
-  })
-
-  it('uses the conservative maxDim/H bound from the widest bucket', () => {
-    expect(ASPECT_BOUND).toBe(1.3)
   })
 })
 
@@ -65,56 +61,27 @@ describe('overscanFromRadius', () => {
   })
 })
 
-describe('overscanRadius', () => {
-  it('is maxDist + slop in hull mode, and nothing else', () => {
-    expect(overscanRadius(hullParams)).toBe(64 + 12)
-    // The default mode needs no tear, no teeth and no fibre - only maxDist.
-    expect(overscanRadius({ ...hullParams, tearAmp: 900, fiberLen: 900, midAmp: 900 })).toBe(76)
+describe('overscanRadius (design 2026-09-05 §4.1)', () => {
+  it('collapses the three branches to one radius', () => {
+    expect(overscanRadius(cleanParams)).toBeCloseTo(47 * 1.53 + 12, 9)
+    expect(overscanRadius(paperParams)).toBeCloseTo(47 * 1.53 + 4 * 4 + 7 + 12, 9)
   })
 
-  it('lands spec 8.6 hull ~= 0.09 for a 64 reference px maxDist', () => {
-    expect(number(overscanFor(hullParams))).toBeCloseTo(0.09, 2)
-  })
-
-  it('adds the blur, the thickness bracket and the fibre in torn mode', () => {
-    const p: EdgeParams = { ...hullParams, mode: 'torn' }
-    const sigma = 200 * Math.pow(p.looseness, 1.6) * ASPECT_BOUND
-    const edgeK = smoothstep(0, 6, p.thickness)
-    const expected =
-      0.45 * sigma +
-      p.thickness +
-      (p.thickness + 0.6 * p.looseness * p.tearAmp + p.midAmp) * edgeK +
-      4 * p.fiberLen +
-      EDGE_SLOP_REFERENCE_PX
-    expect(overscanRadius(p)).toBeCloseTo(expected, 10)
-  })
-
-  it('substitutes maxDist for the blur term in both mode, bracket and edgeK intact', () => {
-    const torn: EdgeParams = { ...hullParams, mode: 'torn' }
-    const both: EdgeParams = { ...hullParams, mode: 'both' }
-    const sigma = 200 * Math.pow(hullParams.looseness, 1.6) * ASPECT_BOUND
-    expect(overscanRadius(both)).toBeCloseTo(
-      overscanRadius(torn) - 0.45 * sigma + hullParams.maxDist,
-      10,
-    )
-  })
-
-  it('orders the three modes hull < torn < both, which is what 8.6 measures', () => {
-    const hull = overscanRadius(hullParams)
-    const torn = overscanRadius({ ...hullParams, mode: 'torn' })
-    const both = overscanRadius({ ...hullParams, mode: 'both' })
-    expect(hull).toBeLessThan(torn)
-    expect(torn).toBeLessThan(both)
-  })
-
-  it('saturates edgeK at thickness 6, so the bracket reading cannot matter above it', () => {
-    const thick: EdgeParams = { ...hullParams, mode: 'torn', thickness: 6 }
-    const thicker: EdgeParams = { ...thick, thickness: 12 }
-    expect(overscanRadius(thicker) - overscanRadius(thick)).toBeCloseTo(12, 6)
+  it('is the slop alone at width 0', () => {
+    expect(overscanRadius({ widthRef: 0, variance: 0.53, fiberLen: 0, deckleWidth: 0 })).toBe(12)
   })
 
   it('accepts a caller-supplied slop instead of the default', () => {
-    expect(overscanRadius({ ...hullParams, slop: 8 })).toBe(72)
+    expect(overscanRadius({ ...cleanParams, slop: 8 })).toBeCloseTo(47 * 1.53 + 8, 9)
+  })
+
+  it('composes with overscanFromRadius through overscanFor', () => {
+    // Fix round 1: this compared overscanFor(cleanParams) against its own definition and could
+    // never fail for a real reason. Pin the composition against the independently-computed
+    // number too: R = 47*1.53+12 = 83.91, p = 83.91/(1000-2*83.91) ~= 0.10083.
+    const composed = number(overscanFor(cleanParams))
+    expect(composed).toBeCloseTo(number(overscanFromRadius(overscanRadius(cleanParams))), 12)
+    expect(composed).toBeCloseTo(0.10083, 5)
   })
 })
 
@@ -184,7 +151,92 @@ describe('checkGuardBand', () => {
   })
 })
 
-function smoothstep(edge0: number, edge1: number, x: number): number {
-  const t = Math.min(1, Math.max(0, (x - edge0) / (edge1 - edge0)))
-  return t * t * (3 - 2 * t)
-}
+describe('the guard margin (design 2026-09-05 §4.2)', () => {
+  it('derives g from the band itself', () => {
+    expect(GUARD_MARGIN_G).toBeCloseTo(0.018, 12)
+    expect(RADIUS_CAP_REFERENCE_PX).toBeCloseTo(482, 9)
+  })
+
+  it('refuses a radius at or past the 482 px cap, where the guard margin diverges', () => {
+    expect(overscanFromRadius(RADIUS_CAP_REFERENCE_PX)).toBeInstanceOf(KnobError)
+    expect(overscanFromRadius(RADIUS_CAP_REFERENCE_PX - 1)).not.toBeInstanceOf(KnobError)
+  })
+
+  // R14: the brief's own test named this "129 texels of total y margin" but its assertion
+  // evaluates to 131 (129 is the epsilon = 0 value, 128.7164 before rounding). Named to state
+  // both.
+  it('reproduces the hull defaults: 128.72 before epsilon, 131 texels with epsilon = 2, of total y margin at A.h 790', () => {
+    // The radius is the REDESIGN's, `W (1 + v) + e` at `W 47, v 0.53`, times the 0.25 headroom —
+    // not `maxDist + e`, which is 105 and gives a different sixth digit.
+    const p = number(overscanFromRadius(1.25 * (47 * 1.53 + 12)))
+    expect(p).toBeCloseTo(0.132731, 6)
+    expect(marginFractionFor(p)).toBeCloseTo(0.162932, 6)
+    const eps = GUARD_EPSILON_REFERENCE_PX / KNOB_REFERENCE_PX
+    const m = guardMarginsFor({ artwork: { w: 790, h: 790 }, overscan: p })
+    expect(m.y).toBe(Math.ceil(790 * (0.162932 + eps)))
+    expect(m.y).toBe(131)
+    expect(m.x).toBe(m.y) // a square: the two axes coincide
+  })
+
+  it('needs a wider x margin than y on a landscape artwork', () => {
+    const p = number(overscanFromRadius(1.25 * (47 * 1.53 + 12)))
+    const m = guardMarginsFor({ artwork: { w: 2370, h: 790 }, overscan: p })
+    expect(m.x).toBeGreaterThan(m.y)
+    const g = GUARD_MARGIN_G
+    const eps = GUARD_EPSILON_REFERENCE_PX / KNOB_REFERENCE_PX
+    const q = 1 - 2 * g * (1 + 2 * p)
+    expect(m.x).toBe(Math.ceil((g * 2370 + (790 * p) / q) / (1 - 2 * g) + 790 * eps))
+  })
+
+  it('keeps q <= GUARD_BAND_INNER on both axes for every aspect and reserve it is used with', () => {
+    for (const R of [40, 84, 105, 150, 300]) {
+      const p = number(overscanFromRadius(R))
+      for (const [w, h] of [
+        [790, 790],
+        [2370, 790],
+        [790, 3160],
+        [531, 271],
+        [433, 768],
+      ]) {
+        const m = guardMarginsFor({ artwork: { w, h }, overscan: p })
+        const front = { w: w + 2 * m.x, h: h + 2 * m.y }
+        const rho = (R * front.h) / KNOB_REFERENCE_PX
+        const check = checkGuardBand({
+          frontSize: front,
+          hullExtent: { x: m.x - rho, y: m.y - rho, w: w + 2 * rho, h: h + 2 * rho },
+        })
+        expect(check, `R ${R} on ${w}x${h}: ${String(check?.message)}`).toBeUndefined()
+      }
+    }
+  })
+
+  // measurement, not a gate (R13): see the task report for the verdict line this produces.
+  it('reports the slack the closed form leaves at epsilon 0 (design §11, item 4)', () => {
+    const rows: string[] = []
+    // R14: rho is computed from the true reserve radius R = 104.8875, not the rounded 105 the
+    // brief's own snippet used — the rounded value pushes qx to 0.482073, over the line, for no
+    // real reason.
+    const R = 1.25 * (47 * 1.53 + 12)
+    const p = number(overscanFromRadius(R))
+    for (const [w, h] of [
+      [790, 790],
+      [2370, 790],
+      [790, 3160],
+    ]) {
+      const g = GUARD_MARGIN_G
+      const q = 1 - 2 * g * (1 + 2 * p)
+      const my = Math.ceil(h * marginFractionFor(p))
+      const mx = Math.ceil((g * w + (h * p) / q) / (1 - 2 * g))
+      const front = { w: w + 2 * mx, h: h + 2 * my }
+      const rho = (R * front.h) / KNOB_REFERENCE_PX
+      rows.push(
+        `${w}x${h}: qx=${((w + 2 * rho) / 2 / front.w).toFixed(6)} ` +
+          `qy=${((h + 2 * rho) / 2 / front.h).toFixed(6)}`,
+      )
+    }
+    // Recorded in the task report; the gate is the `q <= 0.482` case above, which runs at
+    // epsilon 2. Verdict per controller ruling R1: epsilon frozen at 2 for the whole branch —
+    // not revisited here despite every measured q clearing 0.482 at epsilon 0.
+    expect(rows).toHaveLength(3)
+  })
+})

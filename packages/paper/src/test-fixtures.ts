@@ -37,6 +37,36 @@ export function annulusAlpha(
   return a
 }
 
+/**
+ * Anti-aliased axis-aligned rectangle coverage, `[x0, x1] x [y0, y1]`: 0.5 exactly on an edge, the
+ * same convention `discAlpha` uses at exactly `r`.
+ *
+ * A rectangle is what a disc cannot be: its sides are FLAT, so a pair of them separated by a gap
+ * gives an exterior medial ridge whose two gradients are exactly opposite and stay that way along
+ * the ridge's whole length, instead of fanning out from a point the way two arcs do.
+ */
+export function rectAlpha(
+  w: number,
+  h: number,
+  x0: number,
+  y0: number,
+  x1: number,
+  y1: number,
+): Float32Array {
+  const a = new Float32Array(w * h)
+  for (let y = 0; y < h; y++) {
+    for (let x = 0; x < w; x++) {
+      // Signed distance INSIDE the box, positive inside — `-sdBox`, written out.
+      const dx = Math.min(x - x0, x1 - x)
+      const dy = Math.min(y - y0, y1 - y)
+      const inside =
+        dx > 0 && dy > 0 ? Math.min(dx, dy) : -Math.hypot(Math.max(-dx, 0), Math.max(-dy, 0))
+      a[y * w + x] = Math.min(1, Math.max(0, inside + 0.5))
+    }
+  }
+  return a
+}
+
 /** Per-texel maximum of two alphas: two islands in one plane. */
 export function unionAlpha(a: Float32Array, b: Float32Array): Float32Array {
   const out = new Float32Array(a.length)

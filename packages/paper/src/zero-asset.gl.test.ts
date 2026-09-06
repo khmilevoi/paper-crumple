@@ -25,6 +25,7 @@ import { NEUTRAL_TILE_BYTE } from './paper-tiles.js'
 import { paperSheet } from './sheet.js'
 import type { PaperTileSet } from './tile-set.js'
 import { createGlFixture, type PaperGlFixture } from './testing/gl-fixture.js'
+import { SMOOTH_CLEAN } from './testing/edge-cells.js'
 
 let fixture: PaperGlFixture | null = null
 const revoke: string[] = []
@@ -100,7 +101,7 @@ async function render(
   bitmap.close()
   if (GlError.is(handle) || SheetError.is(handle)) return handle
   if (isAborted(handle)) return new GlError('zero-asset: source() aborted with no signal given')
-  const front = sheet.build(handle, FRONT, defaultsFor('hull') as never)
+  const front = sheet.build(handle, FRONT, defaultsFor(SMOOTH_CLEAN) as never)
   if (front instanceof Error) return front
 
   const out = new Uint8Array(front.width * front.height * 4)

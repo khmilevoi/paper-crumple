@@ -20,15 +20,17 @@
  * different surface: the **front**, which is a composite the filter's output is drawn into, not
  * the filter's own output.
  *
- * `build()` supplies a real `paperField` at the default `hull` knobs (`sheet.ts`'s `build()`), so
- * the front compared here is `uEdgeMode == 1` — not the `uEdgeMode == 2` this file was originally
- * written against, when `build()` still passed `paperField: null` unconditionally. At
- * `uEdgeMode == 1` the coverage mask is the hull polygon's own distance field rather than the
- * artwork's alpha, and the sheet follows that polygon, which sits *outside* the artwork's
+ * `build()` supplies a real `paperField` at the default `smooth`/`clean` knobs (`sheet.ts`'s
+ * `build()`), so the front compared here is the POLYGON contour source — not the artwork-alpha
+ * fallback this file was originally written against, when `build()` still passed
+ * `paperField: null` unconditionally. With a polygon field the renderer binds it to both `uSdf*`
+ * slots (design 2026-09-05 §6), so the coverage mask is the hull polygon's own distance field
+ * rather than the artwork's alpha, and the sheet follows that polygon, which sits *outside* the
+ * artwork's
  * silhouette. So an alpha-0 texel of A is no longer uniformly empty: the ones the sheet reaches
  * carry opaque paper, and only the ones it does not reach are still exactly `(0, 0, 0, 0)`. Which
- * of the two any given texel lands in depends on the front the hull was TRACED on: `minDist` and
- * `maxDist` are `reference: 'sprite-px'` knobs, scaled by that front's height when `source()`
+ * of the two any given texel lands in depends on the front the hull was TRACED on: the band
+ * `hullBandFor(W, v)` derives is in reference px, scaled by that front's height when `source()`
  * traces the polygon once, and the polygon then moves 1:1 with the artwork into whatever front
  * `build()` is asked for (`sheet.ts`'s `artworkPlacement`). The two tests below trace at different
  * front heights (49 and 32), so they measure their split rather than deriving it, and they
@@ -50,6 +52,7 @@ import {
   identitySourceBytes as sourceBytes,
 } from './testing/fixture-sources.js'
 import { createGlFixture, type PaperGlFixture } from './testing/gl-fixture.js'
+import { SMOOTH_CLEAN } from './testing/edge-cells.js'
 
 let fixture: PaperGlFixture | null = null
 afterEach(() => {
@@ -164,27 +167,34 @@ describe("the front's artwork rect through readPixels, partitioned by alpha", ()
    * source bytes. This fixture's alpha is only ever 0 or 255 (`sourceBytes` above), so the two
    * classes partition every texel of A.
    *
-   * The alpha-255 half is untouched by the move to `uEdgeMode == 1` (see the file header): an
+   * The alpha-255 half is untouched by the move to the polygon contour source (see the file
+   * header): an
    * opaque texel still has `sheetCov == 1`, so `front = mix(sheet, img.rgb, 1.0)`
    * (`paper-shader.ts:1693`) and the artwork's own bytes survive. The alpha-0 half moved, and is
    * re-measured rather than derived. Measured, of the 1600 texels in the 40x40 artwork rect: all
    * 784 alpha-255 texels still match the source byte for byte, and the 816 alpha-0 texels split
-   * 191 covered (opaque paper) / 625 still clear, with no feathered texel between them.
+   * 152 covered (opaque paper) / 664 still clear, with no feathered texel between them (design
+   * 2026-09-05 §4.2 moves this split from a pre-§4.2 191/625 — see below).
    *
    * The split is the hull's own reach, and nothing else. The hull is traced in `source()`, at
    * *that* call's own front: under `exact: true` the front is the artwork (40x40) plus
-   * `ceil(p * 40) = 5` texels of per-axis margin on every side (`handle.ts`'s `frontForArtwork`,
-   * §8.6 amendment) = 50, not the 128 this test later builds at, so `minDist`/`maxDist` (22/72
-   * reference px) are 1.1/3.6 px there. `build()` then places the artwork 1:1 at
-   * `round((size - artwork) / 2)` and carries the polygon into the 128 front translated to that
-   * same origin (`sheet.ts`'s `artworkPlacement`, `fillHullMask`'s `tx`/`ty`), so the sheet sits a
-   * few px around the 28x28 silhouette: measured, the artwork rect lands at `[44, 84)` — which is
-   * what leaves 625 of its alpha-0 texels clear. Before `artworkPlacement`, the field was framed
-   * by a flat `p` inset instead, which at `size = 128` stretched the sheet to `[23, 103]` — an
-   * overhang of roughly 20 px on every side that covered the whole rect and hid the hull's real
-   * reach.
+   * `guardMarginsFor`'s per-axis margin (§4.2; 6 texels on every side here, not the pre-§4.2
+   * `ceil(p * 40) = 5`) on every side (`handle.ts`'s `frontForArtwork`) = 52, not the 128 this
+   * test later builds at, so the band (`hullBandFor(47, 0.53)` = 22.09/71.91 reference px) is
+   * ≈1.1/3.7 px there.
+   * `build()` then places the artwork 1:1 at `round((size - artwork) / 2)` and carries the
+   * polygon into the 128 front translated to that same origin (`sheet.ts`'s `artworkPlacement`,
+   * `fillHullMask`'s `tx`/`ty`), so the sheet sits a few px around the 28x28 silhouette: measured,
+   * the artwork rect lands at `[44, 84)` — unaffected by §4.2, since it depends only on the
+   * artwork's own size and the 128 build front, not the trace front's margin — which is what
+   * leaves 663 of its alpha-0 texels clear (153 covered — both moved from the trace front's own
+   * margin widening, which changes the band's reference-px-to-texel scale at the trace front, not
+   * the placement above; the last one-texel move is the edge redesign's own, see the assertion). Before `artworkPlacement`, the field was framed by a flat `p` inset
+   * instead, which at `size = 128` stretched the sheet to `[23, 103]` — an overhang of roughly
+   * 20 px on every side that covered the whole rect and hid the hull's real reach.
    *
-   * Test 2 below traces at a 32 px front, where `maxDist` scales to `72 * 32 / 1000 = 2.3` px, and
+   * Test 2 below traces at a 32 px front, where the band's far edge scales to
+   * `71.91 * 32 / 1000 = 2.3` px, and
    * its split is measured separately.
    */
   it('reads back every texel of A unchanged where opaque, and (0,0,0,0) where transparent', async () => {
@@ -200,7 +210,7 @@ describe("the front's artwork rect through readPixels, partitioned by alpha", ()
     // exact: A === the source, and the front grows around it to fit the paper margin (§7.4.3).
     expect(handle.artwork).toEqual({ w: SRC.w, h: SRC.h })
 
-    const front = sheet.build(handle, { w: 128, h: 128 }, defaultsFor('hull') as never)
+    const front = sheet.build(handle, { w: 128, h: 128 }, defaultsFor(SMOOTH_CLEAN) as never)
     if (front instanceof Error) return expect.fail(front.message)
 
     // The artwork's origin inside the front: the front is `ceil(source x (1 + 2p))` and A is
@@ -219,22 +229,27 @@ describe("the front's artwork rect through readPixels, partitioned by alpha", ()
     expect(firstDifferencesAt(got, want, opaque, handle.artwork.w)).toEqual([])
     expect(pickTexels(got, opaque)).toEqual(pickTexels(want, opaque))
 
-    // Under `uEdgeMode == 1` the alpha-0 class is no longer uniformly `(0,0,0,0)`: the texels the
+    // Under the polygon contour source the alpha-0 class is no longer uniformly `(0,0,0,0)`: the texels the
     // hull polygon's sheet covers carry opaque paper, and only the ones it does not reach stay
     // clear. Measured at this build the sheet covers a 1-4 px ring around the silhouette and
     // nothing beyond it — Ruling 1 above gives the mechanism and the numbers. Both counts are
     // pinned individually rather than summed so the split is stated outright rather than implied,
-    // and because the sheet's reach is now the hull's own (traced at a 49 px front, carried over
-    // 1:1), a hull that lost or gained reach moves them.
+    // and because the sheet's reach is now the hull's own (traced at a 52 px front — design
+    // 2026-09-05 §4.2 widens the exact-mode trace front's margin over its pre-§4.2 figure, which
+    // moves this split — carried over 1:1), a hull that lost or gained reach moves them.
     const covered = empty.filter((t) => got[t * 4 + 3] === 255)
     const clear = empty.filter((t) => got[t * 4 + 3] === 0)
-    expect(covered.length).toBe(191)
-    expect(clear.length).toBe(625)
+    expect(covered.length).toBe(153)
+    expect(clear.length).toBe(663)
     expect(covered.length + clear.length).toBe(empty.length)
     // Paper, not a stray copy of the artwork: the default `paperColor` (#f7f4ed) reads high on all
-    // three channels. Measured, the per-channel minimum over all 191 covered texels is
+    // three channels. Measured, the per-channel minimum over all 152 covered texels is
     // (241, 238, 231), so the bound below clears it by ~90 counts; the artwork's own RGB at the
     // sixteen texels sampled (the ring's first row) is `g = 40..94, b <= 17`, nowhere near it.
+    // The split moved by ONE texel for the design 2026-09-05 edge redesign (152/664 before it):
+    // the band `hull.ts` traces is now `hullBandFor(47, 0.53) = [22.09, 71.91]` rather than the
+    // old `minDist 22` / `maxDist 72` pair — deliberately within a tenth of a reference px of it,
+    // which is why one texel of the ring crosses and no more.
     for (const t of covered.slice(0, 16)) {
       expect(got[t * 4]).toBeGreaterThan(150)
       expect(got[t * 4 + 1]).toBeGreaterThan(150)
@@ -259,7 +274,7 @@ describe("the front's artwork rect through readPixels, partitioned by alpha", ()
    * Ruling 3: the oracle is measured, not assumed. A reduction blurs the fixture's hard alpha edge,
    * so `identityResample`'s TypeScript reference carries partial alpha in a ring around the old
    * edge. Measured directly against this fixture at `maxSize: 28` (484 texels total): the front's
-   * `uEdgeMode == 2` coverage mask reproduces the reference exactly on both the 196 texels where
+   * coverage mask reproduces the reference exactly on both the 196 texels where
    * the reference's own alpha is 255 (all four channels, zero mismatches) and the 228 texels where
    * it is 0 (before the sheet's own reach is applied — see the covered/clear/feathered split
    * below, zero mismatches on the ones it does not reach) — but NOT on the 60 texels in
@@ -281,7 +296,7 @@ describe("the front's artwork rect through readPixels, partitioned by alpha", ()
     }
     expect(handle.artwork.w).toBeLessThan(SRC.w)
 
-    const front = sheet.build(handle, { w: 28, h: 28 }, defaultsFor('hull') as never)
+    const front = sheet.build(handle, { w: 28, h: 28 }, defaultsFor(SMOOTH_CLEAN) as never)
     if (front instanceof Error) return expect.fail(front.message)
 
     const reference = identityResample(
@@ -310,9 +325,10 @@ describe("the front's artwork rect through readPixels, partitioned by alpha", ()
     expect(firstDifferencesAt(got, reference, opaque, handle.artwork.w)).toEqual([])
     expect(pickTexels(got, opaque)).toEqual(pickTexels(reference, opaque))
 
-    // Under `uEdgeMode == 1` the reference's alpha-0 class is no longer uniformly `(0,0,0,0)` on
-    // the front. It splits three ways here, not two as in test 1: `front.h = 28` scales the default
-    // `maxDist` of 72 reference px to `72 * 28 / 1000 = 2.0` px, so the sheet's reach and the
+    // Under the polygon contour source the reference's alpha-0 class is no longer uniformly
+    // `(0,0,0,0)` on the front. It splits three ways here, not two as in test 1: `front.h = 28`
+    // scales the band's far edge, `W (1 + v) = 47 * 1.53 = 71.91` reference px, to
+    // `71.91 * 28 / 1000 = 2.0` px, so the sheet's reach and the
     // artwork's own (22x22, one texel smaller than before the §8.6 per-axis amendment would have
     // given at this maxSize) leave 38 texels of the reference's alpha-0 class both inside the
     // sheet's ring AND still within the artwork rect — measured, `covered` is 38 (F8: a maxSize of

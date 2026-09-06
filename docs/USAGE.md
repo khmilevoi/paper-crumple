@@ -126,7 +126,8 @@ export async function mountGrid(items: Item[], ac: AbortController) {
   // Async factory (§4): yields a stage whose invariants hold, an Error, or ABORTED. There is no
   // `canvas` option — the stage owns its drawing surface (§4.0) and blits into yours.
   const stage = await pc.paperStage({
-    sheet:   paperSheet({ edgeMode: 'torn', tiles }),     // edgeMode is a factory option (§6.5)
+    sheet:   paperSheet({ edgeShape: 'torn', edgeFinish: 'paper', tiles }),  // edgeShape/edgeFinish
+                                                          // are factory options (design 2026-09-05 §2)
     motion:  bakedMotion({ packs: [pack2x3, pack1x1] }),  // an unsupplied bucket returns an
                                                           // AssetError naming the missing subpath
     cssPx:   192,                 // the CSS long side of the box the PAPER is fitted into: the stage
@@ -520,7 +521,7 @@ per-view edge treatment.
 // cost of keeping the element's geometry synchronised with whatever the views sit on. That
 // synchronisation against inertial scrolling on iOS is the cost `blit` exists to avoid.
 const stage = await pc.paperStage({
-  sheet:   paperSheet({ edgeMode: 'torn', tiles }),
+  sheet:   paperSheet({ edgeShape: 'torn', edgeFinish: 'paper', tiles }),
   motion:  bakedMotion({ packs: [pack2x3] }),
   maxSize: 512,
   present: 'direct',              // selects the DirectStage overload
@@ -582,7 +583,7 @@ always returning a `GlError`.
 // it never resizes the canvas, never calls loseContext(), and validates the GRANTED attributes
 // read from getContextAttributes() rather than a declaration it was handed.
 const stage = await pc.paperStage({
-  sheet:   paperSheet({ edgeMode: 'hull' }),   // the default mode: no tear, no teeth, no fibre tile
+  sheet:   paperSheet({}),   // the default: a plain cut sheet, no tear, no teeth, no fibre
   motion:  bakedMotion({ packs: [pack2x3] }),
   maxSize: 384,
   gl:      renderer.getContext() as WebGL2RenderingContext,
@@ -621,7 +622,9 @@ assignment error.
 ## 7. A knob panel without TypeScript
 
 `stage.knobs` and `slot.knobs` are `readonly KnobDescriptor[]` **at runtime** — the same descriptors
-that generate the types. A `hull` stage exposes 31 knobs, a `torn` one 46 (§6.5).
+that generate the types. A stage's count is core's two shared knobs, plus the paper slot, plus the
+motion slot's six: `smooth`/`clean` exposes 32 knobs, `smooth`/`paper` 38, `torn`/`clean` 36 and
+`torn`/`paper` 42 (design 2026-09-05 §2.4).
 
 A descriptor's `key` is **slot-local** (§6.1) and carries no namespace of its own, so build the
 panel from the slots rather than from `stage.knobs` — a key a panel writes back has to be one
@@ -629,7 +632,7 @@ panel from the slots rather than from `stage.knobs` — a key a panel writes bac
 
 ```js
 // Keep the slot objects you passed to paperStage.
-const sheet  = paperSheet({ edgeMode: 'torn', tiles })
+const sheet  = paperSheet({ edgeShape: 'torn', edgeFinish: 'paper', tiles })
 const motion = bakedMotion({ packs: [pack2x3] })
 
 for (const [ns, slot] of [['sheet', sheet], ['motion', motion]]) {
@@ -675,6 +678,35 @@ six, so a panel that only ever consulted `k.ui?.label` would render half its row
 label table `k.ui?.label` falls back to here lives in `examples/playground/src/labels.ts`, keyed by
 the same namespaced patch key this section derives above — and a key the table doesn't cover still
 renders, under its raw key, rather than being dropped.
+
+### The width unit
+
+`edgeWidth` has two faces, picked by the factory's `edgeWidthUnit` (`'px' | 'percent'`, default
+`'px'`): a `reference: 'sprite-px'` descriptor (default `47`, range `0…140`) and a
+`reference: 'artwork-pct'` one (default `5.9`, range `0…15`). Only one of the two descriptors
+exists on a given sheet — the unit picks which — so a panel built from `k.reference` (as the loop
+above could be, though the snippet above only handles `'sprite-px'`) labels the slider correctly
+without asking the sheet which unit it was built with. `scaleKnob` never interprets
+`'artwork-pct'`; it is a marker for the UI's unit column and for the resolution step inside
+`source()` alone.
+
+`percent` is a percentage of the artwork's **short side**, not its front and not its long side
+(design 2026-09-05 §3.2): the rim is an isotropic offset band, and the short side is the one base
+that is both rotation-invariant and gives a 3:1 banner the same relative border as a square, rather
+than the roughly 3x mismatch a long-side or height base would produce.
+
+One inherited wrinkle worth knowing before you pick `px`: under that unit the working width is
+bucket-dependent for `edgeShape: 'torn'` (the shader's outward bias is `edgeWidth * size.h / 1000`,
+so a 512-texel build draws a narrower border than a 1024-texel one) but bucket-fixed for
+`edgeShape: 'smooth'` (the polygon is traced once and carried into every bucket 1:1 in texels).
+`percent` is invariant in both shapes. This is `sprite-px`'s own convention and predates the edge
+redesign — it is called out here only because the two shapes now diverge under one unit.
+
+Worked number: at the library's default `overscanHeadroom: 0`, the percent unit's default of `5.9`
+(its own step is `0.1`) reproduces `W = 46.9785` reference px on a square — a gap of `0.0215`
+reference px against the px unit's own default of `47` (step `1`). (An earlier draft of this
+default was `5.7`, derived at `edgeVariance: 0`; that value does not reproduce once the shipped
+`edgeVariance` default of `0.53` is folded in — see the changeset.)
 
 ## 8. Errors in anger
 

@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest'
 import { KNOB_REFERENCE_PX, enumKnob, knobs, pxScale, scaleKnob } from './knobs.js'
-import type { KnobDescriptor } from './knobs.js'
+import type { KnobDescriptor, NumberKnob } from './knobs.js'
 
 describe('knobs()', () => {
   it('returns the tuple it was handed, identically', () => {
@@ -74,5 +74,19 @@ describe('the sprite-px reference (§6.4)', () => {
   it('leaves a non-numeric kind alone even if something asks it to scale', () => {
     const shadow = { key: 'shadow', kind: 'bool', invalidates: 'draw', default: true } as const
     expect(scaleKnob(shadow, 7, 384)).toBe(7)
+  })
+
+  it('never rescales an artwork-pct knob', () => {
+    const d: NumberKnob = {
+      key: 'edgeWidth',
+      kind: 'number',
+      invalidates: 'front',
+      default: 5.9,
+      min: 0,
+      max: 15,
+      step: 0.1,
+      reference: 'artwork-pct',
+    }
+    expect(scaleKnob(d, 5.9, 512)).toBe(5.9)
   })
 })

@@ -290,7 +290,13 @@ export interface LooseField {
   readonly radius: number
   /** `radius * 2 + 1` — how many samples each of the two separable passes takes per texel. */
   readonly taps: number
-  /** Echoes the input `sigmaPx`, so a caller (task 9's renderer) can derive `LOOSE_PUSH`. */
+  /**
+   * Echoes the input `sigmaPx`. It fed the renderer's `LOOSE_PUSH` outward offset until the edge
+   * redesign deleted both (design 2026-09-05 §6.1 item 2 zeroes the push in every cell), so no
+   * caller derives anything from it today; it stays because the blur's own sigma is the one
+   * number that says how far `blurField` moved the zero level, and a reader measuring the loose
+   * envelope needs it.
+   */
   readonly sigmaPx: number
 }
 

@@ -46,18 +46,34 @@ export type { AxisWindow, ResampleSource } from './resample.js'
 export { SDF_RES_MAX, SDF_RES_MIN, sdfResFor, SIZE_QUANTUM } from './resolution.js'
 export {
   artworkLongSide,
-  ASPECT_BOUND,
   checkGuardBand,
   EDGE_SLOP_REFERENCE_PX,
   exactFrontLongSide,
   GUARD_BAND_INNER,
   GUARD_BAND_OUTER,
+  GUARD_EPSILON_REFERENCE_PX,
+  GUARD_MARGIN_G,
+  guardMarginsFor,
   KNOB_REFERENCE_PX,
+  marginFractionFor,
   overscanFor,
   overscanFromRadius,
   overscanRadius,
+  RADIUS_CAP_REFERENCE_PX,
 } from './overscan.js'
-export type { EdgeMode, EdgeParams, GuardCheckInput } from './overscan.js'
+export type { EdgeParams, GuardCheckInput } from './overscan.js'
+
+// Task 2 — the edge vocabulary (design 2026-09-05 §2) and the percent unit's closure (§4.3).
+// `EdgeMode` is gone: `EdgeShape` / `EdgeFinish` / `EdgeWidthUnit` replace it outright (spec §12).
+export type {
+  EdgeFinish,
+  EdgeShape,
+  EdgeSpec,
+  EdgeWidthUnit,
+  PercentWidth,
+  PercentWidthInput,
+} from './edge.js'
+export { percentWidthReserve } from './edge.js'
 
 // P5 — the byte accounting (spec 8.1, 8.5, 8.9).
 export {

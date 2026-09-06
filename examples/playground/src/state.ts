@@ -1,6 +1,7 @@
 import type { BucketName, DemoConfig, PresentMode } from './config'
 import { BUCKET_NAMES, DEFAULT_CONFIG } from './config'
 import type { KnobValues } from './knobs'
+import type { EdgeFinish, EdgeShape, EdgeWidthUnit } from '@paper-crumple/paper'
 
 /**
  * Every knob param is `k.<type>.<key>`. `<type>` is a one-character tag (`b`/`n`/`s`) so
@@ -52,11 +53,23 @@ function parseKnobs(params: URLSearchParams): KnobValues | Error {
   return out
 }
 
-function parseEdgeMode(params: URLSearchParams): DemoConfig['edgeMode'] | Error {
-  const raw = params.get('edgeMode')
-  if (raw === null) return DEFAULT_CONFIG.edgeMode
-  if (raw === 'torn' || raw === 'hull' || raw === 'both') return raw
-  return fieldError('edgeMode', raw)
+/**
+ * One helper behind the three literal-union `DemoConfig` fields `parseEdgeMode` used to be alone
+ * in being: an absent key falls back to `fallback` (`DEFAULT_CONFIG`'s own value for it), a value
+ * outside `allowed` is a named `Error`, and the old three-way `edgeMode` param is simply gone —
+ * an old link's `edgeMode=torn` is an unknown key to every parser below and is ignored, so every
+ * edge field falls back to its default (design 2026-09-05 §9; there is no compatibility shim).
+ */
+function parseLiteral<T extends string>(
+  params: URLSearchParams,
+  key: string,
+  allowed: readonly T[],
+  fallback: T,
+): T | Error {
+  const raw = params.get(key)
+  if (raw === null) return fallback
+  const hit = allowed.find((a) => a === raw)
+  return hit ?? fieldError(key, raw)
 }
 
 function parseBoolField(params: URLSearchParams, key: string, fallback: boolean): boolean | Error {
@@ -98,13 +111,15 @@ function parseNumberField(params: URLSearchParams, key: string, fallback: number
 }
 
 /**
- * The `#`-fragment: the seven `DemoConfig` fields first, then one `k.<type>.<key>` param per
+ * The `#`-fragment: the nine `DemoConfig` fields first, then one `k.<type>.<key>` param per
  * entry in `changed` — already exactly the knobs that differ from their descriptor default
  * (`panel.ts`'s `PanelHandle.changed()`), so nothing here re-derives that filter.
  */
 export function encodeState(config: DemoConfig, changed: KnobValues): string {
   const params = new URLSearchParams()
-  params.set('edgeMode', config.edgeMode)
+  params.set('edgeShape', config.edgeShape)
+  params.set('edgeFinish', config.edgeFinish)
+  params.set('edgeWidthUnit', config.edgeWidthUnit)
   params.set('tiles', config.tiles ? '1' : '0')
   params.set('packs', config.packs.join(','))
   params.set('present', config.present)
@@ -129,8 +144,27 @@ export function encodeState(config: DemoConfig, changed: KnobValues): string {
 export function decodeState(hash: string): { config: DemoConfig; knobs: KnobValues } | Error {
   const params = new URLSearchParams(hash.replace(/^#/, ''))
 
-  const edgeMode = parseEdgeMode(params)
-  if (edgeMode instanceof Error) return edgeMode
+  const edgeShape = parseLiteral<EdgeShape>(
+    params,
+    'edgeShape',
+    ['smooth', 'torn'],
+    DEFAULT_CONFIG.edgeShape,
+  )
+  if (edgeShape instanceof Error) return edgeShape
+  const edgeFinish = parseLiteral<EdgeFinish>(
+    params,
+    'edgeFinish',
+    ['clean', 'paper'],
+    DEFAULT_CONFIG.edgeFinish,
+  )
+  if (edgeFinish instanceof Error) return edgeFinish
+  const edgeWidthUnit = parseLiteral<EdgeWidthUnit>(
+    params,
+    'edgeWidthUnit',
+    ['px', 'percent'],
+    DEFAULT_CONFIG.edgeWidthUnit,
+  )
+  if (edgeWidthUnit instanceof Error) return edgeWidthUnit
   const tiles = parseBoolField(params, 'tiles', DEFAULT_CONFIG.tiles)
   if (tiles instanceof Error) return tiles
   const packs = parsePacks(params)
@@ -152,7 +186,9 @@ export function decodeState(hash: string): { config: DemoConfig; knobs: KnobValu
   if (knobs instanceof Error) return knobs
 
   const config: DemoConfig = {
-    edgeMode,
+    edgeShape,
+    edgeFinish,
+    edgeWidthUnit,
     tiles,
     packs,
     present,

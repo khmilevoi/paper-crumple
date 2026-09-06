@@ -12,12 +12,15 @@ import {
   handleBytes,
   overscanFromRadius,
   overscanRadius,
+  GUARD_EPSILON_REFERENCE_PX,
+  GUARD_MARGIN_G,
+  guardMarginsFor,
   KNOB_REFERENCE_PX,
+  marginFractionFor,
 } from '@paper-crumple/core/unstable'
-import type { EdgeParams, HandleFacts, SheetHandle } from '@paper-crumple/core/unstable'
+import type { EdgeParams, EdgeSpec, HandleFacts, SheetHandle } from '@paper-crumple/core/unstable'
 import { hullBuffers } from './hull-shape.js'
 import type { HullShape } from './hull-shape.js'
-import type { PaperEdgeMode } from './paper-knobs.js'
 
 export interface PaperSheetHandle extends SheetHandle {
   /** The key the artwork slot and the hull cache are both keyed by. */
@@ -39,18 +42,41 @@ export interface PaperSheetHandle extends SheetHandle {
   readonly front: Size
   /** `A`, the unpadded artwork the resample wrote (§8.5). */
   readonly artwork: Size
+  /** The x-axis per-side margin, in texels: `front.w - artwork.w === 2 * marginX` (design 2026-09-05 §4.2). */
+  readonly marginX: number
+  /** The y-axis per-side margin, in texels: `front.h - artwork.h === 2 * marginY` (design 2026-09-05 §4.2). */
+  readonly marginY: number
   readonly overscan: number
   readonly sdfRes: number
   readonly srcW: number
   readonly srcH: number
   readonly aspect: number
   readonly exact: boolean
-  readonly edgeMode: PaperEdgeMode
+  /** Which cell of design 2026-09-05 §6's table this sprite was sourced under. */
+  readonly edgeSpec: EdgeSpec
+  /**
+   * `W` in reference px, as the TRACE ran at it (design 2026-09-05 §3.1). Under `smooth` this is
+   * the width `hullBandFor` derived the band from, and a caller who moves `edgeWidth` gets a
+   * `SourceExpiredError` out of `build()`'s hull-tier guard rather than a stale polygon. Under
+   * `torn` the width is front-tier and there is no trace, so this records only what `source()`'s
+   * own extent arithmetic used: `build()` resolves its own from the live `knobValues` and never
+   * uploads this one.
+   */
+  readonly widthRef: number
+  /**
+   * THIS sprite's own frozen reserve — the factory's defaults at THIS sprite's aspect
+   * (design 2026-09-05 §4.4). Under `edgeWidthUnit: 'px'` it is the factory's own reserve exactly;
+   * under `'percent'` a 1:4 tower's is strictly smaller than the `c = 1` ceiling
+   * `PaperSheet.overscan` reports, which is why `build()`'s `checkReserve` compares against this
+   * rather than against the factory's.
+   */
+  readonly reserve: OverscanReserve
   readonly hull: HullShape
   /**
-   * §6.3 — the hull-tier knob values (`invalidates: 'hull'`: `minDist`, `maxDist`, `angularity`
-   * and `seed` in this package, whichever of them the mode declares) the hull was traced at,
-   * keyed as the descriptors are. `build()` compares the values it is handed against these and
+   * §6.3 — the hull-tier knob values (`invalidates: 'hull'`: under `smooth`, `edgeWidth`,
+   * `edgeVariance`, `angularity` and `seed`; under `torn` the first two are front-tier instead and
+   * this bag is empty) the hull was traced at, keyed as the descriptors are. `build()` compares
+   * the values it is handed against these and
    * answers `SourceExpiredError` on any difference: the trace lives inside `source()` (§5.2), so
    * a moved hull-tier knob is a re-source at the new values, never a retrace `build()` does on
    * its own.
@@ -122,25 +148,32 @@ export function dimsForLongSide(longSide: number, srcW: number, srcH: number, fl
   return srcW >= srcH ? { w: longSide, h: shortSide } : { w: shortSide, h: longSide }
 }
 
-/** Everything `source()` sizes from the frozen reserve: the artwork, its margin, and the front. */
+/**
+ * Everything `source()` sizes from the frozen reserve: the artwork, its per-axis margin, and the
+ * front (design 2026-09-05 §4.2). The two axes no longer carry the same texel count — the x and
+ * y margins coincide only on a square artwork (an exact algebraic identity, not a coincidence).
+ */
 export interface ArtworkFraming {
   /** `A`, the unpadded artwork, source aspect kept. */
   readonly artwork: Size
-  /** The margin on EVERY side of the artwork, in texels: `ceil(overscan * artwork.h)`. */
-  readonly margin: number
-  /** `artwork` plus `2 * margin` on each axis. Not the source's aspect. */
+  /** The x-axis margin on EVERY side of the artwork, in texels (`guardMarginsFor`'s `x`). */
+  readonly marginX: number
+  /** The y-axis margin on EVERY side of the artwork, in texels (`guardMarginsFor`'s `y`). */
+  readonly marginY: number
+  /** `artwork` plus `2 * marginX` on x and `2 * marginY` on y. Not the source's aspect. */
   readonly front: Size
 }
 
 /**
  * §8.6, per axis. The artwork's long side is `srcLong` under `exact`, else the largest value
  * `<= artworkLongSide` (when given) whose front fits `maxSize` on its long side; the front is
- * the artwork plus a `ceil(overscan * artwork.h)` texel margin on every side. The cap's closed
- * form, `floor(maxSize / (1 + 2 * overscan * min(1, srcH / srcW)))`, can be off by one texel
- * either way from the rounding of the short side and of the margin — usually an overshoot,
- * corrected by stepping the long side down until the front fits, but sometimes an undershoot, so
- * `capA + 1` is probed first (see the comment at its call site below): at most a couple of steps
- * either direction.
+ * the artwork plus `guardMarginsFor`'s per-axis margin (paint plus guard band, design 2026-09-05
+ * §4.2) on every side. The cap's closed form, `floor(maxSize / (1 + 2 * longFraction))` (the
+ * margin fraction that belongs to the long axis — see the comment at its call site below), can
+ * be off by one texel either way from the rounding of the short side and of the margin — usually
+ * an overshoot, corrected by stepping the long side down until the front fits, but sometimes an
+ * undershoot, so `capA + 1` is probed first (see the comment at its call site below): at most a
+ * couple of steps either direction.
  */
 export function frontForArtwork(o: {
   overscan: number
@@ -196,19 +229,29 @@ export function frontForArtwork(o: {
   }
   const p = o.overscan
   const srcLong = Math.max(o.srcW, o.srcH)
-  const a = Math.min(1, o.srcH / o.srcW)
+  // The long side is x for a landscape source and y for a portrait or square one, and the two
+  // axes no longer carry the same margin (design 2026-09-05 §4.2). `marginFractionFor` is the Y
+  // fraction; the X fraction is `(g + c*p/Q)/(1 - 2g) + c*eps` with `c = A.h / A.w`, which is
+  // strictly SMALLER for `c < 1`. Estimating a landscape front with the y fraction under-sizes
+  // the artwork by 12-17% (at 3:1, `aLong` lands on 770 where 902 fits — R14), and the loop only
+  // ever steps DOWN, so it never recovers. Pick the fraction that belongs to the long axis.
+  const g = GUARD_MARGIN_G
+  const eps = GUARD_EPSILON_REFERENCE_PX / KNOB_REFERENCE_PX
+  const q = 1 - 2 * g * (1 + 2 * p)
+  const c = Math.min(1, o.srcH / o.srcW)
+  const longFraction =
+    o.srcW >= o.srcH ? (g + (c * p) / q) / (1 - 2 * g) + c * eps : marginFractionFor(p) + eps
   // `capA` is a closed-form estimate; the rounding of the short side (`dimsForLongSide`) and of
-  // the margin (`ceil(p * artwork.h)`) can make the true maximum `capA + 1`. Probing `capA + 1`
+  // the margin (`guardMarginsFor`) can make the true maximum `capA + 1`. Probing `capA + 1`
   // first — the loop below steps back down if it does not actually fit — finds that true maximum
   // throughout the realistic parameter band (aspects 8x8..192x192, overscan 0.05-0.5, maxSize
-  // 32-1024: zero under-shoots across 6.86M combinations swept). Outside that band a bounded
-  // shortfall is possible: at a degenerate aspect where `dimsForLongSide`'s short side floors at
-  // 1 texel, the margin decouples from `aLong` and the closed form can under-shoot by two, not
-  // one (e.g. `srcW 10, srcH 1, p 2, maxSize 18` returns 13 where 14 fits) — a second upward
-  // probe is not worth the extra step for a case this far outside real usage. `max(front) <=
-  // maxSize` still holds for every input regardless: the loop only returns a size it has itself
-  // verified fits.
-  const capA = Math.floor(o.maxSize / (1 + 2 * p * a))
+  // 32-1024: zero under-shoots across 6.86M combinations swept, pre-§4.2). Outside that band a
+  // bounded shortfall is possible: at a degenerate aspect where `dimsForLongSide`'s short side
+  // floors at 1 texel, the margin decouples from `aLong` and the closed form can under-shoot by
+  // two, not one — a second upward probe is not worth the extra step for a case this far outside
+  // real usage. `max(front) <= maxSize` still holds for every input regardless: the loop only
+  // returns a size it has itself verified fits.
+  const capA = Math.floor(o.maxSize / (1 + 2 * longFraction))
   let aLong = o.exact ? srcLong : Math.min(o.artworkLongSide ?? Number.POSITIVE_INFINITY, capA + 1)
   for (;;) {
     if (aLong < 1) {
@@ -218,9 +261,11 @@ export function frontForArtwork(o: {
       )
     }
     const artwork = dimsForLongSide(aLong, o.srcW, o.srcH)
-    const margin = Math.ceil(p * artwork.h)
-    const front = { w: artwork.w + 2 * margin, h: artwork.h + 2 * margin }
-    if (o.exact || Math.max(front.w, front.h) <= o.maxSize) return { artwork, margin, front }
+    const margins = guardMarginsFor({ artwork, overscan: p })
+    const front = { w: artwork.w + 2 * margins.x, h: artwork.h + 2 * margins.y }
+    if (o.exact || Math.max(front.w, front.h) <= o.maxSize) {
+      return { artwork, marginX: margins.x, marginY: margins.y, front }
+    }
     aLong -= 1
   }
 }

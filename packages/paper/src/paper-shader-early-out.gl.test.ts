@@ -17,17 +17,18 @@
  * A third variant paints a sentinel colour where an early-out fires. It is what keeps the on/off
  * comparison from being vacuous: both branches are asserted to fire on the bench-style artwork
  * (soft edge, holes — `silhouetteBytes` in `tools/bench/gl/harness.ts`, with an antialiased edge
- * and two holes added) in both edge modes.
+ * and two holes added) in every cell of design 2026-09-05 §6's table.
  *
  * Three surfaces are covered: `renderFront` on explicit fields (the bench's own set-up), and the
  * two `paperSheet()` fixtures `front-identity.gl.test.ts` and `front-holes.gl.test.ts` build
- * (shared through `testing/fixture-sources.ts`), in `hull` and in `torn` mode.
+ * (shared through `testing/fixture-sources.ts`), in `hull` and in `torn` mode (the legacy factory
+ * option `sheet.ts` still takes — Task 7's to convert).
  *
  * P7 added one more comparison to the first two suites: the shipped text compiles the fold,
  * flap-shadow, crumple, drop-shadow-cut and debug paths out (`#define PAPER_FRONT_BUILD 1`,
  * which is what took ANGLE/D3D11's HLSL compile from 42–48 s to seconds), and every front it
  * renders is compared byte for byte with the whole program (`PAPER_FRONT_BUILD 0`) — through
- * `renderFront` in hull, torn and both modes, and through `paperSheet()` on the two fixtures.
+ * `renderFront` in all four §6 cells, and through `paperSheet()` on the two fixtures.
  *
  * The last suite is about P6a's other edit, the drop-shadow base skipped at `uShadow == 0`: it
  * forces `uShadow = 1` through the real `renderFront` (whose own write of 0 is neutralised by
@@ -45,7 +46,7 @@ import {
   sdfResFor,
   uploadBytes,
 } from '@paper-crumple/core/unstable'
-import type { CoreGlContext, ScratchPools } from '@paper-crumple/core/unstable'
+import type { CoreGlContext, EdgeSpec, ScratchPools } from '@paper-crumple/core/unstable'
 import {
   HOLES_FIXTURE,
   IDENTITY_SRC,
@@ -54,11 +55,11 @@ import {
 } from './testing/fixture-sources.js'
 import { createGlFixture, type PaperGlFixture } from './testing/gl-fixture.js'
 import { createSdfBuilder, SDF_POOL_SLOTS, sigmaFor } from './gl-sdf.js'
-import { defaultsFor, descriptorsFor, type PaperEdgeMode } from './paper-knobs.js'
+import { defaultsFor, descriptorsFor } from './paper-knobs.js'
 import { createPaperRenderer } from './paper-renderer.js'
 import { PAPER_FS } from './paper-shader.js'
 import { mountNeutralTiles } from './paper-tiles.js'
-import { paperSheet } from './sheet.js'
+import { optionsFor, paperSheet } from './sheet.js'
 
 const fixtures: PaperGlFixture[] = []
 const poolsList: ScratchPools[] = []
@@ -97,6 +98,32 @@ const D2_GUARD_OFF = '  { // the D2 guard, removed by the test: the shadow base 
  */
 const FRONT_ON = '#define PAPER_FRONT_BUILD 1'
 const FRONT_OFF = '#define PAPER_FRONT_BUILD 0'
+
+/**
+ * design 2026-09-05 §6's four cells, which is what the `renderFront` half of this suite now
+ * sweeps. `EdgeMode`'s three values collapsed onto the SHAPE column alone — `hull` and `both`
+ * were both "one field bound to both `uSdf*` slots", i.e. `smooth`; `torn` is `torn` — and the
+ * FINISH column is new coverage the mode int could not express: the P6a derivation block reasons
+ * explicitly about `uEdgeFinish == 0` ("paperField never enters the fringe block, so fringe = 0.0
+ * outright"), so the `clean` half of the table is where that half of the derivation is checked.
+ *
+ * Every cell renders at the width knob's own default, never at 0: at `uEdgeWidth == 0` `edgeK()`
+ * is 0, every border decoration is gated off and all four cells render the SAME front — which is
+ * how this suite passed while testing one cell four times.
+ */
+const RENDER_CELLS = [
+  ['smooth/clean', { shape: 'smooth', finish: 'clean', widthUnit: 'px' }],
+  ['smooth/paper', { shape: 'smooth', finish: 'paper', widthUnit: 'px' }],
+  ['torn/clean', { shape: 'torn', finish: 'clean', widthUnit: 'px' }],
+  ['torn/paper', { shape: 'torn', finish: 'paper', widthUnit: 'px' }],
+] as const satisfies ReadonlyArray<readonly [string, EdgeSpec]>
+
+/**
+ * The two cells the `paperSheet()` half of this file drives end to end — the same pair the
+ * `renderFront` half above covers as the first and last rows of `RENDER_CELLS`. Two rather than
+ * four, because each case here is three full `source()` + `build()` round trips on SwiftShader.
+ */
+const SHEET_CELLS = [RENDER_CELLS[0], RENDER_CELLS[3]] as const
 
 /** The sentinel bytes the two branches paint: magenta for (a), green for (b). */
 const SENTINEL_A_RGBA = [255, 0, 255, 255] as const
@@ -262,7 +289,7 @@ interface FrontScene {
    * `null`, otherwise through a renderer whose context compiles `fs` in its place — and, with
    * `shadow`, with `uShadow` forced to that value (see `withPaperShader`).
    */
-  readonly render: (mode: PaperEdgeMode, fs: string | null, shadow?: number) => Uint8Array
+  readonly render: (spec: EdgeSpec, fs: string | null, shadow?: number) => Uint8Array
   dispose(): void
 }
 
@@ -346,7 +373,7 @@ function frontScene(N: number): FrontScene | Error {
   return {
     ctx,
     front: N,
-    render(mode, fs, shadow) {
+    render(spec, fs, shadow) {
       const renderer = rendererFor(fs, shadow)
       expect(GlError.is(renderer), GlError.is(renderer) ? renderer.message : '').toBe(false)
       if (GlError.is(renderer)) return new Uint8Array(0)
@@ -357,10 +384,13 @@ function frontScene(N: number): FrontScene | Error {
         artwork,
         tight,
         loose,
-        paperField: mode === 'hull' ? paperField : null,
-        edgeMode: mode,
-        values: defaultsFor(mode),
-        descriptors: descriptorsFor(mode),
+        // design 2026-09-05 §6: under `smooth` the polygon field IS the contour source (both
+        // `uSdf*` slots); under `torn` it is unread and the artwork's own pair is bound.
+        paperField: spec.shape === 'smooth' ? paperField : null,
+        edgeSpec: spec,
+        widthRef: Number(defaultsFor(spec).edgeWidth),
+        values: defaultsFor(spec),
+        descriptors: descriptorsFor(spec),
       })
       expect(err, err?.message).toBeUndefined()
       return readAll(ctx, frontTexture.handle, N, N)
@@ -400,35 +430,66 @@ describe('PAPER_FS early-outs on the bench-style front (renderFront, explicit fi
     }
   })
 
-  for (const mode of ['hull', 'torn', 'both'] as const satisfies readonly PaperEdgeMode[]) {
-    it(`renders byte-identical fronts through the front build and the whole program (P7) — ${mode}`, () => {
+  /**
+   * The proof that every loop below sweeps four cells rather than rendering one cell four times.
+   *
+   * This suite spent a whole task green over a renderer that uploaded nothing: `loc('thickness')`
+   * resolved through a `PAPER_UNIFORMS` key that no longer existed, `gl-context.ts` cached the
+   * `null`, `uEdgeWidth` / `uBaseBias` / `uEdgeFinish` all read 0, and its three mode strings
+   * rendered the same `edgeWidth = 0` front three times — every byte-identity assertion in the
+   * file still passed. A byte comparison between two renders is only worth what the two renders
+   * differ by, so the file has to establish that difference itself rather than borrow it from a
+   * sibling suite.
+   */
+  it('renders a different front in each of the four cells (design 2026-09-05 §6)', () => {
+    const scene = frontScene(256)
+    expect(scene).not.toBeInstanceOf(Error)
+    if (scene instanceof Error) return
+    const fronts = RENDER_CELLS.map(([name, spec]) => [name, scene.render(spec, null)] as const)
+    for (let i = 0; i < fronts.length; i++) {
+      for (let j = i + 1; j < fronts.length; j++) {
+        const a = fronts[i]
+        const b = fronts[j]
+        if (a === undefined || b === undefined) continue
+        expect(
+          firstDifferences(a[1], b[1], scene.front),
+          `${a[0]} and ${b[0]} rendered the same front`,
+        ).not.toEqual([])
+      }
+    }
+    scene.dispose()
+  }, 120_000)
+
+  for (const [name, spec] of RENDER_CELLS) {
+    it(`renders byte-identical fronts through the front build and the whole program (P7) — ${name}`, () => {
       const scene = frontScene(256)
       expect(scene).not.toBeInstanceOf(Error)
       if (scene instanceof Error) return
-      const front = scene.render(mode, null)
-      const whole = scene.render(mode, PAPER_FS_FULL)
+      const front = scene.render(spec, null)
+      const whole = scene.render(spec, PAPER_FS_FULL)
       expect(front.length).toBe(scene.front * scene.front * 4)
       expect(firstDifferences(front, whole, scene.front)).toEqual([])
       scene.dispose()
     }, 120_000)
   }
 
-  for (const mode of ['hull', 'torn'] as const satisfies readonly PaperEdgeMode[]) {
-    it(`renders byte-identical fronts with the early-outs on and off — ${mode}`, () => {
+  for (const [name, spec] of RENDER_CELLS) {
+    it(`renders byte-identical fronts with the early-outs on and off — ${name}`, () => {
       const scene = frontScene(256)
       expect(scene).not.toBeInstanceOf(Error)
       if (scene instanceof Error) return
 
-      const on = scene.render(mode, null)
-      const off = scene.render(mode, PAPER_FS_OFF)
+      const on = scene.render(spec, null)
+      const off = scene.render(spec, PAPER_FS_OFF)
       expect(on.length).toBe(scene.front * scene.front * 4)
       expect(firstDifferences(on, off, scene.front)).toEqual([])
 
       // Not vacuous: both branches fire on this artwork, and together they cover a substantial
       // share of the front (the bench silhouette is mostly margin and mostly opaque interior).
-      // Measured on SwiftShader: hull 13.4 % / 83.1 %, torn 15.3 % / 22.5 % (deep-inside /
-      // far-outside).
-      const sentinel = scene.render(mode, PAPER_FS_SENTINEL)
+      // The per-mode figures this comment used to quote were measured on the deleted `hull` /
+      // `torn` mode ints at the old uniform set; the bounds below are what the assertion actually
+      // holds to, and they hold in all four cells of design 2026-09-05 §6.
+      const sentinel = scene.render(spec, PAPER_FS_SENTINEL)
       const texels = scene.front * scene.front
       const deepInside = countTexels(sentinel, SENTINEL_A_RGBA)
       const farOutside = countTexels(sentinel, SENTINEL_B_RGBA)
@@ -482,11 +543,11 @@ function holesSource(): SourceBytes {
  */
 async function buildFront(
   ctx: CoreGlContext,
-  mode: PaperEdgeMode,
+  spec: EdgeSpec,
   source: SourceBytes,
   size: number,
 ): Promise<{ bytes: Uint8Array; w: number; h: number } | Error> {
-  const sheet = paperSheet({ edgeMode: mode })
+  const sheet = paperSheet(optionsFor(spec))
   const mounted = sheet.mount(ctx)
   if (mounted !== undefined) return mounted
   const bitmap = await createImageBitmap(new ImageData(source.bytes, source.w, source.h), {
@@ -498,7 +559,7 @@ async function buildFront(
   if (GlError.is(handle) || SheetError.is(handle) || isAborted(handle)) {
     return new Error(`source() refused: ${String(handle)}`)
   }
-  const front = sheet.build(handle, { w: size, h: size }, defaultsFor(mode) as never)
+  const front = sheet.build(handle, { w: size, h: size }, defaultsFor(spec) as never)
   if (front instanceof Error) return front
   const bytes = readAll(ctx, front.texture, front.width, front.height)
   const out = { bytes, w: front.width, h: front.height }
@@ -514,13 +575,13 @@ describe('PAPER_FS early-outs through paperSheet() (the front-identity and front
   ] as const
 
   for (const c of cases) {
-    for (const mode of ['hull', 'torn'] as const satisfies readonly PaperEdgeMode[]) {
-      it(`builds a byte-identical front with the early-outs on and off — ${c.name}, ${mode}`, async () => {
+    for (const [cell, spec] of SHEET_CELLS) {
+      it(`builds a byte-identical front with the early-outs on and off — ${c.name}, ${cell}`, async () => {
         const ctx = open()
-        const on = await buildFront(ctx, mode, c.source(), c.size)
+        const on = await buildFront(ctx, spec, c.source(), c.size)
         expect(on).not.toBeInstanceOf(Error)
         if (on instanceof Error) return
-        const off = await buildFront(withPaperShader(ctx, PAPER_FS_OFF), mode, c.source(), c.size)
+        const off = await buildFront(withPaperShader(ctx, PAPER_FS_OFF), spec, c.source(), c.size)
         expect(off).not.toBeInstanceOf(Error)
         if (off instanceof Error) return
         expect([on.w, on.h]).toEqual([off.w, off.h])
@@ -528,7 +589,7 @@ describe('PAPER_FS early-outs through paperSheet() (the front-identity and front
 
         const sentinel = await buildFront(
           withPaperShader(ctx, PAPER_FS_SENTINEL),
-          mode,
+          spec,
           c.source(),
           c.size,
         )
@@ -540,14 +601,14 @@ describe('PAPER_FS early-outs through paperSheet() (the front-identity and front
         // Three `source()` + `build()` round trips on SwiftShader run well past the default 15 s.
       }, 120_000)
 
-      it(`builds a byte-identical front through the front build and the whole program (P7) — ${c.name}, ${mode}`, async () => {
+      it(`builds a byte-identical front through the front build and the whole program (P7) — ${c.name}, ${cell}`, async () => {
         const ctx = open()
-        const front = await buildFront(ctx, mode, c.source(), c.size)
+        const front = await buildFront(ctx, spec, c.source(), c.size)
         expect(front).not.toBeInstanceOf(Error)
         if (front instanceof Error) return
         const whole = await buildFront(
           withPaperShader(ctx, PAPER_FS_FULL),
-          mode,
+          spec,
           c.source(),
           c.size,
         )
@@ -563,8 +624,8 @@ describe('PAPER_FS early-outs through paperSheet() (the front-identity and front
 // --- D2: the drop shadow at uShadow != 0 ----------------------------------------------------------
 
 describe('PAPER_FS drop shadow at uShadow != 0 (D2 skips the shadow base, it does not remove it)', () => {
-  for (const mode of ['hull', 'torn'] as const satisfies readonly PaperEdgeMode[]) {
-    it(`still renders the drop shadow, byte-identical to the unguarded path — ${mode}`, () => {
+  for (const [name, spec] of RENDER_CELLS) {
+    it(`still renders the drop shadow, byte-identical to the unguarded path — ${name}`, () => {
       const scene = frontScene(256)
       expect(scene).not.toBeInstanceOf(Error)
       if (scene instanceof Error) return
@@ -572,9 +633,9 @@ describe('PAPER_FS drop shadow at uShadow != 0 (D2 skips the shadow base, it doe
       // The shipped shader as the renderer drives it (uShadow = 0), the shipped shader with
       // uShadow forced to 1, and the pre-P6a shader (early-outs off, shadow base unconditional)
       // with the same forced shadow.
-      const noShadow = scene.render(mode, null)
-      const shadow = scene.render(mode, PAPER_FS, 1)
-      const reference = scene.render(mode, PAPER_FS_PRE_P6A, 1)
+      const noShadow = scene.render(spec, null)
+      const shadow = scene.render(spec, PAPER_FS, 1)
+      const reference = scene.render(spec, PAPER_FS_PRE_P6A, 1)
 
       // The shadow is there: texels the sheet leaves clear (alpha 0) now carry the shadow's alpha.
       // The default shadowBlur (13 reference px, 3.3 px on this front) and offset put a soft

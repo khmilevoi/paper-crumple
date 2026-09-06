@@ -61,8 +61,8 @@ Five of the six tiles are measured, not quoted:
 - **texture** — the sprite's front texture; **sheet** and **bucket / stretch** — `fitSheet` against
   the silhouette's real bounding box.
 - **pass a / b** — `paperStage` plus both slots, then `view` + `show` after the front bake.
-- **hull** — the front bake itself, which is where the hull polygon is built; an em dash in `torn`,
-  where that pass does not exist, exactly as the mockup prints it.
+- **hull** — the front bake itself, which is where the hull polygon is built; an em dash under
+  `edgeShape: 'torn'`, which builds no polygon, exactly as the mockup prints it.
 - **draw / step** — the mockup's tile here reads "draw / upload". Nothing in the library reports an
   upload separately (it happens inside `add()`, which the **hull** tile already times), so this one
   pairs the two per-frame numbers that _are_ measurable: a draw-only pose change timed at the call,

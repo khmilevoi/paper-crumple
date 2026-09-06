@@ -1,6 +1,6 @@
 import { expectTypeOf, test } from 'vitest'
 import { enumKnob, knobs } from './knobs.js'
-import type { KnobDescriptor } from './knobs.js'
+import type { KnobDescriptor, NumberKnob } from './knobs.js'
 
 test('knobs() preserves every literal the generated types are built from', () => {
   // eslint-disable-next-line @typescript-eslint/no-unused-vars
@@ -71,4 +71,40 @@ test('ui is optional, so a bundle need not carry English labels', () => {
   // eslint-disable-next-line @typescript-eslint/no-unused-vars
   const d = knobs([{ key: 'shadow', kind: 'bool', invalidates: 'draw', default: true }])
   expectTypeOf<(typeof d)[number]>().toExtend<KnobDescriptor>()
+})
+
+test("reference is 'sprite-px' | 'artwork-pct' — EdgeMode's replacement never widens this union", () => {
+  expectTypeOf<NumberKnob['reference']>().toEqualTypeOf<'sprite-px' | 'artwork-pct' | undefined>()
+  const spritePx: NumberKnob = {
+    key: 'tearAmp',
+    kind: 'number',
+    invalidates: 'front',
+    default: 30,
+    min: 0,
+    max: 80,
+    reference: 'sprite-px',
+  }
+  const artworkPct: NumberKnob = {
+    key: 'edgeWidth',
+    kind: 'number',
+    invalidates: 'front',
+    default: 5.9,
+    min: 0,
+    max: 15,
+    reference: 'artwork-pct',
+  }
+  // eslint-disable-next-line @typescript-eslint/no-unused-vars
+  const _bothAssignable = [spritePx, artworkPct]
+  knobs([
+    {
+      key: 'edgeWidth',
+      kind: 'number',
+      invalidates: 'front',
+      default: 5.9,
+      min: 0,
+      max: 15,
+      // @ts-expect-error — not one of 'sprite-px' | 'artwork-pct'
+      reference: 'front-pct',
+    },
+  ])
 })

@@ -90,14 +90,14 @@ someone else's megabytes. `tiles` and the pack are both opt-in — `paperSheet()
 
 Three packages, one version number. Each is first-class and installable on its own.
 
-| Package                 | Subpath                           | What it holds                                                                                                                                             |
-| ----------------------- | --------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `@paper-crumple/core`   | `.`                               | `paperStage()`, views, sprites, the knob registry, the scheduler, events, the error classes and every contract type.                                      |
-| `@paper-crumple/core`   | `@paper-crumple/core/unstable`    | The slot-authoring surface: `GlContext`, `compile`, `createTarget`, the GPU timer, `SheetHandle`, `MotionFit`, `MotionClip`.                              |
-| `@paper-crumple/paper`  | `.`                               | `paperSheet()` — the `SheetRenderer`: SDF, looseness blur, hull, torn edge, folds, facet mosaic and shadow, plus every CPU primitive exported separately. |
-| `@paper-crumple/paper`  | `@paper-crumple/paper/tiles`      | The four baked grayscale paper tiles, 333 KB, opt-in. Named export `tiles`.                                                                               |
-| `@paper-crumple/motion` | `.`                               | `bakedMotion()` — the `MotionSource`: the CRMP v1 parser, codecs, buckets, fit and the sheet program.                                                     |
-| `@paper-crumple/motion` | `@paper-crumple/motion/packs/2x3` | One baked pack, one module, one subpath. Also `.../packs/1x1` and `.../packs/3x2`.                                                                        |
+| Package                 | Subpath                           | What it holds                                                                                                                                                             |
+| ----------------------- | --------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `@paper-crumple/core`   | `.`                               | `paperStage()`, views, sprites, the knob registry, the scheduler, events, the error classes and every contract type.                                                      |
+| `@paper-crumple/core`   | `@paper-crumple/core/unstable`    | The slot-authoring surface: `GlContext`, `compile`, `createTarget`, the GPU timer, `SheetHandle`, `MotionFit`, `MotionClip`.                                              |
+| `@paper-crumple/paper`  | `.`                               | `paperSheet()` — the `SheetRenderer`: SDF, looseness blur, the edge (shape, finish, width), folds, facet mosaic and shadow, plus every CPU primitive exported separately. |
+| `@paper-crumple/paper`  | `@paper-crumple/paper/tiles`      | The four baked grayscale paper tiles, 333 KB, opt-in. Named export `tiles`.                                                                                               |
+| `@paper-crumple/motion` | `.`                               | `bakedMotion()` — the `MotionSource`: the CRMP v1 parser, codecs, buckets, fit and the sheet program.                                                                     |
+| `@paper-crumple/motion` | `@paper-crumple/motion/packs/2x3` | One baked pack, one module, one subpath. Also `.../packs/1x1` and `.../packs/3x2`.                                                                                        |
 
 The three share **one version number**, fixed by Changesets. That is not a convenience: both slots
 bind to core's concrete GL foundation, the knob registry couples them at the value level, the
