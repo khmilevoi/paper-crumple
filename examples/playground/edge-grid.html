@@ -1,0 +1,162 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>paper-crumple edge comparison grid</title>
+    <!--
+      Inline, for the same reason `index.html` inlines one: without it every load logs a 404 for
+      /favicon.ico, and "the console is clean" is a check this page's driver actually makes.
+    -->
+    <link
+      rel="icon"
+      href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'%3E%3Cpath fill='%23ece7dc' d='M2.5 1h8L14 4.5V15h-11.5z'/%3E%3Cpath fill='%23b3aa98' d='M10.5 1L14 4.5h-3.5z'/%3E%3Cpath fill='none' stroke='%23847c6c' stroke-width='.8' d='M4 6l3 2.5-2.5 2.5 4.5-1.5 2 3'/%3E%3C/svg%3E"
+    />
+    <!--
+      No webfont, and no stylesheet of its own. This page is screenshotted by a driver the moment
+      `__gridDone` flips, and a webfont that has not landed by then would relabel the figure after
+      the capture — a race with no observable signal. `index.html`'s Space Grotesk is worth its
+      race in a page a human watches load; a one-shot render surface is not.
+    -->
+    <style>
+      :root {
+        color-scheme: dark;
+        /* Neutral and dark: the paper is warm off-white and every edge decoration is a light
+           value against it, so the ground has to be dark to show the silhouette, and neutral so
+           it tints nothing the reader is being asked to compare. */
+        --ground: #14161a;
+        --panel: #1b1e24;
+        --ink: #edeef1;
+        --ink-dim: #a6abb5;
+        --rule: #2b3038;
+      }
+
+      html,
+      body {
+        margin: 0;
+        background: var(--ground);
+      }
+
+      body {
+        /* System stack only — see the note above on why no webfont is loaded. */
+        font-family:
+          ui-sans-serif, system-ui, -apple-system, 'Segoe UI', Roboto, 'Helvetica Neue', Arial,
+          sans-serif;
+        color: var(--ink);
+        -webkit-font-smoothing: antialiased;
+      }
+
+      /* The element the driver screenshots. Its own padding and background are what the PNG's
+         border is, so both live here rather than on `body`. `width: max-content` keeps the box
+         exactly as wide as the grid, whatever the viewport is: a screenshot of an element that
+         stretched to the viewport would carry a slab of empty ground on the right. */
+      #grid {
+        width: max-content;
+        padding: 34px 38px 40px;
+        background: var(--ground);
+      }
+
+      .grid-title {
+        margin: 0 0 26px;
+        font-size: 21px;
+        font-weight: 600;
+        letter-spacing: 0.01em;
+        color: var(--ink);
+      }
+
+      /* One CSS grid, `max-content` tracks: every tile is the same measured size (`tileFor`), so
+         the columns line up on the tile and the row headers sit on the same baseline grid. */
+      .grid-table {
+        display: grid;
+        gap: 14px 18px;
+        align-items: start;
+        justify-items: stretch;
+      }
+
+      .grid-corner {
+        /* The empty top-left cell. It exists so the header row and the label column stay in the
+           same grid rather than being positioned against each other. */
+      }
+
+      .grid-colhead {
+        align-self: end;
+        padding-bottom: 6px;
+        border-bottom: 1px solid var(--rule);
+        font-size: 13px;
+        font-weight: 600;
+        letter-spacing: 0.02em;
+        text-align: center;
+        color: var(--ink);
+      }
+
+      /* The edge cell, e.g. `torn / paper`. Right-aligned so it reads into its own row, and
+         vertically centred on the tile rather than on the tile-plus-caption. */
+      .grid-rowhead {
+        align-self: center;
+        padding-right: 4px;
+        max-width: 132px;
+        font-size: 13px;
+        font-weight: 600;
+        line-height: 1.35;
+        text-align: right;
+        color: var(--ink);
+      }
+
+      .grid-cell {
+        margin: 0;
+        display: flex;
+        flex-direction: column;
+        align-items: center;
+        gap: 8px;
+      }
+
+      /* The tile. A one-pixel panel behind it makes the paper's own silhouette readable at the
+         corners, where a warm off-white on a dark ground is otherwise the only thing marking the
+         tile's extent. */
+      .grid-canvas {
+        display: block;
+        background: var(--panel);
+        border-radius: 3px;
+      }
+
+      .grid-caption {
+        font-size: 12px;
+        line-height: 1.3;
+        text-align: center;
+        color: var(--ink-dim);
+        font-variant-numeric: tabular-nums;
+      }
+
+      /* A cell whose render failed. It is drawn as an empty tile with a marked border rather than
+         omitted: the grid must keep its shape so the reader can see WHICH cell is missing, and
+         `__gridErrors` carries why. */
+      .grid-cell.is-failed .grid-canvas {
+        outline: 1px dashed #8a5a5a;
+        outline-offset: -1px;
+      }
+
+      /* The one canvas the library paints into (`scratchCanvas`). Laid out, never displayed: a
+         `blit` view's managed backing store is written from `getBoundingClientRect()` during each
+         draw, and `display: none` would give it a zero box, which the library leaves alone rather
+         than resizing to zero. Pinned at the origin under everything, fully transparent. */
+      #scratch {
+        position: fixed;
+        left: 0;
+        top: 0;
+        z-index: -1;
+        opacity: 0;
+        pointer-events: none;
+      }
+    </style>
+  </head>
+  <body>
+    <!--
+      Empty until the driver calls `window.__renderGrid(spec)`; the module below only installs the
+      three globals the contract names and renders nothing on its own. Nothing about this page is
+      React — it shares `src/config.ts`, `src/framing.ts` and `src/edge-ceilings.ts` with the
+      playground and none of its UI.
+    -->
+    <div id="grid"></div>
+    <script type="module" src="/src/edge-grid.ts"></script>
+  </body>
+</html>
