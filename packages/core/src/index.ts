@@ -130,5 +130,5 @@ export type { BitmapSupplier, PinFor, PinnedSource, SpriteSource } from './sourc
 export { paperStage } from './stage.js'
 export type { AddOptions, BlitStage, DirectStage, Fit, HostedStage, StageCommon } from './stage.js'
 export type { Sprite } from './sprite.js'
-export type { SwapOptions, ViewFrame } from './view.js'
+export type { SwapOptions, SwapToOptions, ViewFrame } from './view.js'
 export { presetForImageId } from './preset.js'

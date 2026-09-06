@@ -77,7 +77,7 @@ import type {
 } from './stage-types.js'
 import { systemTimers, type Timers } from './stepper.js'
 import { transition, type ViewState } from './view-state.js'
-import type { SwapOptions, View } from './view.js'
+import type { SwapOptions, SwapToOptions, View } from './view.js'
 
 /**
  * D4 — the widest slot type. `KnobPatch`, `ViewKnobPatch` and `SpriteKnobPatch` are parameterised
@@ -1408,7 +1408,7 @@ function buildStage(p: StageParts): BuiltStage {
      * The key is derived from the source so a consumer swapping a URL in does not have to mint
      * one; a consumer who wants a stable key calls `add()` and `crumpleTo()` themselves.
      */
-    function swapToMethod(src: SpriteSource, o?: SwapOptions): Run<SwapResult> {
+    function swapToMethod(src: SpriteSource, o?: SwapToOptions): Run<SwapResult> {
       if (p.isDisposed() || state === 'disposed') return settledRun(ABORTED)
       const key = `swap:${presetForImageId(String(src))}:${String(swapCounter++)}`
       // §8.10 — a superseded, stopped or disposed swap aborts the `add()` it started, so a
