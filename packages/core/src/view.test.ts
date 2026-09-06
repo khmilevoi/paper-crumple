@@ -245,6 +245,39 @@ describe('stage.view()', () => {
   })
 })
 
+describe('the stage re-emits a view s events (§7.1)', () => {
+  it('runs the view s own listeners first, then the stage s, synchronously, with view filled in', async () => {
+    const { stage } = await blitStage()
+    const sprite = await stage.add('/a.png', { key: 'k' })
+    if (sprite instanceof Error || isAborted(sprite)) return expect.fail('add refused')
+    const view = stage.view({ canvas: destCanvas() })
+    if (view instanceof Error) return expect.fail('view refused')
+    view.show(sprite)
+    const seen: string[] = []
+    // Subscribed on the stage before the view, deliberately: the order §7.1 promises is the
+    // view's listeners first, and it must not depend on who subscribed first — nor on the
+    // stage's internal relay having been registered on the view's bus before the consumer's
+    // handler was.
+    stage.on('start', (e) => seen.push(`stage:start:${String(e.view === view)}`))
+    stage.on('step', () => seen.push('stage:step'))
+    stage.on('end', () => seen.push('stage:end'))
+    view.on('start', () => seen.push('view:start'))
+    view.on('step', () => seen.push('view:step'))
+    view.on('end', () => seen.push('view:end'))
+    // A one-pose run: `start`, `step` and `end` all land in the same synchronous block.
+    view.play(0, 0)
+    expect(seen).toEqual([
+      'view:start',
+      'stage:start:true',
+      'view:step',
+      'stage:step',
+      'view:end',
+      'stage:end',
+    ])
+    stage.dispose()
+  })
+})
+
 // Where the artwork lands in the box the view draws into — the number a consumer pinning the
 // picture (rather than the paper) at a fixed on-screen rectangle needs, and the one nothing else
 // on `Sprite` or `View` says: `rect` is the paper's box and `frontSize` the whole front.

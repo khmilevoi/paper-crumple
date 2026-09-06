@@ -6,8 +6,14 @@ import { unwrap } from './unwrap.js'
  *
  * Everything §7.1 says about subscription and emission, and nothing about runs. A run's ordering
  * rules are `runner.ts`'s; this file only guarantees that an emit visits its listeners in
- * registration order, that one listener's exception cannot silence the next, and that a call made
- * from inside a handler is deferred by exactly one microtask.
+ * registration order, that one listener's exception cannot silence the next, and that the
+ * `relay` runs synchronously after the last listener returns — which is how a view's bus hands
+ * each event on to the stage's.
+ *
+ * There is no deferral here. A call made from inside a handler runs synchronously, like a call
+ * made from anywhere else; what keeps it from recursing without bound is the runner's own
+ * ordering — `current` is nulled before `end` is emitted, and a run a handler tries to install
+ * from inside a supersession is refused — not a queue in front of the listeners.
  *
  * **Subscribing cannot fail, so `on` is not an `Error | T`.** §7.1 states this so it is not
  * "corrected" into a union during implementation; the type test asserts it.
@@ -27,11 +33,13 @@ export interface EventBusOptions<M extends EventPayloads = Events> {
   /**
    * Called after the last listener of an emit returns, still **inside** that emit — §7.1: "a
    * view's own listeners run first, in registration order; the stage re-emits synchronously
-   * after the last returns". P9 passes the stage's re-emission here.
+   * after the last returns". The stage passes its re-emission here for every view's bus.
    *
-   * Running it inside the emit is load-bearing and not an implementation detail: a `view.play()`
-   * issued from a *stage* handler must land in this bus's deferral box, or the re-entrancy
-   * guarantee would hold for view-side handlers and quietly fail for stage-side ones.
+   * An option rather than a listener, and that is the whole point of it: `emit` knows only
+   * registration order, so a listener the stage registered when it built the view would run
+   * *before* every listener the consumer registers afterwards — the reverse of what §7.1
+   * promises. Running inside the emit also puts a throwing relay on the same `rethrow` path as a
+   * throwing listener, rather than letting it escape the emit.
    */
   relay?: <E extends EventName>(event: E, payload: M[E]) => void
   /**
@@ -63,23 +71,7 @@ export interface EventBus<M extends EventPayloads = Events> {
   once<E extends EventName>(event: E, fn: Listener<M[E]>): () => void
   emit<E extends EventName>(event: E, payload: M[E]): void
   listenerCount(event: EventName): number
-  /** True while any emit on this bus is on the stack. */
-  readonly emitting: boolean
-  /**
-   * §7.1's single-slot re-entrancy box. Returns `true` when the call was stored — an emit is on
-   * the stack and the call drains one microtask after it unwinds — and `false` when it was not,
-   * in which case **the caller runs `fn` itself, synchronously**. That branch is the one that
-   * keeps `start` inside the user gesture: a call from a click handler is not inside an emit.
-   *
-   * A slot is not a stack: it holds one call, and any later `defer` before the next drain
-   * overwrites it — including one made from a *different* emit in the same synchronous block,
-   * which is the shape a run's `end` / `start` / `step` triple produces. That is latest-wins
-   * applied to the same instant, and it is why depth is one and unbounded *synchronous*
-   * recursion is structurally impossible. A consumer who defers from two handlers in one
-   * synchronous block gets the later call, and only the later call.
-   */
-  defer(fn: () => void): boolean
-  /** Drops every listener and empties the slot. */
+  /** Drops every listener. */
   clear(): void
 }
 
@@ -127,9 +119,6 @@ export function createEventBus<M extends EventPayloads = Events>(
 ): EventBus<M> {
   const rethrow = options.rethrow ?? rethrowFromMicrotask
   const listeners = new Map<EventName, Entry[]>()
-  let depth = 0
-  let slot: (() => void) | null = null
-  let drainQueued = false
   let unobservedFired = false
 
   function on<E extends EventName>(event: E, fn: Listener<M[E]>): () => void {
@@ -155,50 +144,34 @@ export function createEventBus<M extends EventPayloads = Events>(
     return off
   }
 
-  function drain(): void {
-    drainQueued = false
-    const pending = slot
-    slot = null
-    if (pending !== null) pending()
-  }
-
   function emit<E extends EventName>(event: E, payload: M[E]): void {
-    depth += 1
-    try {
-      const bucket = listeners.get(event)
-      // A snapshot, so a listener added during this emit does not receive it. `removed` is
-      // consulted per entry so a listener unsubscribed during this emit does not receive it
-      // either — the two halves together are what make `off()` inside a handler mean what it
-      // reads as.
-      const snapshot = bucket === undefined ? [] : bucket.slice()
-      for (const entry of snapshot) {
-        if (entry.removed) continue
-        const listener = entry.fn as Listener<M[E]>
-        try {
-          listener(payload)
-        } catch (thrown) {
-          rethrow(thrown)
-        }
+    const bucket = listeners.get(event)
+    // A snapshot, so a listener added during this emit does not receive it. `removed` is
+    // consulted per entry so a listener unsubscribed during this emit does not receive it
+    // either — the two halves together are what make `off()` inside a handler mean what it
+    // reads as.
+    const snapshot = bucket === undefined ? [] : bucket.slice()
+    for (const entry of snapshot) {
+      if (entry.removed) continue
+      const listener = entry.fn as Listener<M[E]>
+      try {
+        listener(payload)
+      } catch (thrown) {
+        rethrow(thrown)
       }
-      if (options.relay !== undefined) {
-        try {
-          options.relay(event, payload)
-        } catch (thrown) {
-          rethrow(thrown)
-        }
+    }
+    if (options.relay !== undefined) {
+      try {
+        options.relay(event, payload)
+      } catch (thrown) {
+        rethrow(thrown)
       }
-      if (event === 'error' && snapshot.length === 0 && !unobservedFired) {
-        const e = payload as Events['error']
-        if (!e.observed && options.onUnobserved !== undefined) {
-          unobservedFired = true
-          options.onUnobserved(e.error)
-        }
-      }
-    } finally {
-      depth -= 1
-      if (depth === 0 && slot !== null && !drainQueued) {
-        drainQueued = true
-        queueMicrotask(drain)
+    }
+    if (event === 'error' && snapshot.length === 0 && !unobservedFired) {
+      const e = payload as Events['error']
+      if (!e.observed && options.onUnobserved !== undefined) {
+        unobservedFired = true
+        options.onUnobserved(e.error)
       }
     }
   }
@@ -208,17 +181,8 @@ export function createEventBus<M extends EventPayloads = Events>(
     once,
     emit,
     listenerCount: (event) => listeners.get(event)?.length ?? 0,
-    get emitting() {
-      return depth > 0
-    },
-    defer(fn) {
-      if (depth === 0) return false
-      slot = fn
-      return true
-    },
     clear() {
       listeners.clear()
-      slot = null
     },
   }
 }

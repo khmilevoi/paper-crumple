@@ -148,6 +148,8 @@ export function createRunController<T = unknown>(
   const { poseCount } = config
   let current: LiveRun | null = null
   let disposed = false
+  /** Up for the whole of `supersede`; `play` and `crumple` refuse to install a run while it is. */
+  let superseding = false
 
   function detach(r: LiveRun): void {
     if (r.stepper !== null) {
@@ -200,23 +202,29 @@ export function createRunController<T = unknown>(
    * any explicit deferral.
    */
   function supersede(): void {
-    // A loop rather than a single cancel. The `end` emitted below reaches the host's listeners
-    // synchronously, and a listener is explicitly allowed to call `play()` from it — that call
-    // installs its own run and leaves `current` pointing at it. A single cancel would return
-    // here with that run still live, and the caller's `current = r` would then orphan it: its
-    // timer would go on firing, its `finish` would no-op forever because `current` no longer
-    // points at it, and an `await` on its `Run` would never settle. Cancelling until nothing is
-    // live gives every such run the `end` and the `ABORTED` settle it is owed.
+    // The `end` emitted below reaches the host's listeners synchronously, and a listener may call
+    // `play()` from it. On the *completion* path that is the documented looping indicator, and
+    // it is safe because `finish` nulls `current` before it emits: the handler's call finds an
+    // idle controller and simply installs its run. Here the same call would install a run
+    // between this cancel and the caller's own `current = r`, and one of two things has to give.
+    // Leave it, and the caller orphans it — its timer ticking, its `finish` a no-op, its `Run`
+    // never settling. Cancel it and loop, and a handler that re-plays on every `end` — the
+    // looping indicator written without its `completed` check — answers each iteration with a
+    // fresh run for the next to cancel: a synchronous loop that never exits. Nothing sits between
+    // a handler and this controller to bound that; the bus is synchronous.
     //
-    // Each iteration consumes exactly one live run, so the loop continues only while a handler
-    // keeps installing a new one: it terminates for any handler that eventually stops doing so,
-    // and would not for one that calls `play()` unconditionally on every `end`. That is the
-    // unbounded-recursion pathology §7.1's single-slot deferral box exists to prevent, and P9
-    // wires that box between a handler and this controller — this loop is defence in depth.
-    // Note the consequence for a caller using the controller directly: a run installed by a
-    // handler is cancelled immediately by the iteration that follows, so the *earlier* call
-    // wins over the later one.
-    while (current !== null) cancel(current)
+    // So the flag goes up before the cancel, exactly as `dispose` raises `disposed` before its
+    // own, and `play` / `crumple` refuse the call outright while it is up: `ABORTED` returned,
+    // nothing emitted, nothing rendered, and the superseding call wins — the same winner the
+    // cancel-and-loop shape produced, minus the run that lived for zero ticks. With no way to
+    // install a run from inside it, the loop below is provably single-iteration; it stays a loop
+    // so that it can never orphan one.
+    superseding = true
+    try {
+      while (current !== null) cancel(current)
+    } finally {
+      superseding = false
+    }
   }
 
   // A function, not the inlined `o.signal?.aborted === true` it wraps: `aborted` can flip between
@@ -278,7 +286,7 @@ export function createRunController<T = unknown>(
     toRef: PoseRef,
     o: PlayOptions & { owner?: RunOwner } = {},
   ): Run<PlayResult> {
-    if (disposed) return settledRun<PlayResult>(ABORTED)
+    if (disposed || superseding) return settledRun<PlayResult>(ABORTED)
     const owner = o.owner ?? 'view'
     const from = resolvePose(fromRef, poseCount)
     if (from instanceof Error) return settledRun<PlayResult>(from)
@@ -360,7 +368,7 @@ export function createRunController<T = unknown>(
     target: CrumpleTarget<T>,
     o: CrumpleOptions<T> & { owner?: RunOwner } = {},
   ): Run<SwapResult> {
-    if (disposed) return settledRun<SwapResult>(ABORTED)
+    if (disposed || superseding) return settledRun<SwapResult>(ABORTED)
     const owner = o.owner ?? 'view'
     const from = resolvePose(fromRef, poseCount)
     if (from instanceof Error) return settledRun<SwapResult>(from)

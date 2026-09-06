@@ -27,7 +27,7 @@ import type { Size } from './geometry.js'
 import { createGlContext, type CoreGlContext } from './gl-context.js'
 import { createScratchPools, type ScratchPools } from './gl-pools.js'
 import type { DrawTarget, GlCaps } from './gl.js'
-import type { EventName, StageEvent } from './events.js'
+import type { EventName, Events, StageEvent } from './events.js'
 import { atOrAbove, INVALIDATION_ORDER, SPRITE_SCOPE, VIEW_SCOPE } from './invalidation.js'
 import {
   createKnobRegistry,
@@ -1101,7 +1101,22 @@ function buildStage(p: StageParts): BuiltStage {
   }
 
   function createViewObject(t: ViewTarget, targetFor: TargetRule): View {
-    const bus = createEventBus()
+    // §7.1 — a view's own listeners run first, in registration order; the stage re-emits
+    // synchronously after the last returns, with `view` filled in. The bus's `relay` is the one
+    // hook that runs after the last listener regardless of when that listener was registered; a
+    // plain `bus.on` here would run *before* every handler the consumer attaches later. A view's
+    // bus only ever carries `start`, `step` and `end` — `RunHost.emit` is typed to those three,
+    // and an error takes §10.6's route through the policy straight onto the stage's bus — which
+    // is why the other two names have no entry. One entry per name rather than one generic
+    // widening, because `p.bus.emit(event, …)` with a generic `event` asks TypeScript to prove
+    // the payload against every member at once; indexing a mapped record with the same key is
+    // the shape it does correlate.
+    const relayToStage: { [E in EventName]?: (e: Events[E]) => void } = {
+      start: (e) => p.bus.emit('start', { ...e, view }),
+      step: (e) => p.bus.emit('step', { ...e, view }),
+      end: (e) => p.bus.emit('end', { ...e, view }),
+    }
+    const bus = createEventBus({ relay: (event, e) => relayToStage[event]?.(e) })
     let state: ViewState = 'idle'
     let pose = 0
     let record: SpriteRecord | null = null
@@ -1332,7 +1347,12 @@ function buildStage(p: StageParts): BuiltStage {
     function playMethod(from: PoseRef, to: PoseRef, o?: PlayOptions): Run<PlayResult> {
       if (p.isDisposed() || state === 'disposed') return settledRun(ABORTED)
       const run = controllerFor().play(from, to, { ...o, owner: 'view' })
-      currentRun = run
+      // Cache the run only when the controller installed it and it is still live: a call refused
+      // from inside a supersession (or one the signal aborted first) hands back a run that has
+      // already settled, and `view.run` must not report that one while the run that superseded
+      // it is the live one. A one-pose run that finished synchronously has already nulled this
+      // from its own `end`.
+      currentRun = controllerFor().live ? run : null
       return run
     }
 
@@ -1375,7 +1395,8 @@ function buildStage(p: StageParts): BuiltStage {
       // forever, and a held front is unevictable (§4.5). The release is idempotent, so the normal
       // path (adopt at the ball, then the run settles) still releases exactly once.
       void run.done.then(held)
-      currentRun = run
+      // As in `playMethod`: only a run the controller installed and still holds.
+      currentRun = controllerFor().live ? run : null
       return run
     }
 
@@ -1529,13 +1550,10 @@ function buildStage(p: StageParts): BuiltStage {
       },
     }
 
-    // §7.1 — a view's own listeners run first, in registration order; the stage re-emits
-    // synchronously after the last returns, with `view` filled in.
-    bus.on('start', (e) => p.bus.emit('start', { ...e, view }))
-    bus.on('step', (e) => p.bus.emit('step', { ...e, view }))
-    bus.on('end', (e) => p.bus.emit('end', { ...e, view }))
     // `currentRun` is cleared once the run that produced it has actually ended, which is what
     // lets `view.run` report `null` at exactly the moment §4.5 says the view returns to `idle`.
+    // Registered here, before any consumer's handler, so that a handler reading `view.run` from
+    // `end` already sees `null` — §7.1's "`run` set to `null` before it emits `end`".
     bus.on('end', () => {
       currentRun = null
     })

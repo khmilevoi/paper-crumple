@@ -484,7 +484,21 @@ describe('the run clock', () => {
 })
 
 describe('a play() issued from an end handler (§4.5)', () => {
-  it('does not orphan the run that handler starts, when it starts one during a supersession', async () => {
+  it('installs the run when the end is a completion: current is null before end, so the view is clean', () => {
+    h.bus.on('end', (e: Events['end']) => {
+      if (e.completed) h.controller.play(e.to, e.from)
+    })
+    h.controller.play('flat', 'ball')
+    h.timers.advance(495)
+    // The documented looping indicator: the first leg completed, and the `play()` from its `end`
+    // installed the return leg against an idle controller — no supersession, no second `end`.
+    expect(names(h.events).filter((n) => n === 'end')).toHaveLength(1)
+    expect(names(h.events).slice(-3)).toEqual(['end', 'start', 'step'])
+    expect(h.controller.live).toBe(true)
+    expect(h.timers.pending).toBe(1)
+  })
+
+  it('refuses the run a handler starts during a supersession: the superseding call wins, and nothing is orphaned', async () => {
     const first = h.controller.play('flat', 'ball')
     let reentrant: ReturnType<RunController['play']> | null = null
     const off = h.bus.on('end', () => {
@@ -492,13 +506,46 @@ describe('a play() issued from an end handler (§4.5)', () => {
       reentrant = h.controller.play(1, 2)
     })
     h.controller.play('ball', 'flat')
-    // Three runs, three ends: the superseded one, the one the handler started, and none left
-    // ticking. Without the loop in `supersede` there are two ends and a leaked timer.
-    expect(names(h.events).filter((n) => n === 'end')).toHaveLength(2)
+    // Two runs, one end: the superseded one's. The handler's `play()` was refused outright rather
+    // than installed and then cancelled by the next turn of `supersede`'s loop — so it emitted no
+    // `start`, rendered nothing, and left no timer for the caller's `current = r` to orphan.
+    expect(names(h.events).filter((n) => n === 'end')).toHaveLength(1)
+    expect(names(h.events).filter((n) => n === 'start')).toHaveLength(2)
+    expect(h.rendered).toEqual([0, 5])
     expect(h.timers.pending).toBe(1)
     expect(h.controller.live).toBe(true)
     await expect(first).resolves.toBe(ABORTED)
     await expect(reentrant!).resolves.toBe(ABORTED)
+  })
+
+  it('cannot be kept alive by a handler that re-plays on every end, completed or not', async () => {
+    // The looping indicator written without the `completed` check — the mistake §7.1's
+    // `completed: false` convention exists to make harmless. Each `end` the supersede loop emits
+    // would otherwise be answered with a fresh run for the next iteration to cancel, forever.
+    let ends = 0
+    const fromHandler: Array<ReturnType<RunController['play']>> = []
+    h.bus.on('end', () => {
+      ends += 1
+      // A fuse, so the failing shape of this test is a wrong count and not a hung worker.
+      if (ends < 50) fromHandler.push(h.controller.play('ball', 'flat'))
+    })
+    h.controller.play('flat', 'ball')
+    h.timers.advance(495)
+    // The completion path: the handler's `play()` installed the next leg, as documented.
+    expect(ends).toBe(1)
+    expect(h.controller.live).toBe(true)
+
+    // A supersession from outside, while the handler's leg is live.
+    const outside = h.controller.play(2, 3)
+    // Exactly one more `end` — the superseded leg's. The `play()` the handler issued from inside
+    // it was refused, so the loop ran once and the outside call installed its run.
+    expect(ends).toBe(2)
+    expect(names(h.events).slice(-3)).toEqual(['end', 'start', 'step'])
+    expect(h.events[h.events.length - 2]?.payload).toEqual({ from: 2, to: 3 })
+    expect(h.controller.live).toBe(true)
+    expect(h.timers.pending).toBe(1)
+    await expect(fromHandler[1]!).resolves.toBe(ABORTED)
+    expect(outside).toBeDefined()
   })
 
   it('stays disposed when a handler starts a run during dispose()', () => {

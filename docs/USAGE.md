@@ -370,10 +370,11 @@ is a static one somewhere else in your UI.
 const off = view.on('end', (e) => {
   // The documented way to write a looping indicator. `end` reports both ends of the run that just
   // finished as resolved indices, and play() accepts indices, so the ping-pong needs no state of
-  // its own. A call made from inside a handler for this view's own event is deferred by exactly ONE
-  // microtask into a single-slot pending box, so unbounded synchronous recursion is structurally
-  // impossible. This is the only deferral in the library — a call from a click handler still runs
-  // synchronously.
+  // its own. Nothing here is deferred: the run has already torn itself down to `idle` before this
+  // handler runs, so the play() below installs against a clean view, synchronously. The
+  // `completed` check is what ends the loop — a supersession, stop() or dispose() emits `end` with
+  // `completed: false`, and a play() issued from inside a supersession is refused rather than
+  // installed, so a handler that forgets this check cannot make the superseding call loop forever.
   if (e.completed) view.play(e.to, e.from)
 })
 
