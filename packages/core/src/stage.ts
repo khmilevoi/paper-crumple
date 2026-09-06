@@ -1406,11 +1406,17 @@ function buildStage(p: StageParts): BuiltStage {
      * the place where the iOS-audio guarantee is quietly lost.
      *
      * The key is derived from the source so a consumer swapping a URL in does not have to mint
-     * one; a consumer who wants a stable key calls `add()` and `crumpleTo()` themselves.
+     * one — but that derivation carries a monotonic counter, so the same picture folds
+     * differently on every swap. A consumer who wants a stable key passes `o.key` (§5.3): the
+     * `add()` below runs under it, and a key already resident is adopted above without an `add()`
+     * at all.
      */
     function swapToMethod(src: SpriteSource, o?: SwapToOptions): Run<SwapResult> {
       if (p.isDisposed() || state === 'disposed') return settledRun(ABORTED)
-      const key = `swap:${presetForImageId(String(src))}:${String(swapCounter++)}`
+      // §5.3 — the caller's key when there is one, so the fold preset (`presetForImageId(key)` at
+      // fit time) is stable per picture. The counter is only bumped on the minted path: a
+      // caller-supplied key must not perturb the numbering of the swaps that do mint.
+      const key = o?.key ?? `swap:${presetForImageId(String(src))}:${String(swapCounter++)}`
       // §8.10 — a superseded, stopped or disposed swap aborts the `add()` it started, so a
       // second `swapTo` on the same view does not pay for an ingest nobody will show. The gate
       // is the consumer's signal plus the run's own settlement; the superseded run still settles

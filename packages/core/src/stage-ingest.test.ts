@@ -146,6 +146,45 @@ describe('the ingest lane at stage level (spec §8.10)', () => {
     stage.dispose()
   })
 
+  it('a superseded swapTo under a caller-supplied key aborts its add and frees THAT key (§5.3)', async () => {
+    const g = sourceGate()
+    const sheet = fakeSheet({ gate: g.gate })
+    const timers = createFakeTimers()
+    const stage = await createStage({ ...base(), sheet, present: 'blit' }, stageEnv({ timers }))
+    if (stage instanceof Error || isAborted(stage)) return expect.fail('stage refused')
+    const shown = await stage.add('/base.png', { key: 'base' })
+    if (shown instanceof Error || isAborted(shown)) return expect.fail('add refused')
+    const view = stage.view({ canvas: destCanvas(), tag: 'tile' })
+    if (view instanceof Error) return expect.fail('view refused')
+    view.show(shown)
+
+    g.close()
+    const first = view.swapTo('/a.png', { key: 'a' })
+    await flush()
+    // `a`'s add is the running job, suspended inside `source()`.
+    expect(g.pending).toBe(1)
+
+    const second = view.swapTo('/b.png', { key: 'b' })
+    expect(isAborted(await first)).toBe(true)
+    await flush()
+
+    g.release()
+    await flush()
+    expect(g.pending).toBe(1)
+    // The caller's key is free again — not a minted one, the one they passed.
+    expect(stage.get('a')).toBeUndefined()
+    expect(sheet.calls.build).toHaveLength(1) // `base` only: `a` never reached build()
+
+    g.open()
+    await flush()
+    const again = await stage.add('/a.png', { key: 'a' })
+    expect(again instanceof Error || isAborted(again)).toBe(false)
+    timers.advance(10_000)
+    await flush()
+    expect(isAborted(await second)).toBe(false)
+    stage.dispose()
+  })
+
   it('crumpleTo(add(...)) promotes the pending add ahead of a queued background add', async () => {
     const g = sourceGate()
     const sheet = fakeSheet({ gate: g.gate })
