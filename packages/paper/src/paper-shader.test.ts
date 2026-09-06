@@ -6,7 +6,7 @@ import {
   MID_SCALLOP,
   MID_SMOOTH_COEF,
 } from './edge-derive.js'
-import { DEBUG_MODES, PAPER_FS, PAPER_UNIFORMS } from './paper-shader.js'
+import { DEBUG_MODES, PAPER_FS, PAPER_UNIFORMS, glslFloat } from './paper-shader.js'
 
 describe('DEBUG_MODES', () => {
   it('has the expected length', () => {
@@ -134,13 +134,15 @@ describe('PAPER_FS — the edge uniforms (design 2026-09-05 §6)', () => {
    * still passes; re-inline any of them as a literal and it does not.
    */
   it('interpolates its shared coefficients from edge-derive.ts (was ruling R11)', () => {
-    expect(PAPER_FS).toContain(`const float MID_SCALLOP = ${MID_SCALLOP};`)
-    expect(PAPER_FS).toContain(`* ${MID_SMOOTH_COEF} * MID_SCALLOP;`)
+    expect(PAPER_FS).toContain(`const float MID_SCALLOP = ${glslFloat(MID_SCALLOP)};`)
+    expect(PAPER_FS).toContain(`* ${glslFloat(MID_SMOOTH_COEF)} * MID_SCALLOP;`)
     expect(PAPER_FS).toContain(
-      `float midAng = -bite * ${MID_LOW_ANGULAR}.0 + tab * ${MID_HIGH_ANGULAR};`,
+      `float midAng = -bite * ${glslFloat(MID_LOW_ANGULAR)} + tab * ${glslFloat(MID_HIGH_ANGULAR)};`,
     )
     // `CHEW_REACH` reaches the GLSL at two differently scoped `teeth` declarations.
-    expect(PAPER_FS.split(`* ${CHEW_REACH};`).length - 1).toBe(2)
+    expect(PAPER_FS.split(`* ${glslFloat(CHEW_REACH)};`).length - 1).toBe(2)
+    // The formatter itself, since every line above now leans on it.
+    expect([glslFloat(1), glslFloat(1.6), glslFloat(0.18)]).toEqual(['1.0', '1.6', '0.18'])
     // And nothing is kept in step by hand any more.
     expect(PAPER_FS).not.toContain('SYNC (ruling R11)')
   })

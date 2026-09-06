@@ -102,9 +102,10 @@ export const DEBUG_MODES: readonly string[] = [
  *
  * GLSL has no implicit int-to-float conversion in an expression like `-bite * 1`, so a coefficient
  * that happens to be integral has to carry its point. Every interpolation below goes through this,
- * so the emitted text is exactly the literal it replaced.
+ * so the emitted text is exactly the literal it replaced. Exported so the test that pins the
+ * interpolation can format the expected text the same way rather than hard-coding a `.0`.
  */
-function glslFloat(n: number): string {
+export function glslFloat(n: number): string {
   return Number.isInteger(n) ? `${n}.0` : `${n}`
 }
 

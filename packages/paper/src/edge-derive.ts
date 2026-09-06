@@ -61,6 +61,23 @@
  *   at low tearFreq, and stops there"); at `tearFreq 2, tearAngular 0.8` the rendered inward reach
  *   sits on the floor, in three independent configurations, against the 22.09 the identity would
  *   give.
+ *
+ * - **The reserve bounds the alpha BOX, not the distance from the alpha.** `overscanRadius`
+ *   reserves `reserve.radius` reference px around the artwork's alpha bounding box per axis, and
+ *   `checkGuardBand` holds that grown box inside the front; across four fixtures, `tearFreq`
+ *   {2, 9, 24}, `tearAngular` {0.8, 1} and three lattice phases no painted texel left it (worst
+ *   64.81 of 83.91). The Euclidean distance from the alpha is NOT bounded by `reserve.radius`
+ *   inside a concavity: `baseAngular`'s interpolant pushes the webbed contour outward along the
+ *   exterior medial ridge, and on a 20-texel slit between two lobes the paper sat up to 117.95
+ *   reference px from the alpha (84.33 at the shipped `tearFreq 9`), about 11 texels past the box's
+ *   edge and 37 reference px inside the reserve. The box bound is measured, not derived: the worst
+ *   geometry for it is a notch opening AT the box edge with a gap just under `2 W`, which puts the
+ *   web outside the box before the push starts. That fixture was built and measured — two flat
+ *   teeth 30 texels apart, gap against `2 W = 30.5` — and it did NOT approach the reserve: the web
+ *   reached 61.73 of 83.91 out through the gap's mouth, never past the teeth's own outline, and the
+ *   fixture's worst cell overall was 64.81 (margin 19.10, 22.8 %). All of it in
+ *   `edge-redesign.gl.test.ts` ("holds the outward reach inside the frozen reserve, across
+ *   fixtures, lattices and phases"), which publishes the whole 72-cell table.
  */
 
 /**

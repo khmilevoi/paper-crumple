@@ -82,7 +82,7 @@ import type { PackedHull } from './hull-shape.js'
 import { VARIANCE_KNOB, WIDTH_PX_KNOB, defaultsFor } from './paper-knobs.js'
 import { optionsFor, paperSheet } from './sheet.js'
 import type { PaperSheet } from './sheet.js'
-import { discAlpha, logoAlpha, unionAlpha } from './test-fixtures.js'
+import { discAlpha, logoAlpha, rectAlpha, unionAlpha } from './test-fixtures.js'
 import { ALL_FOUR_CELLS, SMOOTH_CLEAN, TORN_CLEAN, TORN_PAPER } from './testing/edge-cells.js'
 import { createGlFixture, type PaperGlFixture } from './testing/gl-fixture.js'
 import type { EdgeSpec } from '@paper-crumple/core/unstable'
@@ -160,26 +160,77 @@ const SLIT_ALPHA = unionAlpha(
 )
 
 /**
- * The discs every analytic fixture is built from, in SOURCE coordinates — the exterior distance to
- * a union of discs is the pointwise minimum of the discs' own, exactly, which is why these three
- * fixtures get an analytic `outsideDistance` and `logoAlpha` gets an EDT.
+ * **The NOTCH: two flat teeth whose ends ARE the alpha box's edge.**
+ *
+ * The slit above maximises the crease ANGLE; this one maximises what the crease angle can do to the
+ * measure that decides §4 — the per-axis excess past the artwork's alpha BOX, which is what
+ * `reachRect` grows and `checkGuardBand` holds inside the front.
+ *
+ * On the slit the two lobes curve away from the gap, so the web the paper throws across it sits
+ * about 29 texels INSIDE the box and a push has to spend that much before it reaches the box's edge
+ * at all. Two flat teeth flush with the box's y edges remove that buffer: the ridge is the gap's
+ * centreline, its two gradients are exactly opposite along the WHOLE length rather than fanning out
+ * from a point, and it exits through both y edges of the box. With a gap just under `2 W` — 30
+ * texels against `2 W = 30.5` — the paper webs across, and the web's top sits only
+ * `sqrt(W^2 - (gap/2)^2)` above the teeth: about 2.6 texels, i.e. 2.6 texels outside the box.
+ *
+ * That is the geometry that turns a small push into a large box excess. On the centreline the box
+ * excess `h` and the distance to the alpha `d` are related by `d = hypot(gap/2, h)`, so
+ * `dh/dd = d/h` — about 5.9 at `h = 2.6`. Every reference px `baseAngular` adds to the contour's
+ * distance buys almost six of box excess, until `h` grows enough to damp it. Nothing else in this
+ * file has that lever.
  */
-const LOBES: ReadonlyMap<Float32Array, readonly { x: number; y: number; r: number }[]> = new Map([
-  [DISC_ALPHA, [{ x: SRC / 2, y: SRC / 2, r: DISC_R }]],
+const TOOTH_GAP = 30
+const TOOTH_A = { x0: 40, y0: 68, x1: 108, y1: 188 }
+const TOOTH_B = { x0: TOOTH_A.x1 + TOOTH_GAP, y0: 68, x1: TOOTH_A.x1 + TOOTH_GAP + 68, y1: 188 }
+const NOTCH_ALPHA = unionAlpha(
+  rectAlpha(SRC, SRC, TOOTH_A.x0, TOOTH_A.y0, TOOTH_A.x1, TOOTH_A.y1),
+  rectAlpha(SRC, SRC, TOOTH_B.x0, TOOTH_B.y0, TOOTH_B.x1, TOOTH_B.y1),
+)
+
+/** A disc or an axis-aligned rectangle, in SOURCE coordinates. */
+interface AnalyticPart {
+  readonly disc?: { readonly x: number; readonly y: number; readonly r: number }
+  readonly rect?: {
+    readonly x0: number
+    readonly y0: number
+    readonly x1: number
+    readonly y1: number
+  }
+}
+
+/** The exterior distance to one part, at a point already in that part's own frame. */
+function partDistance(p: AnalyticPart, x: number, y: number): number {
+  if (p.disc !== undefined) return Math.hypot(x - p.disc.x, y - p.disc.y) - p.disc.r
+  const r = p.rect
+  if (r === undefined) return Infinity
+  const ox = Math.max(r.x0 - x, x - r.x1, 0)
+  const oy = Math.max(r.y0 - y, y - r.y1, 0)
+  return Math.hypot(ox, oy) + Math.min(Math.max(r.x0 - x, x - r.x1, r.y0 - y, y - r.y1), 0)
+}
+
+/**
+ * The primitives every analytic fixture is built from, in SOURCE coordinates — the exterior distance
+ * to a UNION is the pointwise minimum of the parts' own, exactly, which is why these four fixtures
+ * get an analytic `outsideDistance` and `logoAlpha` gets an EDT.
+ */
+const PARTS: ReadonlyMap<Float32Array, readonly AnalyticPart[]> = new Map([
+  [DISC_ALPHA, [{ disc: { x: SRC / 2, y: SRC / 2, r: DISC_R } }]],
   [
     CONCAVE_ALPHA,
     [
-      { x: LOBE_A.x, y: LOBE_A.y, r: LOBE_R },
-      { x: LOBE_B.x, y: LOBE_B.y, r: LOBE_R },
+      { disc: { x: LOBE_A.x, y: LOBE_A.y, r: LOBE_R } },
+      { disc: { x: LOBE_B.x, y: LOBE_B.y, r: LOBE_R } },
     ],
   ],
   [
     SLIT_ALPHA,
     [
-      { x: SLIT_A.x, y: SLIT_A.y, r: SLIT_R },
-      { x: SLIT_B.x, y: SLIT_B.y, r: SLIT_R },
+      { disc: { x: SLIT_A.x, y: SLIT_A.y, r: SLIT_R } },
+      { disc: { x: SLIT_B.x, y: SLIT_B.y, r: SLIT_R } },
     ],
   ],
+  [NOTCH_ALPHA, [{ rect: TOOTH_A }, { rect: TOOTH_B }]],
 ])
 
 /** The fixture's name, for a cache key and for a measurement row. */
@@ -187,6 +238,7 @@ const FIXTURE_NAMES: ReadonlyMap<Float32Array, string> = new Map([
   [DISC_ALPHA, 'disc'],
   [CONCAVE_ALPHA, 'concave'],
   [SLIT_ALPHA, 'slit'],
+  [NOTCH_ALPHA, 'notch'],
   [LOGO_ALPHA, 'logo'],
 ])
 
@@ -385,17 +437,15 @@ function outsideDistance(r: Cell): Float32Array {
   const known = outsideCache.get(key)
   if (known !== undefined) return known
   const out = new Float32Array(r.size.w * r.size.h)
-  const analytic = LOBES.get(r.alpha)
+  const analytic = PARTS.get(r.alpha)
   if (analytic !== undefined) {
-    const lobes = analytic.map((l) => ({
-      x: r.artworkRect.x + l.x,
-      y: r.artworkRect.y + l.y,
-      r: l.r,
-    }))
     for (let y = 0; y < r.size.h; y++) {
       for (let x = 0; x < r.size.w; x++) {
+        // Front texel centre -> the source frame the parts are declared in.
+        const sx = x + 0.5 - r.artworkRect.x
+        const sy = y + 0.5 - r.artworkRect.y
         let d = Infinity
-        for (const l of lobes) d = Math.min(d, Math.hypot(x + 0.5 - l.x, y + 0.5 - l.y) - l.r)
+        for (const part of analytic) d = Math.min(d, partDistance(part, sx, sy))
         out[y * r.size.w + x] = Math.max(0, d)
       }
     }
@@ -450,7 +500,19 @@ function exteriorOf(solid: (i: number) => boolean, w: number, h: number): Uint8A
  * This is the measurement for `torn`, whose contour is the shader's own tear rather than a polygon,
  * and it is also how §9.1's two migration frames are compared.
  */
-function reachOf(r: Cell): { min: number; max: number; boxMax: number } {
+function reachOf(
+  r: Cell,
+  /** An x window in SOURCE coordinates to measure `windowMax` over — `NOTCH_ALPHA`'s gap. */
+  window?: { readonly x0: number; readonly x1: number },
+): {
+  min: number
+  max: number
+  boxMax: number
+  /** Where `boxMax` was read, in SOURCE coordinates — which edge of the box, and whereabouts. */
+  boxAt: { x: number; y: number }
+  /** `boxMax` restricted to `window`, so a fixture's own mechanism can be told from its outline. */
+  windowMax: number
+} {
   const dist = outsideDistance(r)
   const { w, h } = r.size
   const outside = exteriorOf((i) => r.front[i * 4 + 3] >= OPAQUE, w, h)
@@ -472,6 +534,8 @@ function reachOf(r: Cell): { min: number; max: number; boxMax: number } {
   let min = Infinity
   let max = -Infinity
   let boxMax = 0
+  let boxAt = { x: 0, y: 0 }
+  let windowMax = 0
   for (let y = 1; y < h - 1; y++) {
     for (let x = 1; x < w - 1; x++) {
       const i = y * w + x
@@ -485,12 +549,25 @@ function reachOf(r: Cell): { min: number; max: number; boxMax: number } {
       // that box — not the Euclidean distance to the alpha. On a convex fixture the two agree; in
       // a concavity they do not, and only this one is a statement about the front.
       const beyond = Math.max(bx0 - x, x - bx1, by0 - y, y - by1, 0)
-      if (beyond > boxMax) boxMax = beyond
+      if (beyond > boxMax) {
+        boxMax = beyond
+        boxAt = { x: x - r.artworkRect.x, y: y - r.artworkRect.y }
+      }
+      if (window !== undefined && beyond > windowMax) {
+        const sx = x - r.artworkRect.x
+        if (sx > window.x0 && sx < window.x1) windowMax = beyond
+      }
     }
   }
   expect(Number.isFinite(min), 'no outer boundary — the sheet fills the whole front').toBe(true)
   const scale = refPerTexel(r.size)
-  return { min: min * scale, max: max * scale, boxMax: boxMax * scale }
+  return {
+    min: min * scale,
+    max: max * scale,
+    boxMax: boxMax * scale,
+    boxAt,
+    windowMax: windowMax * scale,
+  }
 }
 
 /**
@@ -1004,7 +1081,7 @@ describe('the width does not depend on the shape knobs (design 2026-09-05 §10)'
    * side of a concave fixture is not a width measurement at all — the sheet closes over the notch —
    * and is left to the disc.
    */
-  it('never reaches past the frozen reserve, on a silhouette with reflex vertices', async () => {
+  it("keeps the outward reach inside the frozen reserve on the guard band's own measure — per-axis excess past the alpha box — on a silhouette with reflex vertices", async () => {
     const rows: string[] = []
     const cases: readonly Knobs[] = [
       {},
@@ -1018,11 +1095,15 @@ describe('the width does not depend on the shape knobs (design 2026-09-05 §10)'
       const m = reachOf(r)
       const reserve = handleOf(r).reserve.radius
       rows.push(
-        `concave ${JSON.stringify(knobs)} -> max ${m.max.toFixed(2)} of reserve ${reserve.toFixed(2)}`,
+        `concave ${JSON.stringify(knobs)} -> box ${m.boxMax.toFixed(2)} (euclidean ${m.max.toFixed(2)})` +
+          ` of reserve ${reserve.toFixed(2)}`,
       )
-      // The reserve is the paint radius PLUS `EDGE_SLOP_REFERENCE_PX`; the reach has to fit inside
-      // the whole of it, which is what `checkGuardBand` protects and what clips when it does not.
-      expect(m.max, `concave ${JSON.stringify(knobs)}`).toBeLessThanOrEqual(reserve)
+      // The reserve is the paint radius PLUS `EDGE_SLOP_REFERENCE_PX`, reserved around the alpha
+      // BOX per axis (`reachRect` / `growBox`, `sheet.ts`) — so the quantity that has to fit inside
+      // it, and the one `checkGuardBand` protects, is the per-axis excess past that box. The
+      // Euclidean distance from the alpha is reported beside it and is NOT bounded by the reserve
+      // inside a concavity: see the fourth boundary in `edge-derive.ts` and the sweep below.
+      expect(m.boxMax, `concave ${JSON.stringify(knobs)}`).toBeLessThanOrEqual(reserve)
     }
 
     // ATTRIBUTION. The concave fixture's worst outward reach is larger than the disc's at the same
@@ -1058,14 +1139,15 @@ describe('the width does not depend on the shape knobs (design 2026-09-05 §10)'
     // comparison move, and only their difference is a safety statement. Compared against THIS
     // sprite's own frozen reserve, never against the `clean` one.
     const paper = await cell(TORN_PAPER, { tearFreq: 24 }, CONCAVE_ALPHA)
-    const paperReach = reachOf(paper).max
+    const paperReach = reachOf(paper).boxMax
     const paperReserve = handleOf(paper).reserve.radius
-    const cleanReserve = handleOf(await cell(TORN_CLEAN, { tearFreq: 24 }, CONCAVE_ALPHA)).reserve
-      .radius
+    const clean = await cell(TORN_CLEAN, { tearFreq: 24 }, CONCAVE_ALPHA)
+    const cleanReserve = handleOf(clean).reserve.radius
+    const cleanReach = reachOf(clean).boxMax
     rows.push(
-      `concave torn/paper {"tearFreq":24} -> max ${paperReach.toFixed(2)} of reserve ${paperReserve.toFixed(2)}` +
+      `concave torn/paper {"tearFreq":24} -> box ${paperReach.toFixed(2)} of reserve ${paperReserve.toFixed(2)}` +
         ` (margin ${(paperReserve - paperReach).toFixed(2)}; torn/clean margin was ` +
-        `${(cleanReserve - concaveAngular).toFixed(2)})`,
+        `${(cleanReserve - cleanReach).toFixed(2)})`,
     )
     expect(paperReach, 'concave torn/paper at tearFreq 24').toBeLessThanOrEqual(paperReserve)
 
@@ -1083,11 +1165,11 @@ describe('the width does not depend on the shape knobs (design 2026-09-05 §10)'
    * 3 / 5 / 13 put the lattice at fractional offsets 0.68 / 0.14 / 0.95 of a cell — three
    * different alignments rather than three different noises.
    *
-   * The three fixtures span the geometry the push cares about: `CONCAVE_ALPHA`'s 53-degree crease
-   * at the paper's own boundary, `SLIT_ALPHA`'s 136-degree one (see its own note), and `logoAlpha`
-   * — real artwork, whose ring, slot and detached island put reflex vertices at the box edge where
-   * the exterior medial ridge leaves the bounding box, which is the geometry that can push the
-   * sheet past a reserve rather than merely fill a notch.
+   * The four fixtures span the geometry the push cares about: `CONCAVE_ALPHA`'s 53-degree crease at
+   * the paper's own boundary, `SLIT_ALPHA`'s 136-degree one, `NOTCH_ALPHA`'s flat teeth — the
+   * adversarial case for the measure that decides §4, because its web starts OUTSIDE the alpha box
+   * instead of 29 texels inside it (see each fixture's own note) — and `logoAlpha`, real artwork,
+   * whose ring, slot and detached island put reflex vertices at the box edge.
    *
    * `tearFreq` {2, 9, 24} crossed with `tearAngular` {0.8, 1} covers the lattice from 417 reference
    * px down to 35 at both blends that ship: the overshoot bound `(L/2) sin(phi/2) tearAngular`
@@ -1098,26 +1180,39 @@ describe('the width does not depend on the shape knobs (design 2026-09-05 §10)'
    * — because `source()` freezes the reserve per sprite (§4.4) and a comparison against any other
    * sprite's number is not a safety statement.
    *
-   * **TWO measures, and only one of them is §4.** The case above compares the EUCLIDEAN distance
-   * from the artwork's alpha against the reserve. That is the right instrument on a convex fixture
-   * and the wrong one in a concavity: what `source()` reserves is the alpha BOX grown per axis by
-   * `overscanRadius * k` (`reachRect` / `growBox`, `sheet.ts`), and that is what `checkGuardBand`
-   * holds inside the front. Paper filling a notch is far from the alpha and nowhere near leaving
-   * the box; only paper past the box clips. Both are reported here; the gate is the box.
+   * **TWO measures, and only one of them is §4.** What `source()` reserves is the alpha BOX grown
+   * per axis by `overscanRadius * k` (`reachRect` / `growBox`, `sheet.ts`), and that is what
+   * `checkGuardBand` holds inside the front — an exact chain that does not depend on the
+   * silhouette: paint inside `box + reserve` per axis is paint inside `reach` is paint inside the
+   * guard band. The EUCLIDEAN distance from the artwork's alpha is the other reading, and it is
+   * the right instrument only on a convex fixture: paper filling a notch is far from the alpha and
+   * nowhere near leaving the box.
    *
-   * The weaker Euclidean claim does NOT hold, and that is the finding: it fails on the slit at
-   * seven of these fifty-four cells. It is asserted from the other side instead — every failure is
-   * a slit cell — so a Euclidean overrun appearing on `concave` or on real artwork fails here.
+   * So the box column is the gate, and the Euclidean column is a published readout — it is NOT
+   * bounded by the reserve inside a concavity (the fourth boundary in `edge-derive.ts`), and
+   * gating it would be gating a fact about which fixtures happen to have a deep enough notch.
+   * What is asserted per cell instead is the ORDERING the two instruments must obey, which is a
+   * property of the instruments rather than of a fixture.
    */
   it('holds the outward reach inside the frozen reserve, across fixtures, lattices and phases', async () => {
     const fixtures = [
       ['concave', CONCAVE_ALPHA],
       ['slit', SLIT_ALPHA],
+      ['notch', NOTCH_ALPHA],
       ['logo', LOGO_ALPHA],
     ] as const
     const seeds = [3, 5, 13] as const
     const freqs = [2, 9, 24] as const
     const angulars = [0.8, 1] as const
+
+    // Is the worst box excess coming from the NOTCH'S OWN mechanism — paper webbed across the gap
+    // and pushed out through the gap's mouth — or merely from a tooth's flat outer edge, where any
+    // fixture would put it? Without this the fixture could pass while testing nothing. `gap` is the
+    // window `windowMax` is measured over; `IN-GAP` marks a cell where the overall maximum landed
+    // there too.
+    const gap = { x0: TOOTH_A.x1, x1: TOOTH_B.x0 }
+    const inGap = (name: string, sx: number): boolean =>
+      name === 'notch' && sx > gap.x0 && sx < gap.x1
 
     const rows: string[] = []
     const boxOverruns: string[] = []
@@ -1129,7 +1224,7 @@ describe('the width does not depend on the shape knobs (design 2026-09-05 §10)'
         for (const tearAngular of angulars) {
           for (const seed of seeds) {
             const r = await cell(TORN_CLEAN, { tearFreq, tearAngular, seed }, alpha)
-            const m = reachOf(r)
+            const m = reachOf(r, name === 'notch' ? gap : undefined)
             const reserve = handleOf(r).reserve.radius
             const margin = reserve - m.max
             const where = `${name} tearFreq ${tearFreq} tearAngular ${tearAngular} seed ${seed}`
@@ -1137,7 +1232,9 @@ describe('the width does not depend on the shape knobs (design 2026-09-05 §10)'
               `${where} -> max ${m.max.toFixed(2)} of reserve ${reserve.toFixed(2)}` +
                 ` margin ${margin.toFixed(2)} (${((margin / reserve) * 100).toFixed(1)} %)` +
                 ` | box ${m.boxMax.toFixed(2)} margin ${(reserve - m.boxMax).toFixed(2)}` +
-                ` (${(((reserve - m.boxMax) / reserve) * 100).toFixed(1)} %)`,
+                ` (${(((reserve - m.boxMax) / reserve) * 100).toFixed(1)} %)` +
+                ` @src(${m.boxAt.x},${m.boxAt.y})${inGap(name, m.boxAt.x) ? ' IN-GAP' : ''}` +
+                (name === 'notch' ? ` gapMax ${m.windowMax.toFixed(2)}` : ''),
             )
             const boxMargin = reserve - m.boxMax
             if (margin < worst.margin) worst = { where, margin, max: m.max, reserve }
@@ -1146,6 +1243,14 @@ describe('the width does not depend on the shape knobs (design 2026-09-05 §10)'
             }
             if (margin < 0) alphaOverruns.push(where)
             if (boxMargin < 0) boxOverruns.push(where)
+            // The Euclidean column is a READOUT, published above, not a gate: it is not bounded by
+            // the reserve inside a concavity (see the fourth boundary in edge-derive.ts). What IS
+            // asserted is the ordering the two instruments must obey — per-axis excess past the
+            // alpha box can never exceed the Euclidean distance to the alpha by more than the one
+            // texel of index quantisation:
+            expect(m.boxMax, `${where}: box exceeds Euclidean`).toBeLessThanOrEqual(
+              m.max + refPerTexel(r.size),
+            )
           }
         }
       }
@@ -1163,13 +1268,9 @@ describe('the width does not depend on the shape knobs (design 2026-09-05 §10)'
     expect(rows).toHaveLength(fixtures.length * freqs.length * angulars.length * seeds.length + 3)
     // THE GATE. Nothing the sheet paints leaves the reserve the front actually allocates.
     expect(boxOverruns, 'cells whose paint left the reserved box — this one is §4').toEqual([])
-    // THE FINDING, from the other side. The Euclidean-from-alpha reading of the same reserve is
-    // breached, and only ever inside the slit's own concavity: a breach on `concave` or on real
-    // artwork would be a different statement and has to fail here rather than be absorbed.
-    expect(
-      alphaOverruns.filter((w) => !w.startsWith('slit')),
-      'a Euclidean overrun somewhere other than the slit concavity',
-    ).toEqual([])
+    // The Euclidean-from-alpha column is not gated here — see the per-cell ordering assertion in
+    // the loop, and the fourth boundary in `edge-derive.ts` for why the reserve does not bound it.
+    // It is published in full, with its own WORST line and its overrun list.
   }, 1_800_000)
 })
 
