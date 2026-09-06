@@ -344,7 +344,7 @@ describe('source() (spec 5.2, 8.5, 8.6)', () => {
   })
 })
 
-describe('abort is a sentinel, at three check points (spec 10.5, amendment 1)', () => {
+describe('abort is a sentinel, at four check points (spec 10.5, amendment 1)', () => {
   it('returns ABORTED and never an AbortedError when the signal is already aborted', async () => {
     const ctx = open()
     const sheet = paperSheet()
@@ -1092,6 +1092,52 @@ describe('source() spends pass A alone; the first build() at its framing reuses 
     if (again instanceof Error) return
     expect(draws).toBe(passesFor(field) + 2 + passesFor(field) + 1)
     sheet.releaseFront(again)
+    sheet.dispose()
+  })
+})
+
+describe('a warm add() allocates few new textures (.changeset/scratch-pools-size-keyed.md)', () => {
+  it('creates at most 3 textures on a second add() at the same framing, once Pool A is warm', async () => {
+    const ctx = open()
+    const sheet = paperSheet()
+    sheet.mount(ctx)
+
+    // Prime Pool A/B: one full add() at this framing populates the exclusive artwork slot and
+    // every size-keyed field slot (tight, loose, blur, hull field) `acquireSized` hands out.
+    const first = await sprite()
+    const primed = await sheet.source(first, { maxSize: 128, exact: false })
+    first.close()
+    expect(GlError.is(primed) || SheetError.is(primed) || isAborted(primed)).toBe(false)
+    if (GlError.is(primed) || SheetError.is(primed) || isAborted(primed)) return
+    const primedFront = sheet.build(primed, primed.front, defaultsFor(SMOOTH_CLEAN) as never)
+    expect(primedFront instanceof Error).toBe(false)
+    if (primedFront instanceof Error) return
+    sheet.releaseFront(primedFront)
+
+    // A second sprite at the SAME dimensions, so `source()`'s framing (artwork, front, sdfRes)
+    // matches the priming add() exactly: `ensurePools` keeps the same Pool A/B pair, and every
+    // size-keyed slot the priming add() warmed above is still resident for this one.
+    const second = await sprite()
+    const createTexture = vi.spyOn(ctx.gl, 'createTexture')
+    const handle = await sheet.source(second, { maxSize: 128, exact: false })
+    second.close()
+    if (GlError.is(handle) || SheetError.is(handle) || isAborted(handle)) {
+      createTexture.mockRestore()
+      expect(GlError.is(handle) || SheetError.is(handle) || isAborted(handle)).toBe(false)
+      return
+    }
+    const front = sheet.build(handle, handle.front, defaultsFor(SMOOTH_CLEAN) as never)
+    createTexture.mockRestore()
+    expect(front instanceof Error, String((front as Error)?.message)).toBe(false)
+    if (front instanceof Error) return
+
+    // .changeset/scratch-pools-size-keyed.md: "A warm stage.add of a 1024² artwork allocates
+    // three textures ... (the front, the hull mask and one transient source copy)" — everything
+    // else (the artwork slot, the JFA ping-pong, the size-keyed fields) is already resident from
+    // the priming add() above and costs a map lookup, not an allocation.
+    expect(createTexture.mock.calls.length).toBeLessThanOrEqual(3)
+
+    sheet.releaseFront(front)
     sheet.dispose()
   })
 })
