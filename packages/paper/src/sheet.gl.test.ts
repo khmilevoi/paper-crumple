@@ -500,8 +500,10 @@ describe('portrait sprites and the guard band (spec 8.6)', () => {
     bitmap.close()
     expect(refused(handle), String((handle as Error)?.message)).toBe(false)
     if (GlError.is(handle) || SheetError.is(handle) || isAborted(handle)) return
-    // §8.6 amendment (2026-09-04): the reserve is per axis, in texels, so it is the SAME number
-    // for every aspect — no longer scaled up for a portrait sprite.
+    // §8.6 amendment (2026-09-04): the reserve is applied per axis, in texels, so a portrait
+    // sprite no longer has it scaled up by `h / w`. Under `'px'` it is also the same number for
+    // every aspect and this bound is tight; under `'percent'` design 2026-09-05 §4.4 makes it a
+    // ceiling instead, which is why the assertion is `<=` rather than `toBe`.
     expect(handle.overscan).toBeLessThanOrEqual(sheet.overscan)
     sheet.dispose()
   })
@@ -538,7 +540,7 @@ describe('portrait sprites and the guard band (spec 8.6)', () => {
     sheet.dispose()
   })
 
-  it('sources a full-bleed square in hull mode, headroom no longer required after §4.2', async () => {
+  it('sources a full-bleed square in the smooth/clean cell, headroom no longer required after §4.2', async () => {
     const ctx = open()
     // `ambient-pins.gl.test.ts` documents the pre-§4.2 refusal this fixture reproduced and pads
     // its own fixture around it. The `overscanHeadroom: 0.4` here predates §4.2: at the time, the
@@ -1557,12 +1559,13 @@ function readRect(
 
 describe('the hull polygon as a real paper field (design 2026-09-02, §2-§3)', () => {
   /**
-   * The defect this fixes: `build()` hardcoded `paperField: null`, so the default `hull` mode
-   * always reached `uEdgeMode = 2` — "the sheet IS the artwork alpha" — and the paper was cut
-   * along the garment's own outline. Under `uEdgeMode = 1` the sheet follows the hull polygon,
-   * which sits `minDist`..`maxDist` OUTSIDE the silhouette, so a texel just beyond the artwork's
-   * own alpha is opaque paper. Mode 2 cannot produce that by construction: its coverage mask IS
-   * the alpha, so anything the alpha does not cover reads exactly (0,0,0,0).
+   * The defect this fixes: `build()` hardcoded `paperField: null`, so the default cell always
+   * fell back to the ARTWORK's own tight/loose pair — "the sheet IS the artwork alpha" — and the
+   * paper was cut along the garment's own outline. When `paperField` is non-null the renderer
+   * binds the POLYGON's field to both `uSdf*` slots (design 2026-09-05 §6), so the sheet follows
+   * the hull polygon, which sits `W (1 -+ v)` OUTSIDE the silhouette, and a texel just beyond the
+   * artwork's own alpha is opaque paper. The alpha fallback cannot produce that by construction:
+   * its coverage mask IS the alpha, so anything the alpha does not cover reads exactly (0,0,0,0).
    */
   it('draws paper outside the artwork silhouette at the factory defaults', async () => {
     const ctx = open()
@@ -1579,15 +1582,16 @@ describe('the hull polygon as a real paper field (design 2026-09-02, §2-§3)', 
     if (front instanceof Error) return
 
     // The oracle is the artwork's own SILHOUETTE, not the artwork RECT. The rect cannot
-    // discriminate the two modes here and the difference is arithmetic, not taste: the reserve
-    // `source()` freezes is exactly the hull's own dilation radius (`maxDist` plus the edge slop),
+    // discriminate the two contour sources here and the difference is arithmetic, not taste: the
+    // reserve `source()` freezes is exactly the hull's own dilation radius (`W (1 + v)` plus the
+    // edge slop),
     // so the margin between the artwork rect and the front edge is exactly the distance the hull
     // grows by — and a hull can only reach past that rect for a sprite whose alpha touches its own
     // bounding box. Neither fixture in this file is such a sprite (`compactSprite`'s ellipse stops
     // at half its box), and measured on this fixture, "opaque beyond the artwork rect" is 0 both
     // before and after the fix. The silhouette is the honest line: the hull polygon sits
-    // `minDist`..`maxDist` OUTSIDE it by construction, while mode 2's coverage mask IS the alpha,
-    // so a texel clear of the silhouette is exactly (0,0,0,0) under mode 2. Measured on the same
+    // `W (1 -+ v)` OUTSIDE it by construction, while the alpha fallback's coverage mask IS the
+    // alpha, so a texel clear of the silhouette is exactly (0,0,0,0) under it. Measured on the same
     // fixture: 0 such texels before this change, 382 after.
     //
     // `compactSprite`'s ellipse has radius `w / 4` at the centre of a square source, and `build()`
@@ -1757,14 +1761,15 @@ describe('the hull polygon as a real paper field (design 2026-09-02, §2-§3)', 
   })
 
   /**
-   * Acceptance criterion 3, at the only scope the public API can reach it. `source()` passes no
-   * per-sprite knob values (`sheet.ts`'s own §5.2 note), so a `hull` handle is always traced at
-   * `minDist: 22` / `maxDist: 72` and there is no route to a `use-alpha` hull in `hull` mode.
-   * `torn` forces both distances to 0 (`sheet.ts`'s "torn mode declares no hull-only descriptors
-   * at all"), so `buildHull` returns `HULL_USE_ALPHA` and this is the degenerate case in the
-   * flesh: no mask is filled, no field is built, and the render is the one that shipped. The
-   * mode-2 render itself is covered where it is driven directly, in `paper-renderer.gl.test.ts`,
-   * which this change does not touch.
+   * Acceptance criterion 3, at the only scope the public API can reach it. `torn` builds no
+   * polygon at all — `sheet.ts` hands `buildHull` a `{0, 0}` band under that shape — so
+   * `buildHull` returns `HULL_USE_ALPHA` and this is the degenerate case in the flesh: no mask is
+   * filled, no field is built, and the render falls back to the artwork's own tight/loose pair.
+   *
+   * `smooth` reaches the same state whenever `edgeWidth` is 0, since `hullBandFor(0, v)` is
+   * `{0, 0}` for every `v` (design §7) — that route is pinned separately, in
+   * `builds no polygon at edgeWidth 0 but still builds the tight field`. The renderer's own side
+   * of the fallback is covered where it is driven directly, in `paper-renderer.gl.test.ts`.
    */
   it('builds no hull mask for a use-alpha hull, and renders as it did before', async () => {
     const ctx = open()
@@ -1937,7 +1942,7 @@ describe('build() at a bucket-shaped size (spec 5.4, 8.6)', () => {
   // (spec 7.4.2), so the paper — the fields the shader cuts it from, the hull mask, and the rect
   // the motion layer centres on — has to follow the artwork's pixel placement. Framing the fields
   // by a flat `p` inset instead scaled the silhouette to `size / (1 + 2p)`: at this size that was
-  // a paper smaller than the artwork, which in hull mode vanished behind it entirely.
+  // a paper smaller than the artwork, which under a polygon hull vanished behind it entirely.
   for (const [cell, spec] of [
     ['torn', TORN_PAPER],
     ['smooth', SMOOTH_CLEAN],
@@ -2448,7 +2453,7 @@ describe('async field readback (spec §8.10)', () => {
     deleteBuffer.mockRestore()
   })
 
-  it('the cached-hull path in hull mode issues no readback', async () => {
+  it('the cached-hull path under smooth issues no readback', async () => {
     const ctx = open()
     const sheet = paperSheet()
     sheet.mount(ctx)
@@ -2841,8 +2846,11 @@ describe('paperSheet: one width, three consumers (design 2026-09-05 §3.1, §4.4
    * `size.h / handle.front.h` — `W_ref` would then be constant in reference px and the rendered
    * border would grow with the bucket.
    *
-   * The LARGER bucket, not a smaller one: a smaller front makes `W_ref` larger in reference px,
-   * which `checkReserve` correctly refuses against a reserve frozen at the trace front's scale.
+   * A LARGER bucket here, and a smaller one in the case below it — the reserve check reads its own
+   * width against `handle.front`, so neither direction is refused. (An earlier round of this task
+   * resolved one width for both readers and this comment claimed the smaller direction was
+   * "correctly refused". It was not: `fit.frontSize` is the paper's own box, so shrinking is the
+   * ORDINARY core path, and the refusal was a defect. See `build()`'s step 4.)
    */
   it('renders the same working-px edge width into two buckets of the same handle (percent unit, ruling R6)', async () => {
     const ctx = open()
@@ -2871,6 +2879,59 @@ describe('paperSheet: one width, three consumers (design 2026-09-05 §3.1, §4.4
     // …and it is the artwork's own short side times the percent, exactly (design §3.2).
     const pct = Number(defaultsFor(sheet.edgeSpec).edgeWidth)
     expect(seen[0]).toBeCloseTo((pct / 100) * Math.min(handle.artwork.w, handle.artwork.h), 4)
+    sheet.dispose()
+  })
+
+  /**
+   * Fix round 1. **The ordinary core path builds into a front SMALLER than `handle.front`.**
+   * `motion.fit` sizes the bucket over the paper's own box — `stage.ts:1629`, `:1647` pass
+   * `fit.frontSize`, which is derived from `handle.frontRect` — and that box is strictly inside
+   * the trace front for any sprite whose paper does not fill it.
+   *
+   * Under `edgeWidthUnit: 'percent'` a smaller front is a smaller denominator, so `W_ref` in
+   * reference px is LARGER there. Resolving one width for both readers therefore handed
+   * `checkReserve` a number quoted in this build's plane and compared it against a radius frozen
+   * in the trace front's plane: for this fixture the check saw ≈101.8 reference px against a
+   * permitted 83.9 and answered "re-add required" for a build that reserves nothing extra at all —
+   * every stage-driven build of a percent sheet, refused. `build()` now resolves the reserve's
+   * width against `handle.front`, the plane the reserve was frozen in, and the shader's against
+   * `size` (ruling R6). Zero headroom on purpose: with headroom the defect would be masked on some
+   * fixtures and not others.
+   */
+  it('builds into a front smaller than handle.front under the percent unit (the ordinary fit path)', async () => {
+    const ctx = open()
+    const sheet = paperSheet({ edgeWidthUnit: 'percent' })
+    sheet.mount(ctx)
+    const bitmap = await compactSprite(64, 64)
+    const handle = await sheet.source(bitmap, { maxSize: 128, exact: false })
+    bitmap.close()
+    if (handle instanceof Error || isAborted(handle)) return expect.fail('source() refused')
+
+    // Exactly what `motion.fit` hands the core: the paper's own box, rounded up to whole texels.
+    const fitted = { w: Math.ceil(handle.frontRect.w), h: Math.ceil(handle.frontRect.h) }
+    expect(fitted.h, 'the fixture must actually exercise a SMALLER front').toBeLessThan(
+      handle.front.h,
+    )
+
+    // The build runs INSIDE the capture, not after a warm-up one: `gl-context.ts` memoises each
+    // uniform location on first use, so a location resolved before the patch is installed is never
+    // seen again and `seen` comes back empty.
+    let front: ReturnType<typeof sheet.build> | undefined
+    const seen = captureUniform(ctx, PAPER_UNIFORMS.edgeWidth, () => {
+      front = sheet.build(handle, fitted, defaultsFor(sheet.edgeSpec) as never)
+    })
+    expect(front instanceof Error, String((front as Error)?.message)).toBe(false)
+    if (front === undefined || front instanceof Error) {
+      sheet.dispose()
+      return
+    }
+    // And the width the shader receives is still the bucket-invariant one (ruling R6): the same
+    // `(pct / 100) * min(artwork)` the two larger fronts above produced, from a SMALLER front.
+    expect(seen).toHaveLength(1)
+    const pct = Number(defaultsFor(sheet.edgeSpec).edgeWidth)
+    expect(seen[0]).toBeCloseTo((pct / 100) * Math.min(handle.artwork.w, handle.artwork.h), 4)
+
+    sheet.releaseFront(front)
     sheet.dispose()
   })
 })

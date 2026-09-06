@@ -1076,8 +1076,17 @@ export function paperSheet(options?: PaperSheetOptions): PaperSheet {
    * `percentWidthReserve` exists only to break the mutual definition WHILE the front is still
    * being sized against itself; here `artwork` and `front` are both already known.
    *
-   * **`artwork` is not rescaled against `front`, and must not be** (ruling R6). `build()` calls
-   * this as `widthRefFrom(knobValues, handle.artwork, size)` — the SOURCE front's artwork paired
+   * **`front` is the plane the answer is quoted in, and the caller picks it.** A reference px is a
+   * fraction of a front's height, so the same knob resolves to different reference-px numbers
+   * against different fronts. `build()` calls this TWICE and deliberately: once with
+   * `handle.front`, for `checkReserve` — which compares against a radius `source()` froze in that
+   * plane, and a comparison across two planes is meaningless — and once with `size`, for
+   * `renderFront`, whose `pxScale` is `size.h / KNOB_REFERENCE_PX`. Under `'px'` the two coincide
+   * exactly, because no denominator enters. See `build()`'s step 4 for the failure the single
+   * resolution caused.
+   *
+   * **`artwork` is not rescaled against `front`, and must not be** (ruling R6). The shader-side
+   * call is `widthRefFrom(knobValues, handle.artwork, size)` — the SOURCE front's artwork paired
    * with THIS build's front — and that is correct, not a texel-space mix: `artworkPlacement`
    * (below, and its call site in `build()`'s step 6b region around `sheet.ts:1826`) places the
    * artwork **1:1 and centred in whatever front the build was asked for** (spec §7.4.2), so a
@@ -1756,7 +1765,15 @@ export function paperSheet(options?: PaperSheetOptions): PaperSheet {
       // no extra branch is needed for the zero case.
       const band =
         edgeSpec.shape === 'smooth'
-          ? hullBandFor(widthRef, numKnob(values, 'edgeVariance', 0))
+          ? // `NaN`, not `0`, to match `edgeParamsFrom`'s own `num` helper (`paper-knobs.ts`) —
+            // ruling R3 picked the loud fallback, and the width and the variance must not be read
+            // here under one philosophy and there under the other. The branch is unreachable
+            // either way: `values` is `defaultsFor(edgeSpec)` under the caller's hull-tier
+            // projection, and `descriptorsFor` declares `edgeVariance` in every cell. Note that
+            // `hullBandFor`'s own `clamp01` maps a non-finite variance to 0, so the two fallbacks
+            // would in fact produce the SAME band here — this is an alignment of the reading
+            // convention at the call site, not a behaviour change.
+            hullBandFor(widthRef, numKnob(values, 'edgeVariance', Number.NaN))
           : { minDist: 0, maxDist: 0 }
       const angularity = numKnob(values, 'angularity', 0)
       const seed = numKnob(values, 'seed', 0)
@@ -1950,15 +1967,39 @@ export function paperSheet(options?: PaperSheetOptions): PaperSheet {
     // §2.1: under `torn` the width is a FRONT-tier knob, so it may have moved since `source()` and
     // this is the only place that can see it. Reading `handle.widthRef` instead would make
     // `edgeWidth` inert in exactly the cell the redesign exists for — and would void the
-    // "animatable to zero without a rebuild" premise. `size` is the front THIS build was asked
-    // for, which is what `pxScale` will be taken against; ruling R6's comment at `widthRefFrom`
-    // says why `handle.artwork` is the right partner for it.
-    const widthRef = widthRefFrom(knobValues, handle.artwork, size)
+    // "animatable to zero without a rebuild" premise. Both resolutions below therefore start from
+    // the LIVE `knobValues`; what differs is the DENOMINATOR, and deliberately so.
+    //
+    // **Two fronts, two readers, one width.** Reference px are a fraction of a front's height, so
+    // "a width in reference px" is meaningless without saying which front. Under
+    // `edgeWidthUnit: 'percent'` the two readers below need different ones, and handing either of
+    // them the other's number is a bug:
+    //
+    //   - `checkReserve` compares a radius against `handle.reserve.radius`, which `source()` froze
+    //     with `handle.front` as its denominator. A comparison is only meaningful inside one plane,
+    //     so this side must use `handle.front` too. `size` here made every ordinary core build fail:
+    //     `fit.frontSize` is the paper's own box (`stage.ts:1629`, `:1647`), which is SMALLER than
+    //     the trace front, and a smaller denominator inflates `W_ref` — the `square` fixture
+    //     resolved to a radius near 101.8 against a permitted 83.9 and was refused "re-add
+    //     required" for a build that reserves nothing extra at all.
+    //   - `renderFront` (below) uploads `uEdgeWidth = W_ref * pxScale` with
+    //     `pxScale = size.h / KNOB_REFERENCE_PX`, so ITS number must be quoted against `size` — that
+    //     is ruling R6's invariant, and it is what makes the painted border the same working width
+    //     in every bucket.
+    //
+    // The two agree exactly under `'px'`, where `widthRefFrom` is the identity on the knob and no
+    // denominator enters at all; they diverge only in the percent unit, which is the only place
+    // either front is read.
+    const reserveWidthRef = widthRefFrom(knobValues, handle.artwork, handle.front)
     const reserveCheck = checkReserve(
       handle.reserve,
-      edgeParamsFrom(edgeSpec, knobValues, widthRef),
+      edgeParamsFrom(edgeSpec, knobValues, reserveWidthRef),
     )
     if (reserveCheck !== undefined) return reserveCheck
+
+    // The width the SHADER gets: this build's own front as the denominator (ruling R6). See the
+    // block above for why this is a second resolution rather than a reuse of `reserveWidthRef`.
+    const widthRef = widthRefFrom(knobValues, handle.artwork, size)
 
     // Step 5 (spec 6.3, engine.js's own setLooseness): pass A (the tight SDF field) depends only
     // on the artwork and the handle-frozen geometry, never on any knob — so it is reused whenever
