@@ -1,14 +1,16 @@
 # @paper-crumple/react
 
-The React binding for **paper-crumple**: `usePaperScene`, `<PaperScene>` and `useScene` — a
-thin, reactive layer over a `BlitStage` you build yourself with `paperStage(...)`. This release
-carries the scene only; it ships no component that owns a `<canvas>`.
+The React binding for **paper-crumple**: `usePaperScene`, `<PaperScene>` and `useScene` build the
+scene — a thin, reactive layer over a `BlitStage` you build yourself with `paperStage(...)`.
+`useCrumple` and `<Crumple>` sit on top of it and own one sprite's whole state machine, including
+the `<canvas>` it draws into.
 
 > The family's documentation lives in core's README:
 > <https://github.com/paper-crumple/paper-crumple/tree/main/packages/core#readme>. Errors are
 > values here too — nothing in this package throws, nothing reaches an error boundary, and no
-> promise it returns rejects. `error` is a field on the scene and `status` is a value to branch
-> on, exactly the way `stage instanceof Error` is elsewhere in the family.
+> promise it returns rejects. `error` is a field on both the scene and the crumple; `status` (the
+> scene) and `state` (the crumple) are values to branch on, exactly the way `stage instanceof Error`
+> is elsewhere in the family.
 
 <!-- shared:install-and-import -->
 
@@ -78,7 +80,7 @@ function Tile({ canvas: { src } }: { canvas: { src: string } }): JSX.Element {
 
 ## What this package is
 
-Three exports, and that is the whole surface of this release:
+The scene and the crumple:
 
 - **`usePaperScene(options)`** builds the `BlitStage` your `create` factory returns, rebuilds it
   only when `deps` changes, aborts an in-flight build and disposes a landed one on cleanup, diffs
@@ -88,10 +90,34 @@ Three exports, and that is the whole surface of this release:
   its own, so it costs nothing under SSR.
 - **`useScene()`** reads the nearest `<PaperScene>`. Called outside one, it returns a permanently
   `'failed'` scene carrying an `Error` that says so, rather than throwing.
+- **`useCrumple(options)`** owns one sprite's whole lifetime against the nearest `useScene()` (or
+  the `scene` option, for a second scene on one page). It opens a `View` when a `ready` scene and
+  an attached canvas coincide, disposes it when either goes away, acquires `spriteKey`/`src`
+  through one per-stage, in-flight-deduplicated path, plays the entrance, and swaps to a new `src`
+  under the same key through `view.swapTo` (or `view.crumpleTo` if the target acquisition is
+  already in flight) — reduced motion is consulted at the swap, not cached at mount. It returns
+  a `Crumple`: a reactive snapshot (`state`, `parked`, `pose`, `shown`, `requested`,
+  `error`, `frame`, `frameStyle`, `view`) plus the identity-stable `ref`, `play`, `stop` and
+  `refresh`. `state` is one of the core's own view states while a view exists, and `'detached'`
+  while none does. The `Crumple` object itself is deliberately **not** identity-stable — it is a
+  fresh object every render — so depend on `crumple.shown` or `crumple.play`, never on `crumple`
+  itself.
+- **`<Crumple value={crumple}>`** is the component that owns the `<canvas>`: a positioned wrapper
+  sized from `crumple.frameStyle`, a `<canvas ref={crumple.ref}>` inside it, and `children`
+  rendered as a placeholder layered over the canvas while `crumple.shown === null`. `canvasProps`
+  is the escape hatch for the canvas element itself; it excludes `ref`, `width` and `height` at
+  the type level, because `size` is always `'managed'` and nobody but the stage writes `width` and
+  `height` on the canvas.
 
-`scene.play(from, to)` and `scene.stop()` are the only imperative surface; both are no-ops (an
-empty, `completed: false` report from `play`) on a scene that is not `'ready'`, so a consumer
-never has to guard a call on `status` first.
+`CrumpleOptions`, `CrumpleProps`, `CrumpleSnapshot`, `CrumpleState` and `CrumpleFrameStyle` are
+exported too, for typing a wrapper around `useCrumple` or `<Crumple>` without redeclaring its
+shapes.
+
+`scene.play(from, to)` and `scene.stop()` are the scene's own imperative surface; both are no-ops
+(an empty, `completed: false` report from `play`) on a scene that is not `'ready'`, so a consumer
+never has to guard a call on `status` first. `crumple.play(from, to)`, `crumple.stop()` and
+`crumple.refresh()` work the same way on the crumple — each is a safe no-op (`play` returns
+`null`) while no view exists yet, so a consumer never has to guard on `state` either.
 
 ## Peer dependencies, and nothing else
 
@@ -119,6 +145,11 @@ and turned into `status: 'failed'` with `error` set, exactly like a `create` tha
 `Error`; a lost WebGL2 context moves the same scene to `'failed'` with `lost: true`. There is no
 error boundary this package expects you to install, because there is nothing here for one to
 catch.
+
+The crumple works the same way: a refused acquisition or a swap whose target fails is reported
+through `crumple.error` (and `onError`, if you passed one) rather than thrown; a failed swap rolls
+back to the sprite that was already shown, so the canvas never lands ahead of what `crumple.error`
+says happened.
 
 ## Licence
 
