@@ -10,7 +10,7 @@ import type {
 import { useEffect, useMemo, useState, useSyncExternalStore } from 'react'
 import { createVersionedStore } from './store.js'
 import { useEvent } from './use-event.js'
-import type { Scene, SceneOptions, SceneSnapshot, SceneStatus } from './scene-types.js'
+import type { KnobValue, Scene, SceneOptions, SceneSnapshot, SceneStatus } from './scene-types.js'
 
 /** The mutable record the snapshot is read out of. One per hook instance, never replaced. */
 interface SceneCore {
@@ -22,6 +22,8 @@ interface SceneCore {
 }
 
 const NO_WARNINGS: readonly Error[] = Object.freeze([])
+
+const NO_KNOBS: Readonly<Record<string, KnobValue>> = Object.freeze({})
 
 /**
  * Carried when the context is lost before any `error` event has named a cause. `dead()` makes
@@ -82,6 +84,10 @@ export function usePaperScene(o: SceneOptions): Scene {
     knobEpoch: 0,
   }))
   const [store] = useState(() => createVersionedStore<SceneSnapshot>(() => readScene(core)))
+  const [applied] = useState<{ values: Map<string, KnobValue>; generation: number }>(() => ({
+    values: new Map(),
+    generation: 0,
+  }))
 
   const snapshot = useSyncExternalStore(store.subscribe, store.getSnapshot, store.getServerSnapshot)
 
@@ -181,6 +187,59 @@ export function usePaperScene(o: SceneOptions): Scene {
     // useEvent-stable too, so none of them belongs in the dependency list.
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, o.deps)
+
+  const knobs = o.knobs
+  useEffect(() => {
+    const live = snapshot.status === 'ready' ? snapshot.stage : null
+    if (live === null) return
+
+    // A rebuild is not a reset (§4.1): the knobs the consumer moved are re-applied to the new
+    // stage. `carrying` is narrower than `rebuilt` on purpose — the first landed build is a
+    // rebuild by generation but carries nothing, so its writes are live writes and a refusal on
+    // one of them is reported. Only a genuine carry-forward onto a replacement stage is silent.
+    const rebuilt = applied.generation !== snapshot.generation
+    const carrying = rebuilt && applied.values.size > 0
+    if (rebuilt) {
+      applied.values.clear()
+      // eslint-disable-next-line react-hooks/immutability -- `applied` is an intentionally mutable record held once per hook instance and never replaced; it tracks what has already reached the stage and is never handed to a consumer.
+      applied.generation = snapshot.generation
+    }
+
+    let wrote = false
+    for (const [key, value] of Object.entries(knobs ?? NO_KNOBS)) {
+      if (applied.values.has(key) && Object.is(applied.values.get(key), value)) continue
+      // Recorded before the write, so a refused key is attempted once rather than on every
+      // render until the consumer changes it.
+      applied.values.set(key, value)
+      // One `stage.set` call per changed key, never one call carrying the whole diff: `normalise`
+      // returns on the first invalid key and `applyPatch` only reaches `Object.assign` for a
+      // wholly valid patch, so a single batched call applies none of it when any key is bad.
+      const refused = live.set({ [key]: value } as never)
+      if (refused !== undefined) {
+        // `observed: true` — the error was also handed back as a return value, and §7's telemetry
+        // filter on `!observed` exists so it is not counted twice.
+        if (!carrying) dispatchError({ error: refused, observed: true, view: null })
+        continue
+      }
+      wrote = true
+    }
+
+    if (!wrote) return
+    // A second counter alongside `generation`: a knob write is not a build and must not
+    // masquerade as one. One bump per batch — each crumple joins its own `prepare` off it (§4.3).
+    // eslint-disable-next-line react-hooks/immutability -- `core` is an intentionally mutable record held once per hook instance and never replaced; `store.bump()` publishes each write (§5.5).
+    core.knobEpoch += 1
+    store.bump()
+  }, [
+    applied,
+    core,
+    dispatchError,
+    knobs,
+    snapshot.generation,
+    snapshot.stage,
+    snapshot.status,
+    store,
+  ])
 
   const play = useEvent(
     async (
