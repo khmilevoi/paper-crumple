@@ -83,7 +83,7 @@ import { VARIANCE_KNOB, WIDTH_PX_KNOB, defaultsFor } from './paper-knobs.js'
 import { optionsFor, paperSheet } from './sheet.js'
 import type { PaperSheet } from './sheet.js'
 import { discAlpha, logoAlpha, unionAlpha } from './test-fixtures.js'
-import { ALL_FOUR_CELLS, SMOOTH_CLEAN, TORN_CLEAN } from './testing/edge-cells.js'
+import { ALL_FOUR_CELLS, SMOOTH_CLEAN, TORN_CLEAN, TORN_PAPER } from './testing/edge-cells.js'
 import { createGlFixture, type PaperGlFixture } from './testing/gl-fixture.js'
 import type { EdgeSpec } from '@paper-crumple/core/unstable'
 
@@ -965,8 +965,32 @@ describe('the width does not depend on the shape knobs (design 2026-09-05 §10)'
         ` (delta ${(discAngular - discFlat).toFixed(2)}), reflex share ` +
         `${(concaveAngular - concaveFlat - (discAngular - discFlat)).toFixed(2)}`,
     )
+
+    // THE `paper` FINISH, on the same fixture, at the same worst `tearFreq`. Everything above is
+    // `torn`/`clean`, and the finish terms are ADDITIVE with no mechanism that could shrink
+    // `baseAngular`'s error — so this stacks the worst measured frequency with the one untested
+    // cell of §6's table.
+    //
+    // The honest question is NOT whether the reach grows. It must: a deckle band and a fibre fringe
+    // are drawn outside the rim. It is whether it grows FASTER THAN THE RESERVE, which the same
+    // finish also raises — `edgeParamsFrom` feeds `4 * fiberLen + deckleWidth` into `freezeOverscan`
+    // as `finishTerms`, about 23 reference px at the shipped defaults. So both sides of the
+    // comparison move, and only their difference is a safety statement. Compared against THIS
+    // sprite's own frozen reserve, never against the `clean` one.
+    const paper = await cell(TORN_PAPER, { tearFreq: 24 }, CONCAVE_ALPHA)
+    const paperReach = reachOf(paper).max
+    const paperReserve = handleOf(paper).reserve.radius
+    const cleanReserve = handleOf(await cell(TORN_CLEAN, { tearFreq: 24 }, CONCAVE_ALPHA)).reserve
+      .radius
+    rows.push(
+      `concave torn/paper {"tearFreq":24} -> max ${paperReach.toFixed(2)} of reserve ${paperReserve.toFixed(2)}` +
+        ` (margin ${(paperReserve - paperReach).toFixed(2)}; torn/clean margin was ` +
+        `${(cleanReserve - concaveAngular).toFixed(2)})`,
+    )
+    expect(paperReach, 'concave torn/paper at tearFreq 24').toBeLessThanOrEqual(paperReserve)
+
     await publish('concave-outward-reach', rows)
-    expect(rows).toHaveLength(cases.length + 1)
+    expect(rows).toHaveLength(cases.length + 2)
   }, 600_000)
 })
 
