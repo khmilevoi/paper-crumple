@@ -31,9 +31,10 @@ const SUBPATHS: Record<string, string[]> = {
   core: ['.', './unstable'],
   paper: ['.', './tiles'],
   motion: ['.', './packs/2x3', './packs/1x1', './packs/3x2'],
+  react: ['.'],
 }
 
-const PUBLISHED = ['core', 'paper', 'motion'] as const
+const PUBLISHED = ['core', 'paper', 'motion', 'react'] as const
 const manifests = new Map<string, Manifest>(
   PUBLISHED.map((dir) => [dir, readJson<Manifest>(`packages/${dir}/package.json`)]),
 )

@@ -2,7 +2,7 @@ import { readFileSync } from 'node:fs'
 import { describe, expect, it } from 'vitest'
 
 const DOCS_URL = 'https://github.com/paper-crumple/paper-crumple/tree/main/packages/core#readme'
-const PACKAGES = ['core', 'paper', 'motion'] as const
+const PACKAGES = ['core', 'paper', 'motion', 'react'] as const
 
 const readme = (dir: string): string =>
   readFileSync(new URL(`../packages/${dir}/README.md`, import.meta.url), 'utf8')

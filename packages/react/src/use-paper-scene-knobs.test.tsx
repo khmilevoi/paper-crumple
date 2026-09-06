@@ -169,6 +169,42 @@ test('a carried key the new stage refuses is skipped rather than reported (§4.1
   await harness.unmount()
 })
 
+test('a key added in the same render that changes deps is a live write, reported when refused', async () => {
+  const onError = vi.fn()
+  const refusal = new Error('this slot set does not declare b')
+  const first = createFakeStage()
+  const second = createFakeStage()
+  second.refuseKnob('b', refusal)
+  let deps: readonly unknown[] = [1]
+  let next = first
+  let knobs: Readonly<Record<string, KnobValue>> = { a: 1 }
+  const harness = await renderHook(() =>
+    usePaperScene({ create: async () => next.stage, deps, knobs, onError }),
+  )
+  await flush()
+  expect(onError).not.toHaveBeenCalled()
+
+  // Lose the first stage so the knob effect has nothing live to write onto for the render that
+  // follows; this keeps the deps-change + new-key render's own pass clean of a write that would
+  // otherwise land on the outgoing stage before the replacement lands.
+  first.lose()
+  await flush()
+  // Losing the stage reports its own error through onError; that is not part of what this test
+  // is checking.
+  onError.mockClear()
+
+  // `b` is new in the same render that changes `deps`: it never reached the first stage, so it
+  // is a live write on the replacement stage, not a carry-forward.
+  deps = [2]
+  next = second
+  knobs = { a: 1, b: 2 }
+  await harness.rerender()
+  await flush()
+  expect(onError).toHaveBeenCalledTimes(1)
+  expect(onError).toHaveBeenCalledWith({ error: refusal, observed: true, view: null })
+  await harness.unmount()
+})
+
 test('nothing is written before the stage is ready, or after it is lost', async () => {
   const fake = createFakeStage()
   const gate = deferred<BlitStage>()

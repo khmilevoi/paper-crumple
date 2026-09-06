@@ -127,8 +127,24 @@ export function usePaperScene(o: SceneOptions): Scene {
     }
 
     void (async () => {
-      const built = await create(controller.signal, preMount)
+      let settled: BlitStage | typeof ABORTED | Error
+      try {
+        settled = await create(controller.signal, preMount)
+      } catch (cause) {
+        resolved = true
+        // A thrown `create` degrades into the same `failed` state an Error return produces
+        // (§7): nothing this package returns rejects. A throw after cleanup must not publish,
+        // exactly as a late-landing stage must not.
+        if (controller.signal.aborted) return
+        core.status = 'failed'
+        core.error = cause instanceof Error ? cause : new Error(String(cause))
+        store.bump()
+        return
+      }
       resolved = true
+      // Reassigned into a `const` so the closures below — `built.on('error', …)` in particular —
+      // narrow it the way they did before the `try` forced `settled` to be a `let`.
+      const built = settled
 
       if (controller.signal.aborted) {
         // A `create` that ignores its signal still must not leak: §1's self-cleanup covers the
@@ -194,11 +210,15 @@ export function usePaperScene(o: SceneOptions): Scene {
     if (live === null) return
 
     // A rebuild is not a reset (§4.1): the knobs the consumer moved are re-applied to the new
-    // stage. `carrying` is narrower than `rebuilt` on purpose — the first landed build is a
+    // stage. `carried` is narrower than `rebuilt` on purpose — the first landed build is a
     // rebuild by generation but carries nothing, so its writes are live writes and a refusal on
     // one of them is reported. Only a genuine carry-forward onto a replacement stage is silent.
     const rebuilt = applied.generation !== snapshot.generation
-    const carrying = rebuilt && applied.values.size > 0
+    // Which keys are being carried forward onto a replacement stage, captured before the map is
+    // cleared. Per key, not per pass: a key added in the same render that changed `deps` is a
+    // live write, and §4.3 reports a refusal on a live write — only a genuine carry-forward is
+    // silent.
+    const carried = rebuilt ? new Set(applied.values.keys()) : new Set<string>()
     if (rebuilt) {
       applied.values.clear()
       // eslint-disable-next-line react-hooks/immutability -- `applied` is an intentionally mutable record held once per hook instance and never replaced; it tracks what has already reached the stage and is never handed to a consumer.
@@ -218,7 +238,7 @@ export function usePaperScene(o: SceneOptions): Scene {
       if (refused !== undefined) {
         // `observed: true` — the error was also handed back as a return value, and §7's telemetry
         // filter on `!observed` exists so it is not counted twice.
-        if (!carrying) dispatchError({ error: refused, observed: true, view: null })
+        if (!carried.has(key)) dispatchError({ error: refused, observed: true, view: null })
         continue
       }
       wrote = true

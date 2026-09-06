@@ -121,6 +121,25 @@ test('a superseded build stops forwarding through its own stage listener', async
   await harness.unmount()
 })
 
+test('a create that throws fails the scene, carrying that error, with stage null', async () => {
+  const boom = new Error('the factory threw')
+  // A synchronous `throw` inside an async factory is indistinguishable, at the `await` that
+  // calls it, from the factory returning a promise that rejects — `Promise.reject` exercises the
+  // same catch path here without writing a `throw` this repository's own lint rule forbids
+  // (spec §10.8; `tests/eslint-boundary.test.ts` confirms test files are not exempt).
+  const harness = await renderHook(() =>
+    usePaperScene({
+      create: () => Promise.reject(boom),
+      deps: [1],
+    }),
+  )
+  await flush()
+  expect(harness.result.current.status).toBe('failed')
+  expect(harness.result.current.error).toBe(boom)
+  expect(harness.result.current.stage).toBeNull()
+  await harness.unmount()
+})
+
 test('a pre-mount error on a build that is then aborted is not forwarded after cleanup', async () => {
   const onError = vi.fn()
   const gate = deferred<BlitStage>()
