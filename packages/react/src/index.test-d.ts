@@ -1,6 +1,14 @@
 import type { BlitStage } from '@paper-crumple/core'
 import { expectTypeOf, test } from 'vitest'
-import { PaperScene, usePaperScene, useScene, type Scene, type SceneOptions } from './index.js'
+import {
+  Crumple,
+  PaperScene,
+  useCrumple,
+  usePaperScene,
+  useScene,
+  type Scene,
+  type SceneOptions,
+} from './index.js'
 
 test('usePaperScene takes SceneOptions and returns a Scene', () => {
   expectTypeOf(usePaperScene).parameter(0).toEqualTypeOf<SceneOptions>()
@@ -20,4 +28,9 @@ test('scene.stage narrows to BlitStage once status is checked', () => {
   if (scene.stage !== null) {
     expectTypeOf(scene.stage).toEqualTypeOf<BlitStage>()
   }
+})
+
+test('useCrumple returns the Crumple the component takes (§2, §6)', () => {
+  expectTypeOf(useCrumple<string>).returns.toEqualTypeOf<Crumple>()
+  expectTypeOf<Parameters<typeof Crumple>[0]['value']>().toEqualTypeOf<Crumple>()
 })

@@ -20,3 +20,17 @@ export { PaperScene, useScene } from './scene-context.js'
 export type { PaperSceneProps } from './scene-context.js'
 export { usePaperScene } from './use-paper-scene.js'
 export type { KnobValue, Scene, SceneOptions, SceneSnapshot, SceneStatus } from './scene-types.js'
+
+// --- P3: the crumple (§5, §6) ---
+/** One specifier, and deliberately: `crumple.tsx` declares both the component and the interface of
+ *  this name, and a single re-export carries both meanings. Split across two modules TypeScript
+ *  reports `TS2300: Duplicate identifier`. */
+export { Crumple } from './crumple.js'
+export type { CrumpleProps } from './crumple.js'
+export { useCrumple } from './use-crumple.js'
+export type {
+  CrumpleFrameStyle,
+  CrumpleOptions,
+  CrumpleSnapshot,
+  CrumpleState,
+} from './crumple-types.js'

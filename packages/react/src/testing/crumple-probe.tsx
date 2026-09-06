@@ -69,7 +69,7 @@ export async function renderCrumple(
     input !== undefined && 'scene' in input && input.scene !== undefined ? input.scene : 'context'
   const box: { value: Crumple | null } = { value: null }
 
-  const Probe = (): ReactNode => {
+  const Probe = () => {
     const resolved: ProbeOptions =
       scene === 'context' ? current : { ...current, scene: scene ?? BUILDING }
     const crumple = useCrumple(resolved)
