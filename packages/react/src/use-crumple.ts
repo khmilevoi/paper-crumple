@@ -1,14 +1,17 @@
 import type {
   BlitStage,
+  Events,
   PlayOptions,
   PlayResult,
   PoseRef,
   Run,
   SpriteSource,
+  StageEvent,
+  View,
 } from '@paper-crumple/core'
 import { useEffect, useState, useSyncExternalStore } from 'react'
 import type { Crumple } from './crumple.js'
-import { createCrumpleCore, readCrumple } from './crumple-state.js'
+import { createCrumpleCore, onRunEnd, onRunStart, onRunStep, readCrumple } from './crumple-state.js'
 import type { CrumpleOptions, CrumpleSnapshot } from './crumple-types.js'
 import { useScene } from './scene-context.js'
 import { createVersionedStore } from './store.js'
@@ -52,11 +55,59 @@ export function useCrumple<S extends SpriteSource>(o: CrumpleOptions<S>): Crumpl
 
   const snapshot = useSyncExternalStore(store.subscribe, store.getSnapshot, store.getServerSnapshot)
 
+  /**
+   * Every consumer callback goes through `useEvent`, and they are dispatched from the binding's
+   * own four subscriptions rather than from `view.on` calls of their own: subscribing per callback
+   * would put the consumer's function identity in the effect's dependencies, so an inline arrow
+   * would tear down and re-attach every render — and omitting it is the stale-closure bug that
+   * replaces that one (§5.5).
+   */
+  const dispatchStart = useEvent((e: Events['start']): void => {
+    o.onStart?.(e)
+  })
+  const dispatchEnd = useEvent((e: Events['end']): void => {
+    o.onEnd?.(e)
+  })
+  const dispatchError = useEvent((e: StageEvent<'error'>): void => {
+    o.onError?.(e)
+  })
+
+  /** `observed: true`: the error is on `crumple.error` too, and §7's telemetry filter on
+   *  `!observed` exists so a value with two routes is not counted twice. */
   const report = useEvent((error: Error): void => {
     // eslint-disable-next-line react-hooks/immutability -- `core` is an intentionally mutable record held once per hook instance and never replaced; `store.bump()` publishes each write (§5.5).
     core.error = error
     store.bump()
+    dispatchError({ error, observed: true, view: core.view })
   })
+
+  /**
+   * The three real view events, plus the stage's error bus filtered to this view. A view's bus
+   * carries exactly `start`, `step` and `end`; an error takes the route straight onto the STAGE's
+   * bus, so `view.on('error', …)` compiles and is silently dead (§5.5).
+   */
+  const listen = useEvent((view: View, stage: BlitStage): Array<() => void> => [
+    view.on('start', (e) => {
+      onRunStart(core, e)
+      store.bump()
+      dispatchStart(e)
+    }),
+    view.on('step', (e) => {
+      onRunStep(core, e)
+      store.bump()
+    }),
+    view.on('end', (e) => {
+      onRunEnd(core)
+      store.bump()
+      dispatchEnd(e)
+    }),
+    stage.on('error', (e) => {
+      if (e.view !== view) return
+      core.error = e.error
+      store.bump()
+      dispatchError(e)
+    }),
+  ])
 
   /**
    * Disposal, from either half of the pair. Idempotent: React runs the ref's null call before the
@@ -97,6 +148,8 @@ export function useCrumple<S extends SpriteSource>(o: CrumpleOptions<S>): Crumpl
     }
     // eslint-disable-next-line react-hooks/immutability -- `core` is an intentionally mutable record held once per hook instance and never replaced; `store.bump()` publishes each write (§5.5).
     core.view = created
+    // eslint-disable-next-line react-hooks/immutability -- `live` is an intentionally mutable record held once per hook instance and never replaced; it tracks the pair's own bookkeeping and is never handed to a consumer.
+    live.offs = listen(created, stage)
     store.bump()
   })
 
