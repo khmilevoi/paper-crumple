@@ -37,7 +37,10 @@ const entryTriple = (/** @type {string} */ base) => [
   `package/dist/${base}.d.ts`,
 ]
 
-/** The four published packages: core, paper and motion, plus the react binding (amendment 26). */
+/**
+ * The four published packages. The fourth is `@paper-crumple/react`, the React binding; there is
+ * still no bundle package, because amendment 23 cancelled it.
+ */
 export const PACKAGES = /** @type {readonly PackageSpec[]} */ ([
   {
     dir: 'core',
