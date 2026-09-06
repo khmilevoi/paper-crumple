@@ -131,6 +131,65 @@ const CONCAVE_ALPHA = unionAlpha(
   discAlpha(SRC, SRC, LOBE_B.x, LOBE_B.y, LOBE_R),
 )
 
+/**
+ * The SLIT: the same two discs pulled apart until the exterior between them is a slit rather than
+ * a notch, which is the sharpest crease this fixture family can carry (final review, I2).
+ *
+ * The number that decides how hard `baseAngular` pushes at a reflex vertex is the angle between
+ * the two nearest-feature gradients where the CONTOUR crosses the exterior medial ridge, not the
+ * angle at the artwork's own corner. Across a ridge whose two gradients differ by `phi`, the base
+ * field has a convex kink of slope `sin(phi/2)` on either side, and the interpolant's chord over a
+ * lattice cell of side `L` overshoots it by at most `(L/2) sin(phi/2)`, blended at `tearAngular`.
+ * So `sin(phi/2)` is the whole geometric factor, and it is what this fixture maximises.
+ *
+ * On `CONCAVE_ALPHA` (centres 64 apart, radius 56) the paper's own boundary meets the ridge at
+ * `(0, sqrt((r + W)^2 - h^2))` and `phi = 2 atan(h / that)` — about 53 degrees, `sin(phi/2) = 0.45`.
+ * Here the centres are 132 apart at the same radius: the discs no longer overlap at all (a
+ * 20-texel gap, which the paper webs over), the ridge is the whole perpendicular bisector, and at
+ * the paper's boundary `phi` is about 136 degrees, `sin(phi/2) = 0.93` — within 7 % of the 180
+ * degrees a pair of parallel walls would give, i.e. essentially the review's slit. It is also
+ * SUSTAINED: the ridge runs the full height of the front rather than fanning out from a point, so
+ * the lattice cannot dodge it by phase.
+ */
+const SLIT_R = 56
+const SLIT_A = { x: 62, y: 128 }
+const SLIT_B = { x: 194, y: 128 }
+const SLIT_ALPHA = unionAlpha(
+  discAlpha(SRC, SRC, SLIT_A.x, SLIT_A.y, SLIT_R),
+  discAlpha(SRC, SRC, SLIT_B.x, SLIT_B.y, SLIT_R),
+)
+
+/**
+ * The discs every analytic fixture is built from, in SOURCE coordinates — the exterior distance to
+ * a union of discs is the pointwise minimum of the discs' own, exactly, which is why these three
+ * fixtures get an analytic `outsideDistance` and `logoAlpha` gets an EDT.
+ */
+const LOBES: ReadonlyMap<Float32Array, readonly { x: number; y: number; r: number }[]> = new Map([
+  [DISC_ALPHA, [{ x: SRC / 2, y: SRC / 2, r: DISC_R }]],
+  [
+    CONCAVE_ALPHA,
+    [
+      { x: LOBE_A.x, y: LOBE_A.y, r: LOBE_R },
+      { x: LOBE_B.x, y: LOBE_B.y, r: LOBE_R },
+    ],
+  ],
+  [
+    SLIT_ALPHA,
+    [
+      { x: SLIT_A.x, y: SLIT_A.y, r: SLIT_R },
+      { x: SLIT_B.x, y: SLIT_B.y, r: SLIT_R },
+    ],
+  ],
+])
+
+/** The fixture's name, for a cache key and for a measurement row. */
+const FIXTURE_NAMES: ReadonlyMap<Float32Array, string> = new Map([
+  [DISC_ALPHA, 'disc'],
+  [CONCAVE_ALPHA, 'concave'],
+  [SLIT_ALPHA, 'slit'],
+  [LOGO_ALPHA, 'logo'],
+])
+
 // The return type is inferred on purpose, as in `testing/fixture-sources.ts`: an explicit
 // `Uint8ClampedArray` annotation widens the buffer parameter to `ArrayBufferLike` and `ImageData`
 // then refuses it.
@@ -321,19 +380,18 @@ function artworkAlphaPlane(
  */
 const outsideCache = new Map<string, Float32Array>()
 function outsideDistance(r: Cell): Float32Array {
-  const kind = r.alpha === DISC_ALPHA ? 'disc' : r.alpha === CONCAVE_ALPHA ? 'concave' : 'logo'
+  const kind = FIXTURE_NAMES.get(r.alpha) ?? 'logo'
   const key = `${kind}:${r.size.w}x${r.size.h}@${r.artworkRect.x},${r.artworkRect.y}`
   const known = outsideCache.get(key)
   if (known !== undefined) return known
   const out = new Float32Array(r.size.w * r.size.h)
-  if (kind === 'disc' || kind === 'concave') {
-    const lobes =
-      kind === 'disc'
-        ? [{ x: r.artworkRect.x + SRC / 2, y: r.artworkRect.y + SRC / 2, r: DISC_R }]
-        : [
-            { x: r.artworkRect.x + LOBE_A.x, y: r.artworkRect.y + LOBE_A.y, r: LOBE_R },
-            { x: r.artworkRect.x + LOBE_B.x, y: r.artworkRect.y + LOBE_B.y, r: LOBE_R },
-          ]
+  const analytic = LOBES.get(r.alpha)
+  if (analytic !== undefined) {
+    const lobes = analytic.map((l) => ({
+      x: r.artworkRect.x + l.x,
+      y: r.artworkRect.y + l.y,
+      r: l.r,
+    }))
     for (let y = 0; y < r.size.h; y++) {
       for (let x = 0; x < r.size.w; x++) {
         let d = Infinity
@@ -392,12 +450,28 @@ function exteriorOf(solid: (i: number) => boolean, w: number, h: number): Uint8A
  * This is the measurement for `torn`, whose contour is the shader's own tear rather than a polygon,
  * and it is also how §9.1's two migration frames are compared.
  */
-function reachOf(r: Cell): { min: number; max: number } {
+function reachOf(r: Cell): { min: number; max: number; boxMax: number } {
   const dist = outsideDistance(r)
   const { w, h } = r.size
   const outside = exteriorOf((i) => r.front[i * 4 + 3] >= OPAQUE, w, h)
+  // The alpha's own box, in front texels: `signedFieldExtent`'s `raw`, reproduced from the same
+  // distance field this file already builds (`dist === 0` is exactly `signed >= 0`).
+  let bx0 = Infinity
+  let bx1 = -Infinity
+  let by0 = Infinity
+  let by1 = -Infinity
+  for (let y = 0; y < h; y++) {
+    for (let x = 0; x < w; x++) {
+      if (dist[y * w + x] > 0) continue
+      if (x < bx0) bx0 = x
+      if (x > bx1) bx1 = x
+      if (y < by0) by0 = y
+      if (y > by1) by1 = y
+    }
+  }
   let min = Infinity
   let max = -Infinity
+  let boxMax = 0
   for (let y = 1; y < h - 1; y++) {
     for (let x = 1; x < w - 1; x++) {
       const i = y * w + x
@@ -406,11 +480,17 @@ function reachOf(r: Cell): { min: number; max: number } {
       const d = dist[i]
       if (d < min) min = d
       if (d > max) max = d
+      // `checkGuardBand` protects the alpha BOX grown per axis by `overscanRadius * k`
+      // (`reachRect` / `growBox`, `sheet.ts`), so what actually clips is the Chebyshev excess past
+      // that box — not the Euclidean distance to the alpha. On a convex fixture the two agree; in
+      // a concavity they do not, and only this one is a statement about the front.
+      const beyond = Math.max(bx0 - x, x - bx1, by0 - y, y - by1, 0)
+      if (beyond > boxMax) boxMax = beyond
     }
   }
   expect(Number.isFinite(min), 'no outer boundary — the sheet fills the whole front').toBe(true)
   const scale = refPerTexel(r.size)
-  return { min: min * scale, max: max * scale }
+  return { min: min * scale, max: max * scale, boxMax: boxMax * scale }
 }
 
 /**
@@ -992,6 +1072,105 @@ describe('the width does not depend on the shape knobs (design 2026-09-05 §10)'
     await publish('concave-outward-reach', rows)
     expect(rows).toHaveLength(cases.length + 2)
   }, 600_000)
+
+  /**
+   * **The outward push across THREE fixtures, six knob rows and three lattice phases.**
+   *
+   * The case above passes its bound on one fixture at one seed, and that is not enough to call the
+   * reserve safe: `baseAngular`'s overshoot at a reflex vertex is a LATTICE-PHASE artefact, so one
+   * seed measures one alignment of the lattice against one notch. The phase is `uSeed * 1.7`
+   * (`paper-shader.ts`), and `uSeed = (seed % 17) + 0.31 seed` (`paper-renderer.ts`), so seeds
+   * 3 / 5 / 13 put the lattice at fractional offsets 0.68 / 0.14 / 0.95 of a cell — three
+   * different alignments rather than three different noises.
+   *
+   * The three fixtures span the geometry the push cares about: `CONCAVE_ALPHA`'s 53-degree crease
+   * at the paper's own boundary, `SLIT_ALPHA`'s 136-degree one (see its own note), and `logoAlpha`
+   * — real artwork, whose ring, slot and detached island put reflex vertices at the box edge where
+   * the exterior medial ridge leaves the bounding box, which is the geometry that can push the
+   * sheet past a reserve rather than merely fill a notch.
+   *
+   * `tearFreq` {2, 9, 24} crossed with `tearAngular` {0.8, 1} covers the lattice from 417 reference
+   * px down to 35 at both blends that ship: the overshoot bound `(L/2) sin(phi/2) tearAngular`
+   * grows with `L`, while the fraction of the contour that can find a badly phased cell falls with
+   * it, so the worst row is not predictable a priori and is measured at every combination.
+   *
+   * Each cell is held to ITS OWN frozen `reserve.radius` — the sprite's, not the fixture family's
+   * — because `source()` freezes the reserve per sprite (§4.4) and a comparison against any other
+   * sprite's number is not a safety statement.
+   *
+   * **TWO measures, and only one of them is §4.** The case above compares the EUCLIDEAN distance
+   * from the artwork's alpha against the reserve. That is the right instrument on a convex fixture
+   * and the wrong one in a concavity: what `source()` reserves is the alpha BOX grown per axis by
+   * `overscanRadius * k` (`reachRect` / `growBox`, `sheet.ts`), and that is what `checkGuardBand`
+   * holds inside the front. Paper filling a notch is far from the alpha and nowhere near leaving
+   * the box; only paper past the box clips. Both are reported here; the gate is the box.
+   *
+   * The weaker Euclidean claim does NOT hold, and that is the finding: it fails on the slit at
+   * seven of these fifty-four cells. It is asserted from the other side instead — every failure is
+   * a slit cell — so a Euclidean overrun appearing on `concave` or on real artwork fails here.
+   */
+  it('holds the outward reach inside the frozen reserve, across fixtures, lattices and phases', async () => {
+    const fixtures = [
+      ['concave', CONCAVE_ALPHA],
+      ['slit', SLIT_ALPHA],
+      ['logo', LOGO_ALPHA],
+    ] as const
+    const seeds = [3, 5, 13] as const
+    const freqs = [2, 9, 24] as const
+    const angulars = [0.8, 1] as const
+
+    const rows: string[] = []
+    const boxOverruns: string[] = []
+    const alphaOverruns: string[] = []
+    let worst = { where: '', margin: Infinity, max: 0, reserve: 0 }
+    let worstBox = { where: '', margin: Infinity, max: 0, reserve: 0 }
+    for (const [name, alpha] of fixtures) {
+      for (const tearFreq of freqs) {
+        for (const tearAngular of angulars) {
+          for (const seed of seeds) {
+            const r = await cell(TORN_CLEAN, { tearFreq, tearAngular, seed }, alpha)
+            const m = reachOf(r)
+            const reserve = handleOf(r).reserve.radius
+            const margin = reserve - m.max
+            const where = `${name} tearFreq ${tearFreq} tearAngular ${tearAngular} seed ${seed}`
+            rows.push(
+              `${where} -> max ${m.max.toFixed(2)} of reserve ${reserve.toFixed(2)}` +
+                ` margin ${margin.toFixed(2)} (${((margin / reserve) * 100).toFixed(1)} %)` +
+                ` | box ${m.boxMax.toFixed(2)} margin ${(reserve - m.boxMax).toFixed(2)}` +
+                ` (${(((reserve - m.boxMax) / reserve) * 100).toFixed(1)} %)`,
+            )
+            const boxMargin = reserve - m.boxMax
+            if (margin < worst.margin) worst = { where, margin, max: m.max, reserve }
+            if (boxMargin < worstBox.margin) {
+              worstBox = { where, margin: boxMargin, max: m.boxMax, reserve }
+            }
+            if (margin < 0) alphaOverruns.push(where)
+            if (boxMargin < 0) boxOverruns.push(where)
+          }
+        }
+      }
+    }
+    rows.push(
+      `WORST alpha-euclidean ${worst.where} -> max ${worst.max.toFixed(2)} of reserve ` +
+        `${worst.reserve.toFixed(2)} margin ${worst.margin.toFixed(2)}` +
+        ` (${((worst.margin / worst.reserve) * 100).toFixed(1)} %)`,
+      `WORST box (the guard band's own measure) ${worstBox.where} -> box ${worstBox.max.toFixed(2)}` +
+        ` of reserve ${worstBox.reserve.toFixed(2)} margin ${worstBox.margin.toFixed(2)}` +
+        ` (${((worstBox.margin / worstBox.reserve) * 100).toFixed(1)} %)`,
+      `alpha-euclidean overruns: ${alphaOverruns.length} of ${rows.length} — ${alphaOverruns.join('; ')}`,
+    )
+    await publish('reflex-reserve-sweep', rows)
+    expect(rows).toHaveLength(fixtures.length * freqs.length * angulars.length * seeds.length + 3)
+    // THE GATE. Nothing the sheet paints leaves the reserve the front actually allocates.
+    expect(boxOverruns, 'cells whose paint left the reserved box — this one is §4').toEqual([])
+    // THE FINDING, from the other side. The Euclidean-from-alpha reading of the same reserve is
+    // breached, and only ever inside the slit's own concavity: a breach on `concave` or on real
+    // artwork would be a different statement and has to fail here rather than be absorbed.
+    expect(
+      alphaOverruns.filter((w) => !w.startsWith('slit')),
+      'a Euclidean overrun somewhere other than the slit concavity',
+    ).toEqual([])
+  }, 1_800_000)
 })
 
 describe('both contour shapes leave a solid annulus (design 2026-09-05 §5.1, §8)', () => {

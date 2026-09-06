@@ -1,4 +1,11 @@
 import { describe, it, expect } from 'vitest'
+import {
+  CHEW_REACH,
+  MID_HIGH_ANGULAR,
+  MID_LOW_ANGULAR,
+  MID_SCALLOP,
+  MID_SMOOTH_COEF,
+} from './edge-derive.js'
 import { DEBUG_MODES, PAPER_FS, PAPER_UNIFORMS } from './paper-shader.js'
 
 describe('DEBUG_MODES', () => {
@@ -117,18 +124,24 @@ describe('PAPER_FS — the edge uniforms (design 2026-09-05 §6)', () => {
   })
 
   /**
-   * Ruling R11: the three constants that exist once as a TS constant in `edge-derive.ts` and
-   * once as a GLSL literal here each carry a sync note at BOTH sites, naming the other by
-   * identifier. `CHEW_REACH` has two GLSL sites.
+   * Ruling R11 accepted a TS/GLSL duplication of these coefficients as unavoidable, kept in step by
+   * a sync note at both ends. It is not unavoidable: `PAPER_FS` is a template literal and already
+   * interpolates `MAX_FOLDS`, so `edge-derive.ts` — which is where the CPU budgets the amplitudes
+   * this same GLSL spends — is now the ONE declaration and the shader reads it.
+   *
+   * Asserted against the imported constants rather than against the numbers, which is the whole
+   * point: change `MID_SCALLOP` in `edge-derive.ts` and the emitted GLSL changes with it and this
+   * still passes; re-inline any of them as a literal and it does not.
    */
-  it('carries the ruling R11 sync notes at every mirrored GLSL constant', () => {
-    const notes = PAPER_FS.split('\n').filter((l) => l.includes('edge-derive.ts'))
-    expect(notes.length).toBeGreaterThanOrEqual(4)
-    for (const name of ['MID_LOW_SMOOTH', 'MID_LOW_ANGULAR', 'MID_HIGH_ANGULAR', 'CHEW_REACH']) {
-      expect(
-        notes.some((l) => l.includes(name)),
-        name,
-      ).toBe(true)
-    }
+  it('interpolates its shared coefficients from edge-derive.ts (was ruling R11)', () => {
+    expect(PAPER_FS).toContain(`const float MID_SCALLOP = ${MID_SCALLOP};`)
+    expect(PAPER_FS).toContain(`* ${MID_SMOOTH_COEF} * MID_SCALLOP;`)
+    expect(PAPER_FS).toContain(
+      `float midAng = -bite * ${MID_LOW_ANGULAR}.0 + tab * ${MID_HIGH_ANGULAR};`,
+    )
+    // `CHEW_REACH` reaches the GLSL at two differently scoped `teeth` declarations.
+    expect(PAPER_FS.split(`* ${CHEW_REACH};`).length - 1).toBe(2)
+    // And nothing is kept in step by hand any more.
+    expect(PAPER_FS).not.toContain('SYNC (ruling R11)')
   })
 })

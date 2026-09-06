@@ -67,12 +67,27 @@ file does:
 - `edgeVariance` must stay below `0.6` — above it `tearFloor = tight + 0.4 * edgeWidth` binds
   first, and the true lower reach becomes `max(edgeWidth * (1 - edgeVariance), 0.4 * edgeWidth)`;
   and
-- the shader's `baseAngular` term must be small. `baseAngular` replaces the base field with its
-  piecewise-linear interpolant on a `uTearFreq * ANG_FREQ` lattice, which pulls the contour inward
-  by roughly `ang * L^2 / (8 * rho)` — about 50 reference px at `tearFreq: 2`, checked only by the
-  tear floor above. **At the shipped defaults the precise lower-reach law is
-  `edgeWidth * (1 - edgeVariance) - 2.5`, not the clean `edgeWidth * (1 - edgeVariance)`**; the
-  clean form holds at `tearAngular: 0` or at a `tearFreq` above roughly 12.
+- the shader's `baseAngular` term must be small, and **on real artwork it usually is not**.
+  `baseAngular` replaces the base field with its piecewise-linear interpolant on a lattice of side
+  `L = 1000 / (tearFreq * 1.2)` reference px — 417 at `tearFreq: 2`, 93 at the shipped 9, 35 at 24
+  — and on a convex feature of local curvature radius `rho` the interpolant falls below the field
+  by the chord sag, pulling the contour inward by about `tearAngular * L^2 / (8 * rho)`. That pull
+  scales as `1 / rho`: at the shipped `tearFreq: 9` it is `857 / rho` reference px, so 2.5 on the
+  343-reference-px arc the test disc presents, 8.6 on a feature of radius 100, and more than
+  `edgeWidth * edgeVariance` itself on anything sharper. There is therefore no single number to
+  subtract — the `1 / rho` law above is the whole statement, and a reader who wants their own case
+  evaluates it at their own `rho`.
+
+**So the dependable guarantee under `torn` is `0.4 * edgeWidth`, not `edgeWidth * (1 - edgeVariance)`.**
+The shader's `tearFloor` clamps the inward reach at `0.4 * edgeWidth` unconditionally
+(`paper-shader.ts`, `tearOf`), and on any convex detail with `rho` below roughly 260 reference px
+at the shipped defaults that floor — 18.8 reference px at `edgeWidth: 47` — is what actually stops
+the tear, since `edgeWidth * (1 - edgeVariance)` less the `baseAngular` pull has already fallen
+under it. Most of a real silhouette is that sharp. The clean `edgeWidth * (1 - edgeVariance)` is
+the refinement, recovered where the pull is below a texel — at `tearAngular: 0`, or at a
+`tearFreq` high enough that `tearAngular * L^2 / (8 * rho)` is negligible **for the `rho` in hand**
+(on the test disc that threshold is around `tearFreq: 12`; on a feature ten times sharper it is not
+reached inside the knob's range at all).
 
 **A sixth correction to the design document, alongside the five the plan already lists.** §6's
 table states `uThickness = W` in all four `shape x finish` cells. That is wrong under `smooth`:

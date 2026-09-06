@@ -695,6 +695,13 @@ without asking the sheet which unit it was built with. `scaleKnob` never interpr
 that is both rotation-invariant and gives a 3:1 banner the same relative border as a square, rather
 than the roughly 3x mismatch a long-side or height base would produce.
 
+One inherited wrinkle worth knowing before you pick `px`: under that unit the working width is
+bucket-dependent for `edgeShape: 'torn'` (the shader's outward bias is `edgeWidth * size.h / 1000`,
+so a 512-texel build draws a narrower border than a 1024-texel one) but bucket-fixed for
+`edgeShape: 'smooth'` (the polygon is traced once and carried into every bucket 1:1 in texels).
+`percent` is invariant in both shapes. This is `sprite-px`'s own convention and predates the edge
+redesign — it is called out here only because the two shapes now diverge under one unit.
+
 Worked number: at the library's default `overscanHeadroom: 0`, the percent unit's default of `5.9`
 (its own step is `0.1`) reproduces `W = 46.9785` reference px on a square — a gap of `0.0215`
 reference px against the px unit's own default of `47` (step `1`). (An earlier draft of this

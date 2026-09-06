@@ -9,9 +9,13 @@
  */
 import { KnobError, SheetError } from './errors.js'
 import type { Rect, Size } from './geometry.js'
+import { KNOB_REFERENCE_PX } from './knobs.js'
 
-/** Every bounded edge knob is quoted against this frame (`paper.js:39`). */
-export const KNOB_REFERENCE_PX = 1000
+// Every bounded edge knob is quoted against this frame (`paper.js:39`). ONE declaration, in
+// `./knobs.ts` beside `scaleKnob`, which is the module that defines what the frame means;
+// re-exported here so `unstable.ts`'s P5 block keeps its shape and every consumer that reached for
+// it through this module still gets the same binding rather than a second constant of equal value.
+export { KNOB_REFERENCE_PX }
 
 /**
  * The fixed slop for the JFA half-texel and antialiasing, in reference pixels. Spec 8.6 gives
@@ -38,12 +42,25 @@ export const GUARD_MARGIN_G = GUARD_BAND_OUTER - GUARD_BAND_INNER
  * `KNOB_REFERENCE_PX` (1000 px) reference frame — but `guardMarginsFor` applies it as
  * `A.h · ε / KNOB_REFERENCE_PX` TEXELS (a fraction of the artwork's height), not as a flat
  * `ε`-texel reserve, so it comes out to well under 2 texels at realistic artwork sizes (≈1.5 at
- * the hull defaults, `A.h ≈ 790`). The derivation is exact and every rounding in the pipeline
- * (`reachRect`'s `+0.5`, the inclusive `signedFieldExtent` box, the `ceil`s below) runs in the
- * check's favour, so this is not load-bearing — design §11's fourth measurement is whether it
- * can be zero. Frozen at 2 by controller ruling R1 for the whole branch: changing it after
- * Task 8 would invalidate the committed `hull-default.json` golden frame, which cannot be
- * recaptured once `develop`'s `edgeMode` is gone.
+ * the hull defaults, `A.h ≈ 790`).
+ *
+ * **It is load-bearing on the x axis, and not on the y axis.** On y the derivation is exact and
+ * every rounding in the pipeline (`reachRect`'s `+0.5`, the inclusive `signedFieldExtent` box, the
+ * `ceil` below) runs in the check's favour, so ε is pure insurance there. On x it is not: the x
+ * closed form in `guardMarginsFor` takes the paint reach as `A.h · p / Q`, i.e. evaluated at the
+ * IDEAL `m_y`, while the front the pipeline actually builds is taller than that — the y margin is
+ * `ceil(A.h · (m_y/A.h + ε/1000))`, so the real front carries up to `2 (A.h·ε/1000 + 1)` texels of
+ * height the closed form did not price, and the real paint reach `p · F.h` grows with it. The
+ * `A.h · ε / KNOB_REFERENCE_PX` term on the x line is what pays for that: it has to cover
+ * `2p (A.h·ε/1000 + 1) / (1 - 2g)`, which at any realistic `p` is a fraction of the term itself.
+ * The shortfall it covers is under one texel and only bites on small artwork, where the `ceil`'s
+ * own `+1` dominates — so the code is right as written, but ε cannot be dropped to zero on the
+ * strength of the y-axis argument alone. Design §11's fourth measurement is that question, and this
+ * is half its answer.
+ *
+ * Frozen at 2 by controller ruling R1 for the whole branch — a second reason to leave it alone:
+ * changing it after Task 8 would invalidate the committed `hull-default.json` golden frame, which
+ * cannot be recaptured once `develop`'s `edgeMode` is gone.
  */
 export const GUARD_EPSILON_REFERENCE_PX = 2
 

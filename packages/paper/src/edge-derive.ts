@@ -39,43 +39,65 @@
  *   shipped 9, 35 at 24 — and blends the two at weight `tearAngular`; `tearOf` then adds the
  *   octaves computed here on top of `baseAng`, NOT on top of `base`. On a convex arc of radius
  *   `rho` the interpolant of a concave function lies below it by the chord sag, so the contour is
- *   pulled INWARD by about `tearAngular * L^2 / (8 rho)` — a `1 / tearFreq^2` law, which is why the
- *   shipped `tearFreq 9` barely notices (2.5 reference px on a 343-reference-px arc) and the
- *   descriptor's own minimum of 2 does not: 51 reference px there, more than `W v` itself, so the
- *   contour is dragged down until the shader's `tearFloor = tight + 0.4*W` catches it. At a REFLEX
- *   vertex the same interpolant pushes OUTWARD instead, which is a reserve question rather than a
- *   width one (`paper-shader.ts`'s own header for `baseAngular` states that direction).
- *   So: at `tearAngular > 0` and low `tearFreq` the lower reach is `max(0.4*W, W(1 - v) - the pull
- *   above)`, not `W(1 - v)`. Measured and pinned in `edge-redesign.gl.test.ts` ("is pulled to the
- *   tear floor by baseAngular at low tearFreq, and stops there"); at `tearFreq 2, tearAngular 0.8`
- *   the rendered inward reach sits on the floor, in three independent configurations, against the
- *   22.09 the identity would give.
+ *   pulled INWARD by about `tearAngular * L^2 / (8 rho)`.
+ *
+ *   That is a `1 / tearFreq^2` law AND a `1 / rho` one, and the second half is the half that gets
+ *   dropped. `rho` is the LOCAL radius of curvature of the feature under the contour, not a
+ *   property of the knobs: at the shipped `tearFreq 9` the pull is `857 / rho` reference px, which
+ *   is 2.5 on the 343-reference-px arc the test disc happens to present, 8.6 on a feature of radius
+ *   100, and past `W v` itself on anything sharper. So "the shipped `tearFreq 9` barely notices" is
+ *   TRUE OF THAT ARC AND NOT IN GENERAL: on any convex detail with `rho` below roughly 260
+ *   reference px the pull already carries `W(1 - v)` under `0.4*W` and the floor is what stops the
+ *   contour. Most of a real silhouette is that sharp — so on real artwork the dependable lower
+ *   bound is `0.4*W`, and `W(1 - v)` is the refinement that holds where the pull is under a texel.
+ *   The descriptor's own minimum of `tearFreq 2` does not notice either way: 51 reference px on the
+ *   test disc, more than `W v` itself, so the contour is dragged down until the shader's
+ *   `tearFloor = tight + 0.4*W` catches it. At a REFLEX vertex the same interpolant pushes OUTWARD
+ *   instead, which is a reserve question rather than a width one (`paper-shader.ts`'s own header
+ *   for `baseAngular` states that direction).
+ *   So: at `tearAngular > 0` the lower reach is `max(0.4*W, W(1 - v) - the pull above)`, not
+ *   `W(1 - v)`, and which of the two terms binds depends on `rho` as much as on `tearFreq`.
+ *   Measured and pinned in `edge-redesign.gl.test.ts` ("is pulled to the tear floor by baseAngular
+ *   at low tearFreq, and stops there"); at `tearFreq 2, tearAngular 0.8` the rendered inward reach
+ *   sits on the floor, in three independent configurations, against the 22.09 the identity would
+ *   give.
  */
 
 /**
- * `|midSmooth|` in the shader's `mid = mix(midSmooth, midAng, uTearAngular)` branch:
- * `1.25 * MID_SCALLOP`, where `MID_SCALLOP` is `paper-shader.ts`'s own named GLSL constant (NOT a
- * bare literal — this is `1.25 *` that constant's value). The two must move together (R11): if
- * `MID_SCALLOP` changes, this constant must be updated to `1.25 * MID_SCALLOP`'s new value.
+ * # The five coefficients this module shares with the GLSL, declared HERE and interpolated THERE
+ *
+ * Ruling R11 accepted these as an unavoidable TS/GLSL duplication kept in step by comment. That
+ * premise was wrong: `PAPER_FS` is a TS template literal and already interpolates a module constant
+ * (`#define MAX_FOLDS ${MAX_FOLDS}`), so the shader can simply read these. It does —
+ * `paper-shader.ts` imports them and interpolates them through its own `glslFloat`, which emits
+ * the same text the literals were. There is one declaration of each and no sync note left to keep.
  */
-export const MID_LOW_SMOOTH = 0.225
+
+/**
+ * `MID_SCALLOP` in the shader: the amplitude scale on `midSmooth`, the smooth branch of
+ * `mid = mix(midSmooth, midAng, uTearAngular)`. The smooth scallops were tuned at 4.5 px and
+ * `uMidAmp` is now quoted as an angular notch depth, so this is what keeps the old look at
+ * `tearAngular 0`.
+ */
+export const MID_SCALLOP = 0.18
+/** `midSmooth`'s own coefficient on `MID_SCALLOP` in the shader. */
+export const MID_SMOOTH_COEF = 1.25
+/**
+ * `|midSmooth|`: `MID_SMOOTH_COEF * MID_SCALLOP`. Derived, not restated — see the block above.
+ * (`0.22499999999999998` rather than the `0.225` this was written as: the product of two doubles,
+ * one ulp under, and every consumer of it compares to nine places or feeds a `float` uniform.)
+ */
+export const MID_LOW_SMOOTH = MID_SMOOTH_COEF * MID_SCALLOP
 /**
  * `-bite * 1.0`, the shader's `midAng` angular branch of that same `mid = mix(...)` expression.
- * Read only by `midLow` in this file — it is exported anyway so a reader can see the shader's own
- * branch coefficient named, not folded into an arithmetic expression; do not let lint/knip strip it
- * as unused-across-files.
+ * Read by `midLow` here and interpolated into the GLSL there.
  */
 export const MID_LOW_ANGULAR = 1
-/**
- * `+tab * 0.55`, the other half of that same `midAng` expression. Mirrored as a GLSL literal there;
- * the two must move together (R11). Read only by `midHigh` in this file, exported for the same
- * reason as `MID_LOW_ANGULAR` above.
- */
+/** `+tab * 0.55`, the other half of that same `midAng` expression. */
 export const MID_HIGH_ANGULAR = 0.55
 /**
- * `teeth = chew * 1.6` in the shader — mirrored as a GLSL literal at TWO sites there (the tear
- * silhouette's `teeth` and a second, differently-scoped `teeth = (uChew * k) * 1.6`); all three
- * (this constant and both shader sites) must move together (R11).
+ * `teeth = chew * 1.6` in the shader — at TWO sites there (the tear silhouette's `teeth` and a
+ * second, differently-scoped `teeth = (uChew * k) * 1.6`), both interpolated from this constant.
  */
 export const CHEW_REACH = 1.6
 

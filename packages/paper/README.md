@@ -68,6 +68,12 @@ is a **knob**, present in every combination and animatable to `0`, at which poin
 collapses onto the artwork's alpha and the finish switches off with it: `edgeWidth = 0` is "just the
 artwork", with no rebuild needed to get there.
 
+One qualifier on "animatable", because the two shapes pay different prices for it. Under
+`edgeShape: 'torn'` the width is a **front-tier** knob: a new value re-renders the front and nothing
+else. Under `edgeShape: 'smooth'` it is **hull-tier** — the polygon is traced at the width — so every
+distinct value re-sources the sprite, which costs a field readback and a trace. Still no rebuild of
+the stage, and still fine for a handful of steps; not something to drive at 60 Hz under `smooth`.
+
 |                       | `edgeFinish: 'clean'`                            | `edgeFinish: 'paper'`                                                          |
 | --------------------- | ------------------------------------------------ | ------------------------------------------------------------------------------ |
 | `edgeShape: 'smooth'` | plain cut, no tile needed                        | clean silhouette, deckle band, fibres and tear shadow                          |

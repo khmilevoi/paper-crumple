@@ -56,7 +56,7 @@
  * `EDGE_K_PX`, ...), exactly as the spike does.
  *
  * `paperColor` and `paperBack` are core-declared shared knobs (spec 6.2) and are therefore
- * absent from `descriptorsFor(mode)` / `defaultsFor(mode)` — a slot's own knob bag never
+ * absent from `descriptorsFor(spec)` / `defaultsFor(spec)` — a slot's own knob bag never
  * carries them. A caller driving `PaperRenderer` straight from `defaultsFor` (as this task's
  * own test does) supplies neither, so a value missing from `r.values` falls back to the
  * core-declared default in `SHARED_KNOBS`.

@@ -10,7 +10,11 @@
  *
  * 1. **`MAX_FOLDS` becomes a module constant** (`paper.js:44`'s `${MAX_FOLDS}` interpolation is
  *    kept; the value it interpolates now comes from this file's own `export const MAX_FOLDS = 12`
- *    rather than from `poses.js:16`, which does not move here).
+ *    rather than from `poses.js:16`, which does not move here). The edge redesign added four more
+ *    interpolations by the SAME mechanism and no new one — `MID_SCALLOP`, `MID_SMOOTH_COEF`,
+ *    `MID_LOW_ANGULAR` / `MID_HIGH_ANGULAR` and `CHEW_REACH` now come from `edge-derive.ts`, which
+ *    is where the CPU side of the tear budget reads them, and the emitted text is the literals
+ *    that were there.
  * 2. **`vUv` becomes `gl_FragCoord`** (`paper.js:46`'s `in vec2 vUv;` deleted, `:1451`'s
  *    `vec2 uv = vUv;` replaced with `gl_FragCoord.xy / uFrontSize`, `uFrontSize` added): core's
  *    `FULLSCREEN_VS` emits no varying.
@@ -59,6 +63,14 @@
  *    the whole program of edits 1–8 and what a later draw path would link).
  */
 
+import {
+  CHEW_REACH,
+  MID_HIGH_ANGULAR,
+  MID_LOW_ANGULAR,
+  MID_SCALLOP,
+  MID_SMOOTH_COEF,
+} from './edge-derive.js'
+
 /** `poses.js:16`. `build()` renders pose 0, whose fold list is empty; the fold table itself is
  * not this plan's — only the constant the shader's `#define` interpolates is. */
 export const MAX_FOLDS = 12
@@ -84,6 +96,17 @@ export const DEBUG_MODES: readonly string[] = [
   'artwork only',
   'paper field',
 ]
+
+/**
+ * A number as GLSL float text: `1` becomes `1.0`, `1.6` stays `1.6`.
+ *
+ * GLSL has no implicit int-to-float conversion in an expression like `-bite * 1`, so a coefficient
+ * that happens to be integral has to carry its point. Every interpolation below goes through this,
+ * so the emitted text is exactly the literal it replaced.
+ */
+function glslFloat(n: number): string {
+  return Number.isInteger(n) ? `${n}.0` : `${n}`
+}
 
 export const PAPER_FS = `#version 300 es
 precision highp float;
@@ -467,10 +490,9 @@ float tearFloor(vec2 uv) { return sampleTight(uv) + uBaseBias * 0.4; }
 // the image axes (so its three edge directions never line up with the sprite's).
 const float ANG_FREQ = 1.2;
 // Smooth-mode scallop amplitude per unit of uMidAmp: 26 px of notch depth is 4.7 px of scallop.
-// SYNC (ruling R11): mirrored in TS as 'MID_LOW_SMOOTH' in edge-derive.ts, which is
-// '1.25 * MID_SCALLOP' — the 1.25 is midSmooth's own coefficient below, so MID_LOW_SMOOTH is not
-// this literal but a product of it. If this constant moves, MID_LOW_SMOOTH moves with it.
-const float MID_SCALLOP = 0.18;
+// Declared in edge-derive.ts (which derives 'MID_LOW_SMOOTH' from it) and interpolated here,
+// so it exists once.
+const float MID_SCALLOP = ${glslFloat(MID_SCALLOP)};
 const float ANG_ROT = 0.37;
 
 /**
@@ -579,9 +601,9 @@ float tearOf(vec2 uv, float base, float baseAng, out float shaped) {
   // uMidAmp is quoted as a notch depth (26 px by default). The smooth scallops were tuned at
   // 4.5 px, so the smooth term is scaled by MID_SCALLOP to keep the old look at tearAngular 0.
   vec2 midQ = rot2(nUv * uTearFreq * 1.8, 1.13) + uSeed * 3.1;
-  // SYNC (ruling R11): '1.25 * MID_SCALLOP' is what edge-derive.ts mirrors as 'MID_LOW_SMOOTH'.
-  // The two must move together — see MID_SCALLOP's own note above.
-  float midSmooth = (noiseLinear(midQ) * 2.0 - 1.0) * 1.25 * MID_SCALLOP;
+  // edge-derive.ts's 'MID_LOW_SMOOTH' is this same product, computed there from the same two
+  // constants.
+  float midSmooth = (noiseLinear(midQ) * 2.0 - 1.0) * ${glslFloat(MID_SMOOTH_COEF)} * MID_SCALLOP;
   float mid = midSmooth;
   if (uTearAngular > 0.0) {
     vec2 nq = rot2(nUv * uTearFreq * 2.5, -0.71) + uSeed * 2.3;
@@ -589,9 +611,9 @@ float tearOf(vec2 uv, float base, float baseAng, out float shaped) {
     vec2 tq = rot2(nUv * uTearFreq * 2.1, 2.05) + uSeed * 4.9;
     float tab = max(noiseTri(tq) - 0.74, 0.0) / 0.26;
     // Depth in units of uMidAmp; the smooth version's scallops are only 1.25 units wide.
-    // SYNC (ruling R11): edge-derive.ts mirrors the 1.0 on -bite as 'MID_LOW_ANGULAR' and
-    // edge-derive.ts mirrors the 0.55 on +tab as 'MID_HIGH_ANGULAR'; all four must move together.
-    float midAng = -bite * 1.0 + tab * 0.55;
+    // 'MID_LOW_ANGULAR' and 'MID_HIGH_ANGULAR', from edge-derive.ts, which budgets the amplitudes
+    // this expression spends.
+    float midAng = -bite * ${glslFloat(MID_LOW_ANGULAR)} + tab * ${glslFloat(MID_HIGH_ANGULAR)};
     mid = mix(midSmooth, midAng, uTearAngular);
   }
   // High: 1-3 px teeth. Two counter-rotated lattices, because one at this frequency reads as a
@@ -624,9 +646,8 @@ float tearOf(vec2 uv, float base, float baseAng, out float shaped) {
   // two or three hundred pixels perfectly smooth and then breaks up for fifty. Same argument as
   // the fringe, which is patchy for the same reason. The clump lattice is deliberately coarse —
   // about 180 reference px — so a clean run lasts long enough to be read as clean.
-  // SYNC (ruling R11): the 1.6 is mirrored in edge-derive.ts as 'CHEW_REACH', and again at the
-  // second GLSL site ('teeth = (uChew * k) * 1.6' in farOutside). All three must move together.
-  float teeth = chew * 1.6;
+  // 'CHEW_REACH', from edge-derive.ts; the second use of it is farOutside's own 'teeth'.
+  float teeth = chew * ${glslFloat(CHEW_REACH)};
   float band = 1.0 - smoothstep(0.0, max(teeth * 1.8, 0.5), abs(shaped));
   float toothClump = smoothstep(0.30, 0.66, noiseSmooth(nUv * 5.5 + uSeed * 2.7));
   float d = shaped + high * teeth * band * toothClump;
@@ -1763,9 +1784,8 @@ bool farOutside(vec2 uv, float aa) {
   // cell / sqrt(2): the furthest a triangle's corners can be, barycentrically weighted, from a
   // point inside it (proof block, step 2).
   float angTerm = cell * 0.70710678;
-  // SYNC (ruling R11): the 1.6 is edge-derive.ts's 'CHEW_REACH', and this is the SECOND of the two
-  // GLSL sites (the first is tearOf's own 'teeth = chew * 1.6'). All three must move together.
-  float teeth = (uChew * k) * 1.6;
+  // 'CHEW_REACH' again, the second of its two uses (the first is tearOf's own 'teeth').
+  float teeth = (uChew * k) * ${glslFloat(CHEW_REACH)};
   float strandLen = (uFiberLen * k) * STRAND_MULT;
   float edge = angTerm + slop + 2.0 * teeth + strandLen * 1.05 + aa;
   return u < -max(gateReach(), edge) && tight + uBaseBias * 0.4 < -edge;
