@@ -1,5 +1,7 @@
 import { describe, expect, it } from 'vitest'
 import { frameArtwork } from './framing'
+import { DEFAULT_CONFIG } from './config'
+import { decodeState, encodeState } from './state'
 
 describe('frameArtwork', () => {
   it('pins the artwork at cssPx on its long side and scales the box by the same factor', () => {
@@ -39,5 +41,37 @@ describe('frameArtwork', () => {
     expect(f.image).toEqual({ w: 0, h: 0 })
     expect(f.canvas).toEqual({ w: 0, h: 0 })
     expect(f.offset).toEqual({ x: -0, y: -0 })
+  })
+})
+
+describe('state: the three edge factory options', () => {
+  it('round-trips the three edge factory options', () => {
+    const config = {
+      ...DEFAULT_CONFIG,
+      edgeShape: 'torn' as const,
+      edgeFinish: 'paper' as const,
+      edgeWidthUnit: 'percent' as const,
+    }
+    const decoded = decodeState(encodeState(config, {}))
+    expect(decoded).not.toBeInstanceOf(Error)
+    if (decoded instanceof Error) return
+    expect(decoded.config.edgeShape).toBe('torn')
+    expect(decoded.config.edgeFinish).toBe('paper')
+    expect(decoded.config.edgeWidthUnit).toBe('percent')
+  })
+
+  it('rejects an unknown edge shape by name', () => {
+    const decoded = decodeState('#edgeShape=hull')
+    expect(decoded).toBeInstanceOf(Error)
+    expect(String((decoded as Error).message)).toContain('edgeShape')
+  })
+
+  it('does not accept the old edgeMode param', () => {
+    // Old links are not supported (design §9). `edgeMode` is simply an unknown key, so it is
+    // ignored and every edge field falls back to its default.
+    const decoded = decodeState('#edgeMode=torn')
+    expect(decoded).not.toBeInstanceOf(Error)
+    if (decoded instanceof Error) return
+    expect(decoded.config.edgeShape).toBe(DEFAULT_CONFIG.edgeShape)
   })
 })

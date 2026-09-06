@@ -20,16 +20,35 @@ import { Segmented, Slider } from './primitives'
  * disappears without leaving a hole in the sequence behind it.
  */
 
-/** Every patch key one of the design's own sections already renders. */
+/**
+ * Every patch key one of the design's own sections already renders.
+ *
+ * "02 Edge" now renders every shape and finish knob its rebuilt sub-cards carry (task 9,
+ * `EdgeSection.tsx`'s `SHAPE_ROWS` / `FINISH_ROWS`), not only the small subset the old
+ * `HULL_ROWS` / `TORN_ROWS` picked out — so this set grew past the brief's literal "drops the
+ * five deleted keys and gains `sheet.edgeWidth`, `sheet.edgeVariance`" to also curate the shape-
+ * and finish-only knobs the new sub-cards show, so they are not ALSO rendered a second time by
+ * `libraryGroups` below. Flagged as a deviation in the task-9 report.
+ */
 export const CURATED_KEYS: ReadonlySet<string> = new Set([
-  // 02 Edge
-  'sheet.minDist',
-  'sheet.maxDist',
+  // 02 Edge — universal
+  'sheet.edgeWidth',
+  'sheet.edgeVariance',
+  // 02 Edge — shape (smooth or torn)
   'sheet.angularity',
-  'sheet.thickness',
+  'sheet.tearFreq',
+  'sheet.tearAngular',
   'sheet.looseness',
-  'sheet.tearAmp',
+  'sheet.tearMix',
+  'sheet.chew',
+  // 02 Edge — finish (paper only)
   'sheet.deckleWidth',
+  'sheet.deckleLight',
+  'sheet.deckleTex',
+  'sheet.fibers',
+  'sheet.fiberLen',
+  'sheet.tearShadow',
+  // 02 Edge — shared
   'sheet.sheetCrumple',
   'sheet.seed',
   'paperColor',
@@ -176,8 +195,8 @@ export interface FactorySectionProps {
 /**
  * The `DemoConfig` factory options — also NO counterpart in the mockup, and also real: each one
  * changes the shape of the program rather than one draw, which is why every control here rebuilds
- * the stage (§6.5). `edgeMode` is absent: the curated "02 Edge" Hull/Torn/Both toggle owns it, and two
- * controls writing one option would only disagree.
+ * the stage (§6.5). `edgeShape` / `edgeFinish` / `edgeWidthUnit` are absent: the curated "02 Edge"
+ * shape / finish / unit toggles own them, and two controls writing one option would only disagree.
  */
 export function FactorySection({ config, onChange }: FactorySectionProps): ReactNode {
   return (
