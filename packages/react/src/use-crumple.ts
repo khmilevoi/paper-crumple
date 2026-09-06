@@ -11,7 +11,7 @@ import type {
 } from '@paper-crumple/core'
 import { ABORTED } from '@paper-crumple/core'
 import { useEffect, useState, useSyncExternalStore } from 'react'
-import { acquire, pendingAcquisition } from './acquire.js'
+import { acquire, pendingAcquisition, stageSignal } from './acquire.js'
 import type { Crumple } from './crumple.js'
 import { createCrumpleCore, onRunEnd, onRunStart, onRunStep, readCrumple } from './crumple-state.js'
 import type { CrumpleOptions, CrumpleSnapshot, ReducedMotion } from './crumple-types.js'
@@ -284,6 +284,50 @@ export function useCrumple<S extends SpriteSource>(o: CrumpleOptions<S>): Crumpl
     if (view === null) return
     syncSprite(view)
   }, [view, spriteKey, src, syncSprite])
+
+  const frameTo = o.frameTo
+  useEffect(() => {
+    if (core.frameTo === frameTo) return
+    // Mirrored into the record rather than derived at render: the snapshot must be one cached
+    // object, rebuilt only at a bump (§5.5).
+    // eslint-disable-next-line react-hooks/immutability -- `core` is an intentionally mutable record held once per hook instance and never replaced; `store.bump()` publishes each write (§5.5).
+    core.frameTo = frameTo
+    store.bump()
+  }, [frameTo, core, store])
+
+  const knobEpoch = scene.knobEpoch
+  useEffect(() => {
+    const active = core.view
+    const stage = live.stage
+    if (active === null || stage === null) return
+    const sprite = active.sprite
+    // A crumple with no sprite yet skips the join entirely: `prepare` on a key with no record
+    // returns a SheetError, and a key that is merely reserved has no record until `addBody`
+    // finishes, so joining here would report a library error for the ordinary sequence of moving
+    // a knob while a tile is still mounting (§4.3).
+    if (sprite === null) return
+    if (pendingAcquisition(stage, sprite.key) !== undefined) return
+    let cancelled = false
+    void (async () => {
+      // A knob whose descriptor moves geometry makes the next demand answer SourceExpiredError,
+      // which the stage turns into a re-source. That work is still in flight when `stage.set`
+      // returns, and `prepare` is the one demand that waits for it — reading `View.frame` any
+      // earlier reads the frame the sprite is about to leave.
+      const joined = await stage.prepare(sprite.key, { signal: stageSignal(stage) })
+      if (cancelled) return
+      if (joined instanceof Error) {
+        report(joined)
+        return
+      }
+      // A landed re-source emits nothing at all, so this bump is the only thing that re-reads
+      // `frame` and `frameStyle` (§5.5).
+      active.refresh()
+      store.bump()
+    })()
+    return () => {
+      cancelled = true
+    }
+  }, [knobEpoch, core, live, report, store])
 
   /**
    * Disposal, from either half of the pair. Idempotent: React runs the ref's null call before the
