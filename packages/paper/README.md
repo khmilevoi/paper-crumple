@@ -60,12 +60,26 @@ someone else's megabytes. `tiles` and the pack are both opt-in — `paperSheet()
 
 <!-- /shared:install-and-import -->
 
-## Edge modes
+## The edge: shape, finish, width
 
-`paperSheet({ edgeMode })` is a factory option and not a knob, because it changes which set of
-knobs exists at all. `'hull'` is the default and needs no tile: it traces the artwork's alpha and
-cuts the sheet to it. `'torn'` adds the tear, the teeth and the fibre, and is the mode that reads
-the paper tiles.
+`paperSheet({ edgeShape, edgeFinish })` are factory options and not knobs, because together they
+pick which set of knobs exists at all. `edgeWidth` — how far the paper reaches past the artwork —
+is a **knob**, present in every combination and animatable to `0`, at which point the silhouette
+collapses onto the artwork's alpha and the finish switches off with it: `edgeWidth = 0` is "just the
+artwork", with no rebuild needed to get there.
+
+|                       | `edgeFinish: 'clean'`                            | `edgeFinish: 'paper'`                                                          |
+| --------------------- | ------------------------------------------------ | ------------------------------------------------------------------------------ |
+| `edgeShape: 'smooth'` | plain cut, no tile needed                        | clean silhouette, deckle band, fibres and tear shadow                          |
+| `edgeShape: 'torn'`   | ragged noise-thresholded contour, no tile needed | the ragged contour plus the paper finish — the mode that reads the paper tiles |
+
+`edgeShape: 'smooth'` is the default and traces the artwork's alpha with a CPU polygon (straight
+runs, sharp corners); `edgeFinish: 'clean'` is the default and adds nothing to the rim. Only
+`edgeFinish: 'paper'` reads the `tiles` subpath below.
+
+Each of the four combinations exposes a different count of knobs from the `sheet` slot alone:
+`smooth`/`clean` **24**, `smooth`/`paper` **30**, `torn`/`clean` **28**, `torn`/`paper` **34**
+(design 2026-09-05 §2.4).
 
 ## The tiles subpath
 
@@ -74,11 +88,11 @@ import { tiles } from '@paper-crumple/paper/tiles'
 ```
 
 Four 512×512 grayscale WebP files — 333 KB in total — carrying the only four channels the shader
-ever samples. They are **opt-in**, and `paperSheet()` defaults to `tiles: null`: the default edge
-mode is `hull`, which needs no tear, no teeth and no fibre at all, so the modal consumer would
-otherwise be charged for an asset their configuration cannot use. Without them the sheet renders
-against a neutral texel — the render with the photograph turned off, not a render with garbage in
-it.
+ever samples. They are **opt-in**, and `paperSheet()` defaults to `tiles: null`: the default is
+`edgeShape: 'smooth'`, `edgeFinish: 'clean'`, which needs no tear, no teeth and no fibre at all, so
+the modal consumer would otherwise be charged for an asset their configuration cannot use. Without
+them the sheet renders against a neutral texel — the render with the photograph turned off, not a
+render with garbage in it.
 
 The subpath exports a **named** `tiles` rather than a default, so the specifier and the identifier
 match and a reader of the import line can tell what it brought in.
