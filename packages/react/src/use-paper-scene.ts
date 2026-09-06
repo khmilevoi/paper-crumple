@@ -141,7 +141,25 @@ export function usePaperScene(o: SceneOptions): Scene {
       }
 
       landed = built
-      offs.push(built.on('error', dispatchError))
+      offs.push(
+        built.on('error', (e) => {
+          // The loss GlError is orphaned with `view: null` and arrives immediately after the
+          // `lost` event, in the same synchronous stack. Latch it as the scene's cause; anything
+          // later must not overwrite it.
+          if (built.lost && core.error === null) core.error = e.error
+          dispatchError(e)
+          // Bump on every error, not only on a loss: `stage.warnings` grows at runtime and this
+          // is the only moment it can have (§5.5).
+          store.bump()
+        }),
+      )
+      offs.push(
+        built.on('lost', () => {
+          // `readScene` derives `status` and `lost` from `stage.lost`, so the listener's whole
+          // job is to give it a reason to run.
+          store.bump()
+        }),
+      )
       core.stage = built
       core.status = 'ready'
       core.error = null
