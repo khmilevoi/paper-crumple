@@ -29,6 +29,7 @@ function instance(o?: Partial<CrumpleValue>): CrumpleValue {
     refresh: () => {},
     draw: () => {},
     sync: () => {},
+    retry: () => {},
     ...o,
   }
 }

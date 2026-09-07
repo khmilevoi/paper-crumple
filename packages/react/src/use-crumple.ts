@@ -385,6 +385,19 @@ export function useCrumple<S extends SpriteSource>(o: CrumpleOptions<S>): Crumpl
     swap(view, stage, opts, controller, seq)
   })
 
+  /**
+   * The escape from a rolled-back key (§2.6). Clearing `synced` IS the bypass: it is the only
+   * thing refusing the re-request, and `syncSprite` rebuilds everything else — a new `seq`, a new
+   * controller, a fresh `pending` — from the current options.
+   */
+  const retry = useEvent((): void => {
+    const view = core.view
+    if (view === null) return
+    // eslint-disable-next-line react-hooks/immutability -- `core` is an intentionally mutable record held once per hook instance and never replaced; `store.bump()` publishes each write (§5.5).
+    core.synced = null
+    syncSprite(view)
+  })
+
   const view = snapshot.view
   const { spriteKey, src } = o
   useEffect(() => {
@@ -543,5 +556,5 @@ export function useCrumple<S extends SpriteSource>(o: CrumpleOptions<S>): Crumpl
   })
 
   // Deliberately a fresh object per render: it carries the reactive snapshot (§2.1).
-  return { ...snapshot, frameStyle, artworkStyle, ref, play, stop, refresh, draw, sync }
+  return { ...snapshot, frameStyle, artworkStyle, ref, play, stop, refresh, draw, sync, retry }
 }

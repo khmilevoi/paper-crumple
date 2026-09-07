@@ -162,4 +162,9 @@ export interface CrumpleMethods {
   /** Re-read the view's getters into a new snapshot and publish it. The generic escape for a raw
    *  `view.set` / `view.once` the binding has no method for (§2.2, §11). */
   sync(): void
+  /** Re-run the sprite driver for the current options, bypassing the `synced` check (§2.6).
+   *  `synced` is written before the swap and never reset on failure, so a rolled-back key is
+   *  otherwise refused forever and the only declarative escape is key-away-and-back, which plays
+   *  a full fold to a sprite already on screen. A no-op while detached. */
+  retry(): void
 }
