@@ -259,9 +259,21 @@ test('a superseded swap never settles, and its successor settles once (§2.1)', 
   )
   onSettle.mockClear()
   await probe.rerender({ options: { spriteKey: 'b', src: 'b.png', onSettle } })
+  const opened = probe.current.pending
+  expect(opened?.phase).toBe('swapping')
+  if (opened === null || opened.phase !== 'swapping') return
+  // `b`'s run has to be captured here: the fake settles only the run it handed out LAST
+  // (`testing/fake-stage.ts:150`), so once `c` has opened, `settleRun` can no longer reach `b`.
+  const superseded = opened.run
   await probe.rerender({ options: { spriteKey: 'c', src: 'c.png', onSettle } })
   // The `b` run settles late, after `c` superseded it. The superseded request reports nothing at
-  // all — "React changed its mind" is not an outcome a consumer renders.
+  // all — "React changed its mind" is not an outcome a consumer renders — and it must not clear
+  // the live request's `pending` on its way past.
+  await probe.run(() => {
+    superseded.stop()
+  })
+  expect(onSettle).not.toHaveBeenCalled()
+  expect(probe.current.pending).toMatchObject({ key: 'c', phase: 'swapping' })
   fake.views[0]?.settleRun(undefined)
   await flush()
   expect(onSettle).toHaveBeenCalledTimes(1)
