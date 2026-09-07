@@ -47,7 +47,10 @@ export interface RunHost {
 }
 
 export interface PlayOptions {
-  /** One multiplier over the traversed dwells (§7.2). Clamped at zero; never negative. */
+  /** Wall time in **milliseconds** for the whole traversal, not a multiplier: the authored dwell
+   *  cadence is rescaled into it, so `play('flat', 'ball', { duration: 585 })` finishes at t = 585
+   *  (§7.2). Clamped at zero; never negative. A `duration` shorter than the blocking GPU cost is
+   *  legal — the run overruns and no pose is skipped. */
   duration?: number
   signal?: AbortSignal
 }

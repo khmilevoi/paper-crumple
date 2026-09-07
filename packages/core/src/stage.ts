@@ -111,6 +111,15 @@ export interface StageCommon {
   /** `readonly KnobDescriptor[]` at runtime, so a JS consumer gets ranges, kinds and labels from
    *  the same descriptors that generate the types (§10.6). */
   readonly knobs: readonly KnobDescriptor[]
+  /** Every descriptor's default under its own **namespaced** path — the same frozen object the
+   *  registry builds once at mount, handed out by identity so a consumer can use it as an effect
+   *  dependency (§3.4). `knobs` carries slot-local keys with no path, so a consumer holding a knob
+   *  key had no way to ask what its default was; this is that answer. These are the registry's own
+   *  paths, and they are not all the spelling `set()` takes: a **shared** knob — core's own
+   *  (`core.paperColor`), or any slot descriptor that declares `binds` — is written back through
+   *  the bare shared key (`paperColor`), which is what writes every bound descriptor at once.
+   *  Every other path (`sheet.grain`) is written back exactly as it is keyed here. */
+  readonly defaults: KnobValues
   /** The synchronous form of the `lost` event: a `useEffect` that runs after the event has
    *  already fired has no other way to ask (amendment 16). */
   readonly lost: boolean
@@ -2271,6 +2280,7 @@ function buildStage(p: StageParts): BuiltStage {
     warnings: p.warnings,
     caps: p.ctx.caps,
     knobs: p.registry.descriptors,
+    defaults: p.registry.defaults(),
     get lost() {
       return p.isLost()
     },
