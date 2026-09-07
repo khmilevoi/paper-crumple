@@ -1,22 +1,41 @@
 # Usage: `@paper-crumple/react`
 
-Status: **derived from the design, not from an implementation.** Nothing here has been compiled or
-run — the package does not exist yet. Every hook, component, option and return type below is taken
-from `docs/superpowers/specs/2026-09-06-paper-crumple-react-design.md`, with the section it comes
-from cited inline.
+Status: **written from the design, reconciled against the shipped package.** `@paper-crumple/react`
+is built, merged, and consumed by `examples/playground` — the first real consumer. Every hook,
+component, option and return type below was taken from
+`docs/superpowers/specs/2026-09-06-paper-crumple-react-design.md` and has since been checked against
+`packages/react/src/**`.
 
-This document also documents **an additive amendment to `@paper-crumple/core` that does not exist yet
-either**: a new `SwapToOptions` interface carrying `key`, which `view.swapTo` takes in place of
-`SwapOptions`, and which the core must export from its barrel (§5.3). The binding cannot honour a
-caller-supplied sprite key without it, so the two ship together. Everywhere the amendment is
-load-bearing it is called out by name rather than quietly assumed — see
+What that check covered, so you know what the claims are worth. **Every consumer-facing code sample
+in this document has been compiled against the published types** — the imports resolve, the option
+names and types are the real ones, and the shape each sample destructures is the shape the package
+returns; the `SceneOptions` / `Scene` / `CrumpleOptions` / `Crumple` listings were checked for
+assignability in both directions against the exported types, so they are neither narrower nor wider
+than what ships. The behavioural claims were read against the source and against the suite in
+`packages/react/src/**/*.test.tsx`, which pins most of them by name. **What was not done is running
+any of it in a browser**: the GL behaviour these samples describe rests on the package's own tests,
+not on this document. The four *internal* listings — `useEvent`, `acquire`, the reduced-motion
+branch, and the entrance's three calls — mirror `packages/react/src/use-event.ts`, `acquire.ts` and
+`use-crumple.ts` but are trimmed for reading and are not compiled; treat them as an account of the
+behaviour, not as the code.
+
+The additive core amendment this document was written to anticipate — a `SwapToOptions` interface
+carrying `key`, which `view.swapTo` takes in place of `SwapOptions` — **has shipped**, with the
+binding, in the form described here. It is exported from the core's barrel
+(`packages/core/src/index.ts:133`) and declared at `packages/core/src/view.ts:28`. Everywhere it is
+load-bearing it is still called out by name rather than quietly assumed — see
 [The swap](#6-the-swap-the-headline).
+
+Where the binding was found *wanting* by that first consumer, the gaps are recorded in
+[`docs/design/2026-09-06-react-binding-findings.md`](./design/2026-09-06-react-binding-findings.md)
+and are not restated here: this document describes what the package does, and that one describes
+what a real application then had to write for itself.
 
 Two citation styles appear below and they point at different documents. **`§n`** is a section of the
 React design spec above. **`packages §n`** is a section of
 `docs/superpowers/specs/2026-08-26-paper-crumple-packages-design.md`, which is the spec
-[`docs/USAGE.md`](./USAGE.md) is written from. File-and-line citations point at the real core source
-in this repository, which does exist.
+[`docs/USAGE.md`](./USAGE.md) is written from. File-and-line citations point at the core source in
+this repository and were re-anchored against it when this document was reconciled.
 
 **Read [`docs/USAGE.md`](./USAGE.md) first.** This document does not restate the convention, the
 dwell arithmetic, the knob reference or the error taxonomy; it says what React changes about them,
@@ -42,8 +61,19 @@ import { usePaperScene, PaperScene, useScene, useCrumple, Crumple } from '@paper
 no runtime dependencies at all** (§3):
 
 ```json
-"peerDependencies": { "@paper-crumple/core": "^1", "react": "^19" }
+"dependencies": {},
+"peerDependencies": {
+  "@paper-crumple/core": "workspace:^",
+  "react": "^19",
+  "typescript": ">=5.0"
+},
+"peerDependenciesMeta": { "typescript": { "optional": true } }
 ```
+
+That is the manifest as it stands in the repository: `workspace:^` is rewritten to the published
+version range on release, so an installed copy reads `^1`. The third peer is an *optional* one and
+carries no runtime weight — the package ships types, and declaring the compiler as a peer is what
+lets a consumer's TypeScript version be checked rather than assumed.
 
 USAGE.md states the rule this obeys: *"if you are publishing a wrapper around this library, declare
 core in `peerDependencies` and never in `dependencies`, because that is the one install shape that
@@ -54,18 +84,22 @@ narrowing a failure as a success value, on the most routine event in a scrolling
 across the seam.
 
 **The package calls `assertSingleCore()` for you, and it is not a guarantee.** `usePaperScene` calls
-it once per scene under `process.env.NODE_ENV !== 'production'`, **before `create`**, and a returned
+it once per build — so on every rebuild, not only the first — under
+`globalThis.process?.env?.NODE_ENV !== 'production'`, **before `create`**, and a returned
 `CoreDuplicateError` **fails the scene outright**: `status: 'failed'`, `error` set, and `create` is
 never called (§3). USAGE is explicit that this is *"a startup failure, not a once-per-session console
 warning"*, and refusing to build is what keeps §4.1's invariant intact — `error` is non-null exactly
-when `status === 'failed'`, with no exception carved out for this case.
+when `status === 'failed'`, with no exception carved out for this case. The environment is read
+through `globalThis` rather than as a bare `process` identifier, so the package needs no
+`@types/node`; the cost is that a bundler's `process.env.NODE_ENV` define does not statically strip
+the call, and an environment with no `process` at all is treated as development.
 
 **But it catches the duplicate only when this package's copy of core lost the registration race.**
 `checkSingleCore` returns `undefined` when the marker is the caller's own
-(`packages/core/src/single-core.ts:41`) and registration is a module-load side effect
+(`packages/core/src/single-core.ts:43`) and registration is a module-load side effect
 (`single-core.ts:53`), so if the copy `@paper-crumple/react` resolves registered first, its
 `assertSingleCore()` is clean with two copies live — the *other* copy is the one that knows, and it
-says so through the load-time `console.warn` (`single-core.ts:56`). The assertion is still worth
+says so through the load-time `console.warn` (`single-core.ts:57`). The assertion is still worth
 making here, because a wrapper is precisely the install shape that produces the duplicate. **What you
 should not conclude is that a green scene proves you have one core.** If `instanceof` is behaving
 strangely, check your lockfile before you check this package.
@@ -107,7 +141,7 @@ prop.
 
 **`fit` and `tag` are fixed when the view is created, and changing them later does nothing** — `tag`
 is written at `stage.view()` (`packages/core/src/stage.ts:1471`) and `View.tag` is a read-only
-accessor (`view.ts:88`). Because the `ref` that creates the view is identity-stable (next section),
+accessor (`view.ts:86`). Because the `ref` that creates the view is identity-stable (next section),
 the creating callback is not re-invoked, so **a changed `fit` or `tag` is silently ignored until the
 view is rebuilt.** Worth knowing before it is discovered: if these must vary, vary the React `key` of
 the component that owns them.
@@ -140,7 +174,7 @@ reference is passed every render, *"the callback will temporarily clean up and r
 re-render"*. An unstable `crumple.ref` would therefore **dispose the view and build a new one on every
 render** — `view.dispose()` followed by `stage.view()` on the element it just released, cancelling
 every run in flight. It would not even raise the claimed-canvas refusal, because the cleanup runs
-first and `dispose` releases the element's claim (`stage.ts:1546`). The defect is silent churn, which
+first and `dispose` releases the element's claim (`stage.ts:1562`). The defect is silent churn, which
 is worse than an error, and the whole lifetime rule in §5.2 rests on that identity holding still.
 
 What this buys you in practice:
@@ -202,7 +236,7 @@ function usePaperScene(o: SceneOptions): Scene
 You write the factory call yourself, and **both** parameters you are handed go into it:
 
 ```tsx
-function Gallery({ edgeShape }: { edgeShape: 'torn' | 'box' }) {
+function Gallery({ edgeShape }: { edgeShape: 'torn' | 'smooth' }) {
   const scene = usePaperScene({
     create: (signal, onError) =>
       pc.paperStage({
@@ -259,14 +293,14 @@ which the expensive thing happens exactly when you said it should. Put in `deps`
 `create` closure actually reads, and nothing else.
 
 **A rebuild is not a reset** (§4.1). The knobs you have moved are re-applied to the new stage once it
-is up, and a key the new slot set no longer declares — a `torn`-only knob after a switch to `hull` —
+is up, and a key the new slot set no longer declares — a `torn`-only knob after a switch to `smooth` —
 is skipped rather than reported. `generation` is bumped on every landed build, and it is the
 dependency to hang any imperative re-read on.
 
 **`play` and `stop` on a scene that is not `ready` are not errors and do not queue** (§4.1): `stop`
 is a no-op and `play` resolves to an empty report — no views, nothing skipped, nothing failed, and
 **`completed: false`**, which is what a broadcast over zero eligible views reports
-(`packages/core/src/collisions.ts:133`, `stage.ts:2178`) — *"reporting `true` for a wave that never
+(`packages/core/src/collisions.ts:133`, `stage.ts:2195`) — *"reporting `true` for a wave that never
 happened is the one answer a consumer cannot act on"*. `stage.play` never returns an Error and never
 rejects (packages §4.4), and the binding does not become the first place in the family where a wave
 can fail.
@@ -293,7 +327,7 @@ leaves `ready` detaches its views, which is the `'detached'` state and the `chil
 again — the tiles come back as placeholders rather than staying on screen as dead canvases.
 
 `warnings` mirrors `stage.warnings` and is re-read on every store bump, not captured once: it **grows
-at runtime** (`stage.ts:942`, `stage.ts:1865`). Degradation is a value, not a rejection (packages §4)
+at runtime** (`stage.ts:942`, `stage.ts:1881`). Degradation is a value, not a rejection (packages §4)
 — a paper tile that failed to fetch leaves a usable stage that renders without grain.
 
 ### `PaperScene` and `useScene`
@@ -303,8 +337,9 @@ at runtime** (`stage.ts:942`, `stage.ts:1865`). Degradation is a value, not a re
 ```
 
 A context provider and nothing else — **it renders no DOM** (§4.2). `useScene()` reads it, and
-`useCrumple` calls `useScene()` unless you pass an explicit `scene` option, which is the escape hatch
-for two scenes on one page.
+`useCrumple` uses what it finds unless you pass an explicit `scene` option, which is the escape hatch
+for two scenes on one page. (The hook is called either way — it is the value that is ignored, not the
+call.)
 
 `useScene()` outside a provider **returns a permanently-`failed` scene carrying an Error rather than
 throwing** (§4.2). Nothing in this package throws; see [Errors](#12-errors).
@@ -378,10 +413,10 @@ Disposal in the **ref's cleanup** rather than in a later effect is load-bearing,
 itself. The `ViewError` for a claimed canvas names React out loud:
 
 > "that element already has a live view. […] Dispose the first; React runs a cleanup before the
-> second effect, so StrictMode does not trip this." — `packages/core/src/stage.ts:2333`
+> second effect, so StrictMode does not trip this." — `packages/core/src/stage.ts:2349`
 
 On the other end, `view.dispose()` *"leaves the element's last blitted pixels in place; the element
-itself is the consumer's"* (`packages/core/src/view.ts:105`) — which is exactly the behaviour a React
+itself is the consumer's"* (`packages/core/src/view.ts:131`) — which is exactly the behaviour a React
 unmount wants, and why an unmounting tile does not flash white.
 
 Cleanup order does not matter in either direction. `dispose()` is idempotent and `show(null)` /
@@ -445,7 +480,7 @@ function useCrumple<S extends pc.SpriteSource>(o: CrumpleOptions<S>): Crumple
 as the core's own `AddOptions` does (`stage.ts:96`). So a bare `ImageBitmap` **written at the call
 site** fails to typecheck without `pin: true`, instead of typechecking and then failing at runtime
 with the `AssetError` the core raises for a source no re-supplier can be derived from
-(`stage.ts:1796`):
+(`stage.ts:1816`):
 
 ```tsx
 const bitmap = useCrumple({ spriteKey: 'hero', src: myImageBitmap, pin: true })
@@ -460,21 +495,22 @@ where the byte budget silently stops bounding anything.**
 
 **`size` is not an option, and v1 is always `'managed'`** (§5.1). Offering `'manual'` would have been
 a promise with nothing behind it: under `'manual'` the core never writes `canvas.width/height`
-(`stage.ts:1057` guards on `'managed'`), and `canvasProps` excludes those attributes (below),
+(`stage.ts:1059` guards on `'managed'`), and `canvasProps` excludes those attributes (below),
 so the destination would sit at its stock 300×150 with nobody able to size it. Rather than reopen the
 attribute and make the two settings mean opposite things about who owns the element, `'manual'` is
 deferred and the escape hatch is the raw `scene.stage.view()`.
 
 **`duration` is wall time in milliseconds for the whole traversal — not a multiplier** (§5.1), and it
-applies to every run the hook starts, the entrance and the swap alike. The ball hold is scaled with
-it; the only thing not scaled is the excess a slow fetch adds on top of that hold
+applies to every run the hook starts: the entrance, the swap, **and `crumple.play` itself**, which
+passes the hook's value unless that call carries its own. The ball hold is scaled with it; the only
+thing not scaled is the excess a slow fetch adds on top of that hold
 (`dwell.ts:213`, `runner.ts:502`). Pass a per-run value through
 `crumple.play(from, to, { duration })` when one run needs to differ — that one is the core's own
 `PlayOptions.duration`, and USAGE's dwell arithmetic applies to it unchanged.
 
 **`onError` takes a `pc.StageEvent<'error'>`, not a `pc.Events['error']`** (§5.1), and the reason is a
 fact about the core rather than a preference: **a view's bus carries exactly `start`, `step` and
-`end`.** An error takes packages §10.6's route straight onto the *stage's* bus (`stage.ts:1105`), so
+`end`.** An error takes packages §10.6's route straight onto the *stage's* bus (`stage.ts:1109`), so
 `view.on('error', …)` compiles and is silently dead. The binding subscribes on the stage and filters
 to this view.
 
@@ -486,7 +522,8 @@ inside the user gesture because of it (packages §7.1).
 `requested` and `shown` are separate because they genuinely diverge (§5.1). A swap whose target fails
 **rolls back to the previous sprite** — `state === 'crumpling.recover'`, and the `Run<SwapResult>`
 returns the target's Error — so the prop says B while the canvas shows A. The instance reports both
-and the Error, and **it does not retry.** A retry policy inside an animation library would be a
+and the Error, which also reaches your `onError` with `observed: true`, since it is on
+`crumple.error` as well. And **it does not retry.** A retry policy inside an animation library would be a
 network policy nobody asked for; if you want one, change `spriteKey` again.
 
 **`error` reports the last settled run, and is cleared when the next one starts** — on `start`, not
@@ -497,27 +534,28 @@ mean "something once went wrong", which is not a state any UI has a rendering fo
 
 ## 5. Reactive state, and why it is not event-driven
 
-`state`, `parked`, `pose`, `shown`, `frame` and `frameStyle` are served through
-`useSyncExternalStore`, over a store **the binding versions on every call it makes into the core**
-(§5.5) — `view.show`, `view.draw`, `view.refresh`, `view.play`, `view.swapTo`, view creation and
-disposal, and the settlement of a `stage.prepare` — **and** by the three real view events, **and** by
-`stage.on('error')` filtered to this view.
+`state`, `parked`, `pose`, `shown`, `requested`, `error`, `frame`, `frameStyle` and `view` are served
+through `useSyncExternalStore`, over a store **the binding versions on every call it makes into the
+core** (§5.5) — `view.show`, `view.draw`, `view.refresh`, `view.play`, `view.stop`, `view.swapTo`,
+`view.crumpleTo`, view creation and disposal, and the settlement of a `stage.prepare` — **and** on
+every Error it reports, **and** by the three real view events, **and** by `stage.on('error')`
+filtered to this view.
 
 **Events are a supplementary source, not the source**, and this is worth understanding rather than
 taking on trust, because the gap is not an edge case — it is the default path:
 
 - **`view.show()` emits nothing on an idle view.** `transition(…, 'show')` carries `emits: live`
-  (`packages/core/src/view-state.ts:125`) and `live` is false when the view is idle. So
+  (`packages/core/src/view-state.ts:120`) and `live` is false when the view is idle. So
   `entrance: 'flat'` — the default — and every reduced-motion swap move `view.sprite` from `null` to
   a sprite **with no event at all**. On an event-driven store `shown` would stay `null` forever and
   your placeholder would never lift.
-- **`view.draw()` emits nothing** (`emits: false`, `view-state.ts:117`) while moving `view.pose`, so
+- **`view.draw()` emits nothing** (`emits: false`, `view-state.ts:107`) while moving `view.pose`, so
   the `draw('ball')` of `entrance: 'uncrumple'` is invisible.
 - **A landed re-source emits nothing.** `invalidateSpriteAt` ends in `v.refresh()`
   (`stage.ts:899-921`), and `refresh` is event-free by design — so "re-frame once the re-source has
   landed" has no event to hang on.
 - **`crumpling.ball` is never observable.** The core sets it in the rise stepper's `onDone`
-  (`runner.ts:496`) — after the rise's last `step`, before the descent's first — so for the entire
+  (`runner.ts:498`) — after the rise's last `step`, before the descent's first — so for the entire
   park, which is the whole point of the ball, a listener reads `crumpling.rise`.
 - **`error` never reaches a view's bus at all**, as above.
 
@@ -533,7 +571,7 @@ That last one is why `parked` exists as its own field rather than as `state === 
 `parked` is maintained from what the events do carry: a swap's `start` reports `via`, the resolved
 ball index, and the run is parked from the `step` whose `pose === via`. **It is cleared by `end` and
 by `start`, not merely by the next `step`** — a park cut short by `view.stop()`, by supersession or by
-`dispose()` never reaches a descent step at all (`runner.ts:184-195`, `runner.ts:466`), so a
+`dispose()` never reaches a descent step at all (`runner.ts:184-195`, `runner.ts:467`), so a
 "until the next step" rule would latch `parked` at `true` for the rest of the component's life on
 every stopped or unmounted swap.
 
@@ -574,6 +612,14 @@ decided by scope, not by method, and the narrower scope wins (packages §4.4).
 **`spriteKey` is the trigger.** The swap fires when it changes; `src` is read as the source for the
 new key, and nothing else about the render causes a swap.
 
+**A request for the key already shown is refused before anything observable happens**, and that is
+worth knowing before you build a transport on top of it: the hook returns before `requested` moves,
+before its sequence number advances, and before any library call — so no `add`, no run, no
+`start` / `end`, and **no change to the snapshot at all**. From the outside "the request produced
+silence" and "the request was never considered" are the same thing. If you arm state when you ask for
+a swap — a spinner, a fold direction, an audio sequence — make the same-key check yourself, before
+you arm it.
+
 ```tsx
 function Hero({ selected }: { selected: Item }) {
   const crumple = useCrumple({
@@ -604,27 +650,33 @@ function Hero({ selected }: { selected: Item }) {
 Both are counter-intuitive enough to restate, because the design of this hook is unreadable without
 them.
 
-**`view.swapTo` mints its own key.** `packages/core/src/stage.ts:1413`:
+**`view.swapTo` mints its own key.** `packages/core/src/stage.ts:1429`:
 
 ```ts
 const key = `swap:${presetForImageId(String(src))}:${String(swapCounter++)}`
 ```
 
-and the docblock above it says outright that *"a consumer who wants a stable key calls `add()` and
-`crumpleTo()` themselves."* Because the fold preset is `presetForImageId(key)` at fit time
-(`stage.ts:1647`), that monotonic counter means **`swapTo` folds the same picture differently on every
-swap.**
+The key is derived from the source so a caller swapping a URL in does not have to mint one — but
+because the fold preset is `presetForImageId(key)` at fit time (`stage.ts:1663`), that monotonic
+counter means **the minted path folds the same picture differently on every swap.** The docblock
+above the mint says so, and says what to do instead: *"A consumer who wants a stable key passes
+`o.key` (§5.3): the `add()` below runs under it, and a key already resident is adopted above without
+an `add()` at all."*
 
-**`add()` on a live key is refused** (`stage.ts:1782`) with a `SheetError`, because *"the hull cache
+**`add()` on a live key is refused** (`stage.ts:1798`) with a `SheetError`, because *"the hull cache
 is keyed on (sprite key, sdfRes, hull knobs) and the bitmap is not in that key, so the new sprite
 would inherit the old hull."*
 
-Together those make a stable, caller-supplied key impossible through today's `swapTo`. Hence the
-**additive core amendment** this package needs (§5.3) — a new interface, not a widened one:
+Together those made a stable, caller-supplied key impossible through the `swapTo` that existed when
+this package was designed. Hence the **additive core amendment** that shipped alongside it (§5.3) —
+a new interface, not a widened one, at `packages/core/src/view.ts:28`:
 
 ```ts
-/** `swapTo`'s options ALONE. `SwapOptions` stays as it is — it is shared with `crumpleTo`
- *  (`view.ts:17`), which takes a `Sprite` rather than a source and for which a key is meaningless. */
+/**
+ * `swapTo`'s options ALONE (§5.3). `SwapOptions` above stays as it is — it is shared with
+ * `crumpleTo`, which takes a `Sprite` rather than a source and for which a key is meaningless.
+ * Widening the shared type would have added a member one of its two users silently ignores.
+ */
 export interface SwapToOptions extends SwapOptions {
   /**
    * The key the incoming sprite is added under. Defaults to the minted `swap:…` key, which is
@@ -632,17 +684,19 @@ export interface SwapToOptions extends SwapOptions {
    * share one front, and lets the byte budget bound the result.
    *
    * A key that is already resident is a CACHE HIT, not a failure: the swap adopts the resident
-   * sprite and `src` is not read. Re-pointing a live key remains `replace()`.
+   * sprite and `src` is not read. Re-pointing a live key remains `replace()`, and a key whose
+   * `add()` is still in flight is still refused — sharing a front holds only once the first
+   * `add()` has settled.
    */
   key?: string
 }
 ```
 
-`SwapOptions` is untouched and `view.swapTo`'s parameter merely widens, so a `SwapOptions` an existing
-caller already passes still satisfies it — a minor under packages §10.2's *"minors are additive"*.
-**`SwapToOptions` must be exported from the core's barrel**, next to the existing
-`export type { SwapOptions, ViewFrame } from './view.js'`: a parameter type a consumer cannot name is
-one they cannot build a variable of, and this package's own signatures are the first to need it.
+`SwapOptions` (`view.ts:17`) is untouched and `view.swapTo`'s parameter merely widened, so a
+`SwapOptions` an existing caller already passes still satisfies it — a minor under packages §10.2's
+*"minors are additive"*. `SwapToOptions` **is** exported from the core's barrel, on the same line as
+the type it extends (`packages/core/src/index.ts:133`): a parameter type a consumer cannot name is
+one they cannot build a variable of, and this package's own signatures were the first to need it.
 
 **The resident-key clause is the half that matters.** Without it the commonest sequence in the whole
 library — A → B → A — fails on its third step, because key `a` is still resident and `add` refuses
@@ -651,12 +705,13 @@ exactly the authored ball hold rather than for a network round trip.
 
 **It is not "instant", and do not design a UI expecting it to be.** A resident swap is still
 `crumpleTo` on a non-empty view, which takes the full rise → hold → descent path
-(`stage.ts:1369-1398`) and always tickets the scaled hold through the park timer (`runner.ts:502`,
-`dwell.ts:213`). The degenerate-to-`show()` shortcut is for an **empty** view (`stage.ts:1331`), which
+(`stage.ts:1371-1394`) and always tickets the scaled hold through the park timer (`runner.ts:502`,
+`dwell.ts:213`). The degenerate-to-`show()` shortcut is for an **empty** view (`stage.ts:1364`), which
 a swap by definition is not. **What the cache hit removes is the wait, not the animation** — and
 removing the animation would be the wrong trade anyway.
 
-One claimed benefit is narrower than it sounds: *"lets two views share one front"* holds only once the
+One claimed benefit is narrower than it sounds, and the shipped docblock now says so itself:
+*"lets two views share one front"* holds only once the
 first `add` has settled, because a concurrent second `swapTo` on the same key is still refused while
 that key is merely reserved. The in-flight map below is what covers the window, and it gates `swapTo`
 too — the binding does not call `swapTo` for a key whose acquisition is in flight; it joins the
@@ -669,46 +724,54 @@ mount, the degraded reduced-motion swap, and the re-acquisition after a scene re
 call it, but four of its five lines are visible in behaviour you will otherwise find surprising:
 
 ```ts
-const inFlight = perStage.get(spriteKey) // 1
-if (inFlight === undefined) {
-  const p =
+const { inFlight, controller } = acquisitionsFor(stage) // 1
+let shared = inFlight.get(spriteKey)
+if (shared === undefined) {
+  shared =
     stage.get(spriteKey) !== undefined
-      ? stage.prepare(spriteKey, { signal: sceneSignal }) // 2
-      : stage.add(src, { key: spriteKey, signal: sceneSignal }) // 3
-  perStage.set(spriteKey, p)
-  void p.finally(() => perStage.delete(spriteKey))
+      ? stage.prepare(spriteKey, { signal: controller.signal }) // 2
+      : stage.add(src, { key: spriteKey, signal: controller.signal, ...(pin && { pin }) }) // 3
+  inFlight.set(spriteKey, shared)
+  void shared.finally(() => inFlight.delete(spriteKey))
 }
-let got = await perStage.get(spriteKey)! // 4
-if (got instanceof SheetError && liveKey(got)) {
+let got = await shared // 4
+if (isLiveKeyRefusal(got, spriteKey)) {
   // 5
-  got = await stage.prepare(spriteKey, { signal: sceneSignal })
+  const prepared = await stage.prepare(spriteKey, { signal: controller.signal })
+  if (!isPrepareNoSpriteError(prepared, spriteKey)) got = prepared
 }
 if (mySignal.aborted) return pc.ABORTED // 4
 return got
 ```
 
 1. **A per-stage map of in-flight acquisitions, keyed by sprite key.** `add` refuses a key that is
-   merely *reserved* — in flight and unfinished (`stage.ts:1782`, and `stage.ts:371`: *"a live key is
+   merely *reserved* — in flight and unfinished (`stage.ts:1798`, and `stage.ts:371`: *"a live key is
    refused whether or not it has finished"*). Two `Crumple`s sharing a `spriteKey` and mounting in
    one commit would both see `stage.get() === undefined`, both call `add`, and the second would get a
    `SheetError`. The map is what makes "a second `Crumple` on a picture already on screen appears
    without a fetch" true rather than aspirational. It lives beside the stage and dies with it.
 2. **`prepare`, not the resident sprite.** `stage.get` returns the record's sprite, and eviction
-   *"drops a front and leaves the sprite rebuildable"* (`stage.ts:376`) — so a resident key can hand
+   *"drops a front and leaves the sprite rebuildable"* (`stage.ts:379`) — so a resident key can hand
    back **a sprite with no front**. `show`ing that would set `view.sprite`, lifting your placeholder
    over an empty canvas while the re-source ran on silently. `prepare` is the one demand that *waits*
-   for a re-source rather than returning around it (`stage.ts:1888-1915`).
+   for a re-source rather than returning around it (`stage.ts:1912-1919`).
 3. `add` only when the key is genuinely absent.
-4. **The shared acquisition runs under the scene's signal, and each joiner checks its own after the
-   await.** Passing the first caller's signal would hand every joiner the first component's lifetime:
-   the first unmounts, the shared promise settles `ABORTED`, and the second `Crumple` **stays blank
-   forever**, with no error and no retry.
-5. **A live-key `SheetError` is retried exactly once, through `prepare`.** The map only knows about
+4. **The shared acquisition runs under a signal of the stage's own — not the caller's — and each
+   joiner checks its own after the await.** Passing the first caller's signal would hand every joiner
+   the first component's lifetime: the first unmounts, the shared promise settles `ABORTED`, and the
+   second `Crumple` **stays blank forever**, with no error and no retry. The controller the binding
+   passes instead is held in the same per-stage registry as the map, so it lives and dies with the
+   stage — which is the right lifetime for work several components share, and the reason an unmount
+   mid-acquisition cancels nothing but that component's own interest in the result.
+5. **A live-key refusal is retried exactly once, through `prepare`.** The map only knows about
    acquisitions this binding started, and the core's `reserved` set is private (`stage.ts:371`) —
-   neither `stage.get` nor `prepare` can see it (`stage.ts:2322`, `stage.ts:1880`). So if **you**
+   neither `stage.get` nor `prepare` can see it (`stage.ts:2338`, `stage.ts:1895`). So if **you**
    prefetch `scene.stage.add(src, { key: 'hero' })` while a `Crumple` on `spriteKey: 'hero'` is
    mounting, both callers see an absent key, both call `add`, and one takes the refusal. The fallback
-   joins the winner instead of failing a correct sequence.
+   joins the winner instead of failing a correct sequence. It is careful about *which* error it
+   keeps: if that `prepare` answers *"has no sprite under that key"* the winner's `add` is still in
+   flight and there is nothing to join, so the original live-key refusal — the cause — is reported
+   rather than the symptom.
 
 **The consumer-facing rule that falls out of 5: prefetch *before* mounting**, not alongside. The
 fallback makes the racing case correct rather than fast, and the core cannot expose `reserved` to
@@ -737,7 +800,7 @@ if (stage !== null) {
   if (sprite === pc.ABORTED) return
   if (sprite instanceof Error) return report(sprite)
   // `replace` rebuilds onto the SAME sprite record — it releases and re-installs that record's
-  // handle and front (`packages/core/src/stage.ts:1996-1998`) — so the view is already showing the
+  // handle and front (`packages/core/src/stage.ts:2087-2090`) — so the view is already showing the
   // new bytes and only needs a redraw.
   crumple.refresh()
 }
@@ -760,7 +823,7 @@ motion"). What the hook runs is:
 
 ```ts
 // reduced: show() IS the degraded swap
-const sprite = await acquire(stage, spriteKey, src, signal)
+const sprite = await acquire(stage, spriteKey, src, pin, signal)
 if (sprite === pc.ABORTED) return
 if (sprite instanceof Error) {
   report(sprite)
@@ -768,8 +831,12 @@ if (sprite instanceof Error) {
 }
 view.show(sprite)
 
-// otherwise
-const run = view.swapTo(src, { key: spriteKey, duration, signal })
+// otherwise — and the in-flight map gates this path too (see The swap)
+const pending = pendingAcquisition(stage, spriteKey)
+const run =
+  pending === undefined
+    ? view.swapTo(src, { key: spriteKey, duration, signal })
+    : view.crumpleTo(pending, { duration, signal })
 ```
 
 It goes through the same `acquire` as everything else, which is what keeps it correct in the two
@@ -806,7 +873,7 @@ already be live, in flight, or resident with an evicted front.
   `view.draw('ball')`, `view.play('ball', 'flat')`.
 
 **That order is load-bearing rather than merely tidy** (§5.4). `draw` resolves a `PoseRef` against the
-*shown* sprite's clip (`stage.ts:1508-1516`), so a `draw('ball')` issued before `show` resolves
+*shown* sprite's clip (`stage.ts:1524-1526`), so a `draw('ball')` issued before `show` resolves
 against a pose count of 1 and draws pose 0 — the flat sheet, silently, instead of the ball. If you
 ever hand-roll an entrance through `crumple.view`, show first.
 
@@ -835,6 +902,11 @@ On every change the hook diffs it against the last applied map and writes **only
 attempted. Re-sending the whole object every render is therefore free, which is what lets you keep the
 knobs in ordinary React state.
 
+**Only the keys *present* in the object are ever written, and removing one does not reset it.** The
+binding does not know a key's default and does not go looking for it, so a key you drop keeps
+whatever value it last had on the stage. A "reset everything" affordance is therefore your own: write
+the defaults out explicitly rather than emptying the object.
+
 **The one-call-per-key rule is what makes "one bad key does not abandon the batch" true** rather than
 a wish. `normalise` returns on the first invalid key and writes nothing
 (`packages/core/src/knob-registry.ts:155`), and `applyPatch` only reaches `Object.assign` for a wholly
@@ -860,7 +932,7 @@ framing state lives on the crumple, and the scene has no register of crumples to
 - Each **crumple** watches `knobEpoch` and joins `stage.prepare` for **its own** sprite, then
   recomputes `frame` and `frameStyle` and refreshes.
 - **A crumple with no sprite yet skips the join entirely.** `prepare` on a key with no record returns
-  a `SheetError` (`stage.ts:1881`), and a key that is merely reserved has no record until its `add`
+  a `SheetError` (`stage.ts:1896`), and a key that is merely reserved has no record until its `add`
   finishes (`stage.ts:1825`) — so joining there would report a library error for the perfectly
   ordinary sequence of moving a knob while a tile is still mounting. Nothing is lost: that
   acquisition is already building at the live knob values.
@@ -890,7 +962,13 @@ return <Crumple value={hero} className="hero" />
 
 That is the whole manoeuvre. The hook computes `crumple.frameStyle` — `frame`'s two boxes under the
 one scale `frameTo / max(artwork.w, artwork.h)`, as four CSS strings — and `<Crumple>` spreads it onto
-the wrapper. It is recomputed after every swap and after a hull-tier re-source has landed — the
+the wrapper. Be clear about which rectangle those four numbers describe: `width` and `height` are the
+**drawn box** — the paper, which overflows the picture by however far the edge knobs reach — and
+`left` / `top` are the negative artwork offset under the same scale, so the *artwork* lands where the
+wrapper would otherwise have sat. `frameStyle` is not the artwork's own rectangle; if that is what
+you need — to size a layout slot the paper hangs out of, say — compute it from `crumple.frame`
+yourself, as the paragraph below describes. It is recomputed after every swap and after a hull-tier
+re-source has landed — the
 `knobEpoch` join under [Knobs](#9-knobs). Omit `frameTo` — the default — and `frameStyle` is `null`, the wrapper is left
 alone, and `frame` is still reported: that is the grid's case.
 
@@ -912,7 +990,7 @@ behaviour keyed on how a stage the binding never saw was built.
 
 If the wrapper is not the element you want sized, do it by hand from `crumple.frame`. `ViewFrame` is
 `{ box, artwork }`: the box the view draws into and where the unpadded artwork lands inside it, both
-in that box's pixels, `null` until a front is resident (`packages/core/src/view.ts:41`). It **remembers
+in that box's pixels, `null` until a front is resident (`packages/core/src/view.ts:93`). It **remembers
 nothing and needs nothing remembered** — it reports the view's current frame, so read it again after
 every swap and on every `knobEpoch` change. `frameArtwork` in `examples/playground/src/framing.ts` is
 the reference implementation — the four multiplications by one scale that `heroSlotStyle`
@@ -950,14 +1028,15 @@ ref on that element would be a view with no lifetime — and `width` / `height` 
 
 **Nobody but the stage writes `width` or `height` on the canvas.** The binding is always `'managed'`,
 under which the core reads `getBoundingClientRect()` and writes the backing store during the draw
-(`stage.ts:1057-1071`); a React-set attribute would fight it every blit. The playground learned this
+(`stage.ts:1059-1072`); a React-set attribute would fight it every blit. The playground learned this
 the expensive way, in the pre-migration hero implementation — a canvas with no CSS size takes its
 layout size from those attributes, the two feed each other, and the element grows by
-`devicePixelRatio` per blit until it hits the front size. `heroSlotStyle`
-(`examples/playground/src/hero.ts`) and the `frameArtwork` it calls
-(`examples/playground/src/framing.ts`) are what size the wrapper today, off `crumple.frame` rather
-than off the canvas's own attributes, so the loop has nothing to feed on. The exclusion is safe to
-state absolutely only because `'manual'` is not offered.
+`devicePixelRatio` per blit until it hits the front size. Every box around the canvas is sized off
+`crumple.frame` today rather than off the canvas's own attributes — `value.frameStyle` for the
+wrapper, `heroSlotStyle` (`examples/playground/src/hero.ts`) and the `frameArtwork` it calls
+(`examples/playground/src/framing.ts`) for the playground's own layout slot — so the loop has nothing
+to feed on. The exclusion is safe to state absolutely only because `'manual'` is not offered.
+
 
 ## 12. Errors
 
@@ -970,13 +1049,18 @@ property the design spent itself on — that a failure is visible in a type and 
 Consequently: **no Suspense**, no `use()` on the stage promise, **no error-boundary integration**.
 `error` is a field on the instance and `status` is a value to branch on.
 
+**That holds even when your own `create` breaks the convention.** A factory that throws — or returns
+a rejecting promise — is caught, and the scene degrades into the same `failed` state an Error return
+produces, carrying that error with `stage: null`. It does not become the one place in the package
+where an exception escapes into your tree.
+
 **`ABORTED` never reaches you through the instance's own fields** — `error`, `status`, `shown` and the
 rest are never the sentinel, because "React changed its mind" is not a condition a component renders.
 
 **It does reach exactly one place, and it is the honest price of a real handle** (§7):
 `crumple.play` hands back the raw `pc.Run<pc.PlayResult>`, and `PlayResult` is
-`undefined | PoseError | Aborted` (`packages/core/src/results.ts:64`) — a stopped run, or one on a
-disposed view, settles `ABORTED` (`stage.ts:1345`). A `Run` this package handed you is a core value
+`undefined | PoseError | Aborted` (`packages/core/src/results.ts:59`) — a stopped run, or one on a
+disposed view, settles `ABORTED` (`stage.ts:1347`). A `Run` this package handed you is a core value
 and narrows with the core's own two early returns, abort first. The alternative was a wrapper that
 swallows `stop()`.
 
@@ -1023,6 +1107,11 @@ From §11, and each is deferred with a reason rather than forgotten:
   mounting the `Crumple` that will show the key — see [the acquisition
   shape](#the-acquisition-shape-behind-every-sprite).
 - **Audio.** `@paper-crumple/audio` is still deferred by packages §3.4.
+- **A test double for your own components.** The package's own suite runs against a fake `BlitStage`
+  and a StrictMode-aware harness, but none of that is exported (`packages/react/src/index.ts`) —
+  it is test scaffolding, and nothing in the published graph imports it. Unit-testing a component
+  built on these hooks therefore means either a real WebGL2 context or an injectable seam of your
+  own around `create`, which is what the playground did.
 
 And two things that are the *application's* job rather than the binding's (§10): generating a knob
 panel from the runtime descriptors — a control panel built from `stage.knobs` is an application, not a
