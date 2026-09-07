@@ -54,19 +54,8 @@ export interface SceneOptions<M = undefined> {
   onKnobRefused?: (key: string, value: Knobs[string], error: Error) => void
 }
 
-/** The reactive half of a `Scene`, rebuilt as one cached object per store bump (§5.5). */
-export interface SceneSnapshot<M = undefined> {
-  readonly status: SceneStatus
-  /** Non-null exactly when `status === 'ready'`. */
-  readonly stage: BlitStage | null
-  /**
-   * The landed build's metadata (§3.2). It lives beside `stage` and is cleared with it on
-   * rebuild, failure and loss — non-null exactly when `status === 'ready'`, and `undefined`
-   * rather than `null` when `create` returned a bare stage.
-   */
-  readonly meta: M | null
-  /** Non-null exactly when `status === 'failed'`. */
-  readonly error: Error | null
+/** The four fields every branch of `SceneSnapshot` carries, whatever the status (§4.1). */
+export interface SceneCounters {
   /** `stage.warnings`, re-read on every bump — the array grows at runtime. */
   readonly warnings: readonly Error[]
   /** `stage.lost`. A lost context also moves `status` to `'failed'`. */
@@ -78,11 +67,40 @@ export interface SceneSnapshot<M = undefined> {
 }
 
 /**
- * Memoised, and changes identity only when one of its fields does (§2.1): it is the value of
- * `<PaperScene value={scene}>`, so a fresh identity per render would re-render the whole subtree
- * and re-run every crumple effect that depends on it.
+ * The reactive half of a `Scene`, rebuilt as one cached object per store bump (§5.5).
+ *
+ * §4.1: the "non-null exactly when" invariants used to live in comments, which meant every
+ * consumer wrote `scene.error?.message ?? 'unknown'` inside a branch that had already proved the
+ * error was there. Each status pins `stage`, `meta` and `error`, so a status check narrows all
+ * three and removes every `?.` and `!`.
  */
-export interface Scene<M = undefined> extends SceneSnapshot<M> {
+export type SceneSnapshot<M = undefined> = SceneCounters &
+  (
+    | {
+        readonly status: 'building'
+        readonly stage: null
+        readonly meta: null
+        readonly error: null
+      }
+    | {
+        readonly status: 'ready'
+        readonly stage: BlitStage
+        readonly meta: M
+        readonly error: null
+      }
+    | {
+        readonly status: 'failed'
+        readonly stage: null
+        readonly meta: null
+        readonly error: Error
+      }
+  )
+
+/**
+ * The instance methods a `Scene` adds to its snapshot. Split out so `Scene` can be an
+ * intersection with a union, which an `interface … extends` cannot be.
+ */
+export interface SceneMethods {
   /**
    * On a scene that is not `ready` this is not an error and does not queue: it resolves to an
    * empty report with `completed: false`, which is what a broadcast over zero eligible views
@@ -92,3 +110,10 @@ export interface Scene<M = undefined> extends SceneSnapshot<M> {
   /** A no-op on a scene that is not `ready`. */
   stop(o?: { all?: boolean }): void
 }
+
+/**
+ * Memoised, and changes identity only when one of its fields does (§2.1): it is the value of
+ * `<PaperScene value={scene}>`, so a fresh identity per render would re-render the whole subtree
+ * and re-run every crumple effect that depends on it.
+ */
+export type Scene<M = undefined> = SceneSnapshot<M> & SceneMethods

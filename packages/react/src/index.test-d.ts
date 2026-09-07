@@ -28,6 +28,10 @@ test('scene.stage narrows to BlitStage once status is checked', () => {
   if (scene.stage !== null) {
     expectTypeOf(scene.stage).toEqualTypeOf<BlitStage>()
   }
+  // §4.1: `scene.error.message` after a status check, with no `?.` and no `!`.
+  if (scene.status === 'failed') {
+    expectTypeOf(scene.error.message).toEqualTypeOf<string>()
+  }
 })
 
 test('useCrumple returns the Crumple the component takes (§2, §6)', () => {

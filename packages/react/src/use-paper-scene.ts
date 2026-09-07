@@ -11,7 +11,14 @@ import type {
 import { useEffect, useMemo, useState, useSyncExternalStore } from 'react'
 import { createVersionedStore } from './store.js'
 import { useEvent } from './use-event.js'
-import type { Scene, SceneBuild, SceneOptions, SceneSnapshot, SceneStatus } from './scene-types.js'
+import type {
+  Scene,
+  SceneBuild,
+  SceneCounters,
+  SceneOptions,
+  SceneSnapshot,
+  SceneStatus,
+} from './scene-types.js'
 
 /** The mutable record the snapshot is read out of. One per hook instance, never replaced. */
 interface SceneCore<M> {
@@ -51,17 +58,34 @@ function emptyReport(): StagePlayReport<View> {
 function readScene<M>(core: SceneCore<M>): SceneSnapshot<M> {
   const stage = core.build?.stage ?? null
   const lost = stage !== null && stage.lost
-  const failed = lost || core.status === 'failed'
-  return {
-    status: failed ? 'failed' : core.status,
-    stage: failed ? null : stage,
-    meta: failed || core.build === null ? null : core.build.meta,
-    error: failed ? (core.error ?? LOST_WITHOUT_CAUSE) : null,
+  const counters: SceneCounters = {
     warnings: stage?.warnings ?? NO_WARNINGS,
     lost,
     generation: core.generation,
     knobEpoch: core.knobEpoch,
   }
+  // A lost context is a failure whatever `core.status` says: `dead()` makes every stage method
+  // return an error after a loss, so a scene reporting `ready` would be handing consumers a
+  // stage on which nothing works.
+  if (lost || core.status === 'failed') {
+    return {
+      ...counters,
+      status: 'failed',
+      stage: null,
+      meta: null,
+      error: core.error ?? LOST_WITHOUT_CAUSE,
+    }
+  }
+  if (core.status === 'ready' && core.build !== null) {
+    return {
+      ...counters,
+      status: 'ready',
+      stage: core.build.stage,
+      meta: core.build.meta,
+      error: null,
+    }
+  }
+  return { ...counters, status: 'building', stage: null, meta: null, error: null }
 }
 
 /**

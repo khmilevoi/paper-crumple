@@ -9,7 +9,13 @@ import type {
   View,
 } from '@paper-crumple/core'
 import { expectTypeOf, test } from 'vitest'
-import type { Scene, SceneBuild, SceneOptions, SceneSnapshot } from './scene-types.js'
+import type {
+  Scene,
+  SceneBuild,
+  SceneCounters,
+  SceneOptions,
+  SceneSnapshot,
+} from './scene-types.js'
 
 test('create takes the signal and the handed-down listener, and never rejects (§4.1)', () => {
   expectTypeOf<SceneOptions['create']>().toEqualTypeOf<
@@ -48,4 +54,29 @@ test('Scene is the snapshot plus play and stop, and play never rejects (§7)', (
     (from: PoseRef, to: PoseRef, o?: StagePlayOptions) => Promise<StagePlayReport<View>>
   >()
   expectTypeOf<Scene['stop']>().toEqualTypeOf<(o?: { all?: boolean }) => void>()
+})
+
+test('status narrows stage, meta and error together (§4.1)', () => {
+  const scene = {} as Scene<{ id: string }>
+  if (scene.status === 'ready') {
+    expectTypeOf(scene.stage).toEqualTypeOf<BlitStage>()
+    expectTypeOf(scene.meta).toEqualTypeOf<{ id: string }>()
+    expectTypeOf(scene.error).toEqualTypeOf<null>()
+  } else if (scene.status === 'failed') {
+    expectTypeOf(scene.stage).toEqualTypeOf<null>()
+    expectTypeOf(scene.meta).toEqualTypeOf<null>()
+    expectTypeOf(scene.error).toEqualTypeOf<Error>()
+  } else {
+    expectTypeOf(scene.status).toEqualTypeOf<'building'>()
+    expectTypeOf(scene.stage).toEqualTypeOf<null>()
+    expectTypeOf(scene.meta).toEqualTypeOf<null>()
+    expectTypeOf(scene.error).toEqualTypeOf<null>()
+  }
+})
+
+test('the counters are carried by every branch (§4.1)', () => {
+  expectTypeOf<keyof SceneCounters>().toEqualTypeOf<
+    'warnings' | 'lost' | 'generation' | 'knobEpoch'
+  >()
+  expectTypeOf<Scene>().toMatchTypeOf<SceneCounters>()
 })
