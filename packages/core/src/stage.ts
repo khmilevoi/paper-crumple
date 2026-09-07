@@ -535,6 +535,32 @@ function buildStage(p: StageParts): BuiltStage {
   }
 
   /**
+   * Put a record's front into the LRU, carrying the §4.5 state its slot is supposed to hold.
+   *
+   * An eviction DELETES the slot, and `attach`, `pin` and `hold` are all no-ops for a key the LRU
+   * does not hold — so a view that showed the sprite while its front was gone attached nothing the
+   * LRU can see, and a plain `insert()` afterwards creates a fresh slot with `attachCount: 0`,
+   * which hands the sprite a view is showing straight back to the evictor. `replace()` has always
+   * restored the pin and the attachments after its own insert; `rebuildFront` did not, and the
+   * rebuild is the far commoner of the two.
+   *
+   * Restored only when the slot is NEW, which is what keeps it symmetric: `insert` on a live slot
+   * preserves the counts it already carries, and adding to them again would make the sprite
+   * unevictable for the stage's life.
+   */
+  function insertFront(record: SpriteRecord): void {
+    const known = p.lru.has(record.key)
+    p.lru.insert({
+      key: record.key,
+      bytes: record.front?.bytes ?? 0,
+      reclaimable: record.source.reclaimable,
+    })
+    if (known) return
+    if (record.pinned) p.lru.pin(record.key)
+    for (let i = 0; i < record.attachCount; i += 1) p.lru.attach(record.key)
+  }
+
+  /**
    * Rebuild one front from a resident handle. Synchronous when the artwork is in the slot — the
    * drag row of §8.5's table, ~1–2 ms and no source touched. When `build()` answers
    * `SourceExpiredError` — the artwork slot taken by another sprite (§8.5), or a hull-tier knob
@@ -563,7 +589,7 @@ function buildStage(p: StageParts): BuiltStage {
     if (front instanceof Error) return front
     if (record.front !== null) p.o.sheet.releaseFront(record.front)
     record.front = front
-    p.lru.insert({ key: record.key, bytes: front.bytes, reclaimable: record.source.reclaimable })
+    insertFront(record)
     return undefined
   }
 
@@ -1297,6 +1323,35 @@ function buildStage(p: StageParts): BuiltStage {
       )
     }
 
+    /**
+     * §8.8 — the target of a `crumpleTo` must be **drawable at the ball**, and a bare `Sprite`
+     * whose front the byte budget evicted (§4.5) is not.
+     *
+     * `adopt` fires between the pose-5 and pose-4 renders and rebuilds a missing front there, but
+     * that rebuild is synchronous only: §8.5 keeps ONE artwork slot, so a sprite sourced before
+     * any other answers `SourceExpiredError` and schedules an asynchronous re-source instead. The
+     * fall's first render then drew a record whose `front` was still `null` and the view reported
+     * `the front is not resident; prepare() it first` — while the stage was, at that moment,
+     * preparing exactly that front. The commonest way to reach it is the one the playground takes:
+     * prefetch several samples under a budget that holds one front, then `swapTo` a prefetched
+     * key, which §5.3 adopts as a cache hit without an `add()`.
+     *
+     * `prepare()` is the one demand that WAITS for a re-source (§8.5.1), and a promise target is
+     * the shape `crumpleTo` already has for "not ready yet": the run parks at the ball until it
+     * settles, which is what the park is for. A resident front is untouched — no promise, no park,
+     * and the synchronous adopt of every ordinary swap is unchanged.
+     */
+    function drawableTarget(
+      target: Sprite | Promise<Sprite | Error | Aborted>,
+      o?: SwapOptions,
+    ): Sprite | Promise<Sprite | Error | Aborted> {
+      if (target instanceof Promise) return target
+      const found = findRecord(target)
+      // Not this stage's sprite: `toCrumpleTarget` mints the refusal, one place and not two.
+      if (found === null || found.front !== null) return target
+      return prepare(found.key, o?.signal === undefined ? undefined : { signal: o.signal })
+    }
+
     /** Holds the pending target's front against eviction; returns the release. */
     function holdTarget(target: Sprite | Promise<Sprite | Error | Aborted>): () => void {
       let key: string | null = null
@@ -1357,10 +1412,13 @@ function buildStage(p: StageParts): BuiltStage {
     }
 
     function crumpleToMethod(
-      target: Sprite | Promise<Sprite | Error | Aborted>,
+      raw: Sprite | Promise<Sprite | Error | Aborted>,
       o?: SwapOptions,
     ): Run<SwapResult> {
       if (p.isDisposed() || state === 'disposed') return settledRun(ABORTED)
+      // Before anything else, and synchronously: a sprite whose front is not resident becomes the
+      // `prepare()` that restores it, so every path below waits on a drawable target.
+      const target = drawableTarget(raw, o)
       // `crumpleTo()` on an empty view degenerates to `show()`: there is no previous content to
       // crumple.
       if (record === null) {
@@ -2088,9 +2146,10 @@ function buildStage(p: StageParts): BuiltStage {
     record.fit = built.fit
     record.clip = built.clip
     record.front = built.front
-    p.lru.insert({ key, bytes: record.front?.bytes ?? 0, reclaimable: source.reclaimable })
-    if (record.pinned) p.lru.pin(key)
-    for (let i = 0; i < record.attachCount; i += 1) p.lru.attach(key)
+    // The same restore `rebuildFront` makes, and for the same reason — a front the budget dropped
+    // inside the replace window takes its slot with it. Guarded on the slot being new, so a slot
+    // that survived is not attached a second time.
+    insertFront(record)
     warnReplaced(key)
     settleReplace(undefined)
     return record.sprite
