@@ -70,16 +70,25 @@ export function nextLibrarySample(current: Sample, target: Sample): Sample {
  * `add`, a run, or an `end` event, so nothing would ever arrive to close a transport this component
  * armed for the swap (Finding A). `startSwap` must never begin one.
  *
- * `shownKey` MUST be the key `useCrumple` itself compares — `crumple.shown` (falling back to the
- * request in flight, `shown.id`, before anything has landed) — never the local `shown` request
- * state. `shown` has no path back once a rollback demo sets it to the broken sample: a rollback
- * reverts `crumple.shown`, not `shown` (App.tsx:570-577), and `onSwap` deliberately never advances
- * `swapTarget` away from `BROKEN_ID` after a broken-URL swap. Comparing against `shown.id` instead
- * would make every further "Swap" click a no-op once the rollback demo has fired, silently
- * swallowing the click until the picker is moved away from "broken URL" and back.
+ * `requestedKey` MUST be `crumple.requested` (falling back to the request in flight, `shown.id`,
+ * before anything has landed) — the key `useCrumple` itself compares at `use-crumple.ts:261`, where
+ * it moves in lockstep with `core.synced.key` (`packages/react/src/crumple-state.ts:47`,
+ * `use-crumple.ts:264`). It is NOT `crumple.shown`: that is `view?.sprite?.key`
+ * (`crumple-state.ts:46`), the sprite actually on the canvas, and it diverges from `requested`
+ * precisely on the rollback path — a failed acquisition rolls back, leaving `synced.key` /
+ * `requested` at `'broken'` while `shown` is still the previous sprite's key. Comparing against
+ * `shown` instead re-arms `direction` and `swappingRef` on a second "Swap" click for the broken
+ * sample, then bails out of `setShown` on an identical object: the
+ * `[view, spriteKey, src, syncSprite]` effect (`use-crumple.ts:286-289`) never re-fires, and nothing
+ * ever clears those flags — the transport, keyboard and Swap button go dead until reload.
+ *
+ * Swallowing the repeated broken-URL click here is correct, not a regression: with `spriteKey`
+ * unchanged `useCrumple` refuses by construction, and `rememberPair` refuses a changed `src` under
+ * the same key, so the rollback demo cannot be re-armed by clicking Swap again at all — the guard's
+ * job is to swallow the click rather than arm a transport for a run that can never happen.
  */
-export function isNoOpSwap(shownKey: string, target: Sample): boolean {
-  return target.id === shownKey
+export function isNoOpSwap(requestedKey: string, target: Sample): boolean {
+  return target.id === requestedKey
 }
 
 /** The status line the pill shows: what the last action did, or `null` for the idle readout. */
@@ -464,11 +473,15 @@ export function App(): ReactNode {
       // A same-key request is a silent no-op in `useCrumple` (see `isNoOpSwap`) — nothing would
       // ever arrive to clear `direction` or `swappingRef`, so no swap that cannot run may leave the
       // transport armed. This is the root guard for the whole class, not just one caller's route.
-      // Compared against `crumple.shown ?? shown.id` — the key `useCrumple` itself compares — not
-      // the local `shown` request state, which has no path back once a rollback demo sets it to the
-      // broken sample: `shown` stays `BROKEN_SAMPLE` afterwards, while `crumple.shown` reverts to
-      // the previous sprite's key on rollback, which is what keeps a later Swap to `broken` armable.
-      if (isNoOpSwap(crumple.shown ?? shown.id, target)) return
+      // Compared against `crumple.requested ?? shown.id` — the key `useCrumple` itself compares at
+      // `use-crumple.ts:261`, which moves in lockstep with `core.synced.key`. NOT `crumple.shown`:
+      // that is the sprite actually on the canvas, and it diverges from `requested` precisely on the
+      // rollback path — a failed acquisition leaves `requested` at `'broken'` while `shown` is still
+      // the previous sprite's key. Comparing against `shown` would re-arm the transport on a second
+      // broken-URL click and nothing would ever disarm it (see `isNoOpSwap`'s doc for the full
+      // sequence). Swallowing the repeated click here is correct: with `spriteKey` unchanged the
+      // rollback demo cannot be re-armed by clicking Swap again at all.
+      if (isNoOpSwap(crumple.requested ?? shown.id, target)) return
       const duration = audio.beginSequence(swapSpec(crumple.pose, dwells))
       setSwapDuration(swapDurationFor(duration))
       setDirection('folding')
@@ -476,7 +489,7 @@ export function App(): ReactNode {
       setShown(target)
       setLibrarySample((prev) => nextLibrarySample(prev, target))
     },
-    [audio, crumple.pose, crumple.shown, dwells, shown],
+    [audio, crumple.pose, crumple.requested, dwells, shown],
   )
 
   const onSwap = useCallback(() => {

@@ -42,11 +42,14 @@ describe('nextLibrarySample', () => {
  * the keyboard shortcuts and the Swap button stay dead until reload. If the guard is dropped or its
  * condition is loosened, a request for the sample already shown stops being flagged as a no-op.
  *
- * The guard takes the shown *key* — what `useCrumple` itself compares (`crumple.shown ?? shown.id`
- * at the call site) — not a `Sample`, because the local `shown` request state has no path back
- * after a rollback demo: it stays pinned to the broken sample while `crumple.shown` reverts to the
- * previous sprite's key. The 'does not flag a swap to broken after a rollback' case below is that
- * regression: it is what a correction that reverts to comparing the local request state breaks.
+ * The guard takes the requested *key* — `crumple.requested ?? shown.id` at the call site — the key
+ * `useCrumple` itself compares at `use-crumple.ts:261`, where it moves in lockstep with
+ * `core.synced.key`. This is NOT `crumple.shown` (the sprite actually on the canvas): the two
+ * diverge precisely on the rollback path, where a failed acquisition leaves `requested` at
+ * `'broken'` while `shown` is still the previous sprite's key. The 'flags a repeat swap to broken
+ * after a rollback' case below pins that: comparing against `shown` instead would let the click
+ * through, re-arm the transport, and nothing would ever disarm it (App.tsx `startSwap`'s comment
+ * has the full sequence).
  */
 describe('isNoOpSwap', () => {
   const sweater = SAMPLES.find((s) => s.id === 'sweater')
@@ -63,15 +66,16 @@ describe('isNoOpSwap', () => {
     expect(isNoOpSwap(sweater.id, trench)).toBe(false)
   })
 
-  it('does not flag a swap to broken after a rollback', () => {
-    // After a rollback demo, `crumple.shown` reverts to the previous sprite's key (here `sweater`)
-    // while the local `shown` request state would still read `broken` — the regression this guards
-    // against. The guard must see the reverted key and NOT flag a further swap to `broken`.
+  it('flags a repeat swap to broken after a rollback', () => {
+    // After a rollback, `crumple.requested` stays at `'broken'` (`synced.key` never moved off it —
+    // only the on-canvas `shown` sprite reverted to the previous key). The guard is called with
+    // `requested`, so a second click on "broken URL" must be flagged as a no-op: `useCrumple`
+    // refuses by construction and the rollback demo cannot be re-armed by clicking Swap again.
     const broken = {
       id: BROKEN_ID,
       label: 'broken URL (rollback demo)',
       url: 'https://example.invalid/missing.png',
     }
-    expect(isNoOpSwap(sweater.id, broken)).toBe(false)
+    expect(isNoOpSwap(BROKEN_ID, broken)).toBe(true)
   })
 })
