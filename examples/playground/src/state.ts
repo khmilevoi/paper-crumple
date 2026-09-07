@@ -1,4 +1,4 @@
-import type { BucketName, DemoConfig, PresentMode } from './config'
+import type { BucketName, DemoConfig } from './config'
 import { BUCKET_NAMES, DEFAULT_CONFIG } from './config'
 import type { KnobValues } from './knobs'
 import type { EdgeFinish, EdgeShape, EdgeWidthUnit } from '@paper-crumple/paper'
@@ -95,13 +95,6 @@ function parsePacks(params: URLSearchParams): readonly BucketName[] | Error {
   return BUCKET_NAMES.filter((b) => seen.has(b))
 }
 
-function parsePresent(params: URLSearchParams): PresentMode | Error {
-  const raw = params.get('present')
-  if (raw === null) return DEFAULT_CONFIG.present
-  if (raw === 'blit' || raw === 'direct') return raw
-  return fieldError('present', raw)
-}
-
 function parseNumberField(params: URLSearchParams, key: string, fallback: number): number | Error {
   const raw = params.get(key)
   if (raw === null) return fallback
@@ -111,9 +104,12 @@ function parseNumberField(params: URLSearchParams, key: string, fallback: number
 }
 
 /**
- * The `#`-fragment: the nine `DemoConfig` fields first, then one `k.<type>.<key>` param per
+ * The `#`-fragment: the eight `DemoConfig` fields first, then one `k.<type>.<key>` param per
  * entry in `changed` — already exactly the knobs that differ from their descriptor default
  * (`panel.ts`'s `PanelHandle.changed()`), so nothing here re-derives that filter.
+ *
+ * `present` was removed with the React migration and is deliberately NOT parsed: an old
+ * `&present=direct` link loads at the default rather than reporting an unknown field.
  */
 export function encodeState(config: DemoConfig, changed: KnobValues): string {
   const params = new URLSearchParams()
@@ -122,7 +118,6 @@ export function encodeState(config: DemoConfig, changed: KnobValues): string {
   params.set('edgeWidthUnit', config.edgeWidthUnit)
   params.set('tiles', config.tiles ? '1' : '0')
   params.set('packs', config.packs.join(','))
-  params.set('present', config.present)
   params.set('artworkCssPx', String(config.artworkCssPx))
   params.set('budgetMb', String(config.budgetMb))
   params.set('overscanHeadroom', String(config.overscanHeadroom))
@@ -169,8 +164,6 @@ export function decodeState(hash: string): { config: DemoConfig; knobs: KnobValu
   if (tiles instanceof Error) return tiles
   const packs = parsePacks(params)
   if (packs instanceof Error) return packs
-  const present = parsePresent(params)
-  if (present instanceof Error) return present
   const artworkCssPx = parseNumberField(params, 'artworkCssPx', DEFAULT_CONFIG.artworkCssPx)
   if (artworkCssPx instanceof Error) return artworkCssPx
   const budgetMb = parseNumberField(params, 'budgetMb', DEFAULT_CONFIG.budgetMb)
@@ -191,7 +184,6 @@ export function decodeState(hash: string): { config: DemoConfig; knobs: KnobValu
     edgeWidthUnit,
     tiles,
     packs,
-    present,
     artworkCssPx,
     budgetMb,
     overscanHeadroom,

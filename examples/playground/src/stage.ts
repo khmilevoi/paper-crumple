@@ -152,16 +152,6 @@ export function prefetchSamples(
 function heroCanvas(built: BuiltStage, slot: HTMLElement): HTMLCanvasElement | Error {
   slot.replaceChildren()
 
-  if (built.present === 'direct') {
-    const own = built.stage.surface.canvas
-    if (!(own instanceof HTMLCanvasElement)) {
-      return new Error('playground: a direct stage must own an HTMLCanvasElement surface')
-    }
-    own.className = 'stage-canvas'
-    slot.append(own)
-    return own
-  }
-
   const canvas = document.createElement('canvas')
   canvas.className = 'stage-canvas'
   slot.append(canvas)
@@ -177,33 +167,6 @@ export async function mountHero(
   const startedAt = performance.now()
   const canvas = heroCanvas(built, slot)
   if (canvas instanceof Error) return canvas
-
-  if (built.present === 'direct') {
-    // One surface, one rect, and the surface must be sized to its final layout **before any view
-    // exists**: a view's rect is resolved once, at `stage.view()`, and never recomputed, so
-    // resizing afterward would leave the rect stale while the surface — and, under a
-    // bottom-left-origin WebGL buffer, where that rect actually paints — moves out from under it.
-    // With only the hero left to place, that layout is one square at the origin.
-    const side = Math.max(1, Math.floor(built.stage.surface.width))
-    const resized = built.stage.resize(side, side)
-    if (resized instanceof Error) return resized
-
-    const addedAt = performance.now()
-    const sprite = await built.stage.add(sample.url, { key: sample.id, signal })
-    if (sprite === pc.ABORTED) return pc.ABORTED
-    if (sprite instanceof Error) return sprite
-    const addMs = performance.now() - addedAt
-    const prefetched = prefetchSamples(built, sample, signal)
-
-    const view = built.stage.view({ rect: { x: 0, y: 0, w: side, h: side }, tag: sample.id })
-    if (view instanceof Error) return view
-    const shown = view.show(sprite)
-    if (shown instanceof Error) return shown
-    // The frame exists once the view shows a resident front, so the box is set after `show()`
-    // and the surface is a fixed square that no CSS box can resize — one draw is enough here.
-    frameHero({ view, slot, canvas, cssPx: built.artworkCssPx })
-    return { view, sprite, canvas, addMs, mountMs: performance.now() - startedAt, prefetched }
-  }
 
   // `add` + `view` + `show` spelled out rather than the `mount` that composes exactly those
   // three: the front bake is the expensive one and the only one that is interesting on its own,

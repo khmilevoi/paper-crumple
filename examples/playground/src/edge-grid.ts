@@ -368,7 +368,6 @@ async function renderCell(
     // this figure exists to show what those two finishes actually look like.
     tiles: true,
     packs: ['1x1', '2x3', '3x2'],
-    present: 'blit',
     artworkCssPx: spec.cssPx,
     budgetMb: 64,
     overscanHeadroom: headroom,
@@ -387,16 +386,6 @@ async function renderCell(
   }
   if (built instanceof Error) {
     fail(`${cell.label}: buildStage: ${built.message}`)
-    return null
-  }
-  // `BuiltStage` is a discriminated union for the reason `config.ts` spells out: `view()` on the
-  // un-narrowed `BlitStage | DirectStage` would demand an argument assignable to
-  // `BlitTarget & DirectTarget`, which no real target satisfies. The config above asks for
-  // `blit` unconditionally, so this can only be the other arm if that changes — and then it is a
-  // reported failure rather than a type error nobody reads.
-  if (built.present !== 'blit') {
-    built.stage.dispose()
-    fail(`${cell.label}: expected a blit stage, got "${built.present}"`)
     return null
   }
 

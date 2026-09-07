@@ -1,9 +1,9 @@
 import type { ReactNode } from 'react'
-import type { DemoConfig, PresentMode } from '../config'
+import type { DemoConfig } from '../config'
 import type { Entry, KnobValues } from '../knobs'
 import { isNumberLike, stepOf } from '../knobs'
 import { GROUP_ORDER, labelFor } from '../labels'
-import { Segmented, Slider } from './primitives'
+import { Slider } from './primitives'
 
 /**
  * Everything the design's curated sections leave out — NO counterpart in the mockup, and kept
@@ -201,21 +201,6 @@ export interface FactorySectionProps {
 export function FactorySection({ config, onChange }: FactorySectionProps): ReactNode {
   return (
     <>
-      <div className="row">
-        <span className="row-label">present</span>
-        <Segmented<PresentMode>
-          label="present"
-          value={config.present}
-          onChange={(present) => {
-            onChange({ ...config, present })
-          }}
-          options={[
-            { id: 'blit', label: 'blit', title: 'one 2D canvas per view, blitted into' },
-            { id: 'direct', label: 'direct', title: "the stage's own canvas, one rect per view" },
-          ]}
-        />
-      </div>
-
       <label className="knob-bool">
         <input
           type="checkbox"

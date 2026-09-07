@@ -74,4 +74,18 @@ describe('state: the three edge factory options', () => {
     if (decoded instanceof Error) return
     expect(decoded.config.edgeShape).toBe(DEFAULT_CONFIG.edgeShape)
   })
+
+  it('does not write a present param', () => {
+    expect(encodeState(DEFAULT_CONFIG, {})).not.toContain('present')
+  })
+
+  it('ignores a stale present param instead of reporting a bad field', () => {
+    // An old saved link carries `&present=direct`. The mode is gone — @paper-crumple/react v1
+    // binds `present: 'blit'` only — and the codec DROPS the parameter rather than keeping a
+    // `fieldError` for it, so the link still opens the demo at the default.
+    const decoded = decodeState(`${encodeState(DEFAULT_CONFIG, {})}&present=direct`)
+    expect(decoded).not.toBeInstanceOf(Error)
+    if (decoded instanceof Error) return
+    expect(decoded.config).toEqual(DEFAULT_CONFIG)
+  })
 })

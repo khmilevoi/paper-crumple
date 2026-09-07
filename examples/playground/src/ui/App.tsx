@@ -813,7 +813,7 @@ export function App(): ReactNode {
           <Section
             number={String(groups.length + 6).padStart(2, '0')}
             title="Factory options"
-            summary={config.present}
+            summary={`${String(config.artworkCssPx)} px · ${String(config.budgetMb)} MB`}
             open={openExtra['factory'] ?? false}
             onToggle={() => {
               setOpenExtra((prev) => ({ ...prev, factory: !(prev['factory'] ?? false) }))
