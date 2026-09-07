@@ -91,6 +91,33 @@ export function isNoOpSwap(requestedKey: string, target: Sample): boolean {
   return target.id === requestedKey
 }
 
+/**
+ * Whether the swap this component started has reached the sprite it asked for (§9.3).
+ *
+ * All three values, not two. `crumple.requested === crumple.shown` alone is true AT REST — and the
+ * commit right after a "Swap" click is at rest as far as the snapshot is concerned: `startSwap`
+ * arms `swappingRef` and calls `setShown(target)`, so the effect re-runs on the new `shown.label`
+ * while the snapshot it reads is still the pre-click one, both values naming the PREVIOUS sprite.
+ * Gating on the pair alone would consume the transport and print the new label at the start of the
+ * swap instead of the end. `requested` moves one commit later, inside `useCrumple`'s own
+ * `syncSprite` effect (`use-crumple.ts:286-289`); `shown` moves when the sprite lands.
+ *
+ * `requested !== shownKey` is also exactly the rollback path — a failed acquisition leaves
+ * `requested` at `'broken'` while the previous sprite is still on the canvas — so this never fires
+ * for a swap that did not happen. That path is closed by the error effect, which clears
+ * `swappingRef` itself.
+ *
+ * It reports the ball, not the true end, while `adopt` still moves `shown` mid-fold (§0.1). §2.1's
+ * `onSettle` is the real fix and is not this plan's.
+ */
+export function isSwapSettled(
+  requested: string | null,
+  shownKey: string | null,
+  targetKey: string,
+): boolean {
+  return requested === targetKey && shownKey === targetKey
+}
+
 /** The status line the pill shows: what the last action did, or `null` for the idle readout. */
 export interface StageStatus {
   readonly ok: boolean
@@ -188,14 +215,18 @@ export function App(): ReactNode {
    * behind it (USAGE §7). Without this the audio sequence would never be closed under `reduce`.
    */
   useEffect(() => {
-    if (crumple.shown === null || !swappingRef.current) return
+    if (!swappingRef.current) return
+    if (!isSwapSettled(crumple.requested, crumple.shown, shown.id)) return
     swappingRef.current = false
-    endSwap()
-    // Reporting the settle onto the status pill IS the synchronization this effect exists for —
-    // there is no external store to read it from instead (USAGE §7's own point).
+    // Closing the transport and reporting the settle onto the status pill IS the synchronization
+    // this effect exists for — there is no external store to read either from instead (USAGE §7's
+    // own point). The suppression sits on `endSwap`, whose `setDirection(null)` is now the first
+    // setState the effect reaches; the rule reports only that one, so a second directive below
+    // would be flagged as unused.
     // eslint-disable-next-line react-hooks/set-state-in-effect
-    if (crumple.shown === shown.id) setStatus({ ok: true, text: `swapped to ${shown.label}` })
-  }, [crumple.shown, endSwap, shown.id, shown.label])
+    endSwap()
+    setStatus({ ok: true, text: `swapped to ${shown.label}` })
+  }, [crumple.requested, crumple.shown, endSwap, shown.id, shown.label])
 
   /** A swap whose target failed rolled back to the previous sprite, and the hook reports the
    *  target's Error rather than retrying: the prop says B while the canvas shows A. `error` is
