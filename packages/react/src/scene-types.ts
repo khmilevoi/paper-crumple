@@ -1,15 +1,13 @@
 import type {
   Aborted,
   BlitStage,
+  Knobs,
   PoseRef,
   StageEvent,
   StagePlayOptions,
   StagePlayReport,
   View,
 } from '@paper-crumple/core'
-
-/** What a knob value may be (spec §4.3, §6.2): flat primitives, nothing structured. */
-export type KnobValue = string | number | boolean
 
 export type SceneStatus = 'building' | 'ready' | 'failed'
 
@@ -30,7 +28,12 @@ export interface SceneOptions {
    * forgets a `useMemo` would recreate the WebGL2 context on every render.
    */
   deps: readonly unknown[]
-  knobs?: Readonly<Record<string, KnobValue>>
+  /**
+   * Core's own `Knobs` (§4.2). The binding used to declare a `KnobValue` of its own, which
+   * collided by name with core's *generic* `KnobValue<D>` and gave one type three spellings.
+   * `Record<string, …>` is the honest type: the binding cannot name the slots by design.
+   */
+  knobs?: Knobs
   onError?: (e: StageEvent<'error'>) => void
   /**
    * A declarative knob write the stage refused. `onError` also receives it (§0.3), but a
@@ -38,7 +41,7 @@ export interface SceneOptions {
    * which control to roll back. A carry-forward onto a replacement stage stays silent here for
    * exactly the reason it stays silent on `onError` (§4.1): the consumer did not write it.
    */
-  onKnobRefused?: (key: string, value: KnobValue, error: Error) => void
+  onKnobRefused?: (key: string, value: Knobs[string], error: Error) => void
 }
 
 /** The reactive half of a `Scene`, rebuilt as one cached object per store bump (§5.5). */

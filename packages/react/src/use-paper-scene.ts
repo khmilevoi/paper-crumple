@@ -1,6 +1,7 @@
 import { ABORTED, assertSingleCore, GlError } from '@paper-crumple/core'
 import type {
   BlitStage,
+  Knobs,
   PoseRef,
   StageEvent,
   StagePlayOptions,
@@ -10,7 +11,7 @@ import type {
 import { useEffect, useMemo, useState, useSyncExternalStore } from 'react'
 import { createVersionedStore } from './store.js'
 import { useEvent } from './use-event.js'
-import type { KnobValue, Scene, SceneOptions, SceneSnapshot, SceneStatus } from './scene-types.js'
+import type { Scene, SceneOptions, SceneSnapshot, SceneStatus } from './scene-types.js'
 
 /** The mutable record the snapshot is read out of. One per hook instance, never replaced. */
 interface SceneCore {
@@ -23,7 +24,7 @@ interface SceneCore {
 
 const NO_WARNINGS: readonly Error[] = Object.freeze([])
 
-const NO_KNOBS: Readonly<Record<string, KnobValue>> = Object.freeze({})
+const NO_KNOBS: Knobs = Object.freeze({})
 
 /**
  * Carried when the context is lost before any `error` event has named a cause. `dead()` makes
@@ -75,7 +76,7 @@ export function usePaperScene(o: SceneOptions): Scene {
   const dispatchError = useEvent((e: StageEvent<'error'>): void => {
     o.onError?.(e)
   })
-  const dispatchKnobRefused = useEvent((key: string, value: KnobValue, error: Error): void => {
+  const dispatchKnobRefused = useEvent((key: string, value: Knobs[string], error: Error): void => {
     o.onKnobRefused?.(key, value, error)
   })
 
@@ -87,7 +88,7 @@ export function usePaperScene(o: SceneOptions): Scene {
     knobEpoch: 0,
   }))
   const [store] = useState(() => createVersionedStore<SceneSnapshot>(() => readScene(core)))
-  const [applied] = useState<{ values: Map<string, KnobValue>; generation: number }>(() => ({
+  const [applied] = useState<{ values: Map<string, Knobs[string]>; generation: number }>(() => ({
     values: new Map(),
     generation: 0,
   }))

@@ -1,6 +1,7 @@
 import type {
   Aborted,
   BlitStage,
+  Knobs,
   PoseRef,
   StageEvent,
   StagePlayOptions,
@@ -23,10 +24,8 @@ test('deps is the only rebuild trigger and is a plain readonly list', () => {
   expectTypeOf<SceneOptions['deps']>().toEqualTypeOf<readonly unknown[]>()
 })
 
-test('knobs is a flat map of primitives (§4.3)', () => {
-  expectTypeOf<NonNullable<SceneOptions['knobs']>>().toEqualTypeOf<
-    Readonly<Record<string, string | number | boolean>>
-  >()
+test('knobs is core’s own Knobs, not a third spelling of it (§4.2)', () => {
+  expectTypeOf<NonNullable<SceneOptions['knobs']>>().toEqualTypeOf<Knobs>()
 })
 
 test('the snapshot carries exactly the seven reactive fields (§4.1)', () => {
