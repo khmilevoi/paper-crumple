@@ -16,11 +16,11 @@ test('usePaperScene takes SceneOptions and returns a Scene, with meta defaulting
 })
 
 test('useScene returns a Scene, never null — the no-provider case is a failed scene (§4.2)', () => {
-  expectTypeOf(useScene).returns.toEqualTypeOf<Scene>()
+  expectTypeOf<ReturnType<typeof useScene<undefined>>>().toEqualTypeOf<Scene>()
 })
 
 test('PaperScene takes a Scene, not options', () => {
-  expectTypeOf<Parameters<typeof PaperScene>[0]['value']>().toEqualTypeOf<Scene>()
+  expectTypeOf<Parameters<typeof PaperScene<undefined>>[0]['value']>().toEqualTypeOf<Scene>()
 })
 
 test('scene.stage narrows to BlitStage once status is checked', () => {
