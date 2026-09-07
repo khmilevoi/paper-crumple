@@ -4,8 +4,9 @@ import { App } from './ui/App'
 
 /**
  * No `<StrictMode>`, deliberately: its development double-invoke would build, mount and dispose a
- * second WebGL2 stage on every render pass of `useStage`'s effect, which costs a full front bake
- * each time and makes the diagnostics timings describe a stage nobody is looking at.
+ * second WebGL2 stage on every render pass of `usePaperScene`'s effect (`scene.ts`'s
+ * `useDemoScene`), which costs a full front bake each time and makes the diagnostics timings
+ * describe a stage nobody is looking at.
  */
 const root = document.getElementById('root')
 if (root === null) {

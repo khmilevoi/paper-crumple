@@ -1,9 +1,9 @@
 import type { ReactNode } from 'react'
-import type { DemoConfig, PresentMode } from '../config'
+import type { DemoConfig } from '../config'
 import type { Entry, KnobValues } from '../knobs'
 import { isNumberLike, stepOf } from '../knobs'
 import { GROUP_ORDER, labelFor } from '../labels'
-import { Segmented, Slider } from './primitives'
+import { Slider } from './primitives'
 
 /**
  * Everything the design's curated sections leave out — NO counterpart in the mockup, and kept
@@ -89,7 +89,10 @@ export function libraryGroups(entries: readonly Entry[]): LibraryGroup[] {
 export interface KnobRowsProps {
   readonly entries: readonly Entry[]
   readonly knobs: KnobValues
-  readonly onSet: (key: string, value: string | number | boolean) => Error | undefined
+  /** A knob write is declarative now: it moves React state and `usePaperScene` writes the stage.
+   *  A refusal arrives asynchronously through the scene's `onError`, so there is no Error to
+   *  return. Every call site already ignored the return value. */
+  readonly onSet: (key: string, value: string | number | boolean) => void
 }
 
 /** One row per descriptor, dispatched on `kind`. A descriptor `labels.ts` has no entry for is
@@ -201,21 +204,6 @@ export interface FactorySectionProps {
 export function FactorySection({ config, onChange }: FactorySectionProps): ReactNode {
   return (
     <>
-      <div className="row">
-        <span className="row-label">present</span>
-        <Segmented<PresentMode>
-          label="present"
-          value={config.present}
-          onChange={(present) => {
-            onChange({ ...config, present })
-          }}
-          options={[
-            { id: 'blit', label: 'blit', title: 'one 2D canvas per view, blitted into' },
-            { id: 'direct', label: 'direct', title: "the stage's own canvas, one rect per view" },
-          ]}
-        />
-      </div>
-
       <label className="knob-bool">
         <input
           type="checkbox"

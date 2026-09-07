@@ -1,4 +1,3 @@
-import { INVALIDATION_ORDER } from '@paper-crumple/core'
 import type { KnobDescriptor, NumberKnob, IntKnob } from '@paper-crumple/core'
 import type { BuiltStage } from './config'
 
@@ -24,24 +23,6 @@ export function collectDescriptors(built: BuiltStage): Entry[] {
   for (const k of built.sheet.knobs) out.push({ key: patchKey('sheet', k), k })
   for (const k of built.motion.knobs) out.push({ key: patchKey('motion', k), k })
   return out
-}
-
-const HULL_TIER = INVALIDATION_ORDER.indexOf('hull')
-
-/**
- * Whether writing this knob can move the sprite's geometry, and so needs the canvas re-framed.
- *
- * The hull trace lives inside `sheet.source()`, so a knob at `'hull'` or above is answered with a
- * **re-source** at the live values — a new handle, and a new `Sprite.rect` under a canvas whose
- * box was measured against the old one. Everything below rebuilds the front in place and leaves
- * the handle alone. `atOrAbove` says the same thing but lives in `core/unstable`; the public
- * `INVALIDATION_ORDER` is the same list and is enough for one comparison.
- *
- * Read the tier, never the key: `seed` is filed under "06 PAPER" in the panel and is hull-tier
- * all the same, and the section a knob is drawn in has never been what decides this.
- */
-export function movesGeometry(k: KnobDescriptor): boolean {
-  return INVALIDATION_ORDER.indexOf(k.invalidates) >= HULL_TIER
 }
 
 export function isNumberLike(k: KnobDescriptor): k is NumberKnob | IntKnob {

@@ -8,7 +8,6 @@ import pack2x3 from '@paper-crumple/motion/packs/2x3'
 import pack3x2 from '@paper-crumple/motion/packs/3x2'
 import type { PackModule } from '@paper-crumple/motion'
 
-export type PresentMode = 'blit' | 'direct'
 export type BucketName = '1x1' | '2x3' | '3x2'
 
 const PACKS: Readonly<Record<BucketName, PackModule>> = {
@@ -30,7 +29,6 @@ export interface DemoConfig {
   readonly edgeWidthUnit: EdgeWidthUnit
   readonly tiles: boolean
   readonly packs: readonly BucketName[]
-  readonly present: PresentMode
   readonly artworkCssPx: number
   readonly budgetMb: number
   readonly overscanHeadroom: number
@@ -46,7 +44,6 @@ export const DEFAULT_CONFIG: DemoConfig = {
   edgeWidthUnit: 'px',
   tiles: true,
   packs: ['1x1', '2x3', '3x2'],
-  present: 'blit',
   // The ARTWORK's on-screen long side — the picture is laid out like a 360-px `<img>` and the
   // paper overflows it (`framing.ts`). Matches the width the control panel's own stage gives its
   // sheet (`width: min(360px, 74%)`).
@@ -71,40 +68,25 @@ export const DEFAULT_CONFIG: DemoConfig = {
 }
 
 /**
- * A discriminated union, not a plain interface with `stage: pc.BlitStage | pc.DirectStage`: the
- * two fields must be paired so `built.present === 'direct'` narrows `built.stage` too. A flat
- * interface leaves them uncorrelated — `scene.ts`'s direct branch would then call `.view()` on
- * the *union* `BlitStage | DirectStage`, which TypeScript can only accept an argument assignable
- * to the intersection `DirectTarget & BlitTarget`, and no real target satisfies that. Same reason
- * `buildStage` below branches fully on the literal rather than tagging a shared object afterward.
+ * What one built stage is: the stage itself, and the two slot objects that fed it. The slot objects
+ * are kept and handed back, not discarded — `docs/USAGE.md` §7 builds the panel from the slots
+ * rather than from `stage.knobs`, because a descriptor's key is slot-local.
+ *
+ * A plain interface, and no longer a discriminated union: `present: 'direct'` went with the React
+ * migration, because `@paper-crumple/react` v1 binds `present: 'blit'` only (react spec §11) and
+ * `SceneOptions.create` is typed to return a `pc.BlitStage`.
  */
-export type BuiltStage =
-  | {
-      readonly present: 'blit'
-      readonly stage: pc.BlitStage
-      readonly sheet: PaperSheet
-      readonly motion: ReturnType<typeof bakedMotion>
-      readonly buildMs: number
-      /**
-       * Carried through so `scene.ts` can give the `blit` hero canvas a display size that does
-       * NOT follow its own backing store — see `heroCanvas`. It is the same number that fed
-       * `paperStage({ artworkCssPx })` above, so the two cannot drift apart.
-       */
-      readonly artworkCssPx: number
-    }
-  | {
-      readonly present: 'direct'
-      readonly stage: pc.DirectStage
-      readonly sheet: PaperSheet
-      readonly motion: ReturnType<typeof bakedMotion>
-      readonly buildMs: number
-      /**
-       * Carried through so `scene.ts` can give the `blit` hero canvas a display size that does
-       * NOT follow its own backing store — see `heroCanvas`. It is the same number that fed
-       * `paperStage({ artworkCssPx })` above, so the two cannot drift apart.
-       */
-      readonly artworkCssPx: number
-    }
+export interface BuiltStage {
+  readonly stage: pc.BlitStage
+  readonly sheet: PaperSheet
+  readonly motion: ReturnType<typeof bakedMotion>
+  readonly buildMs: number
+  /**
+   * Carried through so the hero is framed at the same number the stage was built with — it is what
+   * `useCrumple`'s `frameTo` is given, so the two cannot drift apart.
+   */
+  readonly artworkCssPx: number
+}
 
 /**
  * The slot objects are kept and handed back, not discarded: `docs/USAGE.md` §7 builds the panel
@@ -138,24 +120,6 @@ export async function buildStage(
     signal,
   }
 
-  // The `present` literal selects the overload, so the branch is on the literal and not on a
-  // variable — a `present: config.present` would collapse both overloads into a union that
-  // neither `resize` nor `view` can be called on. The whole return is built inside each branch,
-  // for the same reason: `present` and `stage` must come from the same narrowed arm.
-  if (config.present === 'direct') {
-    const stage = await pc.paperStage({ ...base, present: 'direct' })
-    if (stage === pc.ABORTED) return pc.ABORTED
-    if (stage instanceof Error) return stage
-    return {
-      stage,
-      sheet,
-      motion,
-      present: 'direct',
-      buildMs: performance.now() - started,
-      artworkCssPx: config.artworkCssPx,
-    }
-  }
-
   const stage = await pc.paperStage({ ...base, present: 'blit' })
   if (stage === pc.ABORTED) return pc.ABORTED
   if (stage instanceof Error) return stage
@@ -163,7 +127,6 @@ export async function buildStage(
     stage,
     sheet,
     motion,
-    present: 'blit',
     buildMs: performance.now() - started,
     artworkCssPx: config.artworkCssPx,
   }
