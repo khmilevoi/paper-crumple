@@ -8,6 +8,7 @@ import type {
   EventName,
   Events,
   KnobDescriptor,
+  KnobValues,
   PlayOptions,
   PlayResult,
   PoseRef,
@@ -69,6 +70,10 @@ export interface FakeStageOptions {
   /** Sprite keys resident before the binding does anything. */
   readonly sprites?: readonly string[]
   readonly knobs?: readonly KnobDescriptor[]
+  /** `stage.defaults` (§3.4): every descriptor's default under its **namespaced** path. The fake
+   *  has no registry to derive these from `knobs`, which carries slot-local keys with no path, so
+   *  a test that needs them states them. Frozen and handed out by identity, like core's. */
+  readonly defaults?: KnobValues
   readonly prepare?: (key: string) => Promise<Sprite | AddError | Aborted>
   readonly add?: (
     src: SpriteSource,
@@ -110,6 +115,7 @@ const EMPTY_USAGE = {} as unknown as ReturnType<BlitStage['usage']>
 export function createFakeStage(o?: FakeStageOptions): FakeStageHandle {
   const calls: FakeCall[] = []
   const warnings: Error[] = []
+  const defaults: KnobValues = Object.freeze({ ...o?.defaults })
   const sprites = new Map<string, Sprite>()
   const refusals = new Map<string, Error>()
   const viewHandles: FakeViewHandle[] = []
@@ -267,6 +273,7 @@ export function createFakeStage(o?: FakeStageOptions): FakeStageHandle {
     },
     caps: { floatRT: true, maxTextureSize: 4096, timer: false },
     knobs: o?.knobs ?? [],
+    defaults,
     get lost(): boolean {
       return lost
     },
