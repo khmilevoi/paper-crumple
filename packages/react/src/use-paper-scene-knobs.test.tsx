@@ -67,7 +67,7 @@ test('a batch with one invalid key still writes the valid ones (§9)', async () 
   await harness.unmount()
 })
 
-test('a refused key is reported through onError as an observed error', async () => {
+test('a refused key is reported through onError as an unobserved error (§0.3)', async () => {
   const onError = vi.fn()
   const refusal = new Error('unknown knob b')
   const fake = createFakeStage()
@@ -82,7 +82,7 @@ test('a refused key is reported through onError as an observed error', async () 
   )
   await flush()
   expect(onError).toHaveBeenCalledTimes(1)
-  expect(onError).toHaveBeenCalledWith({ error: refusal, observed: true, view: null })
+  expect(onError).toHaveBeenCalledWith({ error: refusal, observed: false, view: null })
   await harness.unmount()
 })
 
@@ -201,7 +201,7 @@ test('a key added in the same render that changes deps is a live write, reported
   await harness.rerender()
   await flush()
   expect(onError).toHaveBeenCalledTimes(1)
-  expect(onError).toHaveBeenCalledWith({ error: refusal, observed: true, view: null })
+  expect(onError).toHaveBeenCalledWith({ error: refusal, observed: false, view: null })
   await harness.unmount()
 })
 

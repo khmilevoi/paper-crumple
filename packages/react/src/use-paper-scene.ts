@@ -236,9 +236,11 @@ export function usePaperScene(o: SceneOptions): Scene {
       // wholly valid patch, so a single batched call applies none of it when any key is bad.
       const refused = live.set({ [key]: value } as never)
       if (refused !== undefined) {
-        // `observed: true` — the error was also handed back as a return value, and §7's telemetry
-        // filter on `!observed` exists so it is not counted twice.
-        if (!carried.has(key)) dispatchError({ error: refused, observed: true, view: null })
+        // §0.3: `observed: false`. `observed` means "is, or will be, a return value someone can
+        // narrow", and §7 tells consumers to filter on it. The only someone who could narrow this
+        // return value is this hook, and it does not hand it back — so dispatching it observed
+        // filtered the one report of the refusal away and made a refused slider a silent no-op.
+        if (!carried.has(key)) dispatchError({ error: refused, observed: false, view: null })
         continue
       }
       wrote = true
