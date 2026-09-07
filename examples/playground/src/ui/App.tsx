@@ -63,6 +63,17 @@ export function nextLibrarySample(current: Sample, target: Sample): Sample {
   return SAMPLES.some((s) => s.id === target.id) ? target : current
 }
 
+/**
+ * Whether a swap to `target` would be a no-op the library itself never reports back on. `useCrumple`
+ * refuses a same-key request before it does anything observable — `syncSprite`'s
+ * `core.synced.key === key` check (`packages/react/src/use-crumple.ts:261`) returns before an
+ * `add`, a run, or an `end` event, so nothing would ever arrive to close a transport this component
+ * armed for the swap (Finding A). `startSwap` must never begin one.
+ */
+export function isNoOpSwap(shown: Sample, target: Sample): boolean {
+  return target.id === shown.id
+}
+
 /** The status line the pill shows: what the last action did, or `null` for the idle readout. */
 export interface StageStatus {
   readonly ok: boolean
@@ -442,6 +453,10 @@ export function App(): ReactNode {
    */
   const startSwap = useCallback(
     (target: Sample) => {
+      // A same-key request is a silent no-op in `useCrumple` (see `isNoOpSwap`) — nothing would
+      // ever arrive to clear `direction` or `swappingRef`, so no swap that cannot run may leave the
+      // transport armed. This is the root guard for the whole class, not just one caller's route.
+      if (isNoOpSwap(shown, target)) return
       const duration = audio.beginSequence(swapSpec(crumple.pose, dwells))
       setSwapDuration(swapDurationFor(duration))
       setDirection('folding')
@@ -449,7 +464,7 @@ export function App(): ReactNode {
       setShown(target)
       setLibrarySample((prev) => nextLibrarySample(prev, target))
     },
-    [audio, crumple.pose, dwells],
+    [audio, crumple.pose, dwells, shown],
   )
 
   const onSwap = useCallback(() => {
@@ -796,6 +811,10 @@ export function App(): ReactNode {
                   const next = SAMPLES.find((s) => s.id === id)
                   if (next === undefined) return
                   startSwap(next)
+                  // Same as `onSwap`'s own re-derivation below: the swap-to select must never keep
+                  // naming the sample just picked here, or the next Swap click becomes the no-op
+                  // `startSwap`'s guard now refuses silently (Finding A).
+                  setSwapTarget(SAMPLES.find((s) => s.id !== next.id)?.id ?? BROKEN_ID)
                 }}
                 onPacksChange={(packs: readonly BucketName[]) => {
                   applyConfig({ ...config, packs })

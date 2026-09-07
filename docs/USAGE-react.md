@@ -914,8 +914,9 @@ If the wrapper is not the element you want sized, do it by hand from `crumple.fr
 `{ box, artwork }`: the box the view draws into and where the unpadded artwork lands inside it, both
 in that box's pixels, `null` until a front is resident (`packages/core/src/view.ts:41`). It **remembers
 nothing and needs nothing remembered** — it reports the view's current frame, so read it again after
-every swap and on every `knobEpoch` change. `frameHero` in `examples/playground/src/stage.ts` is the
-reference implementation.
+every swap and on every `knobEpoch` change. `frameArtwork` in `examples/playground/src/framing.ts` is
+the reference implementation — the four multiplications by one scale that `heroSlotStyle`
+(`examples/playground/src/hero.ts`) applies to size the hero slot.
 
 ## 11. What `<Crumple>` renders
 
@@ -950,10 +951,13 @@ ref on that element would be a view with no lifetime — and `width` / `height` 
 **Nobody but the stage writes `width` or `height` on the canvas.** The binding is always `'managed'`,
 under which the core reads `getBoundingClientRect()` and writes the backing store during the draw
 (`stage.ts:1057-1071`); a React-set attribute would fight it every blit. The playground learned this
-the expensive way — a canvas with no CSS size takes its layout size from those attributes, the two
-feed each other, and the element grows by `devicePixelRatio` per blit until it hits the front size
-(`examples/playground/src/stage.ts`, `frameHero`'s comment). The exclusion is safe to state absolutely
-only because `'manual'` is not offered.
+the expensive way, in the pre-migration hero implementation — a canvas with no CSS size takes its
+layout size from those attributes, the two feed each other, and the element grows by
+`devicePixelRatio` per blit until it hits the front size. `heroSlotStyle`
+(`examples/playground/src/hero.ts`) and the `frameArtwork` it calls
+(`examples/playground/src/framing.ts`) are what size the wrapper today, off `crumple.frame` rather
+than off the canvas's own attributes, so the loop has nothing to feed on. The exclusion is safe to
+state absolutely only because `'manual'` is not offered.
 
 ## 12. Errors
 

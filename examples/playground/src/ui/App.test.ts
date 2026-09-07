@@ -2,7 +2,7 @@ import { describe, expect, it } from 'vitest'
 
 import { SAMPLES } from '../samples'
 import { droppedSample } from '../hero'
-import { nextLibrarySample } from './App'
+import { isNoOpSwap, nextLibrarySample } from './App'
 
 /**
  * `nextLibrarySample` is the "sample" `<select>`'s whole desync guard (Finding B, P4 task 4 fix
@@ -31,5 +31,28 @@ describe('nextLibrarySample', () => {
   it('keeps the current library sample when the target is the broken-URL rollback demo', () => {
     const broken = { id: 'broken', label: 'broken URL (rollback demo)', url: '/nope.png' }
     expect(nextLibrarySample(sweater, broken)).toBe(sweater)
+  })
+})
+
+/**
+ * `isNoOpSwap` is `startSwap`'s root guard (Finding A, P4 final-review fix round). `useCrumple`
+ * refuses a same-key request silently — no `add`, no run, no `end` event — so without this guard
+ * `startSwap` arms `direction` and `swappingRef` for an event that never arrives and the transport,
+ * the keyboard shortcuts and the Swap button stay dead until reload. If the guard is dropped or its
+ * condition is loosened, a request for the sample already shown stops being flagged as a no-op.
+ */
+describe('isNoOpSwap', () => {
+  const sweater = SAMPLES.find((s) => s.id === 'sweater')
+  const trench = SAMPLES.find((s) => s.id === 'trench')
+  expect(sweater).toBeDefined()
+  expect(trench).toBeDefined()
+  if (sweater === undefined || trench === undefined) return
+
+  it('flags a swap to the sample already shown', () => {
+    expect(isNoOpSwap(sweater, sweater)).toBe(true)
+  })
+
+  it('does not flag a swap to a different sample', () => {
+    expect(isNoOpSwap(sweater, trench)).toBe(false)
   })
 })

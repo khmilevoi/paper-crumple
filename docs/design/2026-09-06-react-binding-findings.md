@@ -249,10 +249,18 @@ over the scene and the crumple.
 per render by construction, so depending on the object itself re-runs on every render. The cost of
 that design decision lands directly on every call site: `App.tsx`'s dependency arrays name
 `scene.stop`, `crumple.pose`, `crumple.shown`, `crumple.view`, `crumple.play` and `crumple.refresh`
-individually rather than `scene` or `crumple` (for example `examples/playground/src/ui/App.tsx:377`),
+individually rather than `scene` or `crumple` (for example `examples/playground/src/ui/App.tsx:388`),
 and one of those individual members (`scene.stop`, a called member expression) still trips
 `react-hooks/exhaustive-deps` because the installed analyzer does not narrow it the way it narrows a
-plain property read, requiring a targeted suppression (`App.tsx:371-377`).
+plain property read. That is one of **five** `react-hooks/exhaustive-deps` suppressions the
+granularity forces in this one file, each with its own one-line justification: the boot effect's
+intentional `[]`, which must run once regardless of what `boot` or `onObserved` become
+(`App.tsx:151`); the `pack` memo's `generation` dependency, which the callback body never reads but
+which is what makes the memo re-read after a rebuild swaps the slot underneath (`:352`); the
+`applyPoses` callback's `scene.stop` in place of `scene`, the case above (`:387`); the pose-schedule
+effect's `[generation, built, pack]`, which deliberately excludes `keyFrames` because an edit applies
+its own draft and must not be re-applied here (`:400`); and the prefetch effect's
+`[generation, built]`, which excludes `shown` because a swap must not re-run the prefetch (`:536`).
 
 **Where it belongs.** §2.1, which already states the rule and its reason. Worth recording next to it
 that a real consumer pays the granularity back out in every dependency array it writes, and that the
@@ -330,6 +338,33 @@ to its snapshot — is untested.
 **Where it belongs.** §9, which describes the package's own fake-stage-and-harness approach in
 detail but says nothing about a consumer who wants the same approach for their own hook-driven
 components built on top of `usePaperScene` / `useCrumple`.
+
+## 20. A swap to the sprite key already shown is a silent no-op — and reports nothing
+
+**What the playground needed.** Either a way to route a "swap to this sample" request through
+`startSwap` without the caller having to separately decide whether it is actually a change, or, short
+of that, a signal back from the hook when a requested swap will not run, so the caller does not arm
+state for an event that will never arrive.
+
+**What the package offers.** Neither. `useCrumple`'s `syncSprite` (`packages/react/src/use-crumple.ts:249-282`)
+refuses a same-key request before anything observable happens: `if (core.synced?.view === view &&
+core.synced.key === key) return` (`:261`) returns before `core.requested` is touched, before
+`live.seq` advances, and before `enter` or `swap` — never mind `view.swapTo` — is called. No `add`,
+no run, no `start`/`step`/`end`, and no snapshot bump: the caller has no way to distinguish "the
+request landed and produced silence" from "the request was never even considered", because nothing
+in the `CrumpleSnapshot` changes either way.
+
+**What was done.** `startSwap` (`examples/playground/src/ui/App.tsx`) now refuses a same-key request
+itself, before `audio.beginSequence`, before `setDirection('folding')`, and before
+`swappingRef.current = true`, via a small exported `isNoOpSwap` predicate. Without it, picking the
+sample already shown from the "sample" select left the transport permanently armed — `direction`
+stuck at `'folding'`, `swappingRef.current` stuck `true` — because nothing the hook does was ever
+going to clear them. The guard duplicates the check `syncSprite` already makes; the playground has to
+make it a second time because the hook's own refusal is invisible from the outside.
+
+**Where it belongs.** §5.3, next to "The swap fires when `spriteKey` changes" (line 514) — that
+statement covers the happy path but not what a caller observes when the key does not change, which is
+exactly the gap here.
 
 ## What the package expressed with no friction at all
 
