@@ -1,6 +1,5 @@
 import type { Events, View } from '@paper-crumple/core'
 import type { CrumpleSnapshot } from './crumple-types.js'
-import { frameStyleFor } from './frame-style.js'
 
 /**
  * The mutable record the snapshot is read out of. One per hook instance, never replaced — the
@@ -14,7 +13,6 @@ export interface CrumpleCore {
   parked: boolean
   /** The resolved ball index the current run reported at `start`. Only a swap carries one. */
   via: number | undefined
-  frameTo: number | undefined
   /** Which (view, key) pair the sprite driver has already acted on. */
   synced: { view: View; key: string } | null
 }
@@ -26,19 +24,25 @@ export function createCrumpleCore(): CrumpleCore {
     error: null,
     parked: false,
     via: undefined,
-    frameTo: undefined,
     synced: null,
   }
 }
 
 /**
- * Re-read the getters into one snapshot. The caller caches it: `view.state`, `view.pose` and
+ * What the versioned store holds. `frameStyle` is NOT part of it: it is derived from the published
+ * `frame` and the `frameTo` PROP in the hook's render (§2.7), because a prop mirrored into this
+ * record through an effect lags its own commit by one bump — the lag that left the first entrance
+ * measuring 0 × 0 (§9.1).
+ */
+export type CrumpleReading = Omit<CrumpleSnapshot, 'frameStyle'>
+
+/**
+ * Re-read the getters into one reading. The caller caches it: `view.state`, `view.pose` and
  * `view.frame` are getters, so an object literal built inside `getSnapshot` would have a new
  * identity every call and `useSyncExternalStore` would loop forever (§5.5).
  */
-export function readCrumple(core: CrumpleCore): CrumpleSnapshot {
+export function readCrumple(core: CrumpleCore): CrumpleReading {
   const view = core.view
-  const frame = view?.frame ?? null
   return {
     state: view?.state ?? 'detached',
     parked: core.parked,
@@ -46,8 +50,7 @@ export function readCrumple(core: CrumpleCore): CrumpleSnapshot {
     shown: view?.sprite?.key ?? null,
     requested: core.requested,
     error: core.error,
-    frame,
-    frameStyle: frameStyleFor(frame, core.frameTo),
+    frame: view?.frame ?? null,
     view,
   }
 }
