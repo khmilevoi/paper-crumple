@@ -84,6 +84,7 @@ export type {
 } from './knobs.js'
 export { INVALIDATION_ORDER } from './invalidation.js'
 export type { Flatten, KnobValue, KnobsAt, KnobsOf } from './knob-types.js'
+export type { KnobPrimitive, KnobValues } from './knob-registry.js'
 export { SHARED_KNOBS } from './shared-knobs.js'
 export type { SharedKnobs } from './shared-knobs.js'
 export type {
