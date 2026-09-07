@@ -110,6 +110,48 @@ even as types (§3). You write the `paperStage(...)` call yourself inside `creat
 the binding usable with a custom sheet or a custom motion slot, and it is why the install line above
 still names four packages.
 
+### Local development via `pnpm link`
+
+Consuming this package from a checkout of this monorepo, before anything is published, works the
+same way any pnpm workspace package can be linked out — with one thing to get right. `dist/` is
+gitignored and not built by default, so build the family first:
+
+```sh
+pnpm install && pnpm build   # from the repo root; builds core, paper, motion, react (turbo)
+```
+
+Then, from each package directory you want to consume, register it with the target project by
+path — `pnpm link <absolute-or-relative-path-to-the-package>`, run from the consuming project:
+
+```sh
+# from your other project:
+pnpm link ../paper-crumple/packages/react
+pnpm link ../paper-crumple/packages/core     # required — see below
+```
+
+**Link `@paper-crumple/core` alongside `@paper-crumple/react`, not just `react` by itself.** Inside
+this workspace, pnpm resolves `"@paper-crumple/core": "workspace:^"` to the sibling package
+automatically; that rewrite only happens at `pnpm publish` time. A `pnpm link` from *outside* the
+workspace does not perform it, so an external consumer who links only `packages/react` gets a real,
+working `@paper-crumple/react` whose own `import … from "@paper-crumple/core"` has nothing to
+resolve against — confirmed by linking react alone into a scratch project: it imports fine, but
+`@paper-crumple/core` is `MODULE_NOT_FOUND` until it is linked too. Link `packages/paper` and
+`packages/motion` the same way if your app imports them directly (as most apps will, since `react`
+does not import either — see above). All symlinks a consuming project creates this way land flat in
+its own `node_modules/@paper-crumple/*`, so `core`, `motion`, `paper` and `react` all resolve back
+to the *same* checkout and therefore the same `@paper-crumple/core` module instance —
+`assertSingleCore()` stays happy, the same way pnpm's own workspace symlinking keeps it happy inside
+this repo.
+
+pnpm additionally warns on each `link` that "the linked in dependency will not resolve the peer
+dependencies from the target node_modules" — that is the warning describing exactly the situation
+above, and linking `core` (and `paper`/`motion` as needed) is how you resolve it. `pnpm link --global`
+(the two-step global-store form) is not required for this and was flaky in testing on Windows; the
+direct path form (`pnpm link <path>`) worked reliably and is what is shown here.
+
+Re-run `pnpm build` in this repo after a source change; a linked package is a symlink to `dist/`, not
+to `src/`, so a consumer sees the rebuilt output on its next reload with no re-link needed.
+
 **React 19 only.** The range `^18.3 || ^19` was considered and rejected (§3). The ref-callback
 cleanup function is what gives a view a life exactly as long as its canvas element; on 18 that
 becomes a `useEffect` over a manually mirrored ref, plus `forwardRef`, plus a hand-rolled
