@@ -444,20 +444,33 @@ export function App(): ReactNode {
   useEffect(() => {
     if (built === null || pack === null) return
     // Nothing to apply, nothing to stop. `applyPoses` pays for every call with
-    // `scene.stop({ all: true })` and a `draw('flat')`, and this effect now runs when the sprite
-    // LANDS — which is mid-entrance, and mid-swap while `shown` still moves at the ball (§0.1).
-    // Re-applying a schedule the resident pack already carries is a no-op the library would
-    // accept (`setPoses(null)`), so paying for it would only cut the entrance short. A draft that
+    // `scene.stop({ all: true })` and a `draw('flat')`, and the first sprite landing reaches this
+    // effect through `pack`'s own identity — which is mid-entrance (§9.2, §0.1). Re-applying a
+    // schedule the resident pack already carries is a no-op the library would accept
+    // (`setPoses(null)`), so paying for it would only cut the entrance short. A draft that
     // differs is a real re-application and still runs, exactly as it did across a rebuild.
     if (sameList(keyFrames, pack.keyFrames)) return
     // The only state this can touch is the status pill, and only when the library REFUSES the
     // draft — which is the one thing a reader must be told about a schedule that did not take.
     // eslint-disable-next-line react-hooks/set-state-in-effect
     applyPoses(keyFrames, pack)
-    // Only when a new stage lands or a sprite becomes resident: `keyFrames` changing from an edit
-    // is applied by the edit itself.
+    // Only when a new stage lands or the resident pack itself moves: `keyFrames` changing from an
+    // edit is applied by the edit itself.
+    //
+    // `crumple.shown` is deliberately ABSENT here while the memo above depends on it, and that
+    // asymmetry is load-bearing. There it is what makes `packs()` be re-read at all; here `pack`
+    // already carries the result, because `residentPacks()` hands back `store.get(bucket)`
+    // (`motion/src/source.ts:150`), so `pack`'s identity moves exactly when the resident set
+    // does, including the `null` → `Pack` transition at the first landing — the whole of §9.2.
+    // What `crumple.shown` would add is only the LATER landings, where `packs()[0]` is the same
+    // `Pack` object: on those this effect would re-run once per swap and, whenever the reader
+    // holds a draft that differs from the manifest, re-pay `scene.stop({ all: true })` +
+    // `draw('flat')` at the ball and cut the run short. Nothing is lost by leaving it out —
+    // `setPoses` is a slot-level override the clips read through getters (`source.ts:299-306`),
+    // and `load()` checks it against each arriving pack, so a newly landed sprite already carries
+    // the draft.
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [generation, built, pack, crumple.shown])
+  }, [generation, built, pack])
 
   const commitKeyFrames = useCallback(
     (draft: readonly number[]) => {

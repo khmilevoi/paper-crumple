@@ -87,7 +87,7 @@ describe('isNoOpSwap', () => {
  * has not; and the one where the sprite is on the canvas.
  */
 describe('isSwapSettled', () => {
-  it('is false in the click s own commit, where both values still name the previous sprite', () => {
+  it("is false in the click's own commit, where both values still name the previous sprite", () => {
     expect(isSwapSettled('sweater', 'sweater', 'trench')).toBe(false)
   })
 

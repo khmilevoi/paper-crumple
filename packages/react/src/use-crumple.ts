@@ -108,6 +108,14 @@ export function useCrumple<S extends SpriteSource>(o: CrumpleOptions<S>): Crumpl
    *
    * No `store.bump()`: a redraw of the pose already on screen changes nothing a consumer reads,
    * and bumping here would re-enter this render path for nothing.
+   *
+   * One implicit coupling this key rests on: it is `frameStyle`, i.e. `frame.box * scale`, while a
+   * consumer is free to size its slot from a DIFFERENT box — the playground's `heroSlotStyle` uses
+   * `frameArtwork(frame, cssPx).image` (`examples/playground/src/hero.ts:42-46`). The two co-vary
+   * today because they share their inputs, so the key does fire in the commit that resizes the
+   * slot; but a consumer whose box is NOT co-variant with `frameStyle` — or who passes no
+   * `frameTo` at all, leaving `frameStyle` null — gets no redraw from here, and is left to the
+   * core's own deferred sizing on the next blit (`packages/core/src/stage.ts:1058-1073`).
    */
   const frameWidth = frameStyle?.width ?? null
   const frameHeight = frameStyle?.height ?? null
