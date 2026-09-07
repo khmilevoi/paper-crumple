@@ -10,11 +10,19 @@ import type {
   View,
 } from '@paper-crumple/core'
 import { ABORTED } from '@paper-crumple/core'
-import { useEffect, useState, useSyncExternalStore } from 'react'
+import { useEffect, useLayoutEffect, useMemo, useState, useSyncExternalStore } from 'react'
 import { acquire, pendingAcquisition, stageSignal } from './acquire.js'
 import type { Crumple } from './crumple.js'
-import { createCrumpleCore, onRunEnd, onRunStart, onRunStep, readCrumple } from './crumple-state.js'
-import type { CrumpleOptions, CrumpleSnapshot, ReducedMotion } from './crumple-types.js'
+import {
+  createCrumpleCore,
+  onRunEnd,
+  onRunStart,
+  onRunStep,
+  readCrumple,
+  type CrumpleReading,
+} from './crumple-state.js'
+import type { CrumpleOptions, ReducedMotion } from './crumple-types.js'
+import { frameStyleFor } from './frame-style.js'
 import { rememberPair } from './pair-guard.js'
 import { useScene } from './scene-context.js'
 import { createVersionedStore } from './store.js'
@@ -58,7 +66,7 @@ export function useCrumple<S extends SpriteSource>(o: CrumpleOptions<S>): Crumpl
   const latest = useEvent((): ResolvedOptions => o as unknown as ResolvedOptions)
 
   const [core] = useState(createCrumpleCore)
-  const [store] = useState(() => createVersionedStore<CrumpleSnapshot>(() => readCrumple(core)))
+  const [store] = useState(() => createVersionedStore<CrumpleReading>(() => readCrumple(core)))
   const [live] = useState<CrumpleLive>(() => ({
     stage: null,
     canvas: null,
@@ -69,6 +77,52 @@ export function useCrumple<S extends SpriteSource>(o: CrumpleOptions<S>): Crumpl
   const [pairs] = useState(() => new Map<string, SpriteSource>())
 
   const snapshot = useSyncExternalStore(store.subscribe, store.getSnapshot, store.getServerSnapshot)
+
+  /**
+   * Derived, never mirrored (§2.7). A prop written into `core` from an effect is only published by
+   * the NEXT bump, so `frameStyle` used to lag its own `frameTo` by one commit — and on the
+   * entrance the one blit the view performs lands inside that lag, against a 0 × 0 element (§9.1).
+   * `frameStyleFor` is pure and cheap; the memo exists so the value has a stable identity between
+   * bumps, not to save the four multiplications.
+   */
+  const frameTo = o.frameTo
+  const frameStyle = useMemo(
+    () => frameStyleFor(snapshot.frame, frameTo),
+    [snapshot.frame, frameTo],
+  )
+
+  /**
+   * "Apply the frame, then one event-free redraw" — the pairing `mountHero` had and the migration
+   * dropped (§9.1). Under `size: 'managed'` the core writes `canvas.width/height` from
+   * `getBoundingClientRect()` during a draw, and `managedBackingStore` returns `null` for a zero
+   * box, so the entrance's one blit — which lands before the wrapper has any size at all — leaves
+   * the default 300 × 150 store in place and the browser stretches it. A LAYOUT effect, because
+   * the redraw has to see the box React committed in this very commit; a passive effect measures
+   * the same 0 × 0.
+   *
+   * Keyed on the two box strings and NOT on `frameStyle` or `snapshot.frame`: `View.frame` returns
+   * a fresh object per read, so both have a new identity at every bump and an effect keyed on
+   * either would redraw on every step of every run. The values move only when the front or
+   * `frameTo` moves, and a blit view's frame does not depend on the canvas size, so this cannot
+   * feed itself.
+   *
+   * No `store.bump()`: a redraw of the pose already on screen changes nothing a consumer reads,
+   * and bumping here would re-enter this render path for nothing.
+   *
+   * One implicit coupling this key rests on: it is `frameStyle`, i.e. `frame.box * scale`, while a
+   * consumer is free to size its slot from a DIFFERENT box — the playground's `heroSlotStyle` uses
+   * `frameArtwork(frame, cssPx).image` (`examples/playground/src/hero.ts:42-46`). The two co-vary
+   * today because they share their inputs, so the key does fire in the commit that resizes the
+   * slot; but a consumer whose box is NOT co-variant with `frameStyle` — or who passes no
+   * `frameTo` at all, leaving `frameStyle` null — gets no redraw from here, and is left to the
+   * core's own deferred sizing on the next blit (`packages/core/src/stage.ts:1058-1073`).
+   */
+  const frameWidth = frameStyle?.width ?? null
+  const frameHeight = frameStyle?.height ?? null
+  useLayoutEffect(() => {
+    if (frameWidth === null || frameHeight === null) return
+    core.view?.refresh()
+  }, [frameWidth, frameHeight, core])
 
   /**
    * Every consumer callback goes through `useEvent`, and they are dispatched from the binding's
@@ -288,16 +342,6 @@ export function useCrumple<S extends SpriteSource>(o: CrumpleOptions<S>): Crumpl
     syncSprite(view)
   }, [view, spriteKey, src, syncSprite])
 
-  const frameTo = o.frameTo
-  useEffect(() => {
-    if (core.frameTo === frameTo) return
-    // Mirrored into the record rather than derived at render: the snapshot must be one cached
-    // object, rebuilt only at a bump (§5.5).
-    // eslint-disable-next-line react-hooks/immutability -- `core` is an intentionally mutable record held once per hook instance and never replaced; `store.bump()` publishes each write (§5.5).
-    core.frameTo = frameTo
-    store.bump()
-  }, [frameTo, core, store])
-
   const knobEpoch = scene.knobEpoch
   useEffect(() => {
     const active = core.view
@@ -437,5 +481,5 @@ export function useCrumple<S extends SpriteSource>(o: CrumpleOptions<S>): Crumpl
   })
 
   // Deliberately a fresh object per render: it carries the reactive snapshot (§2.1).
-  return { ...snapshot, ref, play, stop, refresh }
+  return { ...snapshot, frameStyle, ref, play, stop, refresh }
 }

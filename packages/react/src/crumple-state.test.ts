@@ -23,28 +23,27 @@ test('a core with no view reads as the detached snapshot (§5.2, §8)', () => {
     requested: null,
     error: null,
     frame: null,
-    frameStyle: null,
     view: null,
   })
 })
 
-test('with a view, the getters are read through and frameStyle is derived', () => {
+test('the reading carries no frameStyle and the record no frameTo — the hook derives it (§2.7)', () => {
+  const core = createCrumpleCore()
+  expect(core).not.toHaveProperty('frameTo')
+  const snapshot = readCrumple(core)
+  expect(snapshot).not.toHaveProperty('frameStyle')
+})
+
+test('with a view, the getters are read through (§5.2)', () => {
   const core = createCrumpleCore()
   core.view = fakeView({ sprite: 'hero', frame: FRAME })
   core.requested = 'hero'
-  core.frameTo = 192
   const snapshot = readCrumple(core)
   expect(snapshot.state).toBe('crumpling.rise')
   expect(snapshot.pose).toBe(3)
   expect(snapshot.shown).toBe('hero')
   expect(snapshot.requested).toBe('hero')
   expect(snapshot.frame).toBe(FRAME)
-  expect(snapshot.frameStyle).toEqual({
-    width: '230.4px',
-    height: '230.4px',
-    left: '-19.2px',
-    top: '-19.2px',
-  })
 })
 
 test('requested and shown diverge on a rollback, and the error rides with them (§5.1)', () => {

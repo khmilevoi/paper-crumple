@@ -91,6 +91,33 @@ export function isNoOpSwap(requestedKey: string, target: Sample): boolean {
   return target.id === requestedKey
 }
 
+/**
+ * Whether the swap this component started has reached the sprite it asked for (§9.3).
+ *
+ * All three values, not two. `crumple.requested === crumple.shown` alone is true AT REST — and the
+ * commit right after a "Swap" click is at rest as far as the snapshot is concerned: `startSwap`
+ * arms `swappingRef` and calls `setShown(target)`, so the effect re-runs on the new `shown.label`
+ * while the snapshot it reads is still the pre-click one, both values naming the PREVIOUS sprite.
+ * Gating on the pair alone would consume the transport and print the new label at the start of the
+ * swap instead of the end. `requested` moves one commit later, inside `useCrumple`'s own
+ * `syncSprite` effect (`use-crumple.ts:286-289`); `shown` moves when the sprite lands.
+ *
+ * `requested !== shownKey` is also exactly the rollback path — a failed acquisition leaves
+ * `requested` at `'broken'` while the previous sprite is still on the canvas — so this never fires
+ * for a swap that did not happen. That path is closed by the error effect, which clears
+ * `swappingRef` itself.
+ *
+ * It reports the ball, not the true end, while `adopt` still moves `shown` mid-fold (§0.1). §2.1's
+ * `onSettle` is the real fix and is not this plan's.
+ */
+export function isSwapSettled(
+  requested: string | null,
+  shownKey: string | null,
+  targetKey: string,
+): boolean {
+  return requested === targetKey && shownKey === targetKey
+}
+
 /** The status line the pill shows: what the last action did, or `null` for the idle readout. */
 export interface StageStatus {
   readonly ok: boolean
@@ -188,14 +215,18 @@ export function App(): ReactNode {
    * behind it (USAGE §7). Without this the audio sequence would never be closed under `reduce`.
    */
   useEffect(() => {
-    if (crumple.shown === null || !swappingRef.current) return
+    if (!swappingRef.current) return
+    if (!isSwapSettled(crumple.requested, crumple.shown, shown.id)) return
     swappingRef.current = false
-    endSwap()
-    // Reporting the settle onto the status pill IS the synchronization this effect exists for —
-    // there is no external store to read it from instead (USAGE §7's own point).
+    // Closing the transport and reporting the settle onto the status pill IS the synchronization
+    // this effect exists for — there is no external store to read either from instead (USAGE §7's
+    // own point). The suppression sits on `endSwap`, whose `setDirection(null)` is now the first
+    // setState the effect reaches; the rule reports only that one, so a second directive below
+    // would be flagged as unused.
     // eslint-disable-next-line react-hooks/set-state-in-effect
-    if (crumple.shown === shown.id) setStatus({ ok: true, text: `swapped to ${shown.label}` })
-  }, [crumple.shown, endSwap, shown.id, shown.label])
+    endSwap()
+    setStatus({ ok: true, text: `swapped to ${shown.label}` })
+  }, [crumple.requested, crumple.shown, endSwap, shown.id, shown.label])
 
   /** A swap whose target failed rolled back to the previous sprite, and the hook reports the
    *  target's Error rather than retrying: the prop says B while the canvas shows A. `error` is
@@ -365,9 +396,12 @@ export function App(): ReactNode {
    *  good as any. */
   const pack = useMemo(
     () => built?.motion.packs()[0] ?? null,
-    // `generation` is what makes this re-read after a rebuild swaps the slot underneath.
+    // `generation` is what makes this re-read after a rebuild swaps the slot underneath, and
+    // `crumple.shown` is what makes it re-read when a sprite LANDS: `packs()` lists the resident
+    // packs and there are none before the first `add` resolves, which is strictly after `built`
+    // (§9.2). Neither is read in the body.
     // eslint-disable-next-line react-hooks/exhaustive-deps
-    [built, generation],
+    [built, generation, crumple.shown],
   )
   /** `null` means "whatever the pack's manifest says"; anything else is the reader's own draft,
    *  and it survives a rebuild the way the open sections do. */
@@ -409,11 +443,32 @@ export function App(): ReactNode {
   // `bakedMotion()` with no override, so whatever draft the reader was editing is re-applied here.
   useEffect(() => {
     if (built === null || pack === null) return
+    // Nothing to apply, nothing to stop. `applyPoses` pays for every call with
+    // `scene.stop({ all: true })` and a `draw('flat')`, and the first sprite landing reaches this
+    // effect through `pack`'s own identity — which is mid-entrance (§9.2, §0.1). Re-applying a
+    // schedule the resident pack already carries is a no-op the library would accept
+    // (`setPoses(null)`), so paying for it would only cut the entrance short. A draft that
+    // differs is a real re-application and still runs, exactly as it did across a rebuild.
+    if (sameList(keyFrames, pack.keyFrames)) return
     // The only state this can touch is the status pill, and only when the library REFUSES the
     // draft — which is the one thing a reader must be told about a schedule that did not take.
     // eslint-disable-next-line react-hooks/set-state-in-effect
     applyPoses(keyFrames, pack)
-    // Only when a new stage lands: `keyFrames` changing from an edit is applied by the edit itself.
+    // Only when a new stage lands or the resident pack itself moves: `keyFrames` changing from an
+    // edit is applied by the edit itself.
+    //
+    // `crumple.shown` is deliberately ABSENT here while the memo above depends on it, and that
+    // asymmetry is load-bearing. There it is what makes `packs()` be re-read at all; here `pack`
+    // already carries the result, because `residentPacks()` hands back `store.get(bucket)`
+    // (`motion/src/source.ts:150`), so `pack`'s identity moves exactly when the resident set
+    // does, including the `null` → `Pack` transition at the first landing — the whole of §9.2.
+    // What `crumple.shown` would add is only the LATER landings, where `packs()[0]` is the same
+    // `Pack` object: on those this effect would re-run once per swap and, whenever the reader
+    // holds a draft that differs from the manifest, re-pay `scene.stop({ all: true })` +
+    // `draw('flat')` at the ball and cut the run short. Nothing is lost by leaving it out —
+    // `setPoses` is a slot-level override the clips read through getters (`source.ts:299-306`),
+    // and `load()` checks it against each arriving pack, so a newly landed sprite already carries
+    // the draft.
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [generation, built, pack])
 

@@ -27,6 +27,25 @@ test('a swap start, a step at the via and an end move parked through its whole l
   await probe.unmount()
 })
 
+test('the first step past the ball clears parked (§0.2)', async () => {
+  const fake = createFakeStage()
+  const probe = await renderCrumple(
+    { spriteKey: 'hero', src: 'hero.png' },
+    { scene: readyScene(fake.stage) },
+  )
+  const view = fake.views[0]
+  view?.emit('start', { from: 0, to: 0, via: 5 })
+  await flush()
+  view?.emit('step', { pose: 5, frame: 5, ms: 300 })
+  await flush()
+  expect(probe.current.parked).toBe(true)
+  // The descent's first step. `end` is not what clears the park — the next step is (§5.5).
+  view?.emit('step', { pose: 6, frame: 6, ms: 60 })
+  await flush()
+  expect(probe.current.parked).toBe(false)
+  await probe.unmount()
+})
+
 test('the pose the store reports follows the steps', async () => {
   const fake = createFakeStage()
   const probe = await renderCrumple(

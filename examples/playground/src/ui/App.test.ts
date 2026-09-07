@@ -2,7 +2,7 @@ import { describe, expect, it } from 'vitest'
 
 import { SAMPLES } from '../samples'
 import { droppedSample } from '../hero'
-import { isNoOpSwap, nextLibrarySample } from './App'
+import { isNoOpSwap, isSwapSettled, nextLibrarySample } from './App'
 import { BROKEN_ID } from './SourceSection'
 
 /**
@@ -77,5 +77,33 @@ describe('isNoOpSwap', () => {
       url: 'https://example.invalid/missing.png',
     }
     expect(isNoOpSwap(BROKEN_ID, broken)).toBe(true)
+  })
+})
+
+/**
+ * `isSwapSettled` is the swap-settle backstop's whole gate (§9.3). The effect behind it runs in
+ * three distinguishable passes: the click's own commit, where the snapshot is still the pre-click
+ * one; the commit after the hook picked the request up, where `requested` has moved and the sprite
+ * has not; and the one where the sprite is on the canvas.
+ */
+describe('isSwapSettled', () => {
+  it("is false in the click's own commit, where both values still name the previous sprite", () => {
+    expect(isSwapSettled('sweater', 'sweater', 'trench')).toBe(false)
+  })
+
+  it('is false once the request is picked up but the sprite has not landed', () => {
+    expect(isSwapSettled('trench', 'sweater', 'trench')).toBe(false)
+  })
+
+  it('is true when the request the component made is the sprite on the canvas', () => {
+    expect(isSwapSettled('trench', 'trench', 'trench')).toBe(true)
+  })
+
+  it('is false on the rollback path, where requested and shown diverge', () => {
+    expect(isSwapSettled('broken', 'sweater', 'broken')).toBe(false)
+  })
+
+  it('is false before anything has been requested or shown', () => {
+    expect(isSwapSettled(null, null, 'trench')).toBe(false)
   })
 })
