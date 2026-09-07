@@ -20,6 +20,7 @@ export { PaperScene, useScene } from './scene-context.js'
 export type { PaperSceneProps } from './scene-context.js'
 export { usePaperScene } from './use-paper-scene.js'
 export type { Scene, SceneOptions, SceneSnapshot, SceneStatus } from './scene-types.js'
+export type { SceneBuild, SceneCounters, SceneMethods } from './scene-types.js'
 
 // --- P3: the crumple (§5, §6) ---
 /** One specifier, and deliberately: `crumple.tsx` declares both the component and the interface of

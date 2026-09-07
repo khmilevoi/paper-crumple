@@ -101,7 +101,31 @@ function duplicateCore(): Error | undefined {
   return assertSingleCore()
 }
 
-export function usePaperScene<M = undefined>(o: SceneOptions<M>): Scene<M> {
+/**
+ * The positional form (§3.5). It mirrors `useMemo`, so `react-hooks/exhaustive-deps` configured
+ * with `additionalHooks: '(usePaperScene)'` checks the dependency list against what `create`
+ * actually reads — which the options bag cannot offer, because the list is a property value.
+ */
+export function usePaperScene<M = undefined>(
+  create: SceneOptions<M>['create'],
+  deps: readonly unknown[],
+  options?: Omit<SceneOptions<M>, 'create' | 'deps'>,
+): Scene<M>
+/**
+ * The canonical form. Declared last on purpose: `Parameters<T>` and `ReturnType<T>` read the last
+ * overload, and this is the one the public type tests pin.
+ */
+export function usePaperScene<M = undefined>(o: SceneOptions<M>): Scene<M>
+export function usePaperScene<M = undefined>(
+  a: SceneOptions<M> | SceneOptions<M>['create'],
+  b?: readonly unknown[],
+  c?: Omit<SceneOptions<M>, 'create' | 'deps'>,
+): Scene<M> {
+  // Normalised once, at the top: everything below this line sees the options bag and nothing
+  // knows which shape the caller used. `b` is non-optional in the positional overload, so the
+  // `?? []` is unreachable through either public signature and exists only to type the fallback.
+  const o: SceneOptions<M> = typeof a === 'function' ? { ...c, create: a, deps: b ?? [] } : a
+
   const create = useEvent(o.create)
   /** One dispatcher fed from two places, and the binding keeps it single (§7). */
   const dispatchError = useEvent((e: StageEvent<'error'>): void => {
