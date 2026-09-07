@@ -25,6 +25,14 @@ export type ReducedMotion = 'auto' | 'off'
 export type CrumpleState = ViewState | 'detached'
 
 /**
+ * One discriminant to branch a UI on, derived and never stored (§2.5). It overlaps `state`
+ * deliberately: `state` is core's view machine and cannot express the acquire window — where
+ * nothing is playing and nothing has arrived — nor the rollback outcome, which survives `end`.
+ */
+export type CrumpleStatus =
+  'detached' | 'empty' | 'acquiring' | 'shown' | 'playing' | 'swapping' | 'rolled-back'
+
+/**
  * `frame` already scaled by `frameTo` into the four CSS numbers §6 writes on the wrapper. The
  * arithmetic lives in the hook and not in the component because §2 puts logic in the hook, and
  * because the component is handed only the instance — it never sees `frameTo`.
@@ -115,6 +123,7 @@ export type CrumpleOptions<S extends SpriteSource> = {
 /** The reactive half of a `Crumple`, rebuilt as one cached object per store bump (§5.5). */
 export interface CrumpleSnapshot {
   readonly state: CrumpleState
+  readonly status: CrumpleStatus
   /** The swap is parked at the ball, waiting on its target. Maintained by the binding, because
    *  `crumpling.ball` is set between two emissions and is never observable (§5.5). */
   readonly parked: boolean

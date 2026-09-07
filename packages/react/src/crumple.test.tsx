@@ -11,6 +11,7 @@ import { render } from './testing/render.js'
 function instance(o?: Partial<CrumpleValue>): CrumpleValue {
   return {
     state: 'detached',
+    status: 'detached',
     parked: false,
     pose: 0,
     shown: null,

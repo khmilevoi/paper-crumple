@@ -1,5 +1,10 @@
 import type { Events, View } from '@paper-crumple/core'
-import type { CrumplePending, CrumpleSnapshot } from './crumple-types.js'
+import type {
+  CrumplePending,
+  CrumpleSnapshot,
+  CrumpleState,
+  CrumpleStatus,
+} from './crumple-types.js'
 
 /**
  * The mutable record the snapshot is read out of. One per hook instance, never replaced — the
@@ -41,6 +46,31 @@ export function createCrumpleCore(): CrumpleCore {
 export type CrumpleReading = Omit<CrumpleSnapshot, 'frameStyle' | 'artworkStyle'>
 
 /**
+ * Precedence, and each step earns its place (§2.5):
+ *
+ * 1. No view is `detached` before anything else can be said.
+ * 2. An open request wins over everything below it — `error` is cleared at `start`, not at `end`,
+ *    and the degraded path has no `start` at all, so a stale rollback error can still be standing
+ *    while the next request acquires. The request is the more informative of the two.
+ * 3. `rolled-back` is `error !== null && requested !== shown`: the prop says B, the canvas shows A.
+ * 4. A live run with no request behind it is a `play()` the consumer started.
+ * 5. Then the two resting states.
+ */
+function statusOf(core: CrumpleCore, state: CrumpleState, shown: string | null): CrumpleStatus {
+  if (state === 'detached') return 'detached'
+  const pending = core.pending
+  if (pending !== null) {
+    if (pending.phase === 'acquiring') return 'acquiring'
+    if (pending.phase === 'swapping') return 'swapping'
+    return 'playing'
+  }
+  if (core.error !== null && core.requested !== shown) return 'rolled-back'
+  if (state !== 'idle' && state !== 'disposed') return 'playing'
+  if (shown === null) return 'empty'
+  return 'shown'
+}
+
+/**
  * Re-read the getters into one reading. The caller caches it: `view.state`, `view.pose` and
  * `view.frame` are getters, so an object literal built inside `getSnapshot` would have a new
  * identity every call and `useSyncExternalStore` would loop forever (§5.5).
@@ -48,11 +78,14 @@ export type CrumpleReading = Omit<CrumpleSnapshot, 'frameStyle' | 'artworkStyle'
 export function readCrumple(core: CrumpleCore): CrumpleReading {
   const view = core.view
   const sprite = view?.sprite ?? null
+  const state: CrumpleState = view?.state ?? 'detached'
+  const shown = sprite?.key ?? null
   return {
-    state: view?.state ?? 'detached',
+    state,
+    status: statusOf(core, state, shown),
     parked: core.parked,
     pose: view?.pose ?? 0,
-    shown: sprite?.key ?? null,
+    shown,
     sprite,
     requested: core.requested,
     pending: core.pending,
