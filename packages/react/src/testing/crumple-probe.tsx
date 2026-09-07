@@ -14,6 +14,7 @@ export function readyScene(
   return {
     status: 'ready',
     stage,
+    meta: undefined,
     error: null,
     warnings: [],
     lost: false,
@@ -28,6 +29,7 @@ export function buildingScene(): Scene {
   return {
     status: 'building',
     stage: null,
+    meta: null,
     error: null,
     warnings: [],
     lost: false,

@@ -11,7 +11,17 @@ import type {
 
 export type SceneStatus = 'building' | 'ready' | 'failed'
 
-export interface SceneOptions {
+/**
+ * What `create` resolves to when the consumer has build metadata to carry (§3.2). Returning a
+ * bare `BlitStage` is still legal and means `meta` is `undefined` — which is exactly what the
+ * `M = undefined` default type parameter describes.
+ */
+export interface SceneBuild<M> {
+  readonly stage: BlitStage
+  readonly meta: M
+}
+
+export interface SceneOptions<M = undefined> {
   /**
    * `onError` is handed DOWN so the consumer can spread it into `paperStage`'s own `onError`.
    * `StageOptions.onError` is wired before the surface exists, and the consumer writes the
@@ -21,7 +31,7 @@ export interface SceneOptions {
   create: (
     signal: AbortSignal,
     onError: (e: StageEvent<'error'>) => void,
-  ) => Promise<BlitStage | Error | Aborted>
+  ) => Promise<SceneBuild<M> | BlitStage | Error | Aborted>
   /**
    * A rebuild is decided by `deps` and by nothing else. Structural comparison of the options bag
    * was rejected: `sheet` and `motion` are objects returned by factory calls, so a consumer who
@@ -45,10 +55,16 @@ export interface SceneOptions {
 }
 
 /** The reactive half of a `Scene`, rebuilt as one cached object per store bump (§5.5). */
-export interface SceneSnapshot {
+export interface SceneSnapshot<M = undefined> {
   readonly status: SceneStatus
   /** Non-null exactly when `status === 'ready'`. */
   readonly stage: BlitStage | null
+  /**
+   * The landed build's metadata (§3.2). It lives beside `stage` and is cleared with it on
+   * rebuild, failure and loss — non-null exactly when `status === 'ready'`, and `undefined`
+   * rather than `null` when `create` returned a bare stage.
+   */
+  readonly meta: M | null
   /** Non-null exactly when `status === 'failed'`. */
   readonly error: Error | null
   /** `stage.warnings`, re-read on every bump — the array grows at runtime. */
@@ -66,7 +82,7 @@ export interface SceneSnapshot {
  * `<PaperScene value={scene}>`, so a fresh identity per render would re-render the whole subtree
  * and re-run every crumple effect that depends on it.
  */
-export interface Scene extends SceneSnapshot {
+export interface Scene<M = undefined> extends SceneSnapshot<M> {
   /**
    * On a scene that is not `ready` this is not an error and does not queue: it resolves to an
    * empty report with `completed: false`, which is what a broadcast over zero eligible views

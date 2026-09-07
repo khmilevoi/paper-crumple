@@ -11,12 +11,17 @@ import type {
 import { useEffect, useMemo, useState, useSyncExternalStore } from 'react'
 import { createVersionedStore } from './store.js'
 import { useEvent } from './use-event.js'
-import type { Scene, SceneOptions, SceneSnapshot, SceneStatus } from './scene-types.js'
+import type { Scene, SceneBuild, SceneOptions, SceneSnapshot, SceneStatus } from './scene-types.js'
 
 /** The mutable record the snapshot is read out of. One per hook instance, never replaced. */
-interface SceneCore {
+interface SceneCore<M> {
   status: SceneStatus
-  stage: BlitStage | null
+  /**
+   * The landed build, stage and metadata together (§3.2). One field rather than two, so `meta`
+   * is cleared with `stage` by construction: there is no state in which a stale `meta` can
+   * outlive the stage it described.
+   */
+  build: SceneBuild<M> | null
   error: Error | null
   generation: number
   knobEpoch: number
@@ -43,14 +48,16 @@ function emptyReport(): StagePlayReport<View> {
  * `stage.warnings` grows at runtime and `stage.lost` is the synchronous form of the `lost` event,
  * so both are read here — on every bump — rather than mirrored once at build time (§5.5).
  */
-function readScene(core: SceneCore): SceneSnapshot {
-  const lost = core.stage !== null && core.stage.lost
+function readScene<M>(core: SceneCore<M>): SceneSnapshot<M> {
+  const stage = core.build?.stage ?? null
+  const lost = stage !== null && stage.lost
   const failed = lost || core.status === 'failed'
   return {
     status: failed ? 'failed' : core.status,
-    stage: failed ? null : core.stage,
+    stage: failed ? null : stage,
+    meta: failed || core.build === null ? null : core.build.meta,
     error: failed ? (core.error ?? LOST_WITHOUT_CAUSE) : null,
-    warnings: core.stage?.warnings ?? NO_WARNINGS,
+    warnings: stage?.warnings ?? NO_WARNINGS,
     lost,
     generation: core.generation,
     knobEpoch: core.knobEpoch,
@@ -70,7 +77,7 @@ function duplicateCore(): Error | undefined {
   return assertSingleCore()
 }
 
-export function usePaperScene(o: SceneOptions): Scene {
+export function usePaperScene<M = undefined>(o: SceneOptions<M>): Scene<M> {
   const create = useEvent(o.create)
   /** One dispatcher fed from two places, and the binding keeps it single (§7). */
   const dispatchError = useEvent((e: StageEvent<'error'>): void => {
@@ -80,14 +87,14 @@ export function usePaperScene(o: SceneOptions): Scene {
     o.onKnobRefused?.(key, value, error)
   })
 
-  const [core] = useState<SceneCore>(() => ({
+  const [core] = useState<SceneCore<M>>(() => ({
     status: 'building',
-    stage: null,
+    build: null,
     error: null,
     generation: 0,
     knobEpoch: 0,
   }))
-  const [store] = useState(() => createVersionedStore<SceneSnapshot>(() => readScene(core)))
+  const [store] = useState(() => createVersionedStore<SceneSnapshot<M>>(() => readScene(core)))
   const [applied] = useState<{ values: Map<string, Knobs[string]>; generation: number }>(() => ({
     values: new Map(),
     generation: 0,
@@ -114,7 +121,7 @@ export function usePaperScene(o: SceneOptions): Scene {
 
     // eslint-disable-next-line react-hooks/immutability -- `core` is an intentionally mutable record held once per hook instance and never replaced; `store.bump()` publishes each write (§5.5).
     core.status = 'building'
-    core.stage = null
+    core.build = null
     core.error = null
     store.bump()
 
@@ -131,7 +138,7 @@ export function usePaperScene(o: SceneOptions): Scene {
     }
 
     void (async () => {
-      let settled: BlitStage | typeof ABORTED | Error
+      let settled: SceneBuild<M> | BlitStage | typeof ABORTED | Error
       try {
         settled = await create(controller.signal, preMount)
       } catch (cause) {
@@ -153,7 +160,10 @@ export function usePaperScene(o: SceneOptions): Scene {
       if (controller.signal.aborted) {
         // A `create` that ignores its signal still must not leak: §1's self-cleanup covers the
         // factory's own checkpoints, not a stage that resolved after this effect was torn down.
-        if (built !== ABORTED && !(built instanceof Error)) built.dispose()
+        // Unwrap first: a `SceneBuild` has no `dispose`, its `stage` does.
+        if (built !== ABORTED && !(built instanceof Error)) {
+          ;('stage' in built ? built.stage : built).dispose()
+        }
         return
       }
       // "React changed its mind" is not a condition a component renders (§7).
@@ -166,13 +176,20 @@ export function usePaperScene(o: SceneOptions): Scene {
         return
       }
 
-      landed = built
+      // §3.2: a bare `BlitStage` is the `M = undefined` shape. `stage` is a required property of
+      // `SceneBuild` and no stage declares one, so it is the discriminant. The cast is the one in
+      // this file and it is load-bearing: `M`'s default is `undefined`, and a consumer who
+      // declares a non-`undefined` `M` and then returns a bare stage has asked for `meta` to be a
+      // lie.
+      const build: SceneBuild<M> = 'stage' in built ? built : { stage: built, meta: undefined as M }
+
+      landed = build.stage
       offs.push(
-        built.on('error', (e) => {
+        build.stage.on('error', (e) => {
           // The loss GlError is orphaned with `view: null` and arrives immediately after the
           // `lost` event, in the same synchronous stack. Latch it as the scene's cause; anything
           // later must not overwrite it.
-          if (built.lost && core.error === null) core.error = e.error
+          if (build.stage.lost && core.error === null) core.error = e.error
           dispatchError(e)
           // Bump on every error, not only on a loss: `stage.warnings` grows at runtime and this
           // is the only moment it can have (§5.5).
@@ -180,13 +197,13 @@ export function usePaperScene(o: SceneOptions): Scene {
         }),
       )
       offs.push(
-        built.on('lost', () => {
+        build.stage.on('lost', () => {
           // `readScene` derives `status` and `lost` from `stage.lost`, so the listener's whole
           // job is to give it a reason to run.
           store.bump()
         }),
       )
-      core.stage = built
+      core.build = build
       core.status = 'ready'
       core.error = null
       core.generation += 1
@@ -291,5 +308,5 @@ export function usePaperScene(o: SceneOptions): Scene {
   })
 
   // `snapshot` changes identity only on a bump, so the Scene does too (§2.1).
-  return useMemo<Scene>(() => ({ ...snapshot, play, stop }), [snapshot, play, stop])
+  return useMemo<Scene<M>>(() => ({ ...snapshot, play, stop }), [snapshot, play, stop])
 }

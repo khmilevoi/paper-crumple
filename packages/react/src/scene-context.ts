@@ -21,6 +21,7 @@ export function PaperScene({ value, children }: PaperSceneProps): ReactNode {
 const NO_PROVIDER: Scene = Object.freeze({
   status: 'failed',
   stage: null,
+  meta: null,
   error: new Error(
     'useScene() was called outside a <PaperScene>. Wrap the subtree in ' +
       '<PaperScene value={usePaperScene(...)}>, or pass an explicit `scene` option.',

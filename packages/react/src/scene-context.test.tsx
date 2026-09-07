@@ -12,6 +12,7 @@ function readyScene(): Scene {
   return {
     status: 'ready',
     stage: fake.stage,
+    meta: undefined,
     error: null,
     warnings: [],
     lost: false,

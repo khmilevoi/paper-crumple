@@ -10,9 +10,9 @@ import {
   type SceneOptions,
 } from './index.js'
 
-test('usePaperScene takes SceneOptions and returns a Scene', () => {
-  expectTypeOf(usePaperScene).parameter(0).toEqualTypeOf<SceneOptions>()
-  expectTypeOf(usePaperScene).returns.toEqualTypeOf<Scene>()
+test('usePaperScene takes SceneOptions and returns a Scene, with meta defaulting to undefined', () => {
+  expectTypeOf<Parameters<typeof usePaperScene<undefined>>[0]>().toEqualTypeOf<SceneOptions>()
+  expectTypeOf<ReturnType<typeof usePaperScene<undefined>>>().toEqualTypeOf<Scene>()
 })
 
 test('useScene returns a Scene, never null — the no-provider case is a failed scene (§4.2)', () => {
