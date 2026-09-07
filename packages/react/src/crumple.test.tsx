@@ -25,6 +25,8 @@ function instance(o?: Partial<CrumpleValue>): CrumpleValue {
     play: () => null,
     stop: () => {},
     refresh: () => {},
+    draw: () => {},
+    sync: () => {},
     ...o,
   }
 }

@@ -491,6 +491,17 @@ export function useCrumple<S extends SpriteSource>(o: CrumpleOptions<S>): Crumpl
     store.bump()
   })
 
+  const draw = useEvent((pose: PoseRef): void => {
+    const view = core.view
+    if (view === null) return
+    view.draw(pose)
+    store.bump()
+  })
+
+  const sync = useEvent((): void => {
+    store.bump()
+  })
+
   // Deliberately a fresh object per render: it carries the reactive snapshot (§2.1).
-  return { ...snapshot, frameStyle, artworkStyle, ref, play, stop, refresh }
+  return { ...snapshot, frameStyle, artworkStyle, ref, play, stop, refresh, draw, sync }
 }

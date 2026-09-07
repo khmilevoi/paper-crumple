@@ -110,4 +110,10 @@ export interface CrumpleMethods {
   play(from: PoseRef, to: PoseRef, o?: PlayOptions): Run<PlayResult> | null
   stop(): void
   refresh(): void
+  /** `view.draw(pose)`, then one bump. A no-op while detached, so a scrubbing consumer needs no
+   *  `view === null` guard and no `refresh()` chaser — `refresh` forces a second blit (§2.2). */
+  draw(pose: PoseRef): void
+  /** Re-read the view's getters into a new snapshot and publish it. The generic escape for a raw
+   *  `view.set` / `view.once` the binding has no method for (§2.2, §11). */
+  sync(): void
 }
