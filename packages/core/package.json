@@ -1,0 +1,55 @@
+{
+  "name": "@paper-crumple/core",
+  "version": "0.0.0",
+  "description": "The orchestrator and the contracts of the paper-crumple family: stage, views, knob registry, scheduler, events, GL foundation and errors.",
+  "keywords": [
+    "webgl2",
+    "animation",
+    "transition",
+    "paper",
+    "crumple"
+  ],
+  "license": "MIT",
+  "homepage": "https://github.com/paper-crumple/paper-crumple/tree/main/packages/core#readme",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/paper-crumple/paper-crumple.git",
+    "directory": "packages/core"
+  },
+  "type": "module",
+  "sideEffects": false,
+  "engines": {
+    "node": ">=22"
+  },
+  "files": [
+    "dist"
+  ],
+  "publishConfig": {
+    "access": "public"
+  },
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "default": "./dist/index.js"
+    },
+    "./unstable": {
+      "types": "./dist/unstable.d.ts",
+      "default": "./dist/unstable.js"
+    }
+  },
+  "scripts": {
+    "build": "tsdown"
+  },
+  "dependencies": {},
+  "peerDependencies": {
+    "typescript": ">=5.0"
+  },
+  "peerDependenciesMeta": {
+    "typescript": {
+      "optional": true
+    }
+  },
+  "devDependencies": {
+    "typescript": "catalog:"
+  }
+}

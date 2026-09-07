@@ -1,0 +1,11 @@
+pnpm-lock.yaml
+.superpowers/
+.claude/
+docs/
+.changeset/*.md
+**/*.bin
+**/dist/**
+.turbo/
+# Byte-exact cross-language fixtures: this is the Python writer's output, not Prettier's
+# (spec 9.2, 11). Reformatting it breaks the three-way equality check P12 runs.
+packages/motion/test/fixtures/

@@ -1,0 +1,5 @@
+# Scratch output of a manual Blender run: stills, smoke.json, stage1-*.json, packs.
+out/
+# CPython writes these whenever a test imports pack.py. The Vitest wrapper passes -B and
+# PYTHONDONTWRITEBYTECODE=1; a hand-run `python -m unittest` does not.
+__pycache__/

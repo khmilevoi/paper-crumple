@@ -32,11 +32,11 @@ typosquat waiting to happen. Record the one real loss: there is no single `esm.s
 URL for a CDN playground, and three scoped packages with peer relationships are genuinely awkward
 there.
 
-`core` is a `peerDependency` of `paper` and `motion`, so the three resolve to **one** copy of core
-under every modern package manager — which is what makes `instanceof` safe (§10.4). Declare core in
-your own `dependencies`; if you are publishing a wrapper around this library, declare core in
-`peerDependencies` and never in `dependencies`, because that is the one install shape that produces
-two copies. Assert it rather than hoping:
+`core` is a `peerDependency` of `paper`, `motion` and a fourth package, `@paper-crumple/react`, so all
+four resolve to **one** copy of core under every modern package manager — which is what makes
+`instanceof` safe (§10.4). Declare core in your own `dependencies`; if you are publishing a wrapper
+around this library, declare core in `peerDependencies` and never in `dependencies`, because that is
+the one install shape that produces two copies. Assert it rather than hoping:
 
 ```ts
 const dup = pc.assertSingleCore()
@@ -44,10 +44,18 @@ if (dup) throw dup     // CoreDuplicateError, carrying { version } — a startup
                        // once-per-session console warning (§10.4)
 ```
 
-The three packages ship one shared version number under Changesets `fixed`, which without a bundle
-is the only visible signal that they are a family. The peer range is `^1.x` and not `~1.x`: §10.2
-designs minors to be additive, so tilde peers would turn every routine upgrade into a three-package
-flag day. Core's README is canonical; this block appears identically in all three (§14).
+The four packages ship one shared version number under Changesets `fixed`, which without a bundle is
+the only visible signal that they are a family. The peer range is `^1.x` and not `~1.x`: §10.2
+designs minors to be additive, so tilde peers would turn every routine upgrade into a four-package
+flag day. Core's README is canonical; this block appears identically in `paper`'s and `motion`'s
+(§14).
+
+`@paper-crumple/react` is the fourth member of the family and is not covered by this document: it is
+a React binding over the trio above, additive and opt-in, with its own install line and its own peer
+shape — it peers on `react` as well as on `@paper-crumple/core`, and not on `paper` or `motion` at
+all, so a React consumer still installs those two directly, the same as any other consumer, only
+through hooks rather than the calls below. [`docs/USAGE-react.md`](./USAGE-react.md) is the authority
+on how it is installed and consumed; read it once you know the convention this document sets up next.
 
 ## The convention, first
 
@@ -126,11 +134,14 @@ export async function mountGrid(items: Item[], ac: AbortController) {
   // Async factory (§4): yields a stage whose invariants hold, an Error, or ABORTED. There is no
   // `canvas` option — the stage owns its drawing surface (§4.0) and blits into yours.
   const stage = await pc.paperStage({
-    sheet:   paperSheet({ edgeMode: 'torn', tiles }),     // edgeMode is a factory option (§6.5)
+    sheet:   paperSheet({ edgeShape: 'torn', edgeFinish: 'paper', tiles }),  // edgeShape/edgeFinish
+                                                          // are factory options (design 2026-09-05 §2)
     motion:  bakedMotion({ packs: [pack2x3, pack1x1] }),  // an unsupplied bucket returns an
                                                           // AssetError naming the missing subpath
-    cssPx:   192,                 // the stage runs sizeForDisplay({ cssPx, dpr: devicePixelRatio,
-                                  // cap: 512 }) for you. Exactly one of cssPx / maxSize is required.
+    cssPx:   192,                 // the CSS long side of the box the PAPER is fitted into: the stage
+                                  // runs sizeForDisplay({ cssPx, dpr: devicePixelRatio, cap: 2048 })
+                                  // for you. Exactly one of cssPx / maxSize / artworkCssPx (§"pin
+                                  // the picture") is required.
     budget:  64 * 1024 * 1024,    // §8.8: the byte budget governs exactly one per-sprite tier — fronts
     present: 'blit',              // no default any more: this literal selects the BlitStage overload
     onError: ({ error, view, observed }) => {
@@ -182,8 +193,8 @@ the signal fired — either answer contradicts §10.5's "keep what is already pa
 where the caller can see it.
 
 **The destination canvas is sized for you.** `BlitTarget.size` defaults to `'managed'`, under which
-the stage sets `canvas.width/height` to `round(cssSize × devicePixelRatio)`, capped at the front
-size, whenever it is stale. It reads `getBoundingClientRect()` once per draw, which needs no
+the stage sets `canvas.width/height` to `round(cssSize × devicePixelRatio)`, shrunk as a whole —
+keeping the box's own shape — until the front fits it 1:1 on one axis, whenever it is stale. It reads `getBoundingClientRect()` once per draw, which needs no
 observer: draws happen six times per fold, not sixty times per second. A zero CSS size — a hidden
 element — is left alone rather than resized to zero. Without this the headline scenario ships blurry
 on every retina grid, because a consumer's `<canvas>` arrives at its stock 300×150 backing store and
@@ -191,6 +202,37 @@ the front size is bucket-derived and unexposed; §7.4's claim that the number of
 `devicePixelRatio` is thought about goes from N to one is true of the front and was false of the
 destination. Pass `size: 'manual'` to own it yourself, and then `sprite.frontSize`, `sprite.rect`
 and `view.idealSize` are the numbers your layout code needs.
+
+**To pin the picture rather than the paper**, build the stage with `artworkCssPx` instead of
+`cssPx` and read `view.frame`. `cssPx` sizes the front to the box the *paper* fits into, and how
+much of that size the artwork holds depends on the source's aspect (the margin is reserved against
+the artwork's HEIGHT, so a wider source pays a smaller share of it): a portrait or square source
+sits near `1 / (1 + 2 x sheet.overscan)` of the front, and slightly under it, while a landscape one
+gets more — right for a grid tile, and a 1.3-5x upscale if you then stretch the artwork itself to
+`cssPx`. `artworkCssPx` is the CSS long side the
+*artwork* holds on screen: the stage asks the sheet for `ceil(artworkCssPx x dpr)` artwork texels
+and sizes its surface to hold them plus the paper margin for every aspect. `view.frame` is the
+authoritative per-sprite number under either option; do not derive a picture's on-screen size from
+the formula above.
+
+```ts
+const stage = await pc.paperStage({ sheet, motion, artworkCssPx: 360, present: 'blit', signal })
+// …after mount, after every swap, and after a hull-tier knob's re-source has landed
+// (`await stage.prepare(key)` joins it):
+const f = view.frame                                   // { box, artwork } in box pixels, or null
+if (f) {
+  const s = 360 / Math.max(f.artwork.w, f.artwork.h)   // 1:1 at devicePixelRatio
+  el.style.width  = `${f.box.w * s}px`;  el.style.height = `${f.box.h * s}px`
+  el.style.left   = `${-f.artwork.x * s}px`; el.style.top = `${-f.artwork.y * s}px`
+}
+```
+
+`View.frame` is `{ box, artwork }`: the box the view draws into and where the unpadded artwork
+lands inside it, both in that box's pixels, `null` until a front is resident. The sheet is centred
+on the *paper's* box, which the hull grows asymmetrically around the picture, so re-read it at the
+three moments above. The paper overflows the picture by however far the edge knobs reach, and the
+front costs `(1 + 2 x overscan)²` more texels than `cssPx` would for the same number — use `cssPx`
+for grids and `artworkCssPx` for the hero.
 
 The blit also **clears the destination 2D canvas** before each `drawImage`, at minimum the letterbox
 bars. Without that, a swap from a wide sprite to a narrow one under `fit: 'contain'` leaves the
@@ -336,10 +378,11 @@ is a static one somewhere else in your UI.
 const off = view.on('end', (e) => {
   // The documented way to write a looping indicator. `end` reports both ends of the run that just
   // finished as resolved indices, and play() accepts indices, so the ping-pong needs no state of
-  // its own. A call made from inside a handler for this view's own event is deferred by exactly ONE
-  // microtask into a single-slot pending box, so unbounded synchronous recursion is structurally
-  // impossible. This is the only deferral in the library — a call from a click handler still runs
-  // synchronously.
+  // its own. Nothing here is deferred: the run has already torn itself down to `idle` before this
+  // handler runs, so the play() below installs against a clean view, synchronously. The
+  // `completed` check is what ends the loop — a supersession, stop() or dispose() emits `end` with
+  // `completed: false`, and a play() issued from inside a supersession is refused rather than
+  // installed, so a handler that forgets this check cannot make the superseding call loop forever.
   if (e.completed) view.play(e.to, e.from)
 })
 
@@ -487,7 +530,7 @@ per-view edge treatment.
 // cost of keeping the element's geometry synchronised with whatever the views sit on. That
 // synchronisation against inertial scrolling on iOS is the cost `blit` exists to avoid.
 const stage = await pc.paperStage({
-  sheet:   paperSheet({ edgeMode: 'torn', tiles }),
+  sheet:   paperSheet({ edgeShape: 'torn', edgeFinish: 'paper', tiles }),
   motion:  bakedMotion({ packs: [pack2x3] }),
   maxSize: 512,
   present: 'direct',              // selects the DirectStage overload
@@ -508,6 +551,9 @@ if (resizeErr) return resizeErr
 // exact needs maxTextureSize BEFORE the first add(), and this is where it comes from.
 // exact: true renders the front at the source size, which is +22.3 MB of front and +39.4 MB
 // transient during its build (§7.4) — for the single large view, never for a grid.
+// Known limitation: under present: 'blit' an exact front larger than the stage's surface is
+// drawn clipped — use exact with 'direct' (as here) or a maxSize >= the source's long side
+// x (1 + 2 x sheet.overscan). A follow-up grows the blit surface to the front.
 const hero = await stage.add(heroUrl, {
   key: 'hero',
   exact: stage.caps.maxTextureSize >= 2048,
@@ -546,7 +592,7 @@ always returning a `GlError`.
 // it never resizes the canvas, never calls loseContext(), and validates the GRANTED attributes
 // read from getContextAttributes() rather than a declaration it was handed.
 const stage = await pc.paperStage({
-  sheet:   paperSheet({ edgeMode: 'hull' }),   // the default mode: no tear, no teeth, no fibre tile
+  sheet:   paperSheet({}),   // the default: a plain cut sheet, no tear, no teeth, no fibre
   motion:  bakedMotion({ packs: [pack2x3] }),
   maxSize: 384,
   gl:      renderer.getContext() as WebGL2RenderingContext,
@@ -585,7 +631,9 @@ assignment error.
 ## 7. A knob panel without TypeScript
 
 `stage.knobs` and `slot.knobs` are `readonly KnobDescriptor[]` **at runtime** — the same descriptors
-that generate the types. A `hull` stage exposes 31 knobs, a `torn` one 46 (§6.5).
+that generate the types. A stage's count is core's two shared knobs, plus the paper slot, plus the
+motion slot's six: `smooth`/`clean` exposes 32 knobs, `smooth`/`paper` 38, `torn`/`clean` 36 and
+`torn`/`paper` 42 (design 2026-09-05 §2.4).
 
 A descriptor's `key` is **slot-local** (§6.1) and carries no namespace of its own, so build the
 panel from the slots rather than from `stage.knobs` — a key a panel writes back has to be one
@@ -593,7 +641,7 @@ panel from the slots rather than from `stage.knobs` — a key a panel writes bac
 
 ```js
 // Keep the slot objects you passed to paperStage.
-const sheet  = paperSheet({ edgeMode: 'torn', tiles })
+const sheet  = paperSheet({ edgeShape: 'torn', edgeFinish: 'paper', tiles })
 const motion = bakedMotion({ packs: [pack2x3] })
 
 for (const [ns, slot] of [['sheet', sheet], ['motion', motion]]) {
@@ -630,6 +678,44 @@ roughly 38 unique keys and comes back with a `KnobError` on `grain` and `debug`,
 the built-in pair collide on (§6.2) — and which are two genuinely different knobs, separately tuned
 against a flat sheet and a shaded 3D mesh. A TypeScript consumer never sees this: for them the bare
 `grain` does not exist.
+
+The loop above is not hypothetical: `examples/playground/src/panel.ts` runs it against the real
+runtime descriptors — `sheet.knobs` and `motion.knobs` off a live build — generating every row
+without a hand-written list. Where the snippet reads `k.ui?.label`, the demo does not lean on the
+descriptors for it: `paper` declares no `ui` on any descriptor, while `motion` declares one on all
+six, so a panel that only ever consulted `k.ui?.label` would render half its rows unlabelled. The
+label table `k.ui?.label` falls back to here lives in `examples/playground/src/labels.ts`, keyed by
+the same namespaced patch key this section derives above — and a key the table doesn't cover still
+renders, under its raw key, rather than being dropped.
+
+### The width unit
+
+`edgeWidth` has two faces, picked by the factory's `edgeWidthUnit` (`'px' | 'percent'`, default
+`'px'`): a `reference: 'sprite-px'` descriptor (default `47`, range `0…140`) and a
+`reference: 'artwork-pct'` one (default `5.9`, range `0…15`). Only one of the two descriptors
+exists on a given sheet — the unit picks which — so a panel built from `k.reference` (as the loop
+above could be, though the snippet above only handles `'sprite-px'`) labels the slider correctly
+without asking the sheet which unit it was built with. `scaleKnob` never interprets
+`'artwork-pct'`; it is a marker for the UI's unit column and for the resolution step inside
+`source()` alone.
+
+`percent` is a percentage of the artwork's **short side**, not its front and not its long side
+(design 2026-09-05 §3.2): the rim is an isotropic offset band, and the short side is the one base
+that is both rotation-invariant and gives a 3:1 banner the same relative border as a square, rather
+than the roughly 3x mismatch a long-side or height base would produce.
+
+One inherited wrinkle worth knowing before you pick `px`: under that unit the working width is
+bucket-dependent for `edgeShape: 'torn'` (the shader's outward bias is `edgeWidth * size.h / 1000`,
+so a 512-texel build draws a narrower border than a 1024-texel one) but bucket-fixed for
+`edgeShape: 'smooth'` (the polygon is traced once and carried into every bucket 1:1 in texels).
+`percent` is invariant in both shapes. This is `sprite-px`'s own convention and predates the edge
+redesign — it is called out here only because the two shapes now diverge under one unit.
+
+Worked number: at the library's default `overscanHeadroom: 0`, the percent unit's default of `5.9`
+(its own step is `0.1`) reproduces `W = 46.9785` reference px on a square — a gap of `0.0215`
+reference px against the px unit's own default of `47` (step `1`). (An earlier draft of this
+default was `5.7`, derived at `edgeVariance: 0`; that value does not reproduce once the shipped
+`edgeVariance` default of `0.53` is folded in — see the changeset.)
 
 ## 8. Errors in anger
 
@@ -713,6 +799,57 @@ stage.pin('hero'); stage.unpin('hero')
 await stage.replace('sweater', file)      // a File is a Blob, so it is a SpriteSource
 ```
 
+### Prefetch the next page at idle
+
+Every asynchronous ingest — `add()`, `replace()`, `prepare()`'s re-source, §8.5's re-load — runs
+through one stage-wide **ingest lane** (§8.10), and the lane orders jobs by class: the target a live
+`crumpleTo` is parked on, then a front a shown view needs, then background, FIFO within a class.
+`add()` is a **background** job (`mount()` adds at `visible`), so a speculative add never runs ahead
+of the front the reader is looking at — and a background add is **promoted to the head of the lane
+the moment a `crumpleTo` holds the promise it returned** (§4.5's `hold`). That promotion is what
+keeps the click no slower for having prefetched, and it reads the promise — so **keep the promise
+`add()` returned and hand that to `crumpleTo`**. A prefetch still in flight at the click is then
+promoted and adopted when it lands, with no second ingest; a landed one is a `crumpleTo` on a
+resident sprite. Falling back to `swapTo(url)` for a key whose prefetch is in flight would queue a
+**second** ingest of the same image — `swapTo` is `add()` + `crumpleTo(pending)`, and its own
+`add()` is held, but it still runs behind the job the lane already holds, so the click pays the
+prefetch's ingest and then its own. `swapTo` is for a key that was never prefetched, or whose
+prefetch already failed.
+
+```ts
+// At idle, once the current page is on screen. The promises are the prefetch.
+const prefetched = new Map<string, ReturnType<typeof stage.add>>()
+const idle = (fn: () => void) =>
+  typeof requestIdleCallback === 'function' ? requestIdleCallback(fn, { timeout: 200 }) : setTimeout(fn, 200)
+idle(() => {
+  for (const n of nextPage) {
+    const pending = stage.add(n.url, { key: n.id, signal })
+    prefetched.set(n.id, pending)
+    // Settled: `stage.get` is the truth from here — the sprite, or nothing for an add that failed.
+    void pending.then(() => prefetched.delete(n.id))
+  }
+})
+
+// At the click: a landed prefetch is a resident sprite, one still in flight is its promise —
+// `crumpleTo` promotes it to the head of the lane and adopts it when it lands. Only a key never
+// prefetched, or whose prefetch failed, takes `swapTo`.
+const target = stage.get(next.id) ?? prefetched.get(next.id)
+const run =
+  target !== undefined
+    ? view.crumpleTo(target, { duration, signal })
+    : view.swapTo(next.url, { duration, signal })
+```
+
+Two properties make that safe to do speculatively. A prefetched sprite is **reclaimable** whenever
+its source is a `string | URL | Blob`, so the budget still bounds the prefetch: the LRU may drop the
+front, `stage.get` hands back the sprite anyway, and `crumpleTo` rebuilds the front during the rise
+(§8.8 demand 5 — the ball is free time). And a `swapTo` that is superseded — a second `swapTo` on
+the same view, `view.stop()`, `dispose()`, or the caller's own signal — **aborts the `add()` it
+started**, so a reader clicking through five pages pays for one ingest rather than five; an aborted
+`add()` frees its key (§10.5), and the superseded run still settles `ABORTED` after the new `start`
+(§7.1). The lane also yields to the platform's task scheduler between a job's phases, so N
+speculative ingests are N short tasks rather than one long one.
+
 `add`, `addAll`, `replace`, `mount` and `swapTo` all take the same `SpriteSource`:
 
 ```ts
@@ -792,8 +929,8 @@ only when the sheet's screen footprint is an exact, integer-aligned 1:1 map of t
 grid, which the bucket stretch and non-integer cover-scale make untrue in general.
 
 Managed sizing narrows the gap without closing it. The destination backing store is now
-`round(cssSize × devicePixelRatio)` capped at the front size, so the stock 300×150 case is gone and
-the blit never upsamples; the destination is also cleared before each `drawImage`, so nothing of a
+`round(cssSize × devicePixelRatio)` shrunk uniformly to meet the front (never capped per axis,
+which would reshape the sprite), so the stock 300×150 case is gone and the blit never upsamples; the destination is also cleared before each `drawImage`, so nothing of a
 previous sprite survives in the letterbox bars. A 1:1 blit is now reachable — size the CSS box so
 that `cssSize × dpr` lands on the front size — rather than accidental, but it is still not the
 default and the guarantee above is still the one being made.

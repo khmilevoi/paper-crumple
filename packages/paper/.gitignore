@@ -1,0 +1,6 @@
+# Vitest's `toMatchScreenshot` artifacts (actual/diff frames) are never committed.
+**/__screenshots__/*
+# ...but design 2026-09-05 §9.1's migration golden frame IS a committed fixture, not an artifact:
+# it was captured on `develop` @ 222eda7 and cannot be re-rendered once `edgeMode` is gone
+# (`edge-redesign.gl.test.ts`, step 6a). `toMatchScreenshot` never writes into this subdirectory.
+!**/__screenshots__/edge-redesign/

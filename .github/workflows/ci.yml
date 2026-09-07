@@ -1,0 +1,78 @@
+name: ci
+
+on:
+  push:
+    branches: [main, develop]
+  pull_request:
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  level1:
+    name: level 1 · ${{ matrix.os }} · node ${{ matrix.node-version }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest]
+        node-version: ['22.18.0', '24', '26']
+        include:
+          # .gitattributes guards a Windows CRLF failure that only a Windows lane can catch
+          # regressing. One lane is enough; it does not need the whole matrix.
+          - os: windows-latest
+            node-version: '24'
+    steps:
+      - uses: actions/checkout@v7
+      # No `version:` input — the action reads packageManager from package.json, which is the
+      # one place the pnpm version and its integrity hash live.
+      - uses: pnpm/action-setup@v6
+      - uses: actions/setup-node@v7
+        with:
+          node-version: ${{ matrix.node-version }}
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
+      # Core exports ./dist, so nothing resolves @paper-crumple/core across a package
+      # boundary until core is built. Every lane that typechecks or tests must build first.
+      - run: pnpm exec turbo run build --filter=@paper-crumple/core
+      - run: pnpm lint
+      - run: pnpm format:check
+      - run: pnpm typecheck
+      - run: pnpm test
+
+  level2:
+    name: level 2 · webgl2 on swiftshader
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: pnpm/action-setup@v6
+      - uses: actions/setup-node@v7
+        with:
+          node-version: '24'
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
+      # Core exports ./dist, so nothing resolves @paper-crumple/core across a package
+      # boundary until core is built. Every lane that typechecks or tests must build first.
+      - run: pnpm exec turbo run build --filter=@paper-crumple/core
+      - run: pnpm exec playwright install --with-deps chromium
+      - run: pnpm test:gl
+
+  packaging:
+    name: packaging · tarballs, publint and attw
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: pnpm/action-setup@v6
+      - uses: actions/setup-node@v7
+        with:
+          node-version: '24'
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
+      # publint, attw and the entry-list check all read `dist/`, so all three packages build here
+      # and not just core: this lane packs what a consumer would install.
+      - run: pnpm exec turbo run build --filter=@paper-crumple/core --filter=@paper-crumple/paper --filter=@paper-crumple/motion
+      - run: pnpm verify:deps
+      # Prints each tarball's entry list into the log — spec 14's "review the pack output" — and
+      # then asserts it, so the review is binding rather than advisory.
+      - run: pnpm verify:packaging

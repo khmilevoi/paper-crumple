@@ -1,0 +1,53 @@
+{
+  "name": "@paper-crumple/repo",
+  "private": true,
+  "type": "module",
+  "packageManager": "pnpm@10.14.0+sha512.ad27a79641b49c3e481a16a805baa71817a04bbe06a38d17e60e2eaee83f6a146c6a688125f5792e48dd5ba30e7da52a5cda4c3992b9ccf333f9ce223af84748",
+  "devEngines": {
+    "runtime": {
+      "name": "node",
+      "version": "^22.18.0 || >=24.11.0",
+      "onFail": "error"
+    }
+  },
+  "scripts": {
+    "typecheck": "tsc -p tsconfig.json",
+    "lint": "eslint .",
+    "format": "prettier --write .",
+    "format:check": "prettier --check .",
+    "test": "vitest run --project unit --project types",
+    "test:types": "vitest run --project types",
+    "test:gl": "playwright install --no-shell chromium && vitest run --project gl",
+    "check": "turbo run build --filter=@paper-crumple/core --filter=@paper-crumple/paper --filter=@paper-crumple/motion --filter=@paper-crumple/react && pnpm lint && pnpm format:check && pnpm typecheck && pnpm --filter @paper-crumple/playground typecheck && pnpm test && pnpm test:gl",
+    "build": "turbo run build",
+    "bench:cpu": "node --import ./tools/bench/cpu/loader.mjs --expose-gc tools/bench/cpu/run.mjs",
+    "verify:deps": "node tools/packaging/zero-dependencies.mjs",
+    "verify:packaging": "node tools/packaging/verify-packaging.mjs",
+    "changeset": "changeset",
+    "bench:gl": "playwright install --no-shell chromium && vitest run --config tools/bench/gl/vitest.bench.config.ts",
+    "bench:smooth": "playwright install --no-shell chromium && node tools/bench/smooth/run.mjs"
+  },
+  "devDependencies": {
+    "@arethetypeswrong/cli": "0.18.5",
+    "@changesets/cli": "3.0.1",
+    "@eslint/js": "10.0.1",
+    "@paper-crumple/tsconfig": "workspace:*",
+    "@types/node": "26.4.0",
+    "@vitest/browser-playwright": "4.1.11",
+    "eslint": "10.9.1",
+    "eslint-config-prettier": "10.1.8",
+    "eslint-plugin-react-hooks": "^7.1.1",
+    "globals": "17.11.0",
+    "jsdom": "27.0.1",
+    "playwright": "1.62.1",
+    "prettier": "3.9.6",
+    "publint": "0.3.24",
+    "tsdown": "0.22.14",
+    "turbo": "2.10.12",
+    "typescript": "catalog:",
+    "typescript-5.0": "npm:typescript@5.0.4",
+    "typescript-eslint": "8.68.0",
+    "vitest": "4.1.11",
+    "yaml": "2.9.0"
+  }
+}

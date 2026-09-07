@@ -1,0 +1,522 @@
+// Hull edge mode: the paper outline as a CPU-built polygon around the silhouette.
+//
+// The torn mode draws its outline by thresholding noise on a distance field, which is why its
+// contour is a smooth wobble with fuzz on it. The reference cutout is not that: it is a sheet that
+// wraps the garment at a clearly VARYING distance with straight-ish runs and sharp corners. That is
+// a polygon, so this module builds one:
+//
+//   1. a Euclidean signed distance field of the artwork alpha, at the runtime field's resolution —
+//      supplied by the caller, because §8.2.1 makes the GPU read-back the specified source and
+//      `cpuSdfFromAlpha` the degraded fallback;
+//   2. the iso-contour at the middle of the [minDist, maxDist] band (marching squares), keeping
+//      only OUTER loops — a magazine cutout has no holes — but every one of them, so a pair of
+//      sneakers gets two pieces of paper;
+//   3. Douglas-Peucker simplification, with the tolerance driven by `angularity`;
+//   4. each vertex slid along the field's gradient to its own random distance in the band;
+//   5. a repair pass that guarantees paper ⊇ artwork + minDist: a chord across a convex bulge dips
+//      inside the band, so every segment is sampled and a new vertex is inserted (pushed out into
+//      the band) wherever a sample is too close. The result is still a polygon — straight segments,
+//      sharp corners — never a rounded offset.
+//
+// Everything here works in FIELD TEXELS. The caller converts its reference-px knobs into texels and
+// rasterizes the result into a mask at the field's resolution; the GPU jump flood then turns the
+// mask into the signed field the shader samples, exactly as it does for the artwork itself.
+//
+// Pure functions. `rasterizeHull` takes a structural canvas rather than an `HTMLCanvasElement`, so
+// the whole module is level 1: no GL, no DOM, no browser.
+import { extractContours, signedArea } from './contours.js'
+import { moveToDistance, sampleField } from './field.js'
+import type { HullShape, PackedHull } from './hull-shape.js'
+import { HULL_USE_ALPHA, packPolygons } from './hull-shape.js'
+import type { Loop, Point } from './point.js'
+import { makeRandom, noise1d } from './random.js'
+import { simplifyLoop } from './simplify.js'
+
+/**
+ * Douglas-Peucker tolerance in reference px for angularity 0 and 1 — reference pixels, not texels.
+ * Feeds `toleranceFor`, whose output is reference px too; a caller working in texels (as
+ * `BuildHullOptions.tolerance` and `PackedHull.tolerance` do) must multiply by the downstream `k =
+ * pxScale / texel` conversion before using either constant as a texel value.
+ */
+export const TOL_SMOOTH_PX = 1
+export const TOL_ANGULAR_PX = 7
+
+/**
+ * Wavelength, in reference px, of the slow variation of the target distance along the contour —
+ * reference pixels, not texels. `BuildHullOptions.wavelength` (default `60`) is in texels; a caller
+ * deriving its wavelength from this constant must multiply by `k = pxScale / texel` first.
+ */
+export const DISTANCE_WAVELENGTH_PX = 170
+
+/**
+ * Douglas-Peucker tolerance, reference px, for an angularity in 0..1 — reference pixels, not texels.
+ * `BuildHullOptions.tolerance` is texels; scale this by `k = pxScale / texel` before passing it in,
+ * rather than relying on `buildHull`'s own `tolerance ?? toleranceFor(angularity)` fallback, which
+ * resolves to reference px unconverted.
+ */
+export function toleranceFor(angularity: number): number {
+  const a = Number.isFinite(angularity) ? Math.min(1, Math.max(0, angularity)) : 0
+  return TOL_SMOOTH_PX + (TOL_ANGULAR_PX - TOL_SMOOTH_PX) * Math.pow(a, 1.5)
+}
+
+export interface BuildHullOptions {
+  /** Signed distance, texels, positive inside. */
+  readonly field: ArrayLike<number>
+  readonly width: number
+  readonly height: number
+  /** Band, in texels. */
+  readonly minDist: number
+  /** Band, in texels. */
+  readonly maxDist: number
+  /** 0..1. */
+  readonly angularity: number
+  readonly seed: number
+  /**
+   * Douglas-Peucker tolerance, texels. Omitting it falls back to `toleranceFor(angularity)`, which
+   * yields **reference pixels, not texels** — roughly 5x too large if read as a texel count. A
+   * caller working in texels should pass `toleranceFor(angularity) * k` (where `k = pxScale /
+   * texel`) rather than relying on the default.
+   */
+  readonly tolerance?: number
+  /**
+   * Texels; how slowly the target distance drifts along the contour. Default `60` is already texels.
+   * `DISTANCE_WAVELENGTH_PX` (170) is the reference-px equivalent — multiply it by `k = pxScale /
+   * texel` before using it here, do not pass it through unconverted.
+   */
+  readonly wavelength?: number
+  /** Texels between the repair pass's samples. */
+  readonly sampleStep?: number
+  /** Cap on repair passes. */
+  readonly maxPasses?: number
+}
+
+export interface HullStats {
+  readonly components: number
+  readonly dropped: number
+  readonly rawVertices: number
+  readonly vertices: number
+  readonly inserted: number
+  readonly passes: number
+  /** Wall-clock milliseconds. Deliberately outside `HullShape`, so the shape stays comparable. */
+  readonly ms: number
+}
+
+export interface HullBuild {
+  readonly hull: HullShape
+  readonly stats: HullStats
+}
+
+export function buildHull({
+  field,
+  width: w,
+  height: h,
+  minDist,
+  maxDist,
+  angularity,
+  seed,
+  tolerance,
+  wavelength = 60,
+  sampleStep = 2,
+  maxPasses = 12,
+}: BuildHullOptions): HullBuild {
+  const t0 = performance.now()
+  if (!(minDist > 0) && !(maxDist > 0)) {
+    return {
+      hull: HULL_USE_ALPHA,
+      stats: {
+        components: 0,
+        dropped: 0,
+        rawVertices: 0,
+        vertices: 0,
+        inserted: 0,
+        passes: 0,
+        ms: performance.now() - t0,
+      },
+    }
+  }
+  const lo = Math.max(0, Math.min(minDist, maxDist))
+  const hi = Math.max(lo, maxDist)
+  // Units seam: `tolerance` (when given) is texels, but the `toleranceFor` fallback is reference px
+  // — an unconverted default here reads roughly 5x larger than an explicit texel tolerance would.
+  const tol = tolerance ?? toleranceFor(angularity)
+  const rand = makeRandom(seed)
+  const seedInt = Math.floor(seed) | 0
+
+  // 2. iso-contour at the middle of the band; outer loops only, but every one of them.
+  const iso = -(lo + hi) * 0.5
+  const loops = extractContours(field, w, h, iso)
+  let dropped = 0
+  const outer: Loop[] = []
+  for (const loop of loops) {
+    if (signedArea(loop) <= 2) {
+      dropped++
+      continue
+    }
+    outer.push(loop)
+  }
+
+  const polygons: Loop[] = []
+  let inserted = 0
+  let passes = 0
+  let rawVertices = 0
+  for (const loop of outer) {
+    rawVertices += loop.length
+    // 3. simplify.
+    const simple = simplifyLoop(loop, tol)
+    if (simple.length < 3) continue
+
+    // 4. slide every vertex to its own distance in the band. The target drifts slowly along the
+    //    contour (value noise over arc length) with a per-vertex jitter on top: pure per-vertex
+    //    randomness is a sawtooth, while the reference's distance varies over a few segments.
+    let arc = 0
+    const phase = rand() * 1000
+    const moved: Loop = []
+    for (let i = 0; i < simple.length; i++) {
+      if (i > 0) arc += Math.hypot(simple[i][0] - simple[i - 1][0], simple[i][1] - simple[i - 1][1])
+      const slow = noise1d(arc / Math.max(wavelength, 1) + phase, seedInt)
+      // Stretched past the noise's own 0..1 and clamped, so the ends of the band are actually
+      // reached: an unstretched value noise spends its life in the middle third.
+      const v = Math.min(1, Math.max(0, 0.5 + (slow - 0.5) * 1.8 + (rand() - 0.5) * 0.6))
+      const target = lo + (hi - lo) * v
+      moved.push(moveToDistance(field, w, h, simple[i], target))
+    }
+
+    // 5. repair: no chord may pass closer to the artwork than minDist. One vertex per offending
+    //    segment per pass, at the worst sample, pushed out into the lower half of the band.
+    let poly = moved
+    const limit = -(lo - 0.25) // field reading at which a sample counts as too close
+    for (let pass = 0; pass < maxPasses; pass++) {
+      const next: Loop = []
+      let any = false
+      for (let i = 0; i < poly.length; i++) {
+        const a = poly[i]
+        const b = poly[(i + 1) % poly.length]
+        next.push(a)
+        const len = Math.hypot(b[0] - a[0], b[1] - a[1])
+        const n = Math.max(1, Math.ceil(len / sampleStep))
+        let worst = -Infinity
+        let worstAt: Point | null = null
+        for (let k = 1; k < n; k++) {
+          const t = k / n
+          const qx = a[0] + (b[0] - a[0]) * t
+          const qy = a[1] + (b[1] - a[1]) * t
+          const s = sampleField(field, w, h, qx, qy)
+          if (s > limit && s > worst) {
+            worst = s
+            worstAt = [qx, qy]
+          }
+        }
+        if (worstAt) {
+          const target = lo + (hi - lo) * 0.5 * rand()
+          next.push(moveToDistance(field, w, h, worstAt, Math.max(target, lo + 0.05)))
+          inserted++
+          any = true
+        }
+      }
+      poly = next
+      passes = Math.max(passes, pass + 1)
+      if (!any) break
+    }
+    polygons.push(poly)
+  }
+
+  const vertices = polygons.reduce((s, p) => s + p.length, 0)
+  return {
+    hull: packPolygons(polygons, iso, tol),
+    stats: {
+      components: polygons.length,
+      dropped,
+      rawVertices,
+      vertices,
+      inserted,
+      passes,
+      ms: performance.now() - t0,
+    },
+  }
+}
+
+export interface HullMeasure {
+  readonly vertexMin: number
+  readonly vertexMax: number
+  readonly segmentMin: number
+}
+
+/**
+ * Worst-case numbers for a built hull, in texels: the smallest and largest distance any vertex sits
+ * at, and the smallest distance any point along any segment sits at.
+ *
+ * This is how §8.2.1's measurement harness validated itself — it reproduced the authored `[22, 72]`
+ * band exactly — so it is a correctness assertion and not only a readout. The caller divides by its
+ * own texel scale to report reference pixels.
+ */
+export function measureHull(
+  field: ArrayLike<number>,
+  w: number,
+  h: number,
+  hull: PackedHull,
+  sampleStep = 2,
+): HullMeasure {
+  let vertexMin = Infinity
+  let vertexMax = -Infinity
+  let segmentMin = Infinity
+  for (let c = 0; c + 1 < hull.offsets.length; c++) {
+    const start = hull.offsets[c]
+    const end = hull.offsets[c + 1]
+    const count = end - start
+    for (let i = 0; i < count; i++) {
+      const ai = start + i
+      const bi = start + ((i + 1) % count)
+      const ax = hull.points[ai * 2]
+      const ay = hull.points[ai * 2 + 1]
+      const bx = hull.points[bi * 2]
+      const by = hull.points[bi * 2 + 1]
+      const d = -sampleField(field, w, h, ax, ay)
+      if (d < vertexMin) vertexMin = d
+      if (d > vertexMax) vertexMax = d
+      const len = Math.hypot(bx - ax, by - ay)
+      const n = Math.max(1, Math.ceil(len / sampleStep))
+      for (let k = 0; k <= n; k++) {
+        const t = k / n
+        const s = -sampleField(field, w, h, ax + (bx - ax) * t, ay + (by - ay) * t)
+        if (s < segmentMin) segmentMin = s
+      }
+    }
+  }
+  return { vertexMin, vertexMax, segmentMin }
+}
+
+/** The 2D calls `rasterizeHull` makes. `CanvasRenderingContext2D` satisfies this structurally. */
+export interface HullRasterContext {
+  fillStyle: string | CanvasGradient | CanvasPattern
+  clearRect(x: number, y: number, w: number, h: number): void
+  beginPath(): void
+  moveTo(x: number, y: number): void
+  lineTo(x: number, y: number): void
+  closePath(): void
+  fill(rule: 'nonzero'): void
+}
+
+/**
+ * A drawing surface `rasterizeHull` can fill. `HTMLCanvasElement` and `OffscreenCanvas` both satisfy
+ * it, and so does a recording stub — which is what keeps this function level 1.
+ */
+export interface HullCanvas {
+  width: number
+  height: number
+  getContext(contextId: '2d'): HullRasterContext | null
+}
+
+/**
+ * Fills the hull's components into a 2D canvas the size of the field. Texel-centre coordinates map
+ * to canvas pixel centres, i.e. +0.5. Non-zero winding, so overlapping pieces union.
+ *
+ * Returns the canvas, or `undefined` when the surface could not give a 2D context — a canvas that
+ * already carries a WebGL context, say. `undefined` and not an `Error`: this package returns no
+ * `Error` at all (see the plan's global constraints), and the sheet renderer turns the absence into
+ * the `SheetError` its `source()` contract owes.
+ */
+export function rasterizeHull(
+  hull: PackedHull,
+  w: number,
+  h: number,
+  canvas: HullCanvas,
+): HullCanvas | undefined {
+  canvas.width = w
+  canvas.height = h
+  const c2d = canvas.getContext('2d')
+  if (!c2d) return undefined
+  c2d.clearRect(0, 0, w, h)
+  c2d.fillStyle = '#fff'
+  c2d.beginPath()
+  for (let c = 0; c + 1 < hull.offsets.length; c++) {
+    const start = hull.offsets[c]
+    const end = hull.offsets[c + 1]
+    if (end - start < 3) continue
+    c2d.moveTo(hull.points[start * 2] + 0.5, hull.points[start * 2 + 1] + 0.5)
+    for (let v = start + 1; v < end; v++) {
+      c2d.lineTo(hull.points[v * 2] + 0.5, hull.points[v * 2 + 1] + 0.5)
+    }
+    c2d.closePath()
+  }
+  c2d.fill('nonzero')
+  return canvas
+}
+
+/**
+ * Fills the hull's components into `w * h` RGBA bytes by scanline, under the non-zero winding rule,
+ * all components in one pass — the CPU sibling of `rasterizeHull`, and the mask producer the
+ * hull-paper-field design specifies (`docs/superpowers/specs/2026-09-02-hull-paper-field-design.md`
+ * §1). The bytes go straight into an `RGBA8UI` texture for `buildField`, whose seed pass reads
+ * only `.a` (`gl-sdf.ts:88`); RGB is set as well, so a debug readback is legible.
+ *
+ * Two deliberate departures from `rasterizeHull`:
+ *
+ * - No `+0.5`. Hull coordinates are already texel centres (`hull-shape.ts:12`), so row `y` is
+ *   sampled at exactly `y`. The half-texel shift above is a canvas convention — canvas pixel
+ *   centres lie at half-integers — and carrying it here would slide the whole mask by half a texel.
+ * - No anti-aliasing. A texel is inside or it is not: `255, 255, 255, 255` inside, `0, 0, 0, 0`
+ *   outside. Canvas coverage is not deterministic across browsers and drivers, so the seed pass's
+ *   `>= 128` threshold could flip edge texels from one machine to the next; a centre-sampled fill
+ *   is byte-reproducible, in Node included.
+ *
+ * Crossings are half-open in `y` — for an edge `a -> b`, `a.y <= y < b.y` counts +1 and
+ * `b.y <= y < a.y` counts −1, so a horizontal edge counts nothing — and spans are half-open in `x`:
+ * over `[xa, xb)` the filled texels are `ceil(xa) .. ceil(xb) - 1`. That is what keeps a 4-wide
+ * square exactly 4 texels wide and two pieces of paper sharing an edge seamless. Components union
+ * rather than cancel: every outer loop is counter-clockwise (`contours.ts:79-82`), so overlapping
+ * pieces accumulate winding 2 and both fill; nothing is merged or deduplicated. `sx` / `sy` scale
+ * hull texels into this build's field dimensions (design §5) and `tx` / `ty` then translate them:
+ * a build's front is whatever size the bucket fit asked for, with the artwork sitting 1:1 at its
+ * own centred origin, so the hull traced around that artwork in `source()`'s field moves with it —
+ * a scale about the field's origin alone cannot carry that shift.
+ *
+ * A component with fewer than three vertices is skipped, exactly as `rasterizeHull` skips it.
+ * Returns `undefined` when no texel was filled — an empty hull, one whose every component is
+ * degenerate, or one lying wholly outside the mask — and never an all-zero buffer. `undefined`
+ * and not an `Error`, for the reason `rasterizeHull` gives: level-1 modules in this package
+ * return no `Error` at all.
+ *
+ * The ancestor spike did the same job on a canvas: `odeja/spikes/paper-fold/src/engine.js:282-303`
+ * rasterised the hull, uploaded it and built the field from it. That is an external historical
+ * reference, not a path in this repository.
+ */
+export function fillHullMask(
+  hull: PackedHull,
+  w: number,
+  h: number,
+  sx: number,
+  sy: number,
+  tx = 0,
+  ty = 0,
+): Uint8Array | undefined {
+  // Gather the edges of every drawable component once, scaled, as `ax, ay, bx, by` quadruples.
+  let edgeCount = 0
+  for (let c = 0; c + 1 < hull.offsets.length; c++) {
+    const count = hull.offsets[c + 1] - hull.offsets[c]
+    if (count >= 3) edgeCount += count
+  }
+  if (edgeCount === 0) return undefined
+  const edges = new Float64Array(edgeCount * 4)
+  let yMin = Infinity
+  let yMax = -Infinity
+  let e = 0
+  for (let c = 0; c + 1 < hull.offsets.length; c++) {
+    const start = hull.offsets[c]
+    const end = hull.offsets[c + 1]
+    if (end - start < 3) continue
+    for (let v = start; v < end; v++) {
+      const u = v + 1 < end ? v + 1 : start
+      const ay = hull.points[v * 2 + 1] * sy + ty
+      edges[e++] = hull.points[v * 2] * sx + tx
+      edges[e++] = ay
+      edges[e++] = hull.points[u * 2] * sx + tx
+      edges[e++] = hull.points[u * 2 + 1] * sy + ty
+      if (ay < yMin) yMin = ay
+      if (ay > yMax) yMax = ay
+    }
+  }
+  // Only rows with `yMin <= y < yMax` can be crossed by any edge; clamp them to the mask.
+  const rowStart = Math.max(0, Math.ceil(yMin))
+  const rowEnd = Math.min(h, Math.ceil(yMax))
+  const rowCount = Math.max(0, rowEnd - rowStart)
+  // An active-edge list. The crossing rule is half-open in `y`, so an edge is live over exactly the
+  // rows `ceil(min(ay, by)) .. ceil(max(ay, by)) - 1` — a contiguous run. Bucketing every edge by
+  // the first mask row of its run (a counting sort into `order`) and retiring it when its run ends
+  // turns the `rows x edges` scan into `rows x edges-that-span-this-row`, which for a hull is a
+  // handful. Nothing else moves: a row's crossings still go through the same insertion sort and the
+  // same winding walk. The order edges arrive in a row *does* change, but only among crossings at
+  // an identical `x` — and there the walk can only open and close zero-width spans, so the union
+  // the row fills, and with it every byte of the mask, is the same either way.
+  const firstRow = new Int32Array(edgeCount)
+  const lastRow = new Int32Array(edgeCount)
+  const heads = new Int32Array(rowCount + 1)
+  let liveEdges = 0
+  for (let i = 0; i < edgeCount; i++) {
+    const ay = edges[i * 4 + 1]
+    const by = edges[i * 4 + 3]
+    const r0 = Math.max(rowStart, Math.ceil(ay < by ? ay : by))
+    const r1 = Math.min(rowEnd, Math.ceil(ay < by ? by : ay))
+    // `false` for a horizontal edge, an edge off the mask, and any NaN coordinate — all of which
+    // the crossing test below would have rejected on every row anyway.
+    if (!(r0 < r1)) {
+      firstRow[i] = -1
+      continue
+    }
+    firstRow[i] = r0
+    lastRow[i] = r1
+    heads[r0 - rowStart]++
+    liveEdges++
+  }
+  let acc = 0
+  for (let r = 0; r <= rowCount; r++) {
+    const c = heads[r]
+    heads[r] = acc
+    acc += c
+  }
+  const cursor = heads.slice()
+  const order = new Int32Array(liveEdges)
+  for (let i = 0; i < edgeCount; i++) {
+    if (firstRow[i] < 0) continue
+    order[cursor[firstRow[i] - rowStart]++] = i
+  }
+  const active = new Int32Array(liveEdges)
+  let activeCount = 0
+
+  const bytes = new Uint8Array(w * h * 4)
+  const xs = new Float64Array(edgeCount)
+  const dirs = new Int8Array(edgeCount)
+  let filled = false
+  for (let y = rowStart; y < rowEnd; y++) {
+    const r = y - rowStart
+    // Retire the edges whose run ended above this row, then admit the ones whose run starts here.
+    let keep = 0
+    for (let a = 0; a < activeCount; a++) {
+      const i = active[a]
+      if (lastRow[i] > y) active[keep++] = i
+    }
+    activeCount = keep
+    for (let b = heads[r]; b < heads[r + 1]; b++) active[activeCount++] = order[b]
+    // Collect this row's crossings, kept sorted by `x` as they arrive — a hull row crosses a
+    // handful of edges, so an insertion sort beats allocating an index array to hand to `sort`.
+    let n = 0
+    for (let a = 0; a < activeCount; a++) {
+      const i = active[a]
+      const ax = edges[i * 4]
+      const ay = edges[i * 4 + 1]
+      const bx = edges[i * 4 + 2]
+      const by = edges[i * 4 + 3]
+      let dir: number
+      if (ay <= y && y < by) dir = 1
+      else if (by <= y && y < ay) dir = -1
+      else continue
+      const x = ax + ((y - ay) * (bx - ax)) / (by - ay)
+      let k = n
+      while (k > 0 && xs[k - 1] > x) {
+        xs[k] = xs[k - 1]
+        dirs[k] = dirs[k - 1]
+        k--
+      }
+      xs[k] = x
+      dirs[k] = dir
+      n++
+    }
+    // Walk the crossings left to right and fill every span where the winding number is non-zero.
+    let winding = 0
+    let spanStart = 0
+    for (let k = 0; k < n; k++) {
+      const was = winding
+      winding += dirs[k]
+      if (was === 0 && winding !== 0) {
+        spanStart = xs[k]
+      } else if (was !== 0 && winding === 0) {
+        const xa = Math.max(0, Math.ceil(spanStart))
+        const xb = Math.min(w, Math.ceil(xs[k]))
+        if (xa < xb) {
+          bytes.fill(255, (y * w + xa) * 4, (y * w + xb) * 4)
+          filled = true
+        }
+      }
+    }
+  }
+  return filled ? bytes : undefined
+}

@@ -1,0 +1,57 @@
+{
+  "name": "@paper-crumple/paper",
+  "version": "0.0.0",
+  "description": "A SheetRenderer for paper-crumple: SDF, looseness blur, hull, torn edge, folds, facet mosaic and shadow, with compressed paper tiles on an opt-in subpath.",
+  "keywords": [
+    "webgl2",
+    "sdf",
+    "paper",
+    "torn-edge",
+    "paper-crumple"
+  ],
+  "license": "MIT",
+  "homepage": "https://github.com/paper-crumple/paper-crumple/tree/main/packages/core#readme",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/paper-crumple/paper-crumple.git",
+    "directory": "packages/paper"
+  },
+  "type": "module",
+  "sideEffects": false,
+  "engines": {
+    "node": ">=22"
+  },
+  "files": [
+    "dist"
+  ],
+  "publishConfig": {
+    "access": "public"
+  },
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "default": "./dist/index.js"
+    },
+    "./tiles": {
+      "types": "./dist/tiles.d.ts",
+      "default": "./dist/tiles.js"
+    }
+  },
+  "scripts": {
+    "build": "tsdown"
+  },
+  "dependencies": {},
+  "peerDependencies": {
+    "@paper-crumple/core": "workspace:^",
+    "typescript": ">=5.0"
+  },
+  "peerDependenciesMeta": {
+    "typescript": {
+      "optional": true
+    }
+  },
+  "devDependencies": {
+    "@paper-crumple/core": "workspace:*",
+    "typescript": "catalog:"
+  }
+}
