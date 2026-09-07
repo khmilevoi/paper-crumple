@@ -292,11 +292,12 @@ input[type='number'] {
   position: relative;
 }
 
-/* The hero canvas the library paints into. Absolute, because it is *not* the picture's box: it
-   covers the paper as well, reaches past the frame on all four sides, and grows and shrinks with
-   the edge parameters. Out of flow, that growth moves nothing. `filter` matches the design's own
-   drop shadow under its placeholder sheet so a mounted sprite sits in the same light. */
-.stage-canvas {
+/* The `<Crumple>` wrapper the library paints into. Absolute, because it is *not* the picture's
+   box: it covers the paper as well, reaches past the frame on all four sides, and grows and
+   shrinks with the edge parameters. Out of flow, that growth moves nothing. `filter` matches the
+   design's own drop shadow under its placeholder sheet so a mounted sprite sits in the same
+   light. */
+.stage-paper {
   position: absolute;
   display: block;
   filter: drop-shadow(0 22px 34px rgba(0, 0, 0, 0.6));

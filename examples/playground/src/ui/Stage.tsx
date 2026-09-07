@@ -1,9 +1,13 @@
 import { useState } from 'react'
-import type { ReactNode, RefObject } from 'react'
+import type { CSSProperties, ReactNode } from 'react'
+import { Crumple } from '@paper-crumple/react'
 
 export interface StageProps {
-  /** Where `stage.ts` puts the canvas the library paints into. */
-  readonly slotRef: RefObject<HTMLDivElement | null>
+  /** The hero. `<Crumple>` owns the canvas element and its `ref`; nothing here creates one. */
+  readonly hero: Crumple
+  /** The artwork's own rectangle. `null` until a front is resident, when the slot keeps the size
+   *  the stylesheet gives it. */
+  readonly slotStyle: CSSProperties | null
   readonly poseChip: string
   readonly sampleChip: string
   readonly edgeChip: string
@@ -27,7 +31,8 @@ const BACKGROUND_CLASS: Readonly<Record<StageProps['background'], string>> = {
  * to a drag in progress, and a drag that ends anywhere else must leave no trace behind.
  */
 export function Stage({
-  slotRef,
+  hero,
+  slotStyle,
   poseChip,
   sampleChip,
   edgeChip,
@@ -59,10 +64,16 @@ export function Stage({
       </div>
       <span className="stage-chip stage-chip--edge">{edgeChip}</span>
 
-      {/* The artwork's own rectangle, sized from `stage.ts` off `View.frame`. The canvas hangs
-          off it absolutely and reaches as far past it as the paper does, so no edge parameter
-          can move the picture — see `framing.ts`. */}
-      <div className="stage-frame" ref={slotRef} />
+      {/* The artwork's own rectangle, sized from `View.frame` through `heroSlotStyle`. The paper
+          hangs off it absolutely and reaches as far past it as the paper does, so no edge
+          parameter can move the picture — see `framing.ts`.
+
+          `position: 'absolute'` overrides the component's own `position: relative`; the four
+          properties `frameStyle` carries are applied after `style` and are not overridable, which
+          is the precedence §6 wants. */}
+      <div className="stage-frame" style={slotStyle ?? undefined}>
+        <Crumple value={hero} className="stage-paper" style={{ position: 'absolute' }} />
+      </div>
 
       <span className="stage-hint">drop a PNG anywhere on the stage to load it</span>
 

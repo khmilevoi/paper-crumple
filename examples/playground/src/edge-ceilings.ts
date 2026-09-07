@@ -46,7 +46,8 @@ import { KnobError } from '@paper-crumple/core'
  * exact chicken-and-egg `percentWidthReserve`'s closed form exists to break, one level further
  * from public reach. This function says so honestly rather than faking a number: see the task-9
  * report for the point this was decided at. The existing `stage.on('error')` -> status-pill path
- * (`useStage.ts`) stays the backstop under `'percent'`.
+ * (`usePaperScene`'s `onError`, surfaced through `App.tsx`'s `onObserved`) stays the backstop
+ * under `'percent'`.
  */
 export function reserveRadiusFor(spec: EdgeSpec, overscanHeadroom: number): number | undefined {
   if (spec.widthUnit !== 'px') return undefined
@@ -73,7 +74,7 @@ function num(v: string | number | boolean | undefined, fallback: number): number
 }
 
 /**
- * `knobs` is the LIVE bag, keyed the way `useStage`'s `KnobValues` keys everything — patch keys
+ * `knobs` is the LIVE bag, keyed the way `knobs.ts`'s `KnobValues` keys everything — patch keys
  * (`sheet.edgeVariance`, not `edgeVariance`). Every fallback comes from `defaultsFor(spec)`
  * (ruling R3), never a bare literal.
  */

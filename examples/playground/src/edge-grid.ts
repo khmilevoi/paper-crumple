@@ -217,7 +217,7 @@ function planReserve(spec: GridSpec): ReservePlan | Error {
  * Confirm, before the stage is even built, that every knob this cell is about to write lands
  * under the live ceiling the frozen reserve leaves — `edge-ceilings.ts` computes it from
  * `@paper-crumple/paper`'s own public exports, which is the same inequality `checkReserve` will
- * apply. A refusal reaches `useStage`'s pill as an orphaned error event in the playground; here
+ * apply. A refusal reaches `App.tsx`'s status pill as an orphaned error event in the playground; here
  * it would reach nothing at all and the cell would silently render the PREVIOUS width, which is
  * the exact failure mode that makes a comparison grid lie. So it is checked ahead of the write
  * and reported as a value.
@@ -309,8 +309,9 @@ function applyKnobs(built: BuiltStage, cell: CellSpec): boolean {
       continue
     }
     // The erased `pc.BlitStage` type cannot prove a runtime string is one of the slot's own keys,
-    // so the patch is cast at the call site exactly as `useStage.ts` and the library's own tests
-    // do; the runtime registry is what enforces the scope, and it answers with an Error.
+    // so the patch is cast at the call site exactly as `App.tsx`'s `setKnob` (via `usePaperScene`)
+    // and the library's own tests do; the runtime registry is what enforces the scope, and it
+    // answers with an Error.
     const written = built.stage.set({ [`sheet.${key}`]: value } as never)
     if (written instanceof Error) {
       fail(`${cell.label}: stage.set sheet.${key} = ${String(value)}: ${written.message}`)
@@ -348,9 +349,10 @@ function applyKnobs(built: BuiltStage, cell: CellSpec): boolean {
  * removes the second `source()` entirely: the front is built once, at the cell's final values.
  *
  * `prepare()` still follows the `add()`, and still matters: it is the one demand that JOINS a
- * re-source rather than returning around it (`useStage.ts`'s `settleFrame`), so by the time the
- * view shows the sprite its frame is final and a single `refresh()` settles the managed backing
- * store. With the knobs already in place it normally has nothing to join — which is the point.
+ * re-source rather than returning around it (`useCrumple`'s own re-frame path, `hero.ts`), so by
+ * the time the view shows the sprite its frame is final and a single `refresh()` settles the
+ * managed backing store. With the knobs already in place it normally has nothing to join — which
+ * is the point.
  */
 async function renderCell(
   spec: GridSpec,

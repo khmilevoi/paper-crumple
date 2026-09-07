@@ -89,7 +89,10 @@ export function libraryGroups(entries: readonly Entry[]): LibraryGroup[] {
 export interface KnobRowsProps {
   readonly entries: readonly Entry[]
   readonly knobs: KnobValues
-  readonly onSet: (key: string, value: string | number | boolean) => Error | undefined
+  /** A knob write is declarative now: it moves React state and `usePaperScene` writes the stage.
+   *  A refusal arrives asynchronously through the scene's `onError`, so there is no Error to
+   *  return. Every call site already ignored the return value. */
+  readonly onSet: (key: string, value: string | number | boolean) => void
 }
 
 /** One row per descriptor, dispatched on `kind`. A descriptor `labels.ts` has no entry for is

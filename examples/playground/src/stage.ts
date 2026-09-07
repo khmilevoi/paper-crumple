@@ -1,85 +1,18 @@
+/**
+ * What is left of the playground's own stage code after the React migration.
+ *
+ * The hero's canvas, view, framing and first `show()` are `useCrumple`'s and `<Crumple>`'s now
+ * (`hero.ts`). What stays here is the two things that were never the hero's: the idle prefetch of
+ * the other samples, and the raw WebGL probe the diagnostics footer prints.
+ *
+ * The prefetch reaches the stage through `scene.stage`, and that is safe: the binding's `acquire`
+ * retries a live-key refusal through `prepare`, which joins the winner of the race instead of
+ * failing a correct sequence, so a swap onto a key this prefetch is still adding does not report.
+ */
+
 import * as pc from '@paper-crumple/core'
 import type { BuiltStage } from './config'
-import { frameArtwork } from './framing'
 import { SAMPLES, type Sample } from './samples'
-
-/**
- * Mounting the one hero view the design's stage shows.
- *
- * The mockup's stage holds a single sheet and nothing else, so this module mounts one view and
- * stops — the six-tile broadcast grid the pre-React playground also mounted here has no
- * counterpart in `Paper Crumple Control Panel v2.dc.html` and is gone with it.
- *
- * React owns the slot element; the canvas inside it is owned here, because which canvas the
- * library wants depends on `present`: `blit` supplies its own 2D canvas per view and the stage
- * blits into it, while `direct` has one surface — the stage's own — and a view is a rect of it,
- * so the element appended in that mode is the stage's canvas rather than one made here.
- *
- * The canvas's *box* is owned here too, and `View.frame` decides it: the slot is the artwork's
- * own rectangle and never changes size for a given source, while the canvas is positioned over
- * it and reaches however far past it the paper does. See `framing.ts` for why a fixed `cssPx`
- * square was moving the picture under every parameter change.
- */
-
-export interface MountedHero {
-  readonly view: pc.View
-  readonly sprite: pc.Sprite
-  /** The element the library paints into — kept so a swap can re-frame it in place. */
-  readonly canvas: HTMLCanvasElement
-  /** How long `add()` took — the front bake, which is where the hull is built in `hull` mode. */
-  readonly addMs: number
-  /** How long the whole mount took: add + view + show. */
-  readonly mountMs: number
-  /** The prefetches `prefetchSamples` started and has not seen settle — the click holds one. */
-  readonly prefetched: Prefetched
-}
-
-export interface FrameHeroRequest {
-  readonly view: pc.View
-  readonly slot: HTMLElement
-  readonly canvas: HTMLCanvasElement
-  /** What the artwork's long side is to measure, on screen. */
-  readonly cssPx: number
-}
-
-/**
- * Size the slot to the artwork and hang the canvas off it, from what the view reports it is
- * drawing. Returns `false` — and moves nothing — while the view has no resident front to report
- * (nothing is drawn then either, so the boxes it last had are as right as any).
- *
- * The slot is the grid item the design's stage centres, so keeping it at the artwork's box is
- * what pins the picture; the canvas is taken out of flow so that growing it — which every edge
- * parameter does — moves nothing. Idempotent: it reads the view's *current* frame, so it is
- * called again whenever that may have changed — a swap's step, a hull-tier write once its
- * re-source has landed — and never needs to remember anything between calls.
- */
-export function frameHero(o: FrameHeroRequest): boolean {
-  const frame = o.view.frame
-  if (frame === null) return false
-  const framing = frameArtwork(frame, o.cssPx)
-  // The slot's class belongs to React, which renders it; only the box is written from here.
-  o.slot.style.width = `${String(framing.image.w)}px`
-  o.slot.style.height = `${String(framing.image.h)}px`
-  // The display size is set HERE, and deliberately not left to follow the backing store.
-  //
-  // `blitOut`'s default `size: 'managed'` re-reads `getBoundingClientRect()` on *every draw* and
-  // writes `canvas.width`/`height` from it (`core`'s managed branch, `blit.ts`'s
-  // `managedBackingStore`: `min(round(cssDim * dpr), frontDim)`). A canvas with no CSS size takes
-  // its layout size from those same attributes, so the two feed each other and every draw
-  // multiplies the element by `devicePixelRatio`: measured at dpr 1.5, +1.28 % per blit, climbing
-  // until it hit `front.h` — roughly eight folds. That is the canvas "growing and shifting" while
-  // a run plays, and because it is per *draw* rather than per run, even a draw-only pose scrub
-  // did it.
-  //
-  // The CSS box carries the drawn box's own aspect, so under `fit: 'contain'` the blit adds no
-  // bars beyond the sub-pixel rounding between the two, and the frame's pixels map onto CSS
-  // pixels by the one scale `frameArtwork` used.
-  o.canvas.style.width = `${String(framing.canvas.w)}px`
-  o.canvas.style.height = `${String(framing.canvas.h)}px`
-  o.canvas.style.left = `${String(framing.offset.x)}px`
-  o.canvas.style.top = `${String(framing.offset.y)}px`
-  return true
-}
 
 /**
  * How long the fallback waits when the browser has no `requestIdleCallback` (Safari shipped it
@@ -120,7 +53,7 @@ export type Prefetched = ReadonlyMap<string, Promise<pc.Sprite | Error | pc.Abor
  * prefetch is in flight would queue a second ingest of the same image behind the running one, so
  * the click takes it only for a key that was never prefetched, or whose prefetch failed.
  *
- * Keyed on `sample.id`, the same key `mountHero` uses, and the mounted sample is skipped: `add()`
+ * Keyed on `sample.id`, the same key `useHero` uses, and the mounted sample is skipped: `add()`
  * on a live key is refused by design (§4.1) and would only fill the status pill.
  *
  * An entry is dropped the moment its add settles: from there `stage.get(id)` is the truth — the
@@ -147,50 +80,6 @@ export function prefetchSamples(
     }
   })
   return pending
-}
-
-function heroCanvas(built: BuiltStage, slot: HTMLElement): HTMLCanvasElement | Error {
-  slot.replaceChildren()
-
-  const canvas = document.createElement('canvas')
-  canvas.className = 'stage-canvas'
-  slot.append(canvas)
-  return canvas
-}
-
-export async function mountHero(
-  built: BuiltStage,
-  sample: Sample,
-  slot: HTMLElement,
-  signal: AbortSignal,
-): Promise<MountedHero | Error | pc.Aborted> {
-  const startedAt = performance.now()
-  const canvas = heroCanvas(built, slot)
-  if (canvas instanceof Error) return canvas
-
-  // `add` + `view` + `show` spelled out rather than the `mount` that composes exactly those
-  // three: the front bake is the expensive one and the only one that is interesting on its own,
-  // and a single `mount` call cannot be timed apart from the two cheap steps after it.
-  const addedAt = performance.now()
-  const sprite = await built.stage.add(sample.url, { key: sample.id, signal })
-  if (sprite === pc.ABORTED) return pc.ABORTED
-  if (sprite instanceof Error) return sprite
-  const addMs = performance.now() - addedAt
-  const prefetched = prefetchSamples(built, sample, signal)
-
-  // `contain` and not `stretch`: `frameHero` gives the element the drawn box's own aspect, so
-  // there is nothing left to letterbox — but the two differ by the sub-pixel rounding between
-  // them, and `contain` spends that on a sub-pixel bar rather than on a sub-pixel stretch.
-  const view = built.stage.view({ canvas, fit: 'contain', tag: sample.id })
-  if (view instanceof Error) return view
-  const shown = view.show(sprite)
-  if (shown instanceof Error) return shown
-  // `show()` drew into the element at whatever box it had — the frame only exists once a front
-  // is shown — so the box is set from that frame now, and one event-free redraw lets the managed
-  // backing store, which is written from `getBoundingClientRect()` during a draw, catch up.
-  if (frameHero({ view, slot, canvas, cssPx: built.artworkCssPx })) view.refresh()
-
-  return { view, sprite, canvas, addMs, mountMs: performance.now() - startedAt, prefetched }
 }
 
 /**

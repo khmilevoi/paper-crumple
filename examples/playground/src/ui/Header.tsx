@@ -1,5 +1,5 @@
 import type { ReactNode } from 'react'
-import type { StageStatus } from '../useStage'
+import type { StageStatus } from './App'
 
 export interface HeaderProps {
   readonly status: StageStatus

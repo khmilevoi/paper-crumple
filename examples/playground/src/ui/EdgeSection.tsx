@@ -66,7 +66,10 @@ export interface EdgeSectionProps {
   readonly knobs: KnobValues
   readonly spec: EdgeSpec
   readonly onSpecChange: (spec: EdgeSpec) => void
-  readonly onSet: (key: string, value: string | number | boolean) => Error | undefined
+  /** A knob write is declarative now: it moves React state and `usePaperScene` writes the stage.
+   *  A refusal arrives asynchronously through the scene's `onError`, so there is no Error to
+   *  return. Every call site already ignored the return value. */
+  readonly onSet: (key: string, value: string | number | boolean) => void
   /**
    * NOT in the brief's own `EdgeSectionProps` (task-9 brief, "Produces"): computing the live
    * ceiling below needs it and it is not otherwise derivable from `entries` / `knobs` / `spec`.

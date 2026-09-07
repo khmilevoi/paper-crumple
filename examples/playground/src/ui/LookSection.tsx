@@ -38,7 +38,10 @@ export type StageBackground = 'dark' | 'light' | 'checker'
 export interface LookSectionProps {
   readonly entries: readonly Entry[]
   readonly knobs: KnobValues
-  readonly onSet: (key: string, value: string | number | boolean) => Error | undefined
+  /** A knob write is declarative now: it moves React state and `usePaperScene` writes the stage.
+   *  A refusal arrives asynchronously through the scene's `onError`, so there is no Error to
+   *  return. Every call site already ignored the return value. */
+  readonly onSet: (key: string, value: string | number | boolean) => void
   readonly background: StageBackground
   readonly onBackgroundChange: (background: StageBackground) => void
 }
