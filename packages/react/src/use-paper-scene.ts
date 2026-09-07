@@ -115,6 +115,11 @@ export function usePaperScene<M = undefined>(o: SceneOptions<M>): Scene<M> {
       o.onReady?.(build, info)
     },
   )
+  const dispatchFailed = useEvent(
+    (error: Error, info: { lost: boolean; generation: number }): void => {
+      o.onFailed?.(error, info)
+    },
+  )
 
   const [core] = useState<SceneCore<M>>(() => ({
     status: 'building',
@@ -136,6 +141,17 @@ export function usePaperScene<M = undefined>(o: SceneOptions<M>): Scene<M> {
     const offs: Array<() => void> = []
     let landed: BlitStage | null = null
     let resolved = false
+    let reportedFailure = false
+    /**
+     * §3.1: a scene fails once per build. The latch resets with the effect, so a rebuild after a
+     * loss can fail again, and a second `error` event on an already-lost stage cannot re-report.
+     * Always called *after* `store.bump()`, so the callback and the snapshot agree.
+     */
+    const reportFailure = (error: Error, lost: boolean): void => {
+      if (reportedFailure) return
+      reportedFailure = true
+      dispatchFailed(error, { lost, generation: core.generation })
+    }
 
     /**
      * Handed down so the consumer can spread it into `paperStage`'s own `onError`, which core
@@ -161,6 +177,7 @@ export function usePaperScene<M = undefined>(o: SceneOptions<M>): Scene<M> {
       core.status = 'failed'
       core.error = duplicate
       store.bump()
+      reportFailure(duplicate, false)
       return () => {
         controller.abort()
       }
@@ -179,6 +196,7 @@ export function usePaperScene<M = undefined>(o: SceneOptions<M>): Scene<M> {
         core.status = 'failed'
         core.error = cause instanceof Error ? cause : new Error(String(cause))
         store.bump()
+        reportFailure(core.error, false)
         return
       }
       resolved = true
@@ -202,6 +220,7 @@ export function usePaperScene<M = undefined>(o: SceneOptions<M>): Scene<M> {
         core.status = 'failed'
         core.error = built
         store.bump()
+        reportFailure(built, false)
         return
       }
 
@@ -223,6 +242,9 @@ export function usePaperScene<M = undefined>(o: SceneOptions<M>): Scene<M> {
           // Bump on every error, not only on a loss: `stage.warnings` grows at runtime and this
           // is the only moment it can have (§5.5).
           store.bump()
+          // The loss report, and the only one: `lost` fires first with no cause attached, and
+          // core emits this orphaned GlError immediately after in the same stack.
+          if (build.stage.lost) reportFailure(core.error ?? LOST_WITHOUT_CAUSE, true)
         }),
       )
       offs.push(
@@ -242,6 +264,12 @@ export function usePaperScene<M = undefined>(o: SceneOptions<M>): Scene<M> {
       // landed already lost is a failure, not a readiness.
       if (store.getSnapshot().status === 'ready') {
         dispatchReady(build, { generation: core.generation, signal: controller.signal })
+      } else {
+        // The stage landed already lost. `readScene` has it at `failed` and this is the same
+        // bump, so the report belongs here rather than to a listener that will never fire.
+        const landedFailure = store.getSnapshot()
+        if (landedFailure.status === 'failed')
+          reportFailure(landedFailure.error, landedFailure.lost)
       }
     })()
 
@@ -255,8 +283,9 @@ export function usePaperScene<M = undefined>(o: SceneOptions<M>): Scene<M> {
       landed?.dispose()
     }
     // §4.1: a rebuild is decided by `deps` and by nothing else. `create` is useEvent-stable, and
-    // `core` and `store` are created once by useState and never replaced, and `dispatchError` and
-    // `dispatchReady` are useEvent-stable too, so none of them belongs in the dependency list.
+    // `core` and `store` are created once by useState and never replaced, and `dispatchError`,
+    // `dispatchReady` and `dispatchFailed` are useEvent-stable too, so none of them belongs in
+    // the dependency list.
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, o.deps)
 

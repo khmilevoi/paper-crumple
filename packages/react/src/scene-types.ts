@@ -55,6 +55,18 @@ export interface SceneOptions<M = undefined> {
    */
   onReady?: (build: SceneBuild<M>, info: { generation: number; signal: AbortSignal }) => void
   /**
+   * Fires at most once per build (§3.1), synchronously after the bump that moved the snapshot to
+   * `failed`: a `create` that returned an Error, a `create` that threw, a duplicate-core startup
+   * failure, or a lost context. `info.lost` separates the last from the rest.
+   *
+   * A loss is reported from the stage's own `error` event rather than from `lost`, because core
+   * emits the orphaned `GlError` immediately after `lost` in the same synchronous stack and
+   * reporting from `lost` would hand this callback a placeholder while the snapshot ends up
+   * holding the real cause. The residue: a `lost` with no cause ever emitted leaves the snapshot
+   * `failed` and calls nothing here.
+   */
+  onFailed?: (error: Error, info: { lost: boolean; generation: number }) => void
+  /**
    * A declarative knob write the stage refused. `onError` also receives it (§0.3), but a
    * `StageEvent` has nowhere to put the key, and the key is the only thing that tells a consumer
    * which control to roll back. A carry-forward onto a replacement stage stays silent here for
