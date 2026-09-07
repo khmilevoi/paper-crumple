@@ -23,13 +23,15 @@ stage.set({ 'sheet.grain': stage.defaults['sheet.grain'] })
 stage.set({ paperColor: stage.defaults['core.paperColor'] })
 ```
 
-- **Namespaced paths.** `<slot>.<key>` — `sheet.grain`, `motion.grain`, `core.paperColor`. A
-  slot-scoped path is the spelling `stage.set` and `sprite.set` accept, and it is the only
-  unambiguous one when both slots declare the same key.
-- **The two core-declared shared knobs are the exception.** `core.paperColor` and `core.paperBack`
-  are keyed by path in `defaults` but written back by their bare key (`paperColor`, `paperBack`);
-  `set()` resolves only the `sheet.` and `motion.` namespaces, and the bare key is what keeps every
-  bound slot identical.
+- **Namespaced paths.** `<slot>.<key>` — `sheet.grain`, `motion.grain`, `core.paperColor`. A path
+  is the only unambiguous spelling when both slots declare the same key, which is why `defaults`
+  is keyed this way rather than by the bare keys `stage.knobs` carries.
+- **Shared knobs are written back by their bare key.** `set()` resolves only the `sheet.` and
+  `motion.` namespaces, and separately refuses the namespaced path of any descriptor that declares
+  `binds`. So `core.paperColor` and `core.paperBack` — and any slot descriptor bound to one of
+  them — are keyed by path in `defaults` but written back as `paperColor` / `paperBack`, which is
+  what keeps every bound slot identical. Every other path is written back exactly as `defaults`
+  keys it.
 - **One frozen object, handed out by identity.** It is not rebuilt per read, so it is safe as a
   React effect dependency; an undeclared key reads `undefined`.
 - `KnobPrimitive` and `KnobValues` are re-exported from the package root so the field's type can

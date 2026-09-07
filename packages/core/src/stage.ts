@@ -114,10 +114,11 @@ export interface StageCommon {
   /** Every descriptor's default under its own **namespaced** path — the same frozen object the
    *  registry builds once at mount, handed out by identity so a consumer can use it as an effect
    *  dependency (§3.4). `knobs` carries slot-local keys with no path, so a consumer holding a knob
-   *  key had no way to ask what its default was; this is that answer. The paths are the registry's
-   *  own: a slot-scoped default (`sheet.grain`) is spelled for `set()` as it stands, while a
-   *  core-declared shared knob (`core.paperColor`) is written back through its **bare** key
-   *  (`paperColor`) — which is what writes every bound descriptor at once. */
+   *  key had no way to ask what its default was; this is that answer. These are the registry's own
+   *  paths, and they are not all the spelling `set()` takes: a **shared** knob — core's own
+   *  (`core.paperColor`), or any slot descriptor that declares `binds` — is written back through
+   *  the bare shared key (`paperColor`), which is what writes every bound descriptor at once.
+   *  Every other path (`sheet.grain`) is written back exactly as it is keyed here. */
   readonly defaults: KnobValues
   /** The synchronous form of the `lost` event: a `useEffect` that runs after the event has
    *  already fired has no other way to ask (amendment 16). */

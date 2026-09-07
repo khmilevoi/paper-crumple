@@ -58,9 +58,13 @@ describe('stage.defaults', () => {
       // slot-scoped default is written under its own namespaced path; a core-declared shared knob
       // is written under its BARE key, because setting the bare key is what writes core's
       // descriptor and every descriptor that binds it at once, which is what keeps the 2D sheet
-      // and the 3D fill identical by construction (§6.8). `as never` matches how the
-      // implementation and the existing knob tests call `set` — the flat patch type collapses at
-      // the widest slot instantiation, and `registry.normalise` is the enforcement that runs.
+      // and the 3D fill identical by construction (§6.8).
+      // The `core.` test is sufficient here only because `fakeSheet`/`fakeMotion` declare no
+      // `binds`; a bound descriptor's namespaced path is refused too, and is written by its
+      // `binds` key.
+      // `as never` matches how the implementation and the existing knob tests call `set` — the
+      // flat patch type collapses at the widest slot instantiation, and `registry.normalise` is
+      // the enforcement that runs.
       const writable = path.startsWith('core.') ? path.slice('core.'.length) : path
       expect(stage.set({ [writable]: value } as never)).toBeUndefined()
     }
