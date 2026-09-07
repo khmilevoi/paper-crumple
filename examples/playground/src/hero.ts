@@ -78,9 +78,11 @@ export function swapDurationFor(fromAudio: number | null | undefined): number {
  * at `devicePixelRatio` (§6). It is an option rather than something the binding works out because
  * the consumer writes the `paperStage(...)` call and that number never passes through the package.
  *
- * `fit: 'contain'` and not `'stretch'`, exactly as `mountHero` chose: the wrapper carries the drawn
- * box's own aspect, so there is nothing left to letterbox, and the two differ only by the sub-pixel
- * rounding between them — `contain` spends that on a sub-pixel bar rather than a sub-pixel stretch.
+ * `fit: 'contain'` and not `'stretch'`, exactly as the pre-migration `mountHero`
+ * (`075dc4e:examples/playground/src/stage.ts`, deleted by this plan's rewire) chose: the wrapper
+ * carries the drawn box's own aspect, so there is nothing left to letterbox, and the two differ
+ * only by the sub-pixel rounding between them — `contain` spends that on a sub-pixel bar rather
+ * than a sub-pixel stretch.
  * It is fixed at `stage.view()` and a later change is silently ignored, which is why it is a hook
  * option and never a prop.
  */

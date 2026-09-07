@@ -847,8 +847,10 @@ A key whose descriptor moves geometry makes the next demand on the front answer 
 which the stage turns into a re-source — a new sheet handle, and with it a new paper box. **That work
 is still in flight when `stage.set` returns**, so someone must join it with
 `await stage.prepare(spriteKey)` before re-reading `View.frame`; reading any earlier reads the frame
-the sprite is about to leave. This is `settleFrame` in `examples/playground/src/useStage.ts` and it is
-a requirement, not an optimisation.
+the sprite is about to leave. This used to be the playground's own `settleFrame`
+(`examples/playground/src/useStage.ts`, deleted); the binding now does the join itself, in the
+`knobEpoch` effect of `packages/react/src/use-crumple.ts`, and it is a requirement, not an
+optimisation.
 
 The binding does it, split across the only seam that exists (§4.3) — `prepare` takes a *sprite* key,
 framing state lives on the crumple, and the scene has no register of crumples to walk:

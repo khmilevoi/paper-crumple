@@ -50,6 +50,19 @@ function sameList(a: readonly number[], b: readonly number[]): boolean {
   return a.length === b.length && a.every((x, i) => x === b[i])
 }
 
+/**
+ * The "sample" `<select>`'s next bound value. `SourceSection`'s picker only ever renders an
+ * `<option>` per `SAMPLES` entry (`ui/SourceSection.tsx:94`) — a dropped file's `dropped-N` id, or
+ * the rollback demo's `broken` id, has no matching option, which desyncs a controlled `<select>`
+ * and prints a React warning. `target` wins only when it is a library sample; anything else keeps
+ * whatever was remembered, exactly like the pre-migration two-state version, where a dropped file
+ * never touched the state the picker read (`075dc4e:ui/App.tsx`'s `onDropImage` called `swapTo`
+ * directly and never `setSample`).
+ */
+export function nextLibrarySample(current: Sample, target: Sample): Sample {
+  return SAMPLES.some((s) => s.id === target.id) ? target : current
+}
+
 /** The status line the pill shows: what the last action did, or `null` for the idle readout. */
 export interface StageStatus {
   readonly ok: boolean
@@ -73,6 +86,9 @@ export function App(): ReactNode {
    * sample left `deps`, and a source pick is a swap now.
    */
   const [shown, setShown] = useState<Sample>(BOOT_SAMPLE)
+  /** The "sample" picker's own bound value — see `nextLibrarySample`. Kept alongside the collapsed
+   *  `shown` state rather than reviving the pre-migration two-state split. */
+  const [librarySample, setLibrarySample] = useState<Sample>(BOOT_SAMPLE)
   const [status, setStatus] = useState<StageStatus | null>({ ok: true, text: 'booting…' })
 
   const onObserved = useCallback((where: string, error: Error): void => {
@@ -218,7 +234,6 @@ export function App(): ReactNode {
   const stepAtRef = useRef<number | null>(null)
   /** A draw-only pose change, timed around the `view.draw(...)` call itself. */
   const [lastDrawMs, setLastDrawMs] = useState<number | null>(null)
-  const runRef = useRef<pc.Run<pc.PlayResult> | null>(null)
 
   const dwells = built?.motion.poses?.dwells ?? pc.DWELL_MS
 
@@ -278,6 +293,12 @@ export function App(): ReactNode {
   const play = crumple.play
   const runFold = useCallback(
     async (from: pc.PoseRef, to: pc.PoseRef): Promise<void> => {
+      // The pre-migration `runFold` (`075dc4e:ui/App.tsx:303`) returned on a null `view` before
+      // ever touching audio — `play(...)` returns null for exactly the same reason `view` was
+      // null there (`use-crumple.ts`'s `play` checks `core.view === null`), so checking `view`
+      // here, before `audio.beginSequence`, reproduces that guard: a Space press before the stage
+      // is ready plays no clip and leaves nothing pending.
+      if (view === null) return
       const fromIdx = poseIndex(from)
       const toIdx = poseIndex(to)
       if (fromIdx === toIdx) return
@@ -291,10 +312,12 @@ export function App(): ReactNode {
       // `view.play`, and a wrapper is exactly where that guarantee is lost (§5.1).
       const run = play(from, to, { duration: duration ?? FOLD_DURATION_MS })
       if (run === null) {
-        setDirection(null)
+        // Reached only if `view` went away between the check above and this call — audio was
+        // already begun, so it has to be ended through the shared callback, not a bare
+        // `setDirection(null)`, or `audio`'s `pending` is left set with nothing to close it.
+        endSwap()
         return
       }
-      runRef.current = run
       const r = await run
       endSwap()
       if (r === pc.ABORTED) return
@@ -304,7 +327,7 @@ export function App(): ReactNode {
       }
       refresh()
     },
-    [audio, dwells, endSwap, onObserved, play, poseIndex, refresh],
+    [audio, dwells, endSwap, onObserved, play, poseIndex, refresh, view],
   )
 
   // --- pose schedule --------------------------------------------------------------------------
@@ -345,6 +368,12 @@ export function App(): ReactNode {
       refresh()
       return true
     },
+    // `scene.stop` only, not `scene`: the analyzer does not narrow a called member expression
+    // (`scene.stop({...})`) the way it narrows a plain property read, so it still asks for the
+    // base identifier — but `scene`'s identity moves on every `knobEpoch` bump
+    // (`use-paper-scene.ts:251,284`), and depending on the object would re-run this effect, and
+    // everything that closes over it, on every knob write.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
     [built, refresh, scene.stop, view],
   )
 
@@ -418,6 +447,7 @@ export function App(): ReactNode {
       setDirection('folding')
       swappingRef.current = true
       setShown(target)
+      setLibrarySample((prev) => nextLibrarySample(prev, target))
     },
     [audio, crumple.pose, dwells],
   )
@@ -427,6 +457,11 @@ export function App(): ReactNode {
       swapTarget === BROKEN_ID ? BROKEN_SAMPLE : SAMPLES.find((s) => s.id === swapTarget)
     if (target === undefined) return
     startSwap(target)
+    // The pre-migration guard (App.tsx:398, pre-rewire) skipped BOTH `setShown` and
+    // `setSwapTarget` once `swapTarget` was already `BROKEN_ID` — `sampleId` above restores the
+    // first half; this restores the second, so a rollback demo leaves the "swap to" select on
+    // "broken URL" instead of advancing it.
+    if (swapTarget === BROKEN_ID) return
     setSwapTarget(SAMPLES.find((s) => s.id !== target.id)?.id ?? BROKEN_ID)
   }, [startSwap, swapTarget])
 
@@ -518,12 +553,13 @@ export function App(): ReactNode {
       : `key frames ${keyFrames.map((s) => frameFor(s)).join(' → ')}`
 
   /**
-   * What the "source" chip and picker show. `shown` is the state that DRIVES the request — it
-   * becomes the broken sample the instant a rollback demo is clicked, so `crumple.shown` (the
-   * sprite key `<Crumple>` is really showing) is read instead: a rollback leaves it at the
-   * PREVIOUS sprite's key, which is what App.tsx:398's old `swapTarget === BROKEN_ID` guard also
-   * kept the chip on. Before anything has ever landed, `crumple.shown` is `null` and `shown.id`
-   * (the request in flight) is the only thing there is to show.
+   * What the stage chip and the "source" summary show — NOT the picker (that binds to
+   * `librarySample.id`, above). `shown` is the state that DRIVES the request — it becomes the
+   * broken sample the instant a rollback demo is clicked, so `crumple.shown` (the sprite key
+   * `<Crumple>` is really showing) is read instead: a rollback leaves it at the PREVIOUS sprite's
+   * key, which is what App.tsx:398's old `swapTarget === BROKEN_ID` guard also kept the chip on.
+   * Before anything has ever landed, `crumple.shown` is `null` and `shown.id` (the request in
+   * flight) is the only thing there is to show.
    */
   const sampleId = crumple.shown ?? shown.id
 
@@ -752,7 +788,7 @@ export function App(): ReactNode {
               }}
             >
               <SourceSection
-                sampleId={sampleId}
+                sampleId={librarySample.id}
                 packs={config.packs}
                 swapTarget={swapTarget}
                 busy={busy}

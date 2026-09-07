@@ -112,5 +112,10 @@ describe('<Stage>', () => {
     )
     expect(host.querySelector('canvas')).toBeInstanceOf(HTMLCanvasElement)
     expect(seen[0]).toBeInstanceOf(HTMLCanvasElement)
+    // "and to nobody else": exactly one canvas exists in the stage, and `hero.ref` is the only
+    // callback that ever saw it — nothing in `Stage` keeps a second reference to it or renders a
+    // second one.
+    expect(host.querySelectorAll('canvas')).toHaveLength(1)
+    expect(seen).toHaveLength(1)
   })
 })

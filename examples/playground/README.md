@@ -34,20 +34,21 @@ controls — is gone.
 
 ## How it is put together
 
-| file              | what it owns                                                                    |
-| ----------------- | ------------------------------------------------------------------------------- |
-| `src/main.tsx`    | the React root, and the duplicate-core check that must run before it            |
-| `src/ui/App.tsx`  | all page state, the playback and swap paths, and the diagnostics figures        |
-| `src/ui/*.tsx`    | one component per node group of the mockup                                      |
-| `src/useStage.ts` | the stage lifecycle: build, mount, dispose, and the knob carry-over on rebuild  |
-| `src/stage.ts`    | mounting the one hero view, and the renderer string the diagnostics footer uses |
-| `src/config.ts`   | `DemoConfig` — everything §6.5 calls a factory option — and `buildStage`        |
-| `src/knobs.ts`    | descriptor collection, keyed the way `stage.set` wants                          |
-| `src/audio.ts`    | the sound controller, headless: a snapshot plus a subscription                  |
-| `src/state.ts`    | the URL fragment, encoded and decoded                                           |
+| file             | what it owns                                                                                 |
+| ---------------- | -------------------------------------------------------------------------------------------- |
+| `src/main.tsx`   | the React root, and the duplicate-core check that must run before it                         |
+| `src/ui/App.tsx` | all page state, the playback and swap paths, and the diagnostics figures                     |
+| `src/ui/*.tsx`   | one component per node group of the mockup                                                   |
+| `src/scene.ts`   | the stage lifecycle over `usePaperScene`: build, dispose, and the knob carry-over on rebuild |
+| `src/hero.ts`    | the one hero view over `useCrumple`: entrance, swap and the frame style the slot renders     |
+| `src/stage.ts`   | prefetching the other samples, and the renderer string the diagnostics footer uses           |
+| `src/config.ts`  | `DemoConfig` — everything §6.5 calls a factory option — and `buildStage`                     |
+| `src/knobs.ts`   | descriptor collection, keyed the way `stage.set` wants                                       |
+| `src/audio.ts`   | the sound controller, headless: a snapshot plus a subscription                               |
+| `src/state.ts`   | the URL fragment, encoded and decoded                                                        |
 
-**Factory options rebuild; knobs do not.** That split (§6.5) is why `useStage`'s effect depends on
-exactly `config` and `sample`: a knob write goes straight to the live stage and costs one draw. A
+**Factory options rebuild; knobs do not.** That split (§6.5) is why `scene.ts`'s `useDemoScene`
+depends on exactly `config`: a knob write goes straight to the live stage and costs one draw. A
 rebuild is not a reset — every knob a reader moved away from its default is carried onto the new
 stage, and any key the new slot set no longer declares is skipped.
 
