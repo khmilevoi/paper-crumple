@@ -20,10 +20,13 @@ union and became a plain interface, and the URL codec (`examples/playground/src/
 now drops a stale `present=direct` rather than rejecting it, so old links still open at the default.
 
 **Where it belongs.** §11 — and honestly: a shipped core capability now has **no interactive
-demonstration at all**, and it lost it because the React binding cannot show it. It is not untested
-(`packages/core/src/stage.test-d.ts:18-23` exercises both the `'blit'` and `'direct'` arms); it is
-undemoed. §10 should record that the acceptance test was made to pass by removing a demo capability,
-which is a weaker pass than it reads as. Saved URLs also changed meaning.
+demonstration at all**, and it lost it because the React binding cannot show it. It is not untested:
+`packages/core`'s own suite still exercises `present: 'direct'` directly —
+`stage.test-d.ts:22,63,85` (the type overloads), `stage-surface.test.ts:52,57,73,80` (the owned
+surface), `stage-surface.gl.test.ts:30-31` and `stage.gl.test.ts:67-72` (the live-GL surface and
+stage), and `view.test.ts:206,334` (the view itself) — it is undemoed. §10 should record that the
+acceptance test was made to pass by removing a demo capability, which is a weaker pass than it
+reads as. Saved URLs also changed meaning.
 
 **A correction to the analysis.** `edge-grid.ts` was described as untouched. Its behaviour is; its
 text is not — it wrote `present: 'blit'` into a `DemoConfig` literal and narrowed on
@@ -40,8 +43,8 @@ timing; `onStart` fires on the run, after the sprite is resident. `mountMs` was 
 effects and a ref (`examples/playground/src/ui/App.tsx:576-586`, `readyAtRef`): one effect notes
 when the scene enters `'ready'` and clears the previous reading, the other stamps `mountMs` the
 first time `crumple.shown` is non-null. `addMs` has no seam left, and the `hull` tile now prints an
-em dash (`examples/playground/src/ui/App.tsx:625-636`: `'the front bake — no longer separately
-timeable: the binding owns add()'`).
+em dash (`examples/playground/src/ui/App.tsx:632-638`, its quoted title string at `:637`:
+`'the front bake — no longer separately timeable: the binding owns add()'`).
 
 **Where it belongs.** §5.3 / §5.5. Either the snapshot carries a timing, or the spec records that a
 consumer instrumenting acquisition must do its own `stage.add` through `scene.stage` — and lose the
@@ -94,7 +97,7 @@ the pose readout must update. The playground's own store had `notifyPose()`, a p
 
 **What the package offers.** `crumple.refresh()`, which calls `view.refresh()` *and* bumps the
 store. There is no way to ask the instance to re-read its snapshot without also asking it to redraw.
-The playground's `draw` callback (`examples/playground/src/ui/App.tsx:266-278`) calls `view.draw(next)`
+The playground's `draw` callback (`examples/playground/src/ui/App.tsx:267-280`) calls `view.draw(next)`
 and then `refresh()` unconditionally, "one draw more than this needs," per its own comment.
 
 **Where it belongs.** §5.5, which is explicit that events are a supplementary source and the store
@@ -132,7 +135,7 @@ call and never restated for the path where that call does not happen.
 its settled result.
 
 **What the package offers.** `crumple.play` returns a `Run`; the swap, started by `startSwap`
-(`examples/playground/src/ui/App.tsx:442-451`) off a `shown` change (`spriteKey` / `src` in
+(`examples/playground/src/ui/App.tsx:443-453`) off a `shown` change (`spriteKey` / `src` in
 `useHero`), returns nothing. Supersession by the hook's internal sequence number is strictly better
 than the playground's own `AbortController` and is not the complaint: the *result* is reachable only
 as three snapshot fields (`shown`, `requested`, `error`) that a consumer must correlate itself, plus
@@ -148,10 +151,10 @@ the sprite held its own decoded texture.
 **What the package offers.** A mandatory `spriteKey`, and a pair guard that keeps
 `Map<spriteKey, src>` for the life of the component and compares by identity. Two files named
 `photo.png` must get distinct synthetic keys (`droppedSample`, `examples/playground/src/hero.ts:56-58`,
-keyed by a `dropSeq` counter), and the blob URL must stay alive: a scene rebuild re-acquires the key
-from the same `src` (§5.2), which would read a revoked URL. The playground now leaks one blob URL
-per drop, on an operator-accepted trade-off documented inline
-(`examples/playground/src/ui/App.tsx:436-441`).
+keyed by a `dropSeq` counter (`examples/playground/src/ui/App.tsx:468`), and the blob URL must stay
+alive: a scene rebuild re-acquires the key from the same `src` (§5.2), which would read a revoked
+URL. The playground now leaks one blob URL per drop, on an operator-accepted trade-off documented
+inline (`examples/playground/src/ui/App.tsx:472-476`).
 
 **Where it belongs.** §5.3's pair guard, which is right about the defect it prevents and says
 nothing about the source's lifetime.
@@ -160,8 +163,9 @@ nothing about the source's lifetime.
 
 Not a gap — a consequence, recorded because a reader of the demo will notice it. `useStage` rebuilt
 the whole stage for a different sample, because `mountHero` mounted it. `create` does not read the
-sample, and §4.1 says to put in `deps` only what `create` reads, so the sample left `deps`
-(`examples/playground/src/scene.ts:53-56`: `deps: [config]`) and a source pick became a swap. The
+sample, and §4.1 says to put in `deps` only what `create` reads, so the sample left `deps` — the
+prose explaining why is at `examples/playground/src/scene.ts:53-56`, the actual `deps: [config]` at
+`scene.ts:94` — and a source pick became a swap. The
 two states `sample` and `shown` collapsed into one `shown` (`examples/playground/src/ui/App.tsx:88`).
 This is almost certainly the better behaviour; it is still a change nobody asked for, forced by the
 `deps` rule.
@@ -183,7 +187,7 @@ plus `.offset` — the paper box, not the artwork box. `frameArtwork(...).image`
 binding's surface. The playground reimplements the same scale arithmetic as `heroSlotStyle`
 (`examples/playground/src/hero.ts:42-46`), duplicating the `frameTo / max(artwork.w, artwork.h)`
 multiplication `frameStyleFor` already does internally, and separately replicates the package's own
-"no build yet → no override" convention (`packages/react/src/frame-style.ts:16`) by returning `null`
+"no build yet → no override" convention (`packages/react/src/frame-style.ts:15`) by returning `null`
 from the hero's own `slotStyle` when `built === null`, to avoid a real 0px × 0px box reaching the DOM
 during a rebuild.
 
@@ -295,6 +299,37 @@ because there is no pure-render alternative for any of them.
 **Where it belongs.** §5.5. Either the binding offers a small `useSyncExternalStore`-backed
 status-store primitive a consumer can build on instead of raw effects, or the spec records the six
 suppressions as the accepted cost of the current shape.
+
+## 19. The binding ships no consumer-side test double — a consumer cannot test hook-driven UI without a real WebGL2 stage
+
+**What the playground needed.** Task 4's report flagged this, verbatim, as "one methodological note
+for Task 5": a way to unit-test `App.tsx`'s and `hero.ts`'s hook-driven behaviour without a real
+`BlitStage` and a real canvas. `packages/react/src/testing/` builds exactly this for the package's
+own suite — `fake-stage.ts`'s `createFakeStage`, implementing `BlitStage` against the real types
+with a call log, settleable runs and a `refuseKnob` hook; `render.ts`'s `render` / `renderHook`,
+a `StrictMode`-aware harness around `act`; and `crumple-probe.tsx`'s `renderCrumple`, a probe built
+on both.
+
+**What the package offers a consumer.** None of it. `packages/react/src/index.ts:15` states the
+reason directly: "`useEvent`, the versioned store and the fake stage are deliberately absent. The
+first two are internal conventions and the third is test scaffolding; nothing in this graph imports
+`src/testing/`, so none of it reaches `dist`." A consumer gets the real `BlitStage` contract and
+nothing that implements it without a browser's WebGL2 context.
+
+**What was done.** The migration hit this directly, in two different ways. `useDemoScene`
+(`examples/playground/src/scene.ts:58-61`) takes a third `build` parameter, defaulted to the real
+`buildStage` in production, purely so `scene.test.tsx` can inject a fake builder that returns a
+`BuiltStage` wrapping a hand-written fake `BlitStage` (`examples/playground/src/scene.test.tsx:169-187`,
+`fakeStage` / `fakeBuilt` at `:18-31`) — an injected seam the playground had to build for itself,
+because the package supplies no equivalent. `hero.ts`'s `useHero` (`examples/playground/src/hero.ts:89`)
+got no such seam: `examples/playground/src/hero.test.ts` covers only the module's three pure helpers
+(`heroSlotStyle`, `droppedSample`, `swapDurationFor` / `SWAP_DURATION_MS`) because `useHero`'s body
+has no reachable harness, so the hook itself — the part that actually calls `useCrumple` and reacts
+to its snapshot — is untested.
+
+**Where it belongs.** §9, which describes the package's own fake-stage-and-harness approach in
+detail but says nothing about a consumer who wants the same approach for their own hook-driven
+components built on top of `usePaperScene` / `useCrumple`.
 
 ## What the package expressed with no friction at all
 
