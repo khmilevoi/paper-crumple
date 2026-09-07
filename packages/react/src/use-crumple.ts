@@ -1,6 +1,7 @@
 import type {
   BlitStage,
   Events,
+  Fit,
   PlayOptions,
   PlayResult,
   PoseRef,
@@ -48,6 +49,39 @@ function prefersReducedMotion(mode: ReducedMotion | undefined): boolean {
   return globalThis.matchMedia('(prefers-reduced-motion: reduce)').matches
 }
 
+/**
+ * §2.8's gate runs in development only. `globalThis.process` is read through a cast rather than as
+ * a bare `process` identifier so the package needs no `@types/node`; an environment with no
+ * `process` at all is treated as development, which is the usual library convention. The same
+ * shape `usePaperScene`'s duplicate-core gate uses, restated here rather than shared: the two
+ * files are owned by different plans in this run and a shared helper would couple them.
+ */
+function isDevelopment(): boolean {
+  const env = (globalThis as { process?: { env?: { NODE_ENV?: string } } }).process?.env
+  return env?.NODE_ENV !== 'production'
+}
+
+/**
+ * `fit` and `tag` are fixed at `stage.view()` and look reactive because they are hook options
+ * (§2.8). Recreating the view when either moves is too heavy — it replays the entrance — so the
+ * drift is reported and nothing else happens. Once per view: the warning is a mistake to fix, not
+ * a per-render log. `View.fit` is not readable from core, which is why the created pair is
+ * remembered rather than re-read off the view.
+ */
+function warnFixedOptions(live: CrumpleLive, fit: Fit | undefined, tag: string | undefined): void {
+  if (!isDevelopment()) return
+  const created = live.created
+  if (created === null || live.warnedFixed) return
+  if (created.fit === fit && created.tag === tag) return
+  live.warnedFixed = true
+  console.warn(
+    `[paper-crumple] useCrumple: 'fit' and 'tag' are fixed when the view is created and a change ` +
+      `to either has no effect. This view was created with fit=${String(created.fit)} ` +
+      `tag=${String(created.tag)} and now sees fit=${String(fit)} tag=${String(tag)}. ` +
+      `Remount the <Crumple> under a new React key to apply new values.`,
+  )
+}
+
 /** Everything the hook owns that is not part of the snapshot. One per hook instance. */
 interface CrumpleLive {
   stage: BlitStage | null
@@ -57,6 +91,11 @@ interface CrumpleLive {
   run: AbortController | null
   /** Bumped by every supersession, so a settled continuation can tell it is stale. */
   seq: number
+  /** What `stage.view()` was actually given, so §2.8's drift check has something to compare
+   *  against — core exposes `View.tag` but not `View.fit`. */
+  created: { fit: Fit | undefined; tag: string | undefined } | null
+  /** §2.8 warns once per view, and this is reset when one is created. */
+  warnedFixed: boolean
 }
 
 export function useCrumple<S extends SpriteSource>(o: CrumpleOptions<S>): Crumple {
@@ -73,6 +112,8 @@ export function useCrumple<S extends SpriteSource>(o: CrumpleOptions<S>): Crumpl
     offs: [],
     run: null,
     seq: 0,
+    created: null,
+    warnedFixed: false,
   }))
   const [pairs] = useState(() => new Map<string, SpriteSource>())
 
@@ -405,6 +446,12 @@ export function useCrumple<S extends SpriteSource>(o: CrumpleOptions<S>): Crumpl
     syncSprite(view)
   }, [view, spriteKey, src, syncSprite])
 
+  const fit = o.fit
+  const tag = o.tag
+  useEffect(() => {
+    warnFixedOptions(live, fit, tag)
+  }, [fit, tag, view, live])
+
   const knobEpoch = scene.knobEpoch
   useEffect(() => {
     const active = core.view
@@ -484,6 +531,8 @@ export function useCrumple<S extends SpriteSource>(o: CrumpleOptions<S>): Crumpl
     core.view = created
     // eslint-disable-next-line react-hooks/immutability -- `live` is an intentionally mutable record held once per hook instance and never replaced; it tracks the pair's own bookkeeping and is never handed to a consumer.
     live.offs = listen(created, stage)
+    live.created = { fit: opts.fit, tag: opts.tag }
+    live.warnedFixed = false
     store.bump()
   })
 
