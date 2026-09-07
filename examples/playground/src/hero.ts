@@ -88,7 +88,9 @@ export function useHero(o: HeroOptions): Hero {
   const { observed } = o
   const onError = useCallback(
     (e: pc.StageEvent<'error'>): void => {
-      observed('useCrumple', e.error)
+      // §7's orphan channel: `observed: true` means the error is, or will be, a return value
+      // someone can narrow, so reporting it here as well double-counts it.
+      if (!e.observed) observed('useCrumple', e.error)
     },
     [observed],
   )
@@ -105,5 +107,11 @@ export function useHero(o: HeroOptions): Hero {
     onError,
   })
 
-  return { crumple, slotStyle: heroSlotStyle(crumple.frame, o.built?.artworkCssPx ?? 0) }
+  // When there is no build yet, return null to let the stylesheet's default size stand during
+  // rebuild, matching `frameStyleFor`'s pattern — a real 0px × 0px box is reachable because
+  // crumple.frame stays stale until an effect runs while built becomes null synchronously.
+  return {
+    crumple,
+    slotStyle: o.built === null ? null : heroSlotStyle(crumple.frame, o.built.artworkCssPx),
+  }
 }
