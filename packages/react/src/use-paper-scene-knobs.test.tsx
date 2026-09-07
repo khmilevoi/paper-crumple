@@ -238,3 +238,62 @@ test('omitting knobs entirely writes nothing and never bumps knobEpoch', async (
   expect(harness.result.current.knobEpoch).toBe(0)
   await harness.unmount()
 })
+
+test('onKnobRefused names the key, the value and the error (§3.3)', async () => {
+  const onKnobRefused = vi.fn()
+  const refusal = new Error('unknown knob b')
+  const fake = createFakeStage()
+  fake.refuseKnob('b', refusal)
+  const harness = await renderHook(() =>
+    usePaperScene({
+      create: async () => fake.stage,
+      deps: [1],
+      knobs: { a: 1, b: 2 },
+      onKnobRefused,
+    }),
+  )
+  await flush()
+  expect(onKnobRefused).toHaveBeenCalledTimes(1)
+  expect(onKnobRefused).toHaveBeenCalledWith('b', 2, refusal)
+  await harness.unmount()
+})
+
+test('onKnobRefused stays silent for a carry-forward refusal, like onError (§4.1)', async () => {
+  const onKnobRefused = vi.fn()
+  const first = createFakeStage()
+  const second = createFakeStage()
+  second.refuseKnob('b', new Error('this slot set does not declare b'))
+  let deps: readonly unknown[] = [1]
+  let next = first
+  const harness = await renderHook(() =>
+    usePaperScene({ create: async () => next.stage, deps, knobs: { a: 1, b: 2 }, onKnobRefused }),
+  )
+  await flush()
+  expect(onKnobRefused).not.toHaveBeenCalled()
+
+  deps = [2]
+  next = second
+  await harness.rerender()
+  await flush()
+  expect(onKnobRefused).not.toHaveBeenCalled()
+  await harness.unmount()
+})
+
+test('a refused key reaches both channels, onError first', async () => {
+  const order: string[] = []
+  const refusal = new Error('unknown knob b')
+  const fake = createFakeStage()
+  fake.refuseKnob('b', refusal)
+  const harness = await renderHook(() =>
+    usePaperScene({
+      create: async () => fake.stage,
+      deps: [1],
+      knobs: { b: 2 },
+      onError: () => order.push('onError'),
+      onKnobRefused: () => order.push('onKnobRefused'),
+    }),
+  )
+  await flush()
+  expect(order).toEqual(['onError', 'onKnobRefused'])
+  await harness.unmount()
+})

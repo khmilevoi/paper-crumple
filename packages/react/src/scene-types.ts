@@ -32,6 +32,13 @@ export interface SceneOptions {
   deps: readonly unknown[]
   knobs?: Readonly<Record<string, KnobValue>>
   onError?: (e: StageEvent<'error'>) => void
+  /**
+   * A declarative knob write the stage refused. `onError` also receives it (§0.3), but a
+   * `StageEvent` has nowhere to put the key, and the key is the only thing that tells a consumer
+   * which control to roll back. A carry-forward onto a replacement stage stays silent here for
+   * exactly the reason it stays silent on `onError` (§4.1): the consumer did not write it.
+   */
+  onKnobRefused?: (key: string, value: KnobValue, error: Error) => void
 }
 
 /** The reactive half of a `Scene`, rebuilt as one cached object per store bump (§5.5). */

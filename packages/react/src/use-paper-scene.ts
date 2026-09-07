@@ -75,6 +75,9 @@ export function usePaperScene(o: SceneOptions): Scene {
   const dispatchError = useEvent((e: StageEvent<'error'>): void => {
     o.onError?.(e)
   })
+  const dispatchKnobRefused = useEvent((key: string, value: KnobValue, error: Error): void => {
+    o.onKnobRefused?.(key, value, error)
+  })
 
   const [core] = useState<SceneCore>(() => ({
     status: 'building',
@@ -240,7 +243,10 @@ export function usePaperScene(o: SceneOptions): Scene {
         // narrow", and §7 tells consumers to filter on it. The only someone who could narrow this
         // return value is this hook, and it does not hand it back — so dispatching it observed
         // filtered the one report of the refusal away and made a refused slider a silent no-op.
-        if (!carried.has(key)) dispatchError({ error: refused, observed: false, view: null })
+        if (!carried.has(key)) {
+          dispatchError({ error: refused, observed: false, view: null })
+          dispatchKnobRefused(key, value, refused)
+        }
         continue
       }
       wrote = true
@@ -256,6 +262,7 @@ export function usePaperScene(o: SceneOptions): Scene {
     applied,
     core,
     dispatchError,
+    dispatchKnobRefused,
     knobs,
     snapshot.generation,
     snapshot.stage,
