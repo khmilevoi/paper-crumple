@@ -20,6 +20,7 @@ test('a core with no view reads as the detached snapshot (§5.2, §8)', () => {
     parked: false,
     pose: 0,
     shown: null,
+    sprite: null,
     requested: null,
     error: null,
     frame: null,
@@ -93,4 +94,14 @@ test('start clears the error, so a rollback notice goes the moment the next run 
   core.error = new Error('the last swap rolled back')
   onRunStart(core, { from: 0, to: 5 })
   expect(core.error).toBeNull()
+})
+
+test('sprite is read in the same pass as shown, so the two never skew (§2.4)', () => {
+  const core = createCrumpleCore()
+  expect(readCrumple(core).sprite).toBeNull()
+  const sprite = { key: 'a' } as Sprite
+  core.view = { state: 'idle', pose: 0, sprite, frame: null } as unknown as View
+  const reading = readCrumple(core)
+  expect(reading.sprite).toBe(sprite)
+  expect(reading.shown).toBe('a')
 })

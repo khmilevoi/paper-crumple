@@ -43,11 +43,13 @@ export type CrumpleReading = Omit<CrumpleSnapshot, 'frameStyle'>
  */
 export function readCrumple(core: CrumpleCore): CrumpleReading {
   const view = core.view
+  const sprite = view?.sprite ?? null
   return {
     state: view?.state ?? 'detached',
     parked: core.parked,
     pose: view?.pose ?? 0,
-    shown: view?.sprite?.key ?? null,
+    shown: sprite?.key ?? null,
+    sprite,
     requested: core.requested,
     error: core.error,
     frame: view?.frame ?? null,

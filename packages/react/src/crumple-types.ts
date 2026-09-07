@@ -6,6 +6,7 @@ import type {
   PlayResult,
   PoseRef,
   Run,
+  Sprite,
   SpriteSource,
   StageEvent,
   View,
@@ -74,6 +75,10 @@ export interface CrumpleSnapshot {
   /** 0 while detached — `'flat'`, the pose a view is born at. */
   readonly pose: number
   readonly shown: string | null
+  /** The shown sprite itself, read in the same pass as `shown` (§2.4). After core's `adopt` at
+   *  the ball `view.sprite` is already the target while the previous snapshot's `shown` still
+   *  names the outgoing one; reading both here is what closes that skew. */
+  readonly sprite: Sprite | null
   readonly requested: string | null
   readonly error: Error | null
   readonly frame: ViewFrame | null

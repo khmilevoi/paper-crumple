@@ -215,3 +215,14 @@ test('a refused degraded swap reaches crumple.error and onError (ruling 1)', asy
   expect(onError).toHaveBeenCalledTimes(1)
   await probe.unmount()
 })
+
+test('sprite is on the snapshot, so a consumer never reaches for the raw view (§2.4)', async () => {
+  const fake = createFakeStage({ sprites: ['a'] })
+  const probe = await renderCrumple(
+    { spriteKey: 'a', src: 'a.png' },
+    { scene: readyScene(fake.stage) },
+  )
+  expect(probe.current.sprite?.key).toBe('a')
+  expect(probe.current.sprite).toBe(probe.current.view?.sprite)
+  await probe.unmount()
+})
