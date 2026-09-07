@@ -69,9 +69,17 @@ export function nextLibrarySample(current: Sample, target: Sample): Sample {
  * `core.synced.key === key` check (`packages/react/src/use-crumple.ts:261`) returns before an
  * `add`, a run, or an `end` event, so nothing would ever arrive to close a transport this component
  * armed for the swap (Finding A). `startSwap` must never begin one.
+ *
+ * `shownKey` MUST be the key `useCrumple` itself compares — `crumple.shown` (falling back to the
+ * request in flight, `shown.id`, before anything has landed) — never the local `shown` request
+ * state. `shown` has no path back once a rollback demo sets it to the broken sample: a rollback
+ * reverts `crumple.shown`, not `shown` (App.tsx:570-577), and `onSwap` deliberately never advances
+ * `swapTarget` away from `BROKEN_ID` after a broken-URL swap. Comparing against `shown.id` instead
+ * would make every further "Swap" click a no-op once the rollback demo has fired, silently
+ * swallowing the click until the picker is moved away from "broken URL" and back.
  */
-export function isNoOpSwap(shown: Sample, target: Sample): boolean {
-  return target.id === shown.id
+export function isNoOpSwap(shownKey: string, target: Sample): boolean {
+  return target.id === shownKey
 }
 
 /** The status line the pill shows: what the last action did, or `null` for the idle readout. */
@@ -456,7 +464,11 @@ export function App(): ReactNode {
       // A same-key request is a silent no-op in `useCrumple` (see `isNoOpSwap`) — nothing would
       // ever arrive to clear `direction` or `swappingRef`, so no swap that cannot run may leave the
       // transport armed. This is the root guard for the whole class, not just one caller's route.
-      if (isNoOpSwap(shown, target)) return
+      // Compared against `crumple.shown ?? shown.id` — the key `useCrumple` itself compares — not
+      // the local `shown` request state, which has no path back once a rollback demo sets it to the
+      // broken sample: `shown` stays `BROKEN_SAMPLE` afterwards, while `crumple.shown` reverts to
+      // the previous sprite's key on rollback, which is what keeps a later Swap to `broken` armable.
+      if (isNoOpSwap(crumple.shown ?? shown.id, target)) return
       const duration = audio.beginSequence(swapSpec(crumple.pose, dwells))
       setSwapDuration(swapDurationFor(duration))
       setDirection('folding')
@@ -464,7 +476,7 @@ export function App(): ReactNode {
       setShown(target)
       setLibrarySample((prev) => nextLibrarySample(prev, target))
     },
-    [audio, crumple.pose, dwells, shown],
+    [audio, crumple.pose, crumple.shown, dwells, shown],
   )
 
   const onSwap = useCallback(() => {
