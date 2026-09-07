@@ -13,6 +13,10 @@ import { flush } from './testing/render.js'
 const FRAME: ViewFrame = { box: { w: 240, h: 240 }, artwork: { x: 20, y: 20, w: 200, h: 200 } }
 const MOVED: ViewFrame = { box: { w: 260, h: 260 }, artwork: { x: 30, y: 30, w: 200, h: 200 } }
 
+function refreshes(calls: readonly { readonly method: string }[]): number {
+  return calls.filter((c) => c.method === 'view.refresh').length
+}
+
 test('frame and frameStyle are reported from the view, scaled by frameTo (§5.1, §6)', async () => {
   const fake = createFakeStage()
   const probe = await renderCrumple(
@@ -44,7 +48,7 @@ test('with no frameTo the hook reports frame and applies nothing (§5.1)', async
   await probe.unmount()
 })
 
-test('a changed frameTo re-derives frameStyle without touching the view', async () => {
+test('a changed frameTo re-derives frameStyle and is followed by exactly one redraw (§6, §9.1)', async () => {
   const fake = createFakeStage()
   const probe = await renderCrumple(
     { spriteKey: 'hero', src: 'hero.png', frameTo: 192 },
@@ -55,7 +59,53 @@ test('a changed frameTo re-derives frameStyle without touching the view', async 
   const calls = fake.calls.length
   await probe.rerender({ options: { spriteKey: 'hero', src: 'hero.png', frameTo: 100 } })
   expect(probe.current.frameStyle?.width).toBe('120px')
-  expect(fake.calls).toHaveLength(calls)
+  // A new `frameTo` is a new CSS box, and a box the core has not drawn into since it changed is a
+  // stale backing store — the same defect §9.1 measured, reached by a different route.
+  expect(fake.calls).toHaveLength(calls + 1)
+  expect(fake.calls[calls]?.method).toBe('view.refresh')
+  await probe.unmount()
+})
+
+test('a commit that gives the element a box is followed by one event-free redraw (§9.1)', async () => {
+  const fake = createFakeStage()
+  const probe = await renderCrumple(
+    { spriteKey: 'hero', src: 'hero.png', frameTo: 192 },
+    { scene: readyScene(fake.stage) },
+  )
+  const view = fake.views[0]
+  expect(view).toBeDefined()
+  if (view === undefined) return
+  const before = refreshes(view.calls)
+  // The frame only exists once a front is shown, so the commit that first carries a non-null
+  // `frameStyle` is the one the redraw belongs to.
+  view.setFrame(FRAME)
+  view.emit('end', { from: 0, to: 0, completed: true })
+  await flush()
+  expect(probe.current.frameStyle).not.toBeNull()
+  expect(refreshes(view.calls)).toBe(before + 1)
+  await probe.unmount()
+})
+
+test('a bump that leaves the box alone redraws nothing (§9.1)', async () => {
+  const fake = createFakeStage()
+  const probe = await renderCrumple(
+    { spriteKey: 'hero', src: 'hero.png', frameTo: 192 },
+    { scene: readyScene(fake.stage) },
+  )
+  const view = fake.views[0]
+  expect(view).toBeDefined()
+  if (view === undefined) return
+  view.setFrame(FRAME)
+  view.emit('end', { from: 0, to: 0, completed: true })
+  await flush()
+  const settled = refreshes(view.calls)
+  // `View.frame` is a fresh object per read, so every one of these bumps carries a new `frame`
+  // identity and an equal box. A redraw per step would double the cost of every run.
+  view.emit('step', { pose: 1, frame: 1, ms: 60 })
+  await flush()
+  view.emit('step', { pose: 2, frame: 2, ms: 60 })
+  await flush()
+  expect(refreshes(view.calls)).toBe(settled)
   await probe.unmount()
 })
 

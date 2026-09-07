@@ -10,7 +10,7 @@ import type {
   View,
 } from '@paper-crumple/core'
 import { ABORTED } from '@paper-crumple/core'
-import { useEffect, useMemo, useState, useSyncExternalStore } from 'react'
+import { useEffect, useLayoutEffect, useMemo, useState, useSyncExternalStore } from 'react'
 import { acquire, pendingAcquisition, stageSignal } from './acquire.js'
 import type { Crumple } from './crumple.js'
 import {
@@ -90,6 +90,31 @@ export function useCrumple<S extends SpriteSource>(o: CrumpleOptions<S>): Crumpl
     () => frameStyleFor(snapshot.frame, frameTo),
     [snapshot.frame, frameTo],
   )
+
+  /**
+   * "Apply the frame, then one event-free redraw" — the pairing `mountHero` had and the migration
+   * dropped (§9.1). Under `size: 'managed'` the core writes `canvas.width/height` from
+   * `getBoundingClientRect()` during a draw, and `managedBackingStore` returns `null` for a zero
+   * box, so the entrance's one blit — which lands before the wrapper has any size at all — leaves
+   * the default 300 × 150 store in place and the browser stretches it. A LAYOUT effect, because
+   * the redraw has to see the box React committed in this very commit; a passive effect measures
+   * the same 0 × 0.
+   *
+   * Keyed on the two box strings and NOT on `frameStyle` or `snapshot.frame`: `View.frame` returns
+   * a fresh object per read, so both have a new identity at every bump and an effect keyed on
+   * either would redraw on every step of every run. The values move only when the front or
+   * `frameTo` moves, and a blit view's frame does not depend on the canvas size, so this cannot
+   * feed itself.
+   *
+   * No `store.bump()`: a redraw of the pose already on screen changes nothing a consumer reads,
+   * and bumping here would re-enter this render path for nothing.
+   */
+  const frameWidth = frameStyle?.width ?? null
+  const frameHeight = frameStyle?.height ?? null
+  useLayoutEffect(() => {
+    if (frameWidth === null || frameHeight === null) return
+    core.view?.refresh()
+  }, [frameWidth, frameHeight, core])
 
   /**
    * Every consumer callback goes through `useEvent`, and they are dispatched from the binding's
