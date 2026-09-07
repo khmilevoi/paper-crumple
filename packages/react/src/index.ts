@@ -34,3 +34,13 @@ export type {
   CrumpleSnapshot,
   CrumpleState,
 } from './crumple-types.js'
+
+// --- P4: the crumple request surface (§2.1, §2.3, §2.5) ---
+/** Types only: this plan adds no runtime export, which is why `index.test.ts`'s
+ *  `Object.keys(api)` assertion is untouched by it. */
+export type {
+  CrumpleArtworkStyle,
+  CrumplePending,
+  CrumpleSettleEvent,
+  CrumpleStatus,
+} from './crumple-types.js'
