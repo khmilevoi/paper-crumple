@@ -67,10 +67,13 @@ export function onRunStart(core: CrumpleCore, e: Events['start']): void {
 }
 
 /** A swap's `start` reports `via`, the resolved ball index, and the run is parked from the step
- *  whose `pose === via`. `crumpling.ball` itself is set between two emissions and is never
- *  observable, which is why the binding maintains this rather than reading `view.state`. */
+ *  whose `pose === via` until the NEXT step moves off it. Written on every step rather than
+ *  latched: only `start` and `end` cleared it before, so a spinner branched on `parked` — the
+ *  pattern USAGE §5 documents — stayed up for the whole descent (§0.2). `crumpling.ball` itself is
+ *  set between two emissions and is never observable, which is why the binding maintains this
+ *  rather than reading `view.state`. */
 export function onRunStep(core: CrumpleCore, e: Events['step']): void {
-  if (core.via !== undefined && e.pose === core.via) core.parked = true
+  core.parked = core.via !== undefined && e.pose === core.via
 }
 
 /** A park cut short by `stop()`, by supersession or by `dispose()` goes cancel → finish → end and
