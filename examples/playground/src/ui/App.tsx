@@ -365,9 +365,12 @@ export function App(): ReactNode {
    *  good as any. */
   const pack = useMemo(
     () => built?.motion.packs()[0] ?? null,
-    // `generation` is what makes this re-read after a rebuild swaps the slot underneath.
+    // `generation` is what makes this re-read after a rebuild swaps the slot underneath, and
+    // `crumple.shown` is what makes it re-read when a sprite LANDS: `packs()` lists the resident
+    // packs and there are none before the first `add` resolves, which is strictly after `built`
+    // (§9.2). Neither is read in the body.
     // eslint-disable-next-line react-hooks/exhaustive-deps
-    [built, generation],
+    [built, generation, crumple.shown],
   )
   /** `null` means "whatever the pack's manifest says"; anything else is the reader's own draft,
    *  and it survives a rebuild the way the open sections do. */
@@ -409,13 +412,21 @@ export function App(): ReactNode {
   // `bakedMotion()` with no override, so whatever draft the reader was editing is re-applied here.
   useEffect(() => {
     if (built === null || pack === null) return
+    // Nothing to apply, nothing to stop. `applyPoses` pays for every call with
+    // `scene.stop({ all: true })` and a `draw('flat')`, and this effect now runs when the sprite
+    // LANDS — which is mid-entrance, and mid-swap while `shown` still moves at the ball (§0.1).
+    // Re-applying a schedule the resident pack already carries is a no-op the library would
+    // accept (`setPoses(null)`), so paying for it would only cut the entrance short. A draft that
+    // differs is a real re-application and still runs, exactly as it did across a rebuild.
+    if (sameList(keyFrames, pack.keyFrames)) return
     // The only state this can touch is the status pill, and only when the library REFUSES the
     // draft — which is the one thing a reader must be told about a schedule that did not take.
     // eslint-disable-next-line react-hooks/set-state-in-effect
     applyPoses(keyFrames, pack)
-    // Only when a new stage lands: `keyFrames` changing from an edit is applied by the edit itself.
+    // Only when a new stage lands or a sprite becomes resident: `keyFrames` changing from an edit
+    // is applied by the edit itself.
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [generation, built, pack])
+  }, [generation, built, pack, crumple.shown])
 
   const commitKeyFrames = useCallback(
     (draft: readonly number[]) => {
