@@ -289,22 +289,24 @@ export function useCrumple<S extends SpriteSource>(o: CrumpleOptions<S>): Crumpl
       controller: AbortController,
       seq: number,
     ): void => {
-      if (prefersReducedMotion(opts.reducedMotion)) {
+      const reduced = prefersReducedMotion(opts.reducedMotion)
+      if (reduced) {
         // `show()` IS the degraded swap — instant, pose 0, no run — so the accommodation needs no
-        // API of its own, and it goes through `acquire` exactly as the entrance does.
+        // API of its own, and it goes through `acquire` exactly as the entrance does. It emits no
+        // `end`, which is exactly why `onSettle` and not `onEnd` is what a consumer branches on.
         void (async () => {
           const got = await acquire(stage, opts.spriteKey, opts.src, opts.pin, controller.signal)
           if (got === ABORTED || seq !== live.seq) return
           if (got instanceof Error) {
-            report(got)
+            settle(seq, opts.spriteKey, got, true)
             return
           }
           const refused = view.show(got)
           if (refused !== undefined) {
-            report(refused)
+            settle(seq, opts.spriteKey, refused, true)
             return
           }
-          store.bump()
+          settle(seq, opts.spriteKey, null, true)
         })()
         return
       }
@@ -312,30 +314,29 @@ export function useCrumple<S extends SpriteSource>(o: CrumpleOptions<S>): Crumpl
       // The in-flight map gates `swapTo` too: a concurrent second `swapTo` on a key whose `add` is
       // still in flight is refused by `reserved`, which is private to the core. Joining the
       // existing acquisition and handing the promise to `crumpleTo` is the same park, and costs
-      // one ingest rather than two.
-      const pending = pendingAcquisition(stage, opts.spriteKey)
+      // one ingest rather than two. Named `pendingAdd`, not `pending`: `pending` is the snapshot
+      // field now, and one of the two shadowing the other in this function would be a trap.
+      const pendingAdd = pendingAcquisition(stage, opts.spriteKey)
       const run =
-        pending === undefined
+        pendingAdd === undefined
           ? view.swapTo(opts.src, {
               key: opts.spriteKey,
               duration: opts.duration,
               signal: controller.signal,
             })
-          : view.crumpleTo(pending, { duration: opts.duration, signal: controller.signal })
+          : view.crumpleTo(pendingAdd, { duration: opts.duration, signal: controller.signal })
+      // eslint-disable-next-line react-hooks/immutability -- `core` is an intentionally mutable record held once per hook instance and never replaced; `store.bump()` publishes each write (§5.5).
+      core.pending = { key: opts.spriteKey, phase: 'swapping', run }
       store.bump()
       void run.done.then((result) => {
-        if (seq !== live.seq) return
         // A swap whose target fails rolls back to the previous sprite and the Run returns the
-        // target's Error, so the prop says B while the canvas shows A. Reported through `report`,
-        // the same route every other failure in this hook takes, so `onError` sees it too;
-        // `report` already bumps, so this branch and the success branch below each bump exactly
-        // once. Reported, never retried: a retry policy inside an animation library is a network
-        // policy nobody asked for.
-        if (result instanceof Error) {
-          report(result)
-          return
-        }
-        store.bump()
+        // target's Error, so the prop says B while the canvas shows A. `settle` puts it on
+        // `crumple.error` and through `onError` — the route it always took — and hands it to
+        // `onSettle` as the outcome of this request. Reported, never retried automatically: a
+        // retry policy inside an animation library is a network policy nobody asked for, which is
+        // what `retry()` is for (§2.6). `ABORTED` is a sentinel and not an `Error`, so a stopped
+        // swap settles with `error: null`.
+        settle(seq, opts.spriteKey, result instanceof Error ? result : null, false)
       })
     },
   )

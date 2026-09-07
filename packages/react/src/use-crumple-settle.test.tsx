@@ -162,3 +162,110 @@ test('a settled entrance settles exactly once, across re-renders and a repeat se
   expect(probe.current.pending).toBeNull()
   await probe.unmount()
 })
+
+test('an animated swap is pending: swapping with the run, and settles at the run s end (§2.1)', async () => {
+  stubReducedMotion(false)
+  const onSettle = vi.fn()
+  const fake = createFakeStage({ sprites: ['a'] })
+  const probe = await renderCrumple(
+    { spriteKey: 'a', src: 'a.png', onSettle },
+    { scene: readyScene(fake.stage) },
+  )
+  onSettle.mockClear()
+  await probe.rerender({ options: { spriteKey: 'b', src: 'b.png', onSettle } })
+  expect(probe.current.pending).toMatchObject({ key: 'b', phase: 'swapping' })
+  expect(probe.current.pending?.run).not.toBeNull()
+  expect(onSettle).not.toHaveBeenCalled()
+  fake.views[0]?.settleRun(undefined)
+  await flush()
+  expect(probe.current.pending).toBeNull()
+  expect(onSettle).toHaveBeenCalledTimes(1)
+  expect(onSettle).toHaveBeenCalledWith({ key: 'b', error: null, reduced: false })
+  await probe.unmount()
+})
+
+test('the ball is not a settlement: pending outlives shown moving (§0.1, §2.1)', async () => {
+  stubReducedMotion(false)
+  const onSettle = vi.fn()
+  const fake = createFakeStage({ sprites: ['a', 'b'] })
+  const probe = await renderCrumple(
+    { spriteKey: 'a', src: 'a.png', onSettle },
+    { scene: readyScene(fake.stage) },
+  )
+  onSettle.mockClear()
+  await probe.rerender({ options: { spriteKey: 'b', src: 'b.png', onSettle } })
+  const view = fake.views[0]
+  expect(view).toBeDefined()
+  if (view === undefined) return
+  // Core's `adopt` runs at the ball, between the descent's first two renders, so `shown` reads the
+  // TARGET while the fold is still descending. That is the trap §0.1 records; `pending` beside it
+  // is the code answer.
+  view.view.show({ key: 'b' } as unknown as Parameters<typeof view.view.show>[0])
+  view.emit('step', { pose: 5, frame: 1, ms: 16 })
+  await flush()
+  expect(probe.current.shown).toBe('b')
+  expect(probe.current.pending).toMatchObject({ key: 'b', phase: 'swapping' })
+  expect(onSettle).not.toHaveBeenCalled()
+  await probe.unmount()
+})
+
+test('a rolled-back swap settles once, with the error (§2.1, §2.6)', async () => {
+  stubReducedMotion(false)
+  const onSettle = vi.fn()
+  const fake = createFakeStage({ sprites: ['a'] })
+  const probe = await renderCrumple(
+    { spriteKey: 'a', src: 'a.png', onSettle },
+    { scene: readyScene(fake.stage) },
+  )
+  onSettle.mockClear()
+  await probe.rerender({ options: { spriteKey: 'b', src: 'b.png', onSettle } })
+  const failed = new SheetError('the target never arrived')
+  fake.views[0]?.settleRun(failed)
+  await flush()
+  expect(probe.current.pending).toBeNull()
+  expect(probe.current.error).toBe(failed)
+  expect(probe.current.shown).toBe('a')
+  expect(onSettle).toHaveBeenCalledTimes(1)
+  expect(onSettle).toHaveBeenCalledWith({ key: 'b', error: failed, reduced: false })
+  await probe.unmount()
+})
+
+test('a degraded swap settles reduced: true, where no end event exists to hear (§2.1)', async () => {
+  stubReducedMotion(false)
+  const onSettle = vi.fn()
+  const fake = createFakeStage({ sprites: ['a', 'b'] })
+  const probe = await renderCrumple(
+    { spriteKey: 'a', src: 'a.png', onSettle },
+    { scene: readyScene(fake.stage) },
+  )
+  onSettle.mockClear()
+  stubReducedMotion(true)
+  await probe.rerender({ options: { spriteKey: 'b', src: 'b.png', onSettle } })
+  await flush()
+  expect(fake.calls.filter((c) => c.method === 'view.swapTo')).toHaveLength(0)
+  expect(probe.current.pending).toBeNull()
+  expect(onSettle).toHaveBeenCalledTimes(1)
+  expect(onSettle).toHaveBeenCalledWith({ key: 'b', error: null, reduced: true })
+  await probe.unmount()
+})
+
+test('a superseded swap never settles, and its successor settles once (§2.1)', async () => {
+  stubReducedMotion(false)
+  const onSettle = vi.fn()
+  const fake = createFakeStage({ sprites: ['a'] })
+  const probe = await renderCrumple(
+    { spriteKey: 'a', src: 'a.png', onSettle },
+    { scene: readyScene(fake.stage) },
+  )
+  onSettle.mockClear()
+  await probe.rerender({ options: { spriteKey: 'b', src: 'b.png', onSettle } })
+  await probe.rerender({ options: { spriteKey: 'c', src: 'c.png', onSettle } })
+  // The `b` run settles late, after `c` superseded it. The superseded request reports nothing at
+  // all — "React changed its mind" is not an outcome a consumer renders.
+  fake.views[0]?.settleRun(undefined)
+  await flush()
+  expect(onSettle).toHaveBeenCalledTimes(1)
+  expect(onSettle).toHaveBeenCalledWith({ key: 'c', error: null, reduced: false })
+  expect(probe.current.pending).toBeNull()
+  await probe.unmount()
+})
