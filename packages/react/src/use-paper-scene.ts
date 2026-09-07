@@ -110,6 +110,11 @@ export function usePaperScene<M = undefined>(o: SceneOptions<M>): Scene<M> {
   const dispatchKnobRefused = useEvent((key: string, value: Knobs[string], error: Error): void => {
     o.onKnobRefused?.(key, value, error)
   })
+  const dispatchReady = useEvent(
+    (build: SceneBuild<M>, info: { generation: number; signal: AbortSignal }): void => {
+      o.onReady?.(build, info)
+    },
+  )
 
   const [core] = useState<SceneCore<M>>(() => ({
     status: 'building',
@@ -232,6 +237,12 @@ export function usePaperScene<M = undefined>(o: SceneOptions<M>): Scene<M> {
       core.error = null
       core.generation += 1
       store.bump()
+      // §3.1: after the bump, so the consumer's callback and the snapshot agree, and §5.5's "the
+      // store is the source" stays true — both channels fire from this one site. A build that
+      // landed already lost is a failure, not a readiness.
+      if (store.getSnapshot().status === 'ready') {
+        dispatchReady(build, { generation: core.generation, signal: controller.signal })
+      }
     })()
 
     return () => {
@@ -244,8 +255,8 @@ export function usePaperScene<M = undefined>(o: SceneOptions<M>): Scene<M> {
       landed?.dispose()
     }
     // §4.1: a rebuild is decided by `deps` and by nothing else. `create` is useEvent-stable, and
-    // `core` and `store` are created once by useState and never replaced, and `dispatchError` is
-    // useEvent-stable too, so none of them belongs in the dependency list.
+    // `core` and `store` are created once by useState and never replaced, and `dispatchError` and
+    // `dispatchReady` are useEvent-stable too, so none of them belongs in the dependency list.
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, o.deps)
 

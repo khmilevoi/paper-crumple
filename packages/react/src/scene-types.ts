@@ -46,6 +46,15 @@ export interface SceneOptions<M = undefined> {
   knobs?: Knobs
   onError?: (e: StageEvent<'error'>) => void
   /**
+   * Fires once per landed build (§3.1), synchronously after the `ready` bump and before React
+   * re-renders — so a consumer no longer re-derives the transition from `status` and `generation`
+   * in an effect that needs a `set-state-in-effect` suppression.
+   *
+   * `info.signal` is the build effect's own controller. It is already aborted on rebuild and on
+   * unmount, so work started here is cancelled without returning a cleanup.
+   */
+  onReady?: (build: SceneBuild<M>, info: { generation: number; signal: AbortSignal }) => void
+  /**
    * A declarative knob write the stage refused. `onError` also receives it (§0.3), but a
    * `StageEvent` has nowhere to put the key, and the key is the only thing that tells a consumer
    * which control to roll back. A carry-forward onto a replacement stage stays silent here for
