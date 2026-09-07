@@ -21,7 +21,7 @@ import {
   readCrumple,
   type CrumpleReading,
 } from './crumple-state.js'
-import type { CrumpleOptions, ReducedMotion } from './crumple-types.js'
+import type { CrumpleOptions, CrumpleSettleEvent, ReducedMotion } from './crumple-types.js'
 import { artworkStyleFor, frameStyleFor } from './frame-style.js'
 import { rememberPair } from './pair-guard.js'
 import { useScene } from './scene-context.js'
@@ -161,6 +161,37 @@ export function useCrumple<S extends SpriteSource>(o: CrumpleOptions<S>): Crumpl
     dispatchError({ error, observed: true, view: core.view })
   })
 
+  const dispatchSettle = useEvent((e: CrumpleSettleEvent): void => {
+    o.onSettle?.(e)
+  })
+
+  /**
+   * The one place a request ends (§2.1). Every success path and every failure path of the sprite
+   * driver funnels through it, which is what makes "exactly once per request" a property of the
+   * code rather than of four call sites agreeing.
+   *
+   * `seq` is the whole of "never for a superseded or unmounted request": supersession bumps
+   * `live.seq` in `syncSprite` and `destroy()` bumps it too, so a continuation that settles after
+   * either one carries a stale `seq` and stops here. `core.pending` is deliberately not consulted
+   * — a request superseded a microtask before its own settlement would otherwise clear its
+   * successor's `pending` on the way past.
+   *
+   * The error, when there is one, takes the same two routes it always did: `crumple.error` and
+   * `onError` with `observed: true` (§7). `onSettle` is a third exit for the SAME value, and §7's
+   * telemetry filter on `!observed` is what stops it being counted twice.
+   */
+  const settle = useEvent(
+    (seq: number, key: string, error: Error | null, reduced: boolean): void => {
+      if (seq !== live.seq) return
+      // eslint-disable-next-line react-hooks/immutability -- `core` is an intentionally mutable record held once per hook instance and never replaced; `store.bump()` publishes each write (§5.5).
+      core.pending = null
+      if (error !== null) core.error = error
+      store.bump()
+      if (error !== null) dispatchError({ error, observed: true, view: core.view })
+      dispatchSettle({ key, error, reduced })
+    },
+  )
+
   /**
    * The three real view events, plus the stage's error bus filtered to this view. A view's bus
    * carries exactly `start`, `step` and `end`; an error takes the route straight onto the STAGE's
@@ -206,19 +237,24 @@ export function useCrumple<S extends SpriteSource>(o: CrumpleOptions<S>): Crumpl
       void (async () => {
         const got = await acquire(stage, opts.spriteKey, opts.src, opts.pin, controller.signal)
         if (got === ABORTED || seq !== live.seq) return
+        // Read once, on the path this request actually took, and carried into the payload: it is
+        // the accommodation that applied, not "did anything animate" (§2.1).
+        const reduced = prefersReducedMotion(opts.reducedMotion)
         if (got instanceof Error) {
-          report(got)
+          settle(seq, opts.spriteKey, got, reduced)
           return
         }
         const refused = view.show(got)
         if (refused !== undefined) {
-          report(refused)
+          settle(seq, opts.spriteKey, refused, reduced)
           return
         }
         // An `entrance: 'uncrumple'` under `reduce` is `'flat'`: `show()` is one draw, with no run
-        // and no start/step/end triple, which is why nothing downstream needs its own branch.
-        if (opts.entrance !== 'uncrumple' || prefersReducedMotion(opts.reducedMotion)) {
-          store.bump()
+        // and no start/step/end triple, which is why nothing downstream needs its own branch. It
+        // still SETTLES — it is a request that reached an outcome — and this is the fourth clear
+        // site §2.1's "three sites" gloss omits.
+        if (opts.entrance !== 'uncrumple' || reduced) {
+          settle(seq, opts.spriteKey, null, reduced)
           return
         }
         // The order is load-bearing: `draw` resolves a PoseRef against the SHOWN sprite's clip,
@@ -229,12 +265,11 @@ export function useCrumple<S extends SpriteSource>(o: CrumpleOptions<S>): Crumpl
           duration: opts.duration,
           signal: controller.signal,
         })
+        // eslint-disable-next-line react-hooks/immutability -- `core` is an intentionally mutable record held once per hook instance and never replaced; `store.bump()` publishes each write (§5.5).
+        core.pending = { key: opts.spriteKey, phase: 'entering', run }
         store.bump()
-        // No `result instanceof Error` branch here, unlike the swap's below: the `draw('ball')`
-        // above has already resolved the same pose the entrance plays, so the failure mode the
-        // swap guards against — a target whose sprite errors mid-run — cannot arise on this path.
-        void run.done.then(() => {
-          if (seq === live.seq) store.bump()
+        void run.done.then((result) => {
+          settle(seq, opts.spriteKey, result instanceof Error ? result : null, false)
         })
       })()
     },
@@ -327,6 +362,9 @@ export function useCrumple<S extends SpriteSource>(o: CrumpleOptions<S>): Crumpl
     // eslint-disable-next-line react-hooks/immutability -- `core` is an intentionally mutable record held once per hook instance and never replaced; `store.bump()` publishes each write (§5.5).
     core.synced = { view, key }
     core.requested = key
+    // The request opens here, before the path is known; `enter`/`swap` refine the phase and hang
+    // the typed run on it as soon as there is one (§2.1).
+    core.pending = { key, phase: 'acquiring', run: null }
     // eslint-disable-next-line react-hooks/immutability -- `live` is an intentionally mutable record held once per hook instance and never replaced; it tracks the pair's own bookkeeping and is never handed to a consumer.
     live.seq += 1
     const seq = live.seq
@@ -406,6 +444,7 @@ export function useCrumple<S extends SpriteSource>(o: CrumpleOptions<S>): Crumpl
     // eslint-disable-next-line react-hooks/immutability -- `core` is an intentionally mutable record held once per hook instance and never replaced; `store.bump()` publishes each write (§5.5).
     core.view = null
     core.synced = null
+    core.pending = null
     core.parked = false
     core.via = undefined
     // Leaves the element's last blitted pixels in place; the element itself is the consumer's.

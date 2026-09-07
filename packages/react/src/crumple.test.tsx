@@ -16,6 +16,7 @@ function instance(o?: Partial<CrumpleValue>): CrumpleValue {
     shown: null,
     sprite: null,
     requested: null,
+    pending: null,
     error: null,
     frame: null,
     frameStyle: null,

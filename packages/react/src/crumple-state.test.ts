@@ -22,6 +22,7 @@ test('a core with no view reads as the detached snapshot (§5.2, §8)', () => {
     shown: null,
     sprite: null,
     requested: null,
+    pending: null,
     error: null,
     frame: null,
     view: null,

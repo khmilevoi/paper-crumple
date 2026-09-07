@@ -1,5 +1,5 @@
 import type { Events, View } from '@paper-crumple/core'
-import type { CrumpleSnapshot } from './crumple-types.js'
+import type { CrumplePending, CrumpleSnapshot } from './crumple-types.js'
 
 /**
  * The mutable record the snapshot is read out of. One per hook instance, never replaced — the
@@ -9,6 +9,9 @@ export interface CrumpleCore {
   view: View | null
   /** The spriteKey last asked for. Survives a scene rebuild: it is the consumer's prop. */
   requested: string | null
+  /** The open request, or `null` when idle. Set when one opens and cleared at exactly one place
+   *  in the hook — see `settle` in `use-crumple.ts` (§2.1). */
+  pending: CrumplePending | null
   error: Error | null
   parked: boolean
   /** The resolved ball index the current run reported at `start`. Only a swap carries one. */
@@ -21,6 +24,7 @@ export function createCrumpleCore(): CrumpleCore {
   return {
     view: null,
     requested: null,
+    pending: null,
     error: null,
     parked: false,
     via: undefined,
@@ -51,6 +55,7 @@ export function readCrumple(core: CrumpleCore): CrumpleReading {
     shown: sprite?.key ?? null,
     sprite,
     requested: core.requested,
+    pending: core.pending,
     error: core.error,
     frame: view?.frame ?? null,
     view,

@@ -1,0 +1,164 @@
+/**
+ * @vitest-environment jsdom
+ */
+import { SheetError } from '@paper-crumple/core'
+import { afterEach, expect, test, vi } from 'vitest'
+import { createFakeStage } from './testing/fake-stage.js'
+import { readyScene, renderCrumple } from './testing/crumple-probe.js'
+import { flush } from './testing/render.js'
+
+afterEach(() => {
+  vi.unstubAllGlobals()
+})
+
+function stubReducedMotion(matches: boolean): void {
+  vi.stubGlobal(
+    'matchMedia',
+    vi.fn((query: string) => ({ matches, media: query }) as unknown as MediaQueryList),
+  )
+}
+
+test('a flat entrance settles once and leaves pending null (§2.1)', async () => {
+  const onSettle = vi.fn()
+  const fake = createFakeStage()
+  const probe = await renderCrumple(
+    { spriteKey: 'a', src: 'a.png', onSettle },
+    { scene: readyScene(fake.stage) },
+  )
+  // The DEFAULT entrance. Under a three-clear-site reading this request would latch on
+  // `acquiring` forever and never settle; §2.1's "exactly once per request that reaches an
+  // outcome" says otherwise.
+  expect(probe.current.pending).toBeNull()
+  expect(onSettle).toHaveBeenCalledTimes(1)
+  expect(onSettle).toHaveBeenCalledWith({ key: 'a', error: null, reduced: false })
+  await probe.unmount()
+})
+
+test('an uncrumple entrance is pending: entering with the run, and settles at its end (§2.1)', async () => {
+  stubReducedMotion(false)
+  const onSettle = vi.fn()
+  const fake = createFakeStage()
+  const probe = await renderCrumple(
+    { spriteKey: 'a', src: 'a.png', entrance: 'uncrumple', onSettle },
+    { scene: readyScene(fake.stage) },
+  )
+  expect(probe.current.pending).toMatchObject({ key: 'a', phase: 'entering' })
+  expect(probe.current.pending?.run).not.toBeNull()
+  expect(onSettle).not.toHaveBeenCalled()
+  fake.views[0]?.settleRun(undefined)
+  await flush()
+  expect(probe.current.pending).toBeNull()
+  expect(onSettle).toHaveBeenCalledTimes(1)
+  expect(onSettle).toHaveBeenCalledWith({ key: 'a', error: null, reduced: false })
+  await probe.unmount()
+})
+
+test('an uncrumple entrance under reduce settles with reduced: true (§2.1)', async () => {
+  stubReducedMotion(true)
+  const onSettle = vi.fn()
+  const probe = await renderCrumple(
+    { spriteKey: 'a', src: 'a.png', entrance: 'uncrumple', onSettle },
+    { scene: readyScene(createFakeStage().stage) },
+  )
+  expect(onSettle).toHaveBeenCalledWith({ key: 'a', error: null, reduced: true })
+  await probe.unmount()
+})
+
+test('a failed acquisition settles with the error and clears pending (§2.1, §7)', async () => {
+  const failed = new SheetError('the source never decoded')
+  const onSettle = vi.fn()
+  const onError = vi.fn()
+  const fake = createFakeStage({ add: async () => failed })
+  const probe = await renderCrumple(
+    { spriteKey: 'a', src: 'a.png', onSettle, onError },
+    { scene: readyScene(fake.stage) },
+  )
+  await flush()
+  expect(probe.current.pending).toBeNull()
+  expect(probe.current.error).toBe(failed)
+  expect(onSettle).toHaveBeenCalledTimes(1)
+  expect(onSettle).toHaveBeenCalledWith({ key: 'a', error: failed, reduced: false })
+  // The error keeps its existing route as well: one value, two exits, both observed (§7).
+  expect(onError).toHaveBeenCalledTimes(1)
+  expect(onError).toHaveBeenCalledWith(expect.objectContaining({ error: failed, observed: true }))
+  await probe.unmount()
+})
+
+test('an unmounted request never settles (§2.1)', async () => {
+  stubReducedMotion(false)
+  const onSettle = vi.fn()
+  const fake = createFakeStage()
+  const probe = await renderCrumple(
+    { spriteKey: 'a', src: 'a.png', entrance: 'uncrumple', onSettle },
+    { scene: readyScene(fake.stage) },
+  )
+  const view = fake.views[0]
+  expect(view).toBeDefined()
+  if (view === undefined) return
+  onSettle.mockClear()
+  await probe.unmount()
+  view.settleRun(undefined)
+  await flush()
+  expect(onSettle).not.toHaveBeenCalled()
+})
+
+test('a request that opens sets pending: acquiring before anything is known (§2.1)', async () => {
+  const fake = createFakeStage({ add: () => new Promise(() => undefined) })
+  const probe = await renderCrumple(
+    { spriteKey: 'a', src: 'a.png' },
+    { scene: readyScene(fake.stage) },
+  )
+  expect(probe.current.pending).toEqual({ key: 'a', phase: 'acquiring', run: null })
+  await probe.unmount()
+})
+
+test('a superseded entrance never settles, and never clears its successor pending (§2.1)', async () => {
+  stubReducedMotion(false)
+  const onSettle = vi.fn()
+  const fake = createFakeStage()
+  const probe = await renderCrumple(
+    { spriteKey: 'a', src: 'a.png', entrance: 'uncrumple', onSettle },
+    { scene: readyScene(fake.stage) },
+  )
+  const opened = probe.current.pending
+  expect(opened?.phase).toBe('entering')
+  if (opened === null || opened.phase !== 'entering') return
+  const superseded = opened.run
+  // Supersession bumps `live.seq`, so the entrance's own continuation is stale from here on.
+  await probe.rerender({
+    options: { spriteKey: 'b', src: 'b.png', entrance: 'uncrumple', onSettle },
+  })
+  onSettle.mockClear()
+  // `stop()` settles the superseded run with ABORTED — the microtask §2.1 warns about, the one
+  // that would otherwise fire for a dead request and clear the LIVE request's `pending` on the
+  // way past.
+  await probe.run(() => {
+    superseded.stop()
+  })
+  expect(onSettle).not.toHaveBeenCalled()
+  expect(probe.current.pending).not.toBeNull()
+  expect(probe.current.pending?.key).toBe('b')
+  await probe.unmount()
+})
+
+test('a settled entrance settles exactly once, across re-renders and a repeat settlement (§2.1)', async () => {
+  stubReducedMotion(false)
+  const onSettle = vi.fn()
+  const fake = createFakeStage()
+  const options = { spriteKey: 'a', src: 'a.png', entrance: 'uncrumple' as const, onSettle }
+  const probe = await renderCrumple(options, { scene: readyScene(fake.stage) })
+  fake.views[0]?.settleRun(undefined)
+  await flush()
+  expect(onSettle).toHaveBeenCalledTimes(1)
+  // Nothing downstream of the settlement may fire it a second time: neither a second settlement
+  // of the same run, nor a re-render with the same request, nor a bare store bump.
+  fake.views[0]?.settleRun(undefined)
+  await flush()
+  await probe.rerender({ options: { ...options } })
+  await probe.run(() => {
+    probe.current.sync()
+  })
+  expect(onSettle).toHaveBeenCalledTimes(1)
+  expect(probe.current.pending).toBeNull()
+  await probe.unmount()
+})
