@@ -28,11 +28,14 @@ test('a core with no view reads as the detached snapshot (§5.2, §8)', () => {
   })
 })
 
-test('the reading carries no frameStyle and the record no frameTo — the hook derives it (§2.7)', () => {
+test('the reading carries neither style and the record no frameTo — the hook derives both (§2.7, §2.3)', () => {
   const core = createCrumpleCore()
   expect(core).not.toHaveProperty('frameTo')
   const snapshot = readCrumple(core)
+  // Neither style is in the reading: both are derived in the hook's render from the `frameTo`
+  // PROP, so the record cannot lag its own commit (§2.7, §2.3, §9.1).
   expect(snapshot).not.toHaveProperty('frameStyle')
+  expect(snapshot).not.toHaveProperty('artworkStyle')
 })
 
 test('with a view, the getters are read through (§5.2)', () => {

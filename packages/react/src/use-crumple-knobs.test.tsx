@@ -222,3 +222,28 @@ test('a failed join is reported and does not refresh (§7)', async () => {
   expect(fake.calls.filter((c) => c.method === 'view.refresh')).toHaveLength(refreshes)
   await probe.unmount()
 })
+
+test('artworkStyle is on the snapshot beside frameStyle, from the same frame (§2.3)', async () => {
+  const fake = createFakeStage()
+  const probe = await renderCrumple(
+    { spriteKey: 'hero', src: 'hero.png', frameTo: 192 },
+    { scene: readyScene(fake.stage) },
+  )
+  fake.views[0]?.setFrame(FRAME)
+  await probe.run(() => probe.current.refresh())
+  expect(probe.current.artworkStyle).toEqual({ width: '192px', height: '192px' })
+  await probe.unmount()
+})
+
+test('with no frameTo artworkStyle is null, exactly as frameStyle is (§2.3)', async () => {
+  const fake = createFakeStage()
+  const probe = await renderCrumple(
+    { spriteKey: 'hero', src: 'hero.png' },
+    { scene: readyScene(fake.stage) },
+  )
+  fake.views[0]?.setFrame(FRAME)
+  await probe.run(() => probe.current.refresh())
+  expect(probe.current.frameStyle).toBeNull()
+  expect(probe.current.artworkStyle).toBeNull()
+  await probe.unmount()
+})

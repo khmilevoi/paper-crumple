@@ -22,7 +22,7 @@ import {
   type CrumpleReading,
 } from './crumple-state.js'
 import type { CrumpleOptions, ReducedMotion } from './crumple-types.js'
-import { frameStyleFor } from './frame-style.js'
+import { artworkStyleFor, frameStyleFor } from './frame-style.js'
 import { rememberPair } from './pair-guard.js'
 import { useScene } from './scene-context.js'
 import { createVersionedStore } from './store.js'
@@ -88,6 +88,17 @@ export function useCrumple<S extends SpriteSource>(o: CrumpleOptions<S>): Crumpl
   const frameTo = o.frameTo
   const frameStyle = useMemo(
     () => frameStyleFor(snapshot.frame, frameTo),
+    [snapshot.frame, frameTo],
+  )
+
+  /**
+   * The same inputs, the same scale, the same `null` convention — derived here rather than
+   * mirrored, for the reason `frameStyle` above is (§2.3, §2.7). One render publishes both, so a
+   * layout that reserves the artwork box and a wrapper that takes the paper box can never be a
+   * bump out of step with each other.
+   */
+  const artworkStyle = useMemo(
+    () => artworkStyleFor(snapshot.frame, frameTo),
     [snapshot.frame, frameTo],
   )
 
@@ -481,5 +492,5 @@ export function useCrumple<S extends SpriteSource>(o: CrumpleOptions<S>): Crumpl
   })
 
   // Deliberately a fresh object per render: it carries the reactive snapshot (§2.1).
-  return { ...snapshot, frameStyle, ref, play, stop, refresh }
+  return { ...snapshot, frameStyle, artworkStyle, ref, play, stop, refresh }
 }

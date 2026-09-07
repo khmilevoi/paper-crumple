@@ -35,6 +35,16 @@ export interface CrumpleFrameStyle {
   readonly top: string
 }
 
+/**
+ * The ARTWORK's own rectangle under the same one scale `frameStyle` uses — what a layout reserves
+ * for the picture, as opposed to the paper box the wrapper takes (§2.3). Same `null` convention:
+ * absent `frameTo` or absent `frame` means the hook applies nothing.
+ */
+export interface CrumpleArtworkStyle {
+  readonly width: string
+  readonly height: string
+}
+
 export type CrumpleOptions<S extends SpriteSource> = {
   spriteKey: string
   src: S
@@ -83,6 +93,7 @@ export interface CrumpleSnapshot {
   readonly error: Error | null
   readonly frame: ViewFrame | null
   readonly frameStyle: CrumpleFrameStyle | null
+  readonly artworkStyle: CrumpleArtworkStyle | null
   /** Raw, so an unforeseen scenario stays reachable. */
   readonly view: View | null
 }

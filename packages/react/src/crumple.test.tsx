@@ -19,6 +19,7 @@ function instance(o?: Partial<CrumpleValue>): CrumpleValue {
     error: null,
     frame: null,
     frameStyle: null,
+    artworkStyle: null,
     view: null,
     ref: () => {},
     play: () => null,

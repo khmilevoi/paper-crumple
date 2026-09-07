@@ -29,12 +29,12 @@ export function createCrumpleCore(): CrumpleCore {
 }
 
 /**
- * What the versioned store holds. `frameStyle` is NOT part of it: it is derived from the published
- * `frame` and the `frameTo` PROP in the hook's render (§2.7), because a prop mirrored into this
- * record through an effect lags its own commit by one bump — the lag that left the first entrance
- * measuring 0 × 0 (§9.1).
+ * What the versioned store holds. `frameStyle` and `artworkStyle` are NOT part of it: both are
+ * derived from the published `frame` and the `frameTo` PROP in the hook's render (§2.7, §2.3),
+ * because a prop mirrored into this record through an effect lags its own commit by one bump —
+ * the lag that left the first entrance measuring 0 × 0 (§9.1).
  */
-export type CrumpleReading = Omit<CrumpleSnapshot, 'frameStyle'>
+export type CrumpleReading = Omit<CrumpleSnapshot, 'frameStyle' | 'artworkStyle'>
 
 /**
  * Re-read the getters into one reading. The caller caches it: `view.state`, `view.pose` and
