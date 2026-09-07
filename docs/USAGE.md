@@ -32,11 +32,11 @@ typosquat waiting to happen. Record the one real loss: there is no single `esm.s
 URL for a CDN playground, and three scoped packages with peer relationships are genuinely awkward
 there.
 
-`core` is a `peerDependency` of `paper` and `motion`, so the three resolve to **one** copy of core
-under every modern package manager — which is what makes `instanceof` safe (§10.4). Declare core in
-your own `dependencies`; if you are publishing a wrapper around this library, declare core in
-`peerDependencies` and never in `dependencies`, because that is the one install shape that produces
-two copies. Assert it rather than hoping:
+`core` is a `peerDependency` of `paper`, `motion` and a fourth package, `@paper-crumple/react`, so all
+four resolve to **one** copy of core under every modern package manager — which is what makes
+`instanceof` safe (§10.4). Declare core in your own `dependencies`; if you are publishing a wrapper
+around this library, declare core in `peerDependencies` and never in `dependencies`, because that is
+the one install shape that produces two copies. Assert it rather than hoping:
 
 ```ts
 const dup = pc.assertSingleCore()
@@ -44,10 +44,18 @@ if (dup) throw dup     // CoreDuplicateError, carrying { version } — a startup
                        // once-per-session console warning (§10.4)
 ```
 
-The three packages ship one shared version number under Changesets `fixed`, which without a bundle
-is the only visible signal that they are a family. The peer range is `^1.x` and not `~1.x`: §10.2
-designs minors to be additive, so tilde peers would turn every routine upgrade into a three-package
-flag day. Core's README is canonical; this block appears identically in all three (§14).
+The four packages ship one shared version number under Changesets `fixed`, which without a bundle is
+the only visible signal that they are a family. The peer range is `^1.x` and not `~1.x`: §10.2
+designs minors to be additive, so tilde peers would turn every routine upgrade into a four-package
+flag day. Core's README is canonical; this block appears identically in `paper`'s and `motion`'s
+(§14).
+
+`@paper-crumple/react` is the fourth member of the family and is not covered by this document: it is
+a React binding over the trio above, additive and opt-in, with its own install line and its own peer
+shape — it peers on `react` as well as on `@paper-crumple/core`, and not on `paper` or `motion` at
+all, so a React consumer still installs those two directly, the same as any other consumer, only
+through hooks rather than the calls below. [`docs/USAGE-react.md`](./USAGE-react.md) is the authority
+on how it is installed and consumed; read it once you know the convention this document sets up next.
 
 ## The convention, first
 
