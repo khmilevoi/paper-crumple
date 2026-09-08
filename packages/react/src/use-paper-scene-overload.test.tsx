@@ -22,20 +22,32 @@ test('the positional form builds, and infers M from create (§3.5)', async () =>
   await harness.unmount()
 })
 
-test('the positional form rebuilds on a deps change and not otherwise', async () => {
+test('a fresh deps array with identical elements does not rebuild; a changed element does', async () => {
   const first = createFakeStage()
   const second = createFakeStage()
-  let deps: readonly unknown[] = [1]
+  let depValue = 1
   let next = first
-  const harness = await renderHook(() => usePaperScene(async () => next.stage, deps))
+  // The array literal is a *new* object on every render — which is exactly what the positional
+  // form produces, since the options bag it normalises to is rebuilt each time. `useEffect(…,
+  // o.deps)` spreads the contents, so React compares element-wise and identical elements must not
+  // rebuild. Comparing the list by identity instead would fail here.
+  const seen: unknown[][] = []
+  const harness = await renderHook(() => {
+    const deps = [depValue]
+    seen.push(deps)
+    return usePaperScene(async () => next.stage, deps)
+  })
   await flush()
   expect(harness.result.current.generation).toBe(1)
 
   await harness.rerender()
   await flush()
+  expect(seen.length).toBeGreaterThan(1)
+  expect(seen.at(-1)).not.toBe(seen[0])
+  expect(seen.at(-1)).toEqual(seen[0])
   expect(harness.result.current.generation).toBe(1)
 
-  deps = [2]
+  depValue = 2
   next = second
   await harness.rerender()
   await flush()
