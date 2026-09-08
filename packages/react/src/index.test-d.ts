@@ -1,4 +1,4 @@
-import type { BlitStage, PlayResult, PoseRef, Run, Sprite, SwapResult } from '@paper-crumple/core'
+import type { BlitStage } from '@paper-crumple/core'
 import { expectTypeOf, test } from 'vitest'
 import {
   Crumple,
@@ -8,11 +8,17 @@ import {
   useScene,
   type Scene,
   type SceneOptions,
-  type CrumpleArtworkStyle,
-  type CrumpleOptions,
-  type CrumplePending,
-  type CrumpleSettleEvent,
-  type CrumpleStatus,
+} from './index.js'
+// --- P4: the crumple request surface (§2.1, §2.3, §2.5) ---
+// Separate statements rather than widened lists: this file is append-only across plans, and a
+// second import from an already-imported specifier is an established pattern in this package.
+import type { PlayResult, PoseRef, Run, Sprite, SwapResult } from '@paper-crumple/core'
+import type {
+  CrumpleArtworkStyle,
+  CrumpleOptions,
+  CrumplePending,
+  CrumpleSettleEvent,
+  CrumpleStatus,
 } from './index.js'
 
 test('usePaperScene takes SceneOptions and returns a Scene', () => {
