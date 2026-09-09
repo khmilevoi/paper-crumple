@@ -281,3 +281,137 @@ test('a superseded swap never settles, and its successor settles once (§2.1)', 
   expect(probe.current.pending).toBeNull()
   await probe.unmount()
 })
+
+test('stopping a LIVE run cancels the request: no settlement, and pending is cleared (§2.1)', async () => {
+  stubReducedMotion(false)
+  const onSettle = vi.fn()
+  const fake = createFakeStage({ sprites: ['a'] })
+  const probe = await renderCrumple(
+    { spriteKey: 'a', src: 'a.png', onSettle },
+    { scene: readyScene(fake.stage) },
+  )
+  onSettle.mockClear()
+  await probe.rerender({ options: { spriteKey: 'b', src: 'b.png', onSettle } })
+  const opened = probe.current.pending
+  expect(opened?.phase).toBe('swapping')
+  if (opened === null || opened.phase !== 'swapping') return
+  // §2.1 puts the run on `pending` precisely so a consumer can stop it. Nothing supersedes this
+  // request, so `seq` is still live and the continuation is NOT stale — the cancellation has to be
+  // recognised as one. A stop is none of the three outcomes `onSettle` documents, and `ABORTED` is
+  // a sentinel rather than an `Error`, so mapping it to `error: null` would report a request that
+  // never arrived as a success.
+  await probe.run(() => {
+    opened.run.stop()
+  })
+  expect(onSettle).not.toHaveBeenCalled()
+  expect(probe.current.pending).toBeNull()
+  expect(probe.current.error).toBeNull()
+  await probe.unmount()
+})
+
+test('a cancelled request neither sets nor clears the standing error (§2.1, §5.1)', async () => {
+  stubReducedMotion(false)
+  const boom = new SheetError('the stage reported this while the fold was running')
+  const onSettle = vi.fn()
+  const fake = createFakeStage({ sprites: ['a'] })
+  const probe = await renderCrumple(
+    { spriteKey: 'a', src: 'a.png', onSettle },
+    { scene: readyScene(fake.stage) },
+  )
+  onSettle.mockClear()
+  await probe.rerender({ options: { spriteKey: 'b', src: 'b.png', onSettle } })
+  const view = fake.views[0]
+  const opened = probe.current.pending
+  expect(view).toBeDefined()
+  expect(opened?.phase).toBe('swapping')
+  if (view === undefined || opened === null || opened.phase !== 'swapping') return
+  await probe.run(() => {
+    fake.emit('error', { error: boom, observed: false, view: view.view })
+  })
+  expect(probe.current.error).toBe(boom)
+  // A cancellation reaches no outcome at all, so it is neither the moment a previous failure goes
+  // stale nor a failure of its own: `error` is left exactly as the cancelled request found it.
+  await probe.run(() => {
+    opened.run.stop()
+  })
+  expect(onSettle).not.toHaveBeenCalled()
+  expect(probe.current.error).toBe(boom)
+  await probe.unmount()
+})
+
+test('a degraded retry clears the rolled-back error it recovers from (§2.6, §5.1)', async () => {
+  stubReducedMotion(false)
+  const failed = new SheetError('the target never arrived')
+  const fake = createFakeStage({ sprites: ['a'] })
+  const probe = await renderCrumple(
+    { spriteKey: 'a', src: 'a.png' },
+    { scene: readyScene(fake.stage) },
+  )
+  await probe.rerender({ options: { spriteKey: 'b', src: 'b.png' } })
+  fake.views[0]?.settleRun(failed)
+  await flush()
+  expect(probe.current.error).toBe(failed)
+  expect(probe.current.status).toBe('rolled-back')
+  // The escape §2.6 added, taken under the accommodation §5.3 added: the degraded swap emits no
+  // `start`, so `onRunStart` — the only other site that clears `error` — never runs, and the notice
+  // a consumer renders from `error !== null` would outlive the request that superseded it.
+  stubReducedMotion(true)
+  await probe.run(() => {
+    probe.current.retry()
+  })
+  expect(probe.current.shown).toBe('b')
+  expect(probe.current.error).toBeNull()
+  expect(probe.current.status).toBe('shown')
+  await probe.unmount()
+})
+
+test('a replayed flat entrance clears the error the swap it replaces left standing (§5.1)', async () => {
+  stubReducedMotion(false)
+  const failed = new SheetError('the target never arrived')
+  const first = createFakeStage({ sprites: ['a'] })
+  const second = createFakeStage()
+  const probe = await renderCrumple(
+    { spriteKey: 'a', src: 'a.png' },
+    { scene: readyScene(first.stage) },
+  )
+  await probe.rerender({ options: { spriteKey: 'b', src: 'b.png' } })
+  first.views[0]?.settleRun(failed)
+  await flush()
+  expect(probe.current.error).toBe(failed)
+  // A rebuilt stage hands back a view with nothing in it, so the request replays as an ENTRANCE
+  // (§5.4). The default entrance is one `show()` — the second settlement that reaches an outcome
+  // with no `start` behind it.
+  await probe.rerender({ scene: readyScene(second.stage, { generation: 2 }) })
+  await flush()
+  expect(second.calls.filter((c) => c.method === 'view.show')).toHaveLength(1)
+  expect(probe.current.shown).toBe('b')
+  expect(probe.current.error).toBeNull()
+  await probe.unmount()
+})
+
+test('a successful settlement clears an error reported during the run (§5.1)', async () => {
+  stubReducedMotion(false)
+  const boom = new SheetError('the stage reported this while the fold was running')
+  const fake = createFakeStage({ sprites: ['a'] })
+  const probe = await renderCrumple(
+    { spriteKey: 'a', src: 'a.png' },
+    { scene: readyScene(fake.stage) },
+  )
+  await probe.rerender({ options: { spriteKey: 'b', src: 'b.png' } })
+  const view = fake.views[0]
+  expect(view).toBeDefined()
+  if (view === undefined) return
+  await probe.run(() => {
+    fake.emit('error', { error: boom, observed: false, view: view.view })
+  })
+  expect(probe.current.error).toBe(boom)
+  // §5.1's "cleared when the next one starts" read forward: a request that REACHES an outcome
+  // successfully is the moment the previous failure went stale, and the start-less paths have no
+  // other site to clear it at. One rule for every outcome beats a rule that depends on whether the
+  // path happened to emit `start`.
+  view.settleRun(undefined)
+  await flush()
+  expect(probe.current.pending).toBeNull()
+  expect(probe.current.error).toBeNull()
+  await probe.unmount()
+})

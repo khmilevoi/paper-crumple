@@ -10,7 +10,7 @@ import type {
   StageEvent,
   View,
 } from '@paper-crumple/core'
-import { ABORTED } from '@paper-crumple/core'
+import { isAborted } from '@paper-crumple/core'
 import { useEffect, useLayoutEffect, useMemo, useState, useSyncExternalStore } from 'react'
 import { acquire, pendingAcquisition, stageSignal } from './acquire.js'
 import type { Crumple } from './crumple.js'
@@ -220,18 +220,45 @@ export function useCrumple<S extends SpriteSource>(o: CrumpleOptions<S>): Crumpl
    * The error, when there is one, takes the same two routes it always did: `crumple.error` and
    * `onError` with `observed: true` (§7). `onSettle` is a third exit for the SAME value, and §7's
    * telemetry filter on `!observed` is what stops it being counted twice.
+   *
+   * `core.error = error` is unconditional, so a request that reaches a SUCCESSFUL outcome clears
+   * the previous failure. §5.1 says `error` is cleared when the next run starts, and `onRunStart`
+   * is the only other site that does it — but the degraded swap and the flat entrance emit no
+   * `start` at all, which is the whole reason `onSettle` exists. Without this, a `retry()` under
+   * `prefers-reduced-motion: reduce` succeeds while the rollback notice it was documented to
+   * escape (§2.6) stays on screen forever. Cancellation never reaches here (see `cancel`), so a
+   * stop neither sets nor clears.
    */
   const settle = useEvent(
     (seq: number, key: string, error: Error | null, reduced: boolean): void => {
       if (seq !== live.seq) return
       // eslint-disable-next-line react-hooks/immutability -- `core` is an intentionally mutable record held once per hook instance and never replaced; `store.bump()` publishes each write (§5.5).
       core.pending = null
-      if (error !== null) core.error = error
+      core.error = error
       store.bump()
       if (error !== null) dispatchError({ error, observed: true, view: core.view })
       dispatchSettle({ key, error, reduced })
     },
   )
+
+  /**
+   * A request that was CANCELLED rather than settled: `stop()` on the live run, `crumple.stop()`,
+   * a `play()` that ends the run under it, or an acquisition the stage's own disposal aborted.
+   * Core resolves such a run with the `ABORTED` sentinel, which is deliberately not an `Error`, so
+   * an `instanceof Error` test maps it to the same payload a clean animated end produces.
+   *
+   * A stop is none of the three outcomes `onSettle` documents — animated end, degraded show,
+   * rollback — so nothing is dispatched and `error` is left exactly as the cancelled request found
+   * it. The request is still over, so `pending` is released: leaving it latched would strand
+   * `status` on `swapping` for a run nobody is running. Supersession bumps `seq` first and is
+   * therefore already handled by the same guard `settle` uses.
+   */
+  const cancel = useEvent((seq: number): void => {
+    if (seq !== live.seq) return
+    // eslint-disable-next-line react-hooks/immutability -- `core` is an intentionally mutable record held once per hook instance and never replaced; `store.bump()` publishes each write (§5.5).
+    core.pending = null
+    store.bump()
+  })
 
   /**
    * The three real view events, plus the stage's error bus filtered to this view. A view's bus
@@ -277,7 +304,11 @@ export function useCrumple<S extends SpriteSource>(o: CrumpleOptions<S>): Crumpl
     ): void => {
       void (async () => {
         const got = await acquire(stage, opts.spriteKey, opts.src, opts.pin, controller.signal)
-        if (got === ABORTED || seq !== live.seq) return
+        if (isAborted(got)) {
+          cancel(seq)
+          return
+        }
+        if (seq !== live.seq) return
         // Read once, on the path this request actually took, and carried into the payload: it is
         // the accommodation that applied, not "did anything animate" (§2.1).
         const reduced = prefersReducedMotion(opts.reducedMotion)
@@ -310,6 +341,10 @@ export function useCrumple<S extends SpriteSource>(o: CrumpleOptions<S>): Crumpl
         core.pending = { key: opts.spriteKey, phase: 'entering', run }
         store.bump()
         void run.done.then((result) => {
+          if (isAborted(result)) {
+            cancel(seq)
+            return
+          }
           settle(seq, opts.spriteKey, result instanceof Error ? result : null, false)
         })
       })()
@@ -337,7 +372,11 @@ export function useCrumple<S extends SpriteSource>(o: CrumpleOptions<S>): Crumpl
         // `end`, which is exactly why `onSettle` and not `onEnd` is what a consumer branches on.
         void (async () => {
           const got = await acquire(stage, opts.spriteKey, opts.src, opts.pin, controller.signal)
-          if (got === ABORTED || seq !== live.seq) return
+          if (isAborted(got)) {
+            cancel(seq)
+            return
+          }
+          if (seq !== live.seq) return
           if (got instanceof Error) {
             settle(seq, opts.spriteKey, got, true)
             return
@@ -375,8 +414,12 @@ export function useCrumple<S extends SpriteSource>(o: CrumpleOptions<S>): Crumpl
         // `crumple.error` and through `onError` — the route it always took — and hands it to
         // `onSettle` as the outcome of this request. Reported, never retried automatically: a
         // retry policy inside an animation library is a network policy nobody asked for, which is
-        // what `retry()` is for (§2.6). `ABORTED` is a sentinel and not an `Error`, so a stopped
-        // swap settles with `error: null`.
+        // what `retry()` is for (§2.6). A stopped swap is not a rollback and not a success: it
+        // resolves the `ABORTED` sentinel, which is not an `Error`, and goes to `cancel`.
+        if (isAborted(result)) {
+          cancel(seq)
+          return
+        }
         settle(seq, opts.spriteKey, result instanceof Error ? result : null, false)
       })
     },
