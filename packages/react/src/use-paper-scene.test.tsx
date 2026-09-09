@@ -229,3 +229,25 @@ test('a duplicate core fails the scene outright and create is never called (§3)
     registry[CORE_MARKER_KEY] = own
   }
 })
+
+test('the duplicate-core failure reports through onFailed, with lost false (§3)', async () => {
+  const registry = globalThis as unknown as Record<symbol, unknown>
+  const own = registry[CORE_MARKER_KEY]
+  registry[CORE_MARKER_KEY] = { version: '0.0.0-impostor' }
+  try {
+    const onFailed = vi.fn()
+    const create = vi.fn(async () => createFakeStage().stage)
+    const harness = await renderHook(() => usePaperScene({ create, deps: [1], onFailed }))
+    await flush()
+    // The startup gate fails the scene before `create` is ever reached, and §3.1's "at most once
+    // per build" covers this dispatch site too — `generation` is 0 because nothing ever landed.
+    expect(create).not.toHaveBeenCalled()
+    expect(onFailed).toHaveBeenCalledTimes(1)
+    expect(onFailed.mock.calls[0]?.[0]?.name).toBe('CoreDuplicateError')
+    expect(onFailed.mock.calls[0]?.[0]).toBe(harness.result.current.error)
+    expect(onFailed.mock.calls[0]?.[1]).toEqual({ lost: false, generation: 0 })
+    await harness.unmount()
+  } finally {
+    registry[CORE_MARKER_KEY] = own
+  }
+})

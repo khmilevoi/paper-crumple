@@ -1,9 +1,10 @@
 /**
  * @vitest-environment jsdom
  */
+import { ABORTED, type Aborted } from '@paper-crumple/core'
 import { expect, test, vi } from 'vitest'
 import { usePaperScene } from './use-paper-scene.js'
-import { createFakeStage } from './testing/fake-stage.js'
+import { createFakeStage, type FakeStageHandle } from './testing/fake-stage.js'
 import { flush, renderHook } from './testing/render.js'
 
 interface Built {
@@ -97,12 +98,25 @@ test('info.signal is the effect controller, aborted on unmount', async () => {
 
 test('onReady never fires for a build that failed or was aborted', async () => {
   const onReady = vi.fn()
-  const harness = await renderHook(() =>
-    usePaperScene({ create: async () => new Error('no stage today'), deps: [1], onReady }),
+  const failing = vi.fn(async () => new Error('no stage today'))
+  const failed = await renderHook(() => usePaperScene({ create: failing, deps: [1], onReady }))
+  await flush()
+  expect(failing).toHaveBeenCalledTimes(1)
+  expect(onReady).not.toHaveBeenCalled()
+  await failed.unmount()
+
+  // The other half of the title: a `create` that resolves to the sentinel is a cancellation, and
+  // a cancellation is not a landed build either (§7).
+  // Annotated: `vi.fn` widens the inferred return to `Promise<symbol>`, and the sentinel is a
+  // unique symbol, so an unannotated mock does not satisfy `create`.
+  const cancelling = vi.fn(async (): Promise<Aborted> => ABORTED)
+  const abandoned = await renderHook(() =>
+    usePaperScene({ create: cancelling, deps: [1], onReady }),
   )
   await flush()
+  expect(cancelling).toHaveBeenCalledTimes(1)
   expect(onReady).not.toHaveBeenCalled()
-  await harness.unmount()
+  await abandoned.unmount()
 })
 
 test('onFailed fires on a create Error, with lost false (§3.1)', async () => {
@@ -219,5 +233,64 @@ test('onFailed fires after the failed bump and before React re-renders (§3.1)',
   // ordering is asserted by render index instead.
   expect(renders).toContain('failed')
   expect(rendersAtCallback).toBe(renders.indexOf('failed'))
+  await harness.unmount()
+})
+
+test('an ABORTED create is a cancellation, not a failure — onFailed stays silent (§7)', async () => {
+  const onFailed = vi.fn()
+  const create = vi.fn(async (): Promise<Aborted> => ABORTED)
+  const harness = await renderHook(() => usePaperScene({ create, deps: [1], onFailed }))
+  await flush()
+  // The factory really did settle on the sentinel: without this the silence below would be the
+  // silence of a build that had simply not finished yet.
+  expect(create).toHaveBeenCalledTimes(1)
+  expect(onFailed).not.toHaveBeenCalled()
+  expect(harness.result.current.status).toBe('building')
+  expect(harness.result.current.error).toBeNull()
+  await harness.unmount()
+})
+
+test('under StrictMode onReady fires exactly once for one landed build (§3.1)', async () => {
+  const onReady = vi.fn()
+  const built: FakeStageHandle[] = []
+  // The self-cleaning factory `use-paper-scene.test.tsx` uses for its own StrictMode test: the
+  // loser of the double invocation disposes its stage and returns the sentinel (§1).
+  const create = vi.fn(async (signal: AbortSignal) => {
+    const fake = createFakeStage()
+    built.push(fake)
+    await Promise.resolve()
+    if (signal.aborted) {
+      fake.stage.dispose()
+      return ABORTED
+    }
+    return fake.stage
+  })
+  const harness = await renderHook(() => usePaperScene({ create, deps: [1], onReady }), {
+    strict: true,
+  })
+  await flush()
+  // The preconditions that make the count below mean something: StrictMode really did run the
+  // build effect twice, and exactly one of the two builds survived it.
+  expect(create).toHaveBeenCalledTimes(2)
+  expect(built).toHaveLength(2)
+  expect(built.filter((f) => !f.disposed)).toHaveLength(1)
+  expect(onReady).toHaveBeenCalledTimes(1)
+  expect(onReady.mock.calls[0]?.[1]?.generation).toBe(1)
+  await harness.unmount()
+})
+
+test('under StrictMode onFailed fires exactly once for one failed build (§3.1)', async () => {
+  const onFailed = vi.fn()
+  const boom = new Error('no stage today')
+  const create = vi.fn(async () => boom)
+  const harness = await renderHook(() => usePaperScene({ create, deps: [1], onFailed }), {
+    strict: true,
+  })
+  await flush()
+  // Again the precondition: both invocations resolved to the same Error, so it is the
+  // aborted-build check rather than luck that keeps the report at one.
+  expect(create).toHaveBeenCalledTimes(2)
+  expect(onFailed).toHaveBeenCalledTimes(1)
+  expect(onFailed).toHaveBeenCalledWith(boom, { lost: false, generation: 0 })
   await harness.unmount()
 })

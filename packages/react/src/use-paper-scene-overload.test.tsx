@@ -65,6 +65,15 @@ test('the third argument carries knobs and every callback', async () => {
   await flush()
   expect(onReady).toHaveBeenCalledTimes(1)
   expect(fake.calls.filter((c) => c.method === 'set').map((c) => c.args[0])).toEqual([{ a: 1 }])
+
+  // `onError` is carried too, and the only way to show it is to make the landed stage emit: a
+  // successful knob write reports nothing, so an untriggered spy would prove nothing either.
+  expect(onError).not.toHaveBeenCalled()
+  const event = { error: new Error('a warning-shaped error'), observed: false, view: null }
+  fake.emit('error', event)
+  await flush()
+  expect(onError).toHaveBeenCalledTimes(1)
+  expect(onError).toHaveBeenCalledWith(event)
   await harness.unmount()
 })
 

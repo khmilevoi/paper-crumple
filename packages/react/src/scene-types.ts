@@ -64,6 +64,13 @@ export interface SceneOptions<M = undefined> {
    * reporting from `lost` would hand this callback a placeholder while the snapshot ends up
    * holding the real cause. The residue: a `lost` with no cause ever emitted leaves the snapshot
    * `failed` and calls nothing here.
+   *
+   * `info.generation` is read at report time and therefore means two different things, which
+   * `info.lost` is what separates. On a loss (`lost: true`) it is the generation of the build
+   * that was lost — that build landed, so the counter had already been bumped for it. On every
+   * other failure (`lost: false`) nothing landed, so it is the generation of the last *successful*
+   * build, and `0` when none has ever landed. A `lost: false` report never names the build that
+   * failed, because a build that never landed was never numbered.
    */
   onFailed?: (error: Error, info: { lost: boolean; generation: number }) => void
   /**

@@ -13,6 +13,7 @@ import type {
   Scene,
   SceneBuild,
   SceneCounters,
+  SceneMethods,
   SceneOptions,
   SceneSnapshot,
 } from './scene-types.js'
@@ -54,6 +55,17 @@ test('Scene is the snapshot plus play and stop, and play never rejects (§7)', (
     (from: PoseRef, to: PoseRef, o?: StagePlayOptions) => Promise<StagePlayReport<View>>
   >()
   expectTypeOf<Scene['stop']>().toEqualTypeOf<(o?: { all?: boolean }) => void>()
+})
+
+test('SceneMethods is exactly the two instance methods a Scene adds (§4.1)', () => {
+  expectTypeOf<keyof SceneMethods>().toEqualTypeOf<'play' | 'stop'>()
+  expectTypeOf<SceneMethods['play']>().toEqualTypeOf<
+    (from: PoseRef, to: PoseRef, o?: StagePlayOptions) => Promise<StagePlayReport<View>>
+  >()
+  expectTypeOf<SceneMethods['stop']>().toEqualTypeOf<(o?: { all?: boolean }) => void>()
+  // The split exists so `Scene` can intersect a union with these; the intersection is what makes
+  // the methods available on every branch, not only on `ready`.
+  expectTypeOf<Scene>().toMatchTypeOf<SceneMethods>()
 })
 
 test('status narrows stage, meta and error together (§4.1)', () => {
