@@ -367,11 +367,14 @@ export function usePaperScene<M = undefined>(
     for (const key of [...applied.values.keys()]) {
       if (Object.hasOwn(declared, key)) continue
       applied.values.delete(key)
-      const fallback = live.defaults[key]
       // Silently skipped when the stage declares no default under this spelling: `stage.defaults`
       // is keyed by the registry's own paths, and a shared knob is written back through its bare
-      // shared key, so not every key a consumer may legally write appears here.
-      if (fallback === undefined) continue
+      // shared key, so not every key a consumer may legally write appears here. An own-property
+      // test rather than an `undefined` check, matching the write loop above: a consumer key of
+      // `toString` or `constructor` resolves through the prototype chain to an `Object.prototype`
+      // member, which is not `undefined`, and the stage would be handed a function to store.
+      if (!Object.hasOwn(live.defaults, key)) continue
+      const fallback = live.defaults[key]
       // Silent on refusal too: `onError` and `onKnobRefused` report what the consumer wrote, and
       // removing a key is not a write.
       if (live.set({ [key]: fallback } as never) !== undefined) continue

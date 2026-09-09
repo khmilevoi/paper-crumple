@@ -76,12 +76,35 @@ test('a key the stage declares no default for is skipped silently', async () => 
   await harness.unmount()
 })
 
+test('a key only Object.prototype declares is skipped, like any undeclared key', async () => {
+  const fake = createFakeStage({ defaults: { a: 0 } })
+  // `toString` is not in `stage.defaults`, but it *is* on the prototype of the object holding
+  // them: a plain `defaults[key]` read resolves it to a function and writes that back.
+  let knobs: Knobs = { a: 5, toString: 9 }
+  const harness = await renderHook(() =>
+    usePaperScene({ create: async () => fake.stage, deps: [1], knobs }),
+  )
+  await flush()
+  // Annotated, because a bare literal mixing `{ toString: 9 }` with `{ a: 0 }` makes TS ask for
+  // `toString?: undefined` on the sibling — and every object inherits one that is a function.
+  const written: unknown[] = [{ a: 5 }, { toString: 9 }]
+  expect(setCalls(fake)).toEqual(written)
+
+  knobs = {}
+  await harness.rerender()
+  await flush()
+  const afterReset: unknown[] = [{ a: 5 }, { toString: 9 }, { a: 0 }]
+  expect(setCalls(fake)).toEqual(afterReset)
+  await harness.unmount()
+})
+
 test('a refused reset is silent and does not bump knobEpoch on its own', async () => {
   const onError = vi.fn()
+  const onKnobRefused = vi.fn()
   const fake = createFakeStage({ defaults: { a: 0 } })
   let knobs: Knobs = { a: 5 }
   const harness = await renderHook(() =>
-    usePaperScene({ create: async () => fake.stage, deps: [1], knobs, onError }),
+    usePaperScene({ create: async () => fake.stage, deps: [1], knobs, onError, onKnobRefused }),
   )
   await flush()
   expect(harness.result.current.knobEpoch).toBe(1)
@@ -91,7 +114,9 @@ test('a refused reset is silent and does not bump knobEpoch on its own', async (
   await harness.rerender()
   await flush()
   expect(harness.result.current.knobEpoch).toBe(1)
+  // Both channels, not just one: removing a key is not a write, so neither report fires.
   expect(onError).not.toHaveBeenCalled()
+  expect(onKnobRefused).not.toHaveBeenCalled()
   await harness.unmount()
 })
 

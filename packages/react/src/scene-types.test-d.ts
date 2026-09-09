@@ -17,6 +17,7 @@ import type {
   SceneOptions,
   SceneSnapshot,
 } from './scene-types.js'
+import { usePaperScene } from './use-paper-scene.js'
 
 test('create takes the signal and the handed-down listener, and never rejects (§4.1)', () => {
   expectTypeOf<SceneOptions['create']>().toEqualTypeOf<
@@ -91,4 +92,16 @@ test('the counters are carried by every branch (§4.1)', () => {
     'warnings' | 'lost' | 'generation' | 'knobEpoch'
   >()
   expectTypeOf<Scene>().toMatchTypeOf<SceneCounters>()
+})
+
+test('the positional form infers M from create when no type argument is given (§3.5)', () => {
+  // `.test-d.ts` files are typechecked, never executed, so calling the hook outside a component
+  // here is safe — and calling it is the only way to observe what `M` infers to. Its sibling in
+  // `use-paper-scene-overload.test.tsx` passes `<Built>` explicitly and so proves instantiation,
+  // which is why that test no longer claims inference in its title.
+  const create = async (): Promise<SceneBuild<{ id: string }>> => ({
+    stage: {} as BlitStage,
+    meta: { id: 'x' },
+  })
+  expectTypeOf(usePaperScene(create, [])).toEqualTypeOf<Scene<{ id: string }>>()
 })

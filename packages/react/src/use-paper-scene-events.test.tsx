@@ -174,6 +174,37 @@ test('onFailed fires once on a loss, with lost true and the stage’s own GlErro
   await harness.unmount()
 })
 
+test('a build that landed already lost reports onFailed, not onReady (§3.1)', async () => {
+  const onFailed = vi.fn()
+  const onReady = vi.fn()
+  const fake = createFakeStage()
+  const harness = await renderHook(() =>
+    usePaperScene({
+      // The context dies during an `await` inside `create`, so the stage is already lost when it
+      // lands. Neither listener the hook attaches afterwards will ever fire — `lost` and the
+      // orphaned GlError were both emitted before there was anything to hear them — so the only
+      // report of this failure is the one the landing itself makes.
+      create: async () => {
+        await Promise.resolve()
+        fake.lose()
+        return fake.stage
+      },
+      deps: [1],
+      onFailed,
+      onReady,
+    }),
+  )
+  await flush()
+  expect(fake.stage.lost).toBe(true)
+  expect(onReady).not.toHaveBeenCalled()
+  expect(onFailed).toHaveBeenCalledTimes(1)
+  // No cause was latched, so the scene carries the standing loss error rather than nothing.
+  expect(onFailed.mock.calls[0]?.[0]?.name).toBe('GlError')
+  expect(onFailed.mock.calls[0]?.[1]).toEqual({ lost: true, generation: 1 })
+  expect(harness.result.current.status).toBe('failed')
+  await harness.unmount()
+})
+
 test('an ordinary error on a live stage does not fire onFailed', async () => {
   const onFailed = vi.fn()
   const fake = createFakeStage()

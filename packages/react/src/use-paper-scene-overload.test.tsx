@@ -10,7 +10,9 @@ interface Built {
   readonly label: string
 }
 
-test('the positional form builds, and infers M from create (§3.5)', async () => {
+// The type argument is explicit here, so this is instantiation and not inference — what M infers
+// to when it is omitted is a type-level question, and `scene-types.test-d.ts` asks it.
+test('the positional form builds, and carries an explicit M to the snapshot (§3.5)', async () => {
   const fake = createFakeStage()
   const meta: Built = { label: 'positional' }
   const harness = await renderHook(() =>
