@@ -334,8 +334,10 @@ export function usePaperScene<M = undefined>(
       applied.generation = snapshot.generation
     }
 
+    const declared = knobs ?? NO_KNOBS
+
     let wrote = false
-    for (const [key, value] of Object.entries(knobs ?? NO_KNOBS)) {
+    for (const [key, value] of Object.entries(declared)) {
       if (applied.values.has(key) && Object.is(applied.values.get(key), value)) continue
       // Recorded before the write, so a refused key is attempted once rather than on every
       // render until the consumer changes it.
@@ -355,6 +357,24 @@ export function usePaperScene<M = undefined>(
         }
         continue
       }
+      wrote = true
+    }
+
+    // §3.4: a key the consumer stopped declaring goes back to the stage's own default. Before
+    // `stage.defaults` the hook could not know one — `stage.knobs` carries slot-local keys with no
+    // path — so a consumer's reset had to walk the descriptors itself. The keys are snapshotted
+    // because the map is written inside the loop.
+    for (const key of [...applied.values.keys()]) {
+      if (Object.hasOwn(declared, key)) continue
+      applied.values.delete(key)
+      const fallback = live.defaults[key]
+      // Silently skipped when the stage declares no default under this spelling: `stage.defaults`
+      // is keyed by the registry's own paths, and a shared knob is written back through its bare
+      // shared key, so not every key a consumer may legally write appears here.
+      if (fallback === undefined) continue
+      // Silent on refusal too: `onError` and `onKnobRefused` report what the consumer wrote, and
+      // removing a key is not a write.
+      if (live.set({ [key]: fallback } as never) !== undefined) continue
       wrote = true
     }
 
