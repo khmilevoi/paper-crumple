@@ -1,15 +1,100 @@
 /**
  * @vitest-environment jsdom
  */
-import { SheetError } from '@paper-crumple/core'
+import {
+  SheetError,
+  type PlayResult,
+  type Run,
+  type Sprite,
+  type SwapResult,
+} from '@paper-crumple/core'
+import { act, createElement } from 'react'
+import { createRoot } from 'react-dom/client'
 import { afterEach, expect, test, vi } from 'vitest'
+import {
+  createRunController,
+  type CrumpleTarget,
+  type RunController,
+} from '../../core/src/runner.js'
+import { createFakeTimers } from '../../core/src/testing/fake-timers.js'
+import { acquire } from './acquire.js'
 import { createFakeStage } from './testing/fake-stage.js'
 import { readyScene, renderCrumple } from './testing/crumple-probe.js'
+import { deferred } from './testing/deferred.js'
 import { flush } from './testing/render.js'
+import { useCrumple } from './use-crumple.js'
 
 afterEach(() => {
   vi.unstubAllGlobals()
+  vi.restoreAllMocks()
 })
+
+/** Keep core's synchronous lifecycle and run results; only pixels and time are fake. */
+function installRealRuns(
+  fake: ReturnType<typeof createFakeStage>,
+  options: { poseCount?: number; render?: () => Error | undefined } = {},
+) {
+  const timers = createFakeTimers()
+  const controllers: RunController<Sprite>[] = []
+  const runs: Run<PlayResult | SwapResult>[] = []
+  const createView = fake.stage.view.bind(fake.stage)
+  vi.spyOn(fake.stage, 'view').mockImplementation((target) => {
+    const view = createView(target)
+    if (view instanceof Error) return view
+    const handle = fake.views.find((candidate) => candidate.view === view)
+    if (handle === undefined) return view
+    const poseCount = options.poseCount ?? 2
+    const controller = createRunController<Sprite>(
+      {
+        timers,
+        emit: (event, payload) => handle.emit(event, payload),
+        reportError: (error) => fake.emit('error', { error, observed: false, view }),
+        render: (pose) => {
+          view.draw(pose)
+          return options.render?.()
+        },
+        frameFor: (pose) => pose,
+        setState: (state) => handle.setState(state),
+      },
+      { poseCount, dwells: Array.from({ length: poseCount }, () => 10) },
+    )
+    controllers.push(controller)
+    // Source and built declarations give ABORTED distinct unique-symbol types, but both use
+    // Symbol.for('paper-crumple.aborted') at runtime. Bridge that declaration boundary here.
+    const remember = <R extends PlayResult | SwapResult>(run: Run<unknown>): Run<R> => {
+      const published = run as Run<R>
+      runs.push(published)
+      return published
+    }
+    vi.spyOn(view, 'play').mockImplementation((from, to, opts) =>
+      remember<PlayResult>(controller.play(from, to, opts)),
+    )
+    vi.spyOn(view, 'swapTo').mockImplementation((_src, opts) =>
+      remember<SwapResult>(
+        controller.crumple(view.pose, fake.addSprite(opts?.key ?? 'target'), {
+          ...opts,
+          adopt: (sprite) => view.show(sprite),
+        }),
+      ),
+    )
+    vi.spyOn(view, 'crumpleTo').mockImplementation((sprite, opts) =>
+      remember<SwapResult>(
+        controller.crumple(view.pose, sprite as CrumpleTarget<Sprite>, {
+          ...opts,
+          adopt: (next) => view.show(next),
+        }),
+      ),
+    )
+    vi.spyOn(view, 'stop').mockImplementation(() => controller.stop())
+    const dispose = view.dispose.bind(view)
+    vi.spyOn(view, 'dispose').mockImplementation(() => {
+      controller.dispose()
+      dispose()
+    })
+    return view
+  })
+  return { controllers, runs, timers }
+}
 
 function stubReducedMotion(matches: boolean): void {
   vi.stubGlobal(
@@ -389,29 +474,172 @@ test('a replayed flat entrance clears the error the swap it replaces left standi
   await probe.unmount()
 })
 
-test('a successful settlement clears an error reported during the run (§5.1)', async () => {
-  stubReducedMotion(false)
-  const boom = new SheetError('the stage reported this while the fold was running')
+test.each(['play', 'swapTo', 'crumpleTo'] as const)(
+  'retry from synchronous %s onStart leaves a pending handle that stops the successor',
+  async (method) => {
+    const fake = createFakeStage({ sprites: ['a'], add: () => new Promise(() => {}) })
+    const real = installRealRuns(fake)
+    const onSettle = vi.fn()
+    let retried = false
+    const onStart = vi.fn(() => {
+      if (retried) return
+      retried = true
+      probe.current.retry()
+    })
+    const options = {
+      spriteKey: 'a',
+      src: 'a.png',
+      reducedMotion: 'off' as const,
+      onSettle,
+      onStart,
+    }
+    const probe = await renderCrumple(options, { scene: null })
+    if (method === 'play') {
+      await probe.rerender({
+        scene: readyScene(fake.stage),
+        options: { ...options, entrance: 'uncrumple' },
+      })
+    } else {
+      await probe.rerender({ scene: readyScene(fake.stage) })
+      onSettle.mockClear()
+      if (method === 'crumpleTo') {
+        void acquire(fake.stage, 'b', 'b.png', undefined, new AbortController().signal)
+      }
+      await probe.rerender({ options: { ...options, spriteKey: 'b', src: 'b.png' } })
+      expect(fake.views[0]?.view[method]).toHaveBeenCalled()
+    }
+    expect(onStart).toHaveBeenCalledTimes(2)
+    expect(real.controllers[0]?.live).toBe(true)
+    expect(probe.current.pending?.phase).toBe('swapping')
+    await probe.run(() => probe.current.pending?.run?.stop())
+    expect(real.controllers[0]?.live).toBe(false)
+    expect(probe.current.pending).toBeNull()
+    expect(onSettle).not.toHaveBeenCalled()
+    await probe.unmount()
+  },
+)
+
+test('retry from the aborted predecessor onEnd owns the successor controller', async () => {
   const fake = createFakeStage({ sprites: ['a'] })
+  const real = installRealRuns(fake)
+  const onStart = vi.fn()
+  const onSettle = vi.fn()
+  let retried = false
+  const onEnd = vi.fn(() => {
+    if (retried) return
+    retried = true
+    probe.current.retry()
+  })
+  const options = {
+    spriteKey: 'a',
+    src: 'a.png',
+    reducedMotion: 'off' as const,
+    onStart,
+    onEnd,
+    onSettle,
+  }
+  const probe = await renderCrumple(options, { scene: readyScene(fake.stage) })
+  onSettle.mockClear()
+  await probe.rerender({ options: { ...options, spriteKey: 'b', src: 'b.png' } })
+  await probe.run(() => probe.current.retry())
+  // The outer retry became stale during abort; it must not start a third run after onEnd returns.
+  expect(onStart).toHaveBeenCalledTimes(2)
+  expect(real.controllers[0]?.live).toBe(true)
+  await probe.run(() => probe.current.pending?.run?.stop())
+  expect(real.controllers[0]?.live).toBe(false)
+  expect(probe.current.pending).toBeNull()
+  expect(onSettle).not.toHaveBeenCalled()
+  await probe.unmount()
+})
+
+test('synchronous unmount from onError suppresses onSettle', async () => {
+  const failed = new SheetError('the acquisition failed')
+  const acquisition = deferred<Sprite | typeof failed>()
+  const fake = createFakeStage({ add: () => acquisition.promise })
+  const container = document.createElement('div')
+  document.body.append(container)
+  const root = createRoot(container)
+  const onSettle = vi.fn()
+  const onError = vi.fn(() => root.unmount())
+  const scene = readyScene(fake.stage)
+  function Probe() {
+    const crumple = useCrumple({ spriteKey: 'a', src: 'a.png', scene, onError, onSettle })
+    return createElement('canvas', { ref: crumple.ref })
+  }
+  await act(async () => root.render(createElement(Probe)))
+  await act(async () => acquisition.resolve(failed))
+  expect(onError).toHaveBeenCalledTimes(1)
+  expect(fake.views[0]?.disposed).toBe(true)
+  expect(container.childElementCount).toBe(0)
+  expect(onSettle).not.toHaveBeenCalled()
+  container.remove()
+})
+
+test('synchronous retry from onError settles only the successful successor', async () => {
+  const failed = new SheetError('the first acquisition failed')
+  const acquisition = deferred<Sprite | typeof failed>()
+  let attempts = 0
+  const fake = createFakeStage({
+    add: async () => {
+      attempts += 1
+      return attempts === 1 ? acquisition.promise : fake.addSprite('a')
+    },
+  })
+  const onSettle = vi.fn()
   const probe = await renderCrumple(
-    { spriteKey: 'a', src: 'a.png' },
+    { spriteKey: 'a', src: 'a.png', onError: () => probe.current.retry(), onSettle },
     { scene: readyScene(fake.stage) },
   )
-  await probe.rerender({ options: { spriteKey: 'b', src: 'b.png' } })
-  const view = fake.views[0]
-  expect(view).toBeDefined()
-  if (view === undefined) return
-  await probe.run(() => {
-    fake.emit('error', { error: boom, observed: false, view: view.view })
-  })
-  expect(probe.current.error).toBe(boom)
-  // §5.1's "cleared when the next one starts" read forward: a request that REACHES an outcome
-  // successfully is the moment the previous failure went stale, and the start-less paths have no
-  // other site to clear it at. One rule for every outcome beats a rule that depends on whether the
-  // path happened to emit `start`.
-  view.settleRun(undefined)
-  await flush()
-  expect(probe.current.pending).toBeNull()
+  await probe.run(() => acquisition.resolve(failed))
+  expect(onSettle).toHaveBeenCalledExactlyOnceWith({ key: 'a', error: null, reduced: false })
   expect(probe.current.error).toBeNull()
   await probe.unmount()
 })
+
+test.each(['entrance', 'swap'] as const)(
+  'a current %s frame failure survives Run.done resolving undefined',
+  async (path) => {
+    const boom = new SheetError('render failed')
+    const fake = createFakeStage({ sprites: ['a'] })
+    let failed = false
+    const real = installRealRuns(fake, {
+      poseCount: path === 'entrance' ? 1 : 2,
+      render: () => {
+        if (failed) return undefined
+        failed = true
+        return boom
+      },
+    })
+    const onError = vi.fn()
+    const onEnd = vi.fn()
+    const onSettle = vi.fn()
+    const options = {
+      spriteKey: 'a',
+      src: 'a.png',
+      reducedMotion: 'off' as const,
+      onError,
+      onEnd,
+      onSettle,
+    }
+    const probe = await renderCrumple(
+      { ...options, entrance: path === 'entrance' ? 'uncrumple' : 'flat' },
+      { scene: readyScene(fake.stage) },
+    )
+    if (path === 'swap') {
+      onSettle.mockClear()
+      await probe.rerender({ options: { ...options, spriteKey: 'b', src: 'b.png' } })
+      await probe.run(() => real.timers.advance(100))
+    }
+    expect(await real.runs[0]?.done).toBeUndefined()
+    expect(onEnd).toHaveBeenCalledExactlyOnceWith(expect.objectContaining({ completed: false }))
+    expect(probe.current.pending).toBeNull()
+    expect(probe.current.error).toBe(boom)
+    expect(onSettle).toHaveBeenCalledExactlyOnceWith({
+      key: path === 'entrance' ? 'a' : 'b',
+      error: boom,
+      reduced: false,
+    })
+    expect(onError).toHaveBeenCalledTimes(1)
+    await probe.unmount()
+  },
+)
