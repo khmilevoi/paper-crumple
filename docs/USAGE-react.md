@@ -159,8 +159,8 @@ becomes a `useEffect` over a manually mirrored ref, plus `forwardRef`, plus a ha
 live.
 
 `@paper-crumple/react` joins the Changesets `fixed` array with the other three, so all four ship one
-version number. Exports: `.` only. There is no subpath split — packages §3.2's argument for one is
-about asset weight in packs and tiles, and none of it applies to a binding.
+version number. It exports `.` and `./testing`. There is no other subpath split — packages §3.2's
+argument for one is about asset weight in packs and tiles, and none of it applies to a binding.
 
 ## The shape of the API, in one paragraph
 
@@ -229,6 +229,12 @@ What this buys you in practice:
   over a changed `sheet` **does not rebuild**. It is used by the next rebuild `deps` asks for. That
   is §4.1's contract, not an accident of the pattern.
 
+For scenes, `draw`, `sync`, `retry`, `onSettle`, `onReady`, `onFailed`, and `onKnobRefused` are
+identity-stable too. `create` and `onError` are already `useEvent`-wrapped, so consumer
+`useCallback` wrappers around them are unnecessary. If the installed `react-hooks/exhaustive-deps`
+analyser does not recognise a member expression, destructure the called member first, for example
+`const { stop } = scene`, and use that variable in the dependency array.
+
 **`Scene` is memoised and changes identity only when one of its fields does** (§2.1) — it has to be,
 because it is the value of `<PaperScene value={scene}>` and every `useCrumple` reads it through
 `useScene()`. A fresh identity per render would re-render the whole subtree and re-run every crumple
@@ -245,34 +251,85 @@ a fresh object per render by construction. **Depend on `crumple.shown` or on `cr
 ### `usePaperScene`
 
 ```ts
-interface SceneOptions {
-  /** `onError` is handed DOWN so you can spread it into `paperStage`'s own `onError`. */
+interface SceneBuild<M> {
+  readonly stage: pc.BlitStage
+  readonly meta: M
+}
+
+interface SceneOptions<M = undefined> {
   create: (
     signal: AbortSignal,
-    onError: (e: pc.StageEvent<'error'>) => void,
-  ) => Promise<pc.BlitStage | Error | pc.Aborted>
+    onError: StageErrorListener,
+  ) => Promise<SceneBuild<M> | pc.BlitStage | Error | pc.Aborted>
   deps: readonly unknown[]
-  knobs?: Readonly<Record<string, string | number | boolean>>
-  onError?: (e: pc.StageEvent<'error'>) => void
+  knobs?: pc.Knobs
+  onError?: StageErrorListener
+  onReady?: (
+    build: SceneBuild<M>,
+    info: { generation: number; signal: AbortSignal },
+  ) => void
+  onFailed?: (error: Error, info: { lost: boolean; generation: number }) => void
+  onKnobRefused?: (key: string, value: pc.Knobs[string], error: Error) => void
 }
 
-interface Scene {
-  readonly status: 'building' | 'ready' | 'failed'
-  readonly stage: pc.BlitStage | null // non-null exactly when status === 'ready'
-  readonly error: Error | null // non-null exactly when status === 'failed'
-  readonly warnings: readonly Error[] // stage.warnings, re-read on every store bump
-  readonly lost: boolean // stage.lost; a lost context also moves status to 'failed'
-  readonly generation: number // bumped on every landed build
-  readonly knobEpoch: number // bumped after every knob batch is written
-  play(
-    from: pc.PoseRef,
-    to: pc.PoseRef,
-    o?: pc.StagePlayOptions,
-  ): Promise<pc.StagePlayReport<pc.View>>
-  stop(o?: { all?: boolean }): void
+type SceneSnapshot<M = undefined> = SceneCounters &
+  (
+    | { readonly status: 'building'; readonly stage: null; readonly meta: null; readonly error: null }
+    | { readonly status: 'ready'; readonly stage: pc.BlitStage; readonly meta: M; readonly error: null }
+    | { readonly status: 'failed'; readonly stage: null; readonly meta: null; readonly error: Error }
+  )
+
+type Scene<M = undefined> = SceneSnapshot<M> & SceneMethods
+type CreateStage<M = undefined> = SceneOptions<M>['create']
+type StageErrorListener = (e: pc.StageEvent<'error'>) => void
+
+function usePaperScene<M = undefined>(options: SceneOptions<M>): Scene<M>
+function usePaperScene<M = undefined>(
+  create: CreateStage<M>,
+  deps: readonly unknown[],
+  options?: Omit<SceneOptions<M>, 'create' | 'deps'>,
+): Scene<M>
+```
+
+`meta` is non-null exactly in the `ready` branch and is cleared beside `stage` on rebuild, failure,
+and context loss. Use it to retain the artifacts that produced the current stage:
+
+```tsx
+type BuildMeta = {
+  sheet: ReturnType<typeof paperSheet>
+  motion: ReturnType<typeof bakedMotion>
 }
 
-function usePaperScene(o: SceneOptions): Scene
+const create: CreateStage<BuildMeta> = async (signal, onError) => {
+  const sheet = paperSheet({ tiles })
+  const motion = bakedMotion({ packs: [pack2x3] })
+  const stage = await pc.paperStage({ present: 'blit', cssPx: 512, sheet, motion, signal, onError })
+  if (stage instanceof Error || pc.isAborted(stage)) return stage
+  return { stage, meta: { sheet, motion } }
+}
+
+const scene = usePaperScene(create, [], {
+  onReady: ({ meta }, { signal }) => {
+    if (!signal.aborted) console.info('scene ready', meta.sheet)
+  },
+  onFailed: (error, { lost }) => console.error(lost ? 'context lost' : 'build failed', error),
+})
+```
+
+`onReady` fires synchronously after the ready bump and before React re-renders. Its signal aborts on
+rebuild or unmount; no cleanup return is used. `onFailed` covers returned or thrown `create` errors,
+duplicate-core failure, and context loss. Its generation is the lost build when `lost: true`, and
+otherwise the last successful generation.
+
+`onKnobRefused(key, value, error)` is the key-carrying callback for a refused declarative write;
+`onError` still receives the stage event. For a synchronous escape hatch, use `scene.stage.set(...)`.
+The positional overload is the `react-hooks/exhaustive-deps`-checkable form:
+
+```tsx
+const scene = usePaperScene(create, [edgeShape, quality], {
+  knobs,
+  onKnobRefused: (key, value, error) => console.warn('knob refused', key, value, error),
+})
 ```
 
 You write the factory call yourself, and **both** parameters you are handed go into it:
