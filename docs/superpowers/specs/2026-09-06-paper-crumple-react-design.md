@@ -101,8 +101,9 @@ born when the canvas ref attaches.
 ### 2.1 Every function this package hands out is identity-stable
 
 **`useEvent` is the package-wide convention**, applied without exception to instance methods
-(`play`, `stop`, `refresh`), to `ref`, to every consumer callback the binding invokes (`onStart`,
-`onEnd`, `onError`) and to `SceneOptions.create`. The latest function is mirrored into a ref, and
+(`play`, `stop`, `refresh`, `draw`, `sync`, `retry`), to `ref`, and to every consumer callback the
+binding invokes (`onStart`, `onEnd`, `onError`, `onSettle`, `onReady`, `onFailed`, `onKnobRefused`)
+and to `SceneOptions.create`. The latest function is mirrored into a ref, and
 what is handed out is a wrapper whose identity never changes:
 
 ```ts
@@ -233,6 +234,13 @@ interface SceneOptions<M = undefined> {
   onKnobRefused?: (key: string, value: pc.Knobs[string], error: Error) => void
 }
 
+interface SceneCounters {
+  readonly warnings: readonly Error[]
+  readonly lost: boolean
+  readonly generation: number
+  readonly knobEpoch: number
+}
+
 type SceneSnapshot<M = undefined> = SceneCounters & (
   | { readonly status: 'building'; readonly stage: null; readonly meta: null; readonly error: null }
   | { readonly status: 'ready'; readonly stage: pc.BlitStage; readonly meta: M; readonly error: null }
@@ -306,6 +314,12 @@ loss clear it alongside `stage`. A bare `pc.BlitStage` remains legal and means `
 `onReady` receives the build and its generation/signal, so consumers can retain build artifacts
 without a sidecar race. The metadata is consumer-defined and does not make the package import sheet,
 motion, or other slot types.
+
+`onReady` fires once per landed build, after the ready store bump and before React re-renders. Its
+signal is the build effect controller signal and aborts on rebuild or unmount. `onFailed` covers
+returned or thrown `create` errors, duplicate-core failure, and context loss; `lost` distinguishes
+context loss from other failures. For `lost: true`, `generation` identifies the lost build; for
+other failures it is the last successful generation, or zero before any successful build.
 
 ### 4.2 `PaperScene` and `useScene`
 
@@ -845,11 +859,11 @@ synchronising ordinary UI state off the snapshots — a status pill, a mount tim
 — has `useEffect` plus `useState` and nothing else. That is what `eslint-plugin-react-hooks@7.1.1`
 reports at **error** level under `react-hooks/set-state-in-effect`; in that plugin's `recommended`
 config `exhaustive-deps` is only a `warn`, and it is `set-state-in-effect` (with `refs`) that bites.
-`examples/playground/src/ui/App.tsx` carries six such suppressions, each justified in a line, and none
-of them has a pure-render alternative — they are the "synchronise with an external system" shape
-`useEffect` exists for, aimed at a store the consumer cannot reach. Either the package publishes a
-small store primitive to build on, or six suppressions in the first consumer is the accepted cost of
-this shape. v1 accepts it; §11 names the alternative.
+`examples/playground/src/ui/App.tsx` carries suppressions only for this unresolved
+`set-state-in-effect` shape, each justified in a line; the shipped stable methods and callbacks no
+longer require dependency suppressions. These effects synchronise with an external store the
+consumer cannot reach. Either the package publishes a small store primitive to build on, or this
+remaining concern persists; §11 names the alternative.
 
 ## 6. What `<Crumple>` renders
 
