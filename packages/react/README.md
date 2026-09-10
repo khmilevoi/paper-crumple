@@ -77,9 +77,10 @@ The scene and the crumple:
 - **`usePaperScene(options)`** builds the `BlitStage` your `create` factory returns, rebuilds it
   only when `deps` changes, aborts an in-flight build and disposes a landed one on cleanup, diffs
   `knobs` at one `stage.set` per changed key, and moves `status` to `'failed'` when the WebGL2
-  context is lost. Its snapshot carries generic build metadata and exposes `onReady`, `onFailed`,
-  and `onKnobRefused` callbacks; reset goes through `stage.defaults`, and the positional overload
-  is supported too. It never touches the DOM.
+  context is lost. Its discriminated snapshot carries generic build metadata: `status` discriminates
+  `stage`, `meta`, and `error`. It exposes `onReady`, `onFailed`, and `onKnobRefused` callbacks;
+  reset goes through `stage.defaults`, and the positional overload `usePaperScene(create, deps,
+options?)` is supported too. It never touches the DOM.
 - **`<PaperScene value={scene}>`** is a context provider and nothing else — it renders no DOM of
   its own, so it costs nothing under SSR.
 - **`useScene()`** reads the nearest `<PaperScene>`. Called outside one, it returns a permanently
