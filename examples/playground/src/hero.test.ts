@@ -27,6 +27,7 @@ describe('useHero', () => {
     const onSettle = vi.fn()
     let shown = A
     let current: Crumple | null = null
+    const scene = { ...readyScene(fake.stage), meta: { artworkCssPx: 360 } }
     const activeRoot = createRoot(document.createElement('div'))
     root = activeRoot
     function Probe(): ReactNode {
@@ -35,9 +36,7 @@ describe('useHero', () => {
     }
     const render = async (): Promise<void> => {
       await act(async () => {
-        activeRoot.render(
-          createElement(PaperScene, { value: readyScene(fake.stage) }, createElement(Probe)),
-        )
+        activeRoot.render(createElement(PaperScene, { value: scene }, createElement(Probe)))
       })
     }
     await render()

@@ -57,7 +57,7 @@ export function swapDurationFor(fromAudio: number | null | undefined): number {
  */
 export function useHero(o: HeroOptions): Crumple {
   const scene = useScene<BuiltStage>()
-  const frameTo = scene.status === 'ready' ? scene.meta?.artworkCssPx : undefined
+  const frameTo = scene.status === 'ready' ? scene.meta.artworkCssPx : undefined
 
   return useCrumple({
     spriteKey: o.shown.id,
