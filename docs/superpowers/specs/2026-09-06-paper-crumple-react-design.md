@@ -425,15 +425,36 @@ type CrumpleOptions<S extends pc.SpriteSource> = {
   reducedMotion?: 'auto' | 'off'    // default 'auto'
   onStart?: (e: pc.Events['start']) => void
   onEnd?: (e: pc.Events['end']) => void
+  onSettle?: (e: CrumpleSettleEvent) => void
   /** A `pc.StageEvent`, not a `pc.Events` member — errors never reach a view's own bus. */
   onError?: (e: pc.StageEvent<'error'>) => void
 } & pc.PinFor<S>
+
+interface CrumpleSettleEvent {
+  readonly key: string
+  readonly error: Error | null
+  readonly reduced: boolean
+}
 
 interface Crumple {
   /** Identity-stable per §2.1, and that is load-bearing: React re-attaches a callback ref whose
    *  identity changed, which here means disposing and rebuilding the view every render. */
   readonly ref: (el: HTMLCanvasElement | null) => void
   readonly state: pc.ViewState | 'detached'
+  readonly status:
+    | 'detached'
+    | 'empty'
+    | 'acquiring'
+    | 'shown'
+    | 'playing'
+    | 'swapping'
+    | 'rolled-back'
+  readonly sprite: pc.Sprite | null
+  readonly pending:
+    | { readonly key: string; readonly phase: 'acquiring'; readonly run: null }
+    | { readonly key: string; readonly phase: 'entering'; readonly run: pc.Run<pc.PlayResult> }
+    | { readonly key: string; readonly phase: 'swapping'; readonly run: pc.Run<pc.SwapResult> }
+    | null
   /** The swap is parked at the ball, waiting on its target. Maintained by the binding, because
    *  `crumpling.ball` is set between two emissions and is never observable (§5.5). */
   readonly parked: boolean
@@ -446,11 +467,15 @@ interface Crumple {
    *  `null` when `frameTo` was absent or no front is resident. The arithmetic lives here and not
    *  in the component because §2 puts logic in the hook. */
   readonly frameStyle: { width: string; height: string; left: string; top: string } | null
+  readonly artworkStyle: { readonly width: string; readonly height: string } | null
   readonly view: pc.View | null      // raw, so an unforeseen scenario stays reachable
   /** `null` while detached. The `Run` is returned rather than swallowed: it is the only handle
    *  that carries `stop()` and the settled result, and a caller who wanted `void` can ignore it. */
   play(from: pc.PoseRef, to: pc.PoseRef, o?: pc.PlayOptions): pc.Run<pc.PlayResult> | null
   stop(): void
+  draw(pose: pc.PoseRef): void
+  sync(): void
+  retry(): void
   refresh(): void
 }
 
@@ -477,6 +502,13 @@ binding inherits that hole exactly, neither widening nor claiming to close it.
 `play` must stay a plain function, never `async` and never wrapped in one: `start` is emitted
 synchronously inside `view.play`, and the wrapper is exactly where that guarantee is lost (§5.3).
 
+Gate side effects on `crumple.view !== null` (or `state !== 'detached'`) before calling `play`; a
+`null` return is too late to undo a side effect. The return is a raw `Run`, not a settlement signal.
+
+`fit` and `tag` are fixed when the view is created. A later change is ignored and warns once in
+development; the values remain fixed until the view is rebuilt, typically by remounting under a
+different React `key`.
+
 **`null` from `play` means detached, and means nothing else.** There was no view to call — the scene
 is not `ready`, or no canvas is attached. A run that is *refused* or cut short is not a `null`: it is
 a `Run` that settles `PoseError` or `ABORTED` (§7), because `view.play` always hands back a handle.
@@ -489,13 +521,18 @@ forbids wrapping `play` in a promise is what makes its return value too late to 
 `requested` and `shown` are separate because they genuinely diverge: a swap whose target fails rolls
 back to the previous sprite (`state === 'crumpling.recover'`, and the `Run<SwapResult>` returns the
 target's Error), so the prop says B while the canvas shows A. The instance reports both and the
-Error, and **does not retry**. A retry policy inside an animation library would be a network policy
-nobody asked for.
+Error. The binding does not retry automatically; `retry()` explicitly retries the current rolled-back
+key without requiring a key-away-and-back cycle.
 
 **`error` reports the last settled run and is cleared when the next one starts** — on `start`, not on
 `end`, so a consumer rendering a rollback notice from `error !== null` sees it removed the moment the
 user's next interaction begins rather than a fold later. It does not latch until unmount: a latching
 field would make `error !== null` mean "something once went wrong", which no consumer can render.
+
+`onSettle` fires exactly once for a request that reaches animated completion, degraded `show()`, or
+rollback, and never for a superseded or unmounted request. Its `reduced` flag records whether
+reduced-motion accommodation applied to that request. `pending` remains non-null until this request
+settles.
 
 ### 5.2 Lifetime
 
@@ -617,23 +654,20 @@ const run = view.swapTo(src, { key: spriteKey, duration, signal })
 **A `spriteKey` that does not change is silence, and the silence is not reported.** The sync refuses
 a request whose `(view, key)` pair it has already synced, and it refuses it early: before `requested`
 is touched, before the internal sequence number advances, before `enter` or `swap` — never mind
-`view.swapTo`. No `add`, no run, no `start`/`step`/`end`, and no store bump, so nothing in
-`CrumpleSnapshot` moves and a caller cannot tell "the request landed and produced silence" from "the
-request was never considered". As a refusal that is right — re-selecting the picture already shown
-should cost nothing — and as a signal it is a trap for any caller that arms state *around* the swap
-it believes it just started. A transport that sets a fold direction and waits for `onEnd` waits
-forever; the playground picked the shown sample out of its own `<select>` and left the transport
-permanently armed. **A caller that arms anything must make the same-key check itself, before it
-arms** — the playground's `isNoOpSwap` is that check, written a second time because the hook's own is
-invisible from outside. The alternative, a snapshot field or an event meaning "considered and
-declined", is a fifth way to observe a swap and is not in v1.
+`view.swapTo`. No `add`, no run, no `start`/`step`/`end`, no `onSettle`, and no store bump. As a
+refusal that is right — re-selecting the picture already shown should cost nothing — and as a signal
+it is a trap for any caller that arms state *around* the swap it believes it just started. A transport
+that sets a fold direction and waits for `onEnd` waits forever; **a caller that arms anything must
+make the same-key check itself, before it arms**. The alternative, a snapshot field or an event
+meaning "considered and declined", is not in v1.
 
 **The declarative swap hands back no handle.** `crumple.play` returns its `Run`; the swap cannot,
 because nothing calls it — the hook starts it off a `spriteKey` change. Supersession by the hook's own
 sequence number is strictly better than a consumer-held `AbortController` and is not the loss; the
-loss is `stop()` and the settled `Run<SwapResult>`. What a consumer gets instead is three snapshot
-fields to correlate — `shown`, `requested`, `error` — plus `onEnd`, which the degraded path below does
-not fire at all. §11 names the imperative form and the hazard that comes with it.
+loss is `stop()` and the settled `Run<SwapResult>`. What a consumer gets instead is `shown`,
+`requested`, `pending`, `error` and `onSettle` to correlate the request; `onEnd` remains the view-run
+event and the degraded path below does not fire it. §11 names the imperative form and the hazard that
+comes with it.
 
 ### `acquire` — the one shape that turns a pair into a sprite
 
@@ -691,16 +725,11 @@ twice: it shows evicted sprites blank, and it races itself across two components
 `start`/`step`/`end` triple, which is also why nothing downstream of it needs a reduced-motion
 branch of its own. An `entrance: 'uncrumple'` under `reduce` is therefore `'flat'`.
 
-**And therefore a reduced-motion swap settles with no event of any kind.** `onStart` and `onEnd` are
-dispatched from the view's own bus (§5.5) and the degraded path never touches it: there is no run to
-start and none to end, only a `show()`. A consumer who closes something on `onEnd` — an audio
-sequence, a transport flag, a cursor — must close it on `shown` instead, in an effect, or it hangs
-for exactly the users who asked for less motion. The audio guarantee elsewhere in this spec is stated
-for the synchronous `swapTo` call and never restated for the path where that call does not happen,
-and the playground carries a settle backstop on `crumple.shown` for precisely that reason. This is
-the one place where the reactive snapshot is not a supplementary convenience but the only channel;
-a consumer who reads the callbacks and not §5.5 will not discover it until a reduced-motion user
-does.
+**A reduced-motion swap emits no view-run event, but it does settle through `onSettle`.** `onStart` and
+`onEnd` are dispatched from the view's own bus (§5.5) and the degraded path never touches it: there is
+no run to start and none to end, only a `show()`. A consumer who closes something on `onEnd` — an audio
+sequence, a transport flag, a cursor — must use `onSettle` for request completion; `shown` alone is
+not a settlement signal. `CrumpleSettleEvent.reduced` records that this accommodation applied.
 
 **No `await` may sit between a user gesture and `swapTo`.** `start` is emitted synchronously inside
 the call, and an `AudioContext.resume()` in a start handler only runs inside the gesture because of
@@ -723,17 +752,10 @@ sanctioned re-point and is one line away through `scene.stage`. Automatic `repla
 because `replace` releases the source-derived halves before rebuilding (`stage.ts:1996-1998`), so the
 front the rise would animate on is gone — the animation would silently vanish.
 
-**The map lives as long as the component, and so must every source in it.** The guard compares by
-identity and never forgets a key, and §5.2's rebuild re-acquires every key from the `src` the props
-still carry — so a source that is only valid until its sprite has been ingested is not safe to
-release. Revoking the `URL.createObjectURL` of a dropped file once its texture is resident makes the
-next scene rebuild read a revoked URL, and handing the same key a *fresh* URL instead is the mismatch
-this guard exists to refuse. A consumer swapping to blob-backed sources therefore either keeps every
-URL alive for as long as the component is mounted — which the playground does, one leak per drop,
-knowingly — or never re-points a key and mints one per source. The shape that breaks is a key taken
-from the file's *name*: two files called `photo.png` are two pictures and need two keys, so a
-synthetic key per drop is not a nicety. This section was right about the defect the guard prevents
-and said nothing about what the guard costs the source's lifetime.
+**`File` is a direct source.** It is a `Blob` and is passed directly as `src`; the binding does not
+require an object URL. The identity guard still compares sources and never forgets a key, so a
+consumer keeps a unique key for each dropped picture — two files with the same filename can differ —
+and does not re-point a key to a different source.
 
 ### 5.4 The entrance
 
@@ -761,7 +783,8 @@ sprite is already on screen to rise from.
 
 ### 5.5 Reactive state
 
-`state`, `parked`, `pose`, `shown`, `frame` and `frameStyle` are served through
+`state`, `status`, `parked`, `pose`, `shown`, `sprite`, `requested`, `pending`, `error`, `frame`,
+`frameStyle`, `artworkStyle` and `view` are served through
 `useSyncExternalStore`, over a store the **binding** versions.
 
 **Events are a supplementary source, not the source.** An earlier draft subscribed `start`, `step`,
@@ -793,7 +816,9 @@ snapshot object.
 
 `parked` is maintained the same way, from what the events do carry: a swap's `start` reports `via`,
 the resolved ball index, and the run is parked from the `step` whose `pose === via`. This needs no
-`poseCount` accessor and no core change.
+`poseCount` accessor and no core change. The target `shown` and `sprite` are adopted at the ball,
+while descent is still running; `pending` remains non-null through that descent and is cleared only
+when the request settles. Neither `shown` nor `sprite` is therefore a settlement signal.
 
 **It is cleared by `end` and by `start`, not only by the next `step`.** A park cut short by
 `view.stop()`, by supersession or by `dispose()` goes through `cancel` → `finish` → `end`
@@ -802,6 +827,11 @@ the resolved ball index, and the run is parked from the `step` whose `pose === v
 `parked` at `true` for the rest of the component's life on every stopped, superseded or unmounted
 swap. `start` clears it too, and clears the remembered `via` with it, or a later ordinary `play`
 whose first `step` happens to land on the previous run's ball index latches it again.
+
+`onStart`, `onEnd` and `onError` are dispatched from these subscriptions. `onSettle` is dispatched
+exactly once when the current request reaches animated completion, degraded `show()`, or rollback,
+and never when superseded or unmounted. All callbacks use the identity-stable `useEvent` wrappers;
+they do not create their own subscriptions.
 
 The snapshot **must be that cached object, rebuilt at each bump** — never assembled fresh inside
 `getSnapshot`. `view.state` and `view.pose` are getters, so an object literal built per call has a new
@@ -841,16 +871,14 @@ for unforeseen scenarios, and between them they map this surface's edge.
   has no seam a consumer can time. A consumer who must time acquisition does its own `add` through
   `scene.stage` and gives up the shared in-flight registry (§5.3) by doing so, which is a real cost
   and not a formality: it is the thing that makes two crumples on one key cost one fetch.
-- **No sprite.** `shown` is `view.sprite?.key`, a key. The sprite's own `rect` and `frontSize` are
-  reachable only as `crumple.view?.sprite`, read at render time off the raw view — outside the
-  snapshot, so nothing versions them in step with the fields printed beside them.
+- **`sprite` is shipped.** `sprite` is read in the same snapshot pass as `shown`, so a consumer can
+  inspect the resident `pc.Sprite` without reaching through `crumple.view` during render. `shown`
+  remains its key-shaped companion for lightweight comparisons.
 - **No run cadence.** Neither a step count nor a step interval; a consumer wanting either subscribes
   `view.on('start')` and `view.on('step')` itself, in parallel with the binding's own subscriptions.
-- **No re-read that is only a re-read.** `refresh()` calls `view.refresh()` *and* bumps the store;
-  there is no way to ask the instance to re-read its snapshot without also asking it to redraw. After
-  a `view.draw(n)`, which emits nothing (above), a consumer whose pose readout must follow pays one
-  redraw it did not need — the playground's draw handler calls `refresh()` unconditionally and says
-  so in a comment. A bump-only form is one method and is named in §11.
+- **`draw` and `sync` are shipped.** `draw(pose)` performs one draw and one snapshot bump, while
+  `sync()` re-reads after an otherwise-raw view call without drawing. `refresh()` retains its
+  draw-and-refresh meaning for callers that need both.
 
 **A consumer doing ordinary bookkeeping over these snapshots writes effects, and lints against
 them.** `usePaperScene` and `useCrumple` avoid setState-in-an-effect internally by owning a versioned
@@ -875,8 +903,9 @@ A positioned wrapper element, a `<canvas ref={value.ref}>` inside it, and `child
 canvas while `value.shown === null`. DOM props land on the wrapper; `canvasProps` is the escape hatch
 for the canvas itself.
 
-The wrapper is a `<div>` with `position: relative`. It is not overridable in v1 — an `as` prop is a
-guess at a requirement nobody has stated yet, and adding one later breaks nothing.
+The wrapper is a `<div>` with a fixed default of `position: relative`. Consumer `style` may override
+that default; an `as` prop is a separate guess at a requirement nobody has stated yet, and adding
+one later breaks nothing.
 
 The wrapper is not decoration. The paper overflows the picture by however far the edge knobs reach,
 and pinning the *picture* rather than the *paper* means sizing and offsetting an element from
@@ -894,23 +923,15 @@ handed.**
 
 `value.frameStyle` is recomputed after every swap and after a hull-tier re-source has landed (§4.3).
 
-**`frameStyle` is the paper box; the picture box is not on the instance.** `frameStyleFor` is exactly
-`frameArtwork(frame, frameTo).canvas` plus the offset, and `frameArtwork(...).image` — the artwork's
-own rectangle at the same scale — never reaches this package's surface. That is enough for
-`<Crumple>`, which is why it was enough for this section, and it is not enough for the layout around
-it: a consumer who hangs the paper *out of flow*, so that no edge knob can move the picture on
-screen, needs the picture's rectangle to size the slot the paper hangs off. Today that consumer
-reimplements the one multiplication `frameTo / max(artwork.w, artwork.h)` this package already does
-internally (`examples/playground/src/hero.ts`'s `heroSlotStyle`), and reimplements its "no build yet,
-no override" convention with it — `frame-style.ts` returns `null` rather than a 0×0 box, and that is a
-behaviour rather than an export, so a consumer who does not replicate it puts a real zero-sized box in
-the DOM during every rebuild. Both are §11 work. What §6 must not imply is that `frameStyle` is the
-whole of framing; it is the half the component needs.
+**`frameStyle` is the paper box and `artworkStyle` is the picture box.** Both are derived in the hook
+from `frameArtwork(frame, frameTo)`, at the same scale and with the same `null` convention: absent
+`frameTo` or absent `frame` means the hook applies nothing. `frameStyle` goes on `<Crumple>`'s
+wrapper; `artworkStyle` gives a consumer the artwork's own width and height for an out-of-flow slot.
 
-Where the consumer's own `style` prop sets one of the four properties `frameStyle` carries,
-**`frameStyle` wins** — it is applied last. A consumer overriding `width` on a framed wrapper is
-asking for a broken frame rather than a customisation, and the alternative precedence makes framing
-fail silently for whoever forgot which four properties were spoken for.
+The wrapper's fixed default is `position: relative`. Consumer `style` may override it, and may set
+other properties, but **`frameStyle` is spread last**, so its `width`, `height`, `left`, and `top` win.
+A consumer overriding one of those four on a framed wrapper is asking for a broken frame rather than
+a customisation.
 
 **Why `frameTo` is an option and not something the binding works out.** An earlier draft said
 `<Crumple>` frames "when the scene was built with `artworkCssPx`", which cannot be implemented: the
@@ -992,7 +1013,14 @@ first client paint agree and there is no hydration mismatch.
 ## 9. Testing
 
 Level 1, jsdom, no browser and no GPU — §3.4 states that all three React-shaped constraints are
-level-1 testable, and this package is the proof.
+level-1 testable, and this package is the proof. The pure fake stage and snapshot fixtures ship from
+the public `@paper-crumple/react/testing` subpath.
+
+Tests use jsdom because `createFakeStage` creates a canvas. Testing Library configures React's act
+environment; a bare `act` caller sets `IS_REACT_ACT_ENVIRONMENT = true`. `matchMedia` is guarded and
+needs no stub unless a test exercises `reducedMotion: 'auto'` with reduction enabled. The fake's
+`view.run` always reads `null`, and `FakeViewHandle.settleRun` controls only the latest run, so tests
+settle the latest handle explicitly and assert supersession through the call log.
 
 - A **fake stage** implementing `BlitStage` against the real types, so the tests exercise the
   binding's own state machine rather than WebGL.
@@ -1027,20 +1055,16 @@ level-1 testable, and this package is the proof.
 - `.test-d.ts` type tests in the existing `types` vitest project, including that a bare
   `ImageBitmap` without `pin: true` does not typecheck as `CrumpleOptions.src`.
 
-The GL project stays untouched; this package adds no `*.gl.test.ts`.
+The GL project stays untouched; this package adds no `*.gl.test.ts`. Assertions should use the fake
+stage's call log for exact core interactions — for example, one `add` for shared acquisition and no
+`add` for a resident-key cache hit — rather than depending on implementation details of the harness.
 
-**None of that apparatus reaches a consumer, and this section should own the gap rather than leave it
-implied.** The fake stage, the `StrictMode`-aware `render` / `renderHook` harness and the crumple
-probe live in `packages/react/src/testing/`, which nothing in the export graph imports, so none of it
-lands in `dist` — `index.ts` says so outright, and calls it internal conventions and test scaffolding.
-A consumer testing their own hook-driven component built on `usePaperScene` / `useCrumple` therefore
-faces the real `BlitStage` contract with nothing in the package that implements it short of a browser
-with a WebGL2 context, which is exactly the position this section put *itself* in and then solved for
-itself only. The migration hit it in both directions: `examples/playground/src/scene.ts`'s
-`useDemoScene` grew a third `build` parameter — defaulted to the real builder, replaced in tests —
-purely to get a hand-written fake `BlitStage` in, and `hero.ts`'s `useHero`, which got no such seam,
-has its hook body untested while only its three pure helpers are covered. An injected builder is the
-workaround a consumer can write; a published double is the fix, and §11 names it.
+The ReactDOM-backed render/probe helpers remain internal; the public subpath contains the pure fake
+stage and snapshot fixtures only. Consumers testing hook-driven components built on
+`usePaperScene` / `useCrumple` can therefore exercise the real binding contract without WebGL2, while
+the test harness retains freedom to evolve. The compatibility promise is additive within a major:
+helpers may add fields within a major version, but never remove fields within that major. Consumers
+should assert relevant calls and fields rather than exact equality over every helper field.
 
 ## 10. The playground migration
 
@@ -1097,14 +1121,10 @@ into one. That is almost certainly the better behaviour, nobody asked for it, an
 The rest were found by the migration and are named here so the backlog is in one place rather than
 in a findings report:
 
-- **A wider `Crumple` surface.** Five readings a consumer takes off the raw `crumple.view` rather
-  than off the snapshot (§5.5, §6): the acquisition timing, the shown `Sprite` itself rather than its
-  key, a run's step cadence, the artwork box beside `frameStyle`'s paper box, and a re-read that
-  versions the snapshot without also redrawing. Each is one field or one method; they are deferred
-  *together* because they are one decision — how much of the core's surface this snapshot mirrors —
-  and one consumer's diagnostics footer is not enough evidence to settle it. `view` stays the escape
-  hatch meanwhile, which is what §5.1 exposes it for, and a design that closed every one of these
-  would have to say what is left for `view` to be.
+- **Acquisition timing, `shownAt`, and run cadence.** The binding still does not expose when its
+  `stage.add`/`prepare` work begins or ends, a timestamp for when a sprite is shown, or a snapshot
+  step count/interval. Consumers needing those diagnostics can use `scene.stage` and the raw
+  `crumple.view` seams meanwhile; a stable public shape needs evidence from real use.
 - **Tier-aware knob invalidation.** Every batch that wrote anything bumps `knobEpoch` and every
   crumple joins `prepare` off it (§4.3), including for a write that expired no front. The tier is
   public and reachable — `stage.knobs` is `readonly KnobDescriptor[]` (`stage.ts:113`) and
@@ -1118,17 +1138,16 @@ in a findings report:
   the handle the declarative path cannot (§5.3). The hazard is the reason it is not in v1: two ways
   to change the sprite, one declarative and one not, racing through the same sequence number, and a
   `spriteKey` prop that then disagrees with what is on screen for reasons other than a failure.
-- **The internals `index.ts` withholds.** Two of them already have a consumer asking. The versioned
-  store, as a primitive a consumer can synchronise derived state through instead of effects that trip
-  `react-hooks/set-state-in-effect` (§5.5); and `src/testing/` — the fake stage and the `StrictMode`
-  harness — as a published double, so a consumer can test a hook-driven component without a WebGL2
-  context (§9). Both are deliberately internal today, and publishing either freezes its shape.
-  `src/testing/` is the one to do first: it is the one whose absence forces a consumer to write an
-  injected seam into production code.
+- **The versioned store primitive `index.ts` withholds.** A consumer cannot synchronise derived state
+  through the binding's store without effects that trip `react-hooks/set-state-in-effect` (§5.5).
+  Publishing a small primitive would make that seam available, but would also freeze its shape; it
+  remains deliberately internal today.
 
 ## 12. Open questions, and the failure this document keeps making
 
-No open questions. The amendment in §5.3 is the only change to a published contract.
+No open questions. The amendment in §5.3 is the only core contract amendment; the additive React
+surface and `@paper-crumple/react/testing` subpath are shipped package additions covered by the
+major-version compatibility promise.
 
 What is worth recording instead is the defect this document produced eleven times across four review
 passes, because a fifth is likelier than not and the reader who finds it should recognise it
