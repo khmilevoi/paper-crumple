@@ -1,48 +1,17 @@
-import { useCallback } from 'react'
-import type * as pc from '@paper-crumple/core'
-import { useCrumple } from '@paper-crumple/react'
-import type { Crumple, Scene } from '@paper-crumple/react'
+import { useCrumple, useScene } from '@paper-crumple/react'
+import type { Crumple, CrumpleSettleEvent } from '@paper-crumple/react'
 
 import type { BuiltStage } from './config'
-import { frameArtwork } from './framing'
 import type { Sample } from './samples'
 
 /** What a swap gets when sound is off or silent — the fold has to last *something*. */
 export const SWAP_DURATION_MS = 900
 
-export interface SlotStyle {
-  readonly width: string
-  readonly height: string
-}
-
 export interface HeroOptions {
-  readonly scene: Scene
-  readonly built: BuiltStage | null
   readonly shown: Sample
   readonly duration: number
-  readonly onEnd: () => void
+  readonly onSettle: (event: CrumpleSettleEvent) => void
   readonly observed: (where: string, error: Error) => void
-}
-
-export interface Hero {
-  readonly crumple: Crumple
-  readonly slotStyle: SlotStyle | null
-}
-
-/**
- * The `.stage-frame` box.
- *
- * `<Crumple>`'s `frameStyle` sizes the WRAPPER to the paper box and offsets it so the artwork lands
- * where the wrapper would otherwise have been — `frameStyleFor` is `frameArtwork(...).canvas` plus
- * `.offset`, the same four multiplications by one scale. What the package does not produce is
- * `frameArtwork(...).image`, the artwork's own rectangle, and the playground needs it: the slot is
- * what the layout reserves, and the paper hangs off it out of flow so no edge parameter can move
- * the picture (`framing.ts`).
- */
-export function heroSlotStyle(frame: pc.ViewFrame | null, cssPx: number): SlotStyle | null {
-  if (frame === null) return null
-  const { image } = frameArtwork(frame, cssPx)
-  return { width: `${String(image.w)}px`, height: `${String(image.h)}px` }
 }
 
 /**
@@ -86,34 +55,20 @@ export function swapDurationFor(fromAudio: number | null | undefined): number {
  * It is fixed at `stage.view()` and a later change is silently ignored, which is why it is a hook
  * option and never a prop.
  */
-export function useHero(o: HeroOptions): Hero {
-  const { observed } = o
-  const onError = useCallback(
-    (e: pc.StageEvent<'error'>): void => {
-      // §7's orphan channel: `observed: true` means the error is, or will be, a return value
-      // someone can narrow, so reporting it here as well double-counts it.
-      if (!e.observed) observed('useCrumple', e.error)
-    },
-    [observed],
-  )
+export function useHero(o: HeroOptions): Crumple {
+  const scene = useScene<BuiltStage>()
+  const frameTo = scene.status === 'ready' ? scene.meta?.artworkCssPx : undefined
 
-  const crumple = useCrumple({
-    scene: o.scene,
+  return useCrumple({
     spriteKey: o.shown.id,
     src: o.shown.src,
     fit: 'contain',
     tag: o.shown.id,
     duration: o.duration,
-    frameTo: o.built?.artworkCssPx,
-    onEnd: o.onEnd,
-    onError,
+    frameTo,
+    onSettle: o.onSettle,
+    onError(e) {
+      if (!e.observed) o.observed('useCrumple', e.error)
+    },
   })
-
-  // When there is no build yet, return null to let the stylesheet's default size stand during
-  // rebuild, matching `frameStyleFor`'s pattern — a real 0px × 0px box is reachable because
-  // crumple.frame stays stale until an effect runs while built becomes null synchronously.
-  return {
-    crumple,
-    slotStyle: o.built === null ? null : heroSlotStyle(crumple.frame, o.built.artworkCssPx),
-  }
 }

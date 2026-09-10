@@ -1,13 +1,10 @@
 import { useState } from 'react'
-import type { CSSProperties, ReactNode } from 'react'
+import type { ReactNode } from 'react'
 import { Crumple } from '@paper-crumple/react'
 
 export interface StageProps {
   /** The hero. `<Crumple>` owns the canvas element and its `ref`; nothing here creates one. */
   readonly hero: Crumple
-  /** The artwork's own rectangle. `null` until a front is resident, when the slot keeps the size
-   *  the stylesheet gives it. */
-  readonly slotStyle: CSSProperties | null
   readonly poseChip: string
   readonly sampleChip: string
   readonly edgeChip: string
@@ -32,7 +29,6 @@ const BACKGROUND_CLASS: Readonly<Record<StageProps['background'], string>> = {
  */
 export function Stage({
   hero,
-  slotStyle,
   poseChip,
   sampleChip,
   edgeChip,
@@ -64,14 +60,10 @@ export function Stage({
       </div>
       <span className="stage-chip stage-chip--edge">{edgeChip}</span>
 
-      {/* The artwork's own rectangle, sized from `View.frame` through `heroSlotStyle`. The paper
-          hangs off it absolutely and reaches as far past it as the paper does, so no edge
-          parameter can move the picture — see `framing.ts`.
-
-          `position: 'absolute'` overrides the component's own `position: relative`; the four
-          properties `frameStyle` carries are applied after `style` and are not overridable, which
-          is the precedence §6 wants. */}
-      <div className="stage-frame" style={slotStyle ?? undefined}>
+      {/* The artwork's own rectangle is exposed by the hero snapshot. The paper hangs off it
+          absolutely and reaches as far past it as the paper does, so no edge parameter can move
+          the picture. */}
+      <div className="stage-frame" style={hero.artworkStyle ?? undefined}>
         <Crumple value={hero} className="stage-paper" style={{ position: 'absolute' }} />
       </div>
 

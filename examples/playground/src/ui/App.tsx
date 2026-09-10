@@ -253,12 +253,10 @@ function Playground({
     setDirection(null)
   }, [audio])
 
-  const { crumple, slotStyle } = useHero({
-    scene,
-    built,
+  const crumple = useHero({
     shown,
     duration: swapDuration,
-    onEnd: endSwap,
+    onSettle: () => endSwap(),
     observed,
   })
 
@@ -829,7 +827,6 @@ function Playground({
         <section className="stage-column">
           <Stage
             hero={crumple}
-            slotStyle={slotStyle}
             poseChip={`pose ${String(pose)} / ${String(lastPose)}`}
             sampleChip={sampleId}
             edgeChip={edgeChip}
