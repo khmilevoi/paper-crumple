@@ -1,7 +1,5 @@
-import type { KnobDescriptor, NumberKnob, IntKnob } from '@paper-crumple/core'
+import type { KnobDescriptor, Knobs, NumberKnob, IntKnob } from '@paper-crumple/core'
 import type { BuiltStage } from './config'
-
-export type KnobValues = Readonly<Record<string, string | number | boolean>>
 
 /**
  * The write-back key. A `binds` descriptor is one core-owned value both slots share, and the
@@ -45,6 +43,6 @@ export function pctOf(value: number, min: number, max: number): number {
   return Math.max(0, Math.min(100, ((value - min) / (max - min)) * 100))
 }
 
-export function defaultValue(k: KnobDescriptor): string | number | boolean {
+export function defaultValue(k: KnobDescriptor): Knobs[string] {
   return k.default
 }

@@ -1,6 +1,6 @@
 import type { BucketName, DemoConfig } from './config'
 import { BUCKET_NAMES, DEFAULT_CONFIG } from './config'
-import type { KnobValues } from './knobs'
+import type { Knobs } from '@paper-crumple/core'
 import type { EdgeFinish, EdgeShape, EdgeWidthUnit } from '@paper-crumple/paper'
 
 /**
@@ -37,8 +37,8 @@ function parseKnobValue(type: string, raw: string, key: string): string | number
   return fieldError(key, raw)
 }
 
-function parseKnobs(params: URLSearchParams): KnobValues | Error {
-  const out: Record<string, string | number | boolean> = {}
+function parseKnobs(params: URLSearchParams): Knobs | Error {
+  const out: Record<string, Knobs[string]> = {}
   for (const [rawKey, rawValue] of params) {
     if (!rawKey.startsWith(KNOB_PREFIX)) continue
     const rest = rawKey.slice(KNOB_PREFIX.length) // "b.sheet.tearAmp"
@@ -111,7 +111,7 @@ function parseNumberField(params: URLSearchParams, key: string, fallback: number
  * `present` was removed with the React migration and is deliberately NOT parsed: an old
  * `&present=direct` link loads at the default rather than reporting an unknown field.
  */
-export function encodeState(config: DemoConfig, changed: KnobValues): string {
+export function encodeState(config: DemoConfig, changed: Knobs): string {
   const params = new URLSearchParams()
   params.set('edgeShape', config.edgeShape)
   params.set('edgeFinish', config.edgeFinish)
@@ -136,7 +136,7 @@ export function encodeState(config: DemoConfig, changed: KnobValues): string {
  * key. `URLSearchParams` does the actual parsing, so there is no `JSON.parse` — and nothing here
  * to `throw` or to `catch` around.
  */
-export function decodeState(hash: string): { config: DemoConfig; knobs: KnobValues } | Error {
+export function decodeState(hash: string): { config: DemoConfig; knobs: Knobs } | Error {
   const params = new URLSearchParams(hash.replace(/^#/, ''))
 
   const edgeShape = parseLiteral<EdgeShape>(

@@ -1,8 +1,9 @@
 import type { ReactNode } from 'react'
 import { SHARED_KNOBS } from '@paper-crumple/core'
 import type { IntKnob, NumberKnob } from '@paper-crumple/core'
+import type { Knobs } from '@paper-crumple/core'
 import type { EdgeSpec } from '@paper-crumple/paper'
-import type { Entry, KnobValues } from '../knobs'
+import type { Entry } from '../knobs'
 import { isNumberLike, stepOf } from '../knobs'
 import { ceilingsFor } from '../edge-ceilings'
 import { Segmented, Slider, SubCard } from './primitives'
@@ -63,7 +64,7 @@ const unitOf = (k: NumberKnob | IntKnob): string | undefined =>
 
 export interface EdgeSectionProps {
   readonly entries: readonly Entry[]
-  readonly knobs: KnobValues
+  readonly knobs: Knobs
   readonly spec: EdgeSpec
   readonly onSpecChange: (spec: EdgeSpec) => void
   /** A knob write is declarative now: it moves React state and `usePaperScene` writes the stage.

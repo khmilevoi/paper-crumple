@@ -1,11 +1,11 @@
 import { useCallback, useMemo, useState } from 'react'
 import * as pc from '@paper-crumple/core'
+import type { Knobs } from '@paper-crumple/core'
 import { usePaperScene } from '@paper-crumple/react'
 import type { Scene } from '@paper-crumple/react'
 
 import type { BuiltStage, DemoConfig } from './config'
 import { buildStage } from './config'
-import type { KnobValues } from './knobs'
 import { collectDescriptors, defaultValue } from './knobs'
 
 /** The build seam. Production passes nothing and gets `buildStage`; the tests pass a fake, which
@@ -19,10 +19,10 @@ export type BuildStage = (
 export interface DemoScene {
   readonly scene: Scene
   readonly built: BuiltStage | null
-  readonly knobs: KnobValues
-  readonly setKnob: (key: string, value: pc.Knobs[string]) => void
+  readonly knobs: Knobs
+  readonly setKnob: (key: string, value: Knobs[string]) => void
   readonly resetKnobs: () => void
-  readonly seedKnobs: (values: KnobValues) => void
+  readonly seedKnobs: (values: Knobs) => void
 }
 
 /**
@@ -33,9 +33,9 @@ export interface DemoScene {
  * because the binding has no idea what its default is — so a reset is not `{}`, it is every
  * default, spelled out. `useStage.resetKnobs` wrote them one at a time for the same reason.
  */
-export function defaultKnobValues(built: BuiltStage | null): KnobValues {
+export function defaultKnobValues(built: BuiltStage | null): Knobs {
   if (built === null) return {}
-  const out: Record<string, pc.Knobs[string]> = {}
+  const out: Record<string, Knobs[string]> = {}
   for (const e of collectDescriptors(built)) out[e.key] = defaultValue(e.k)
   return out
 }
@@ -61,7 +61,7 @@ export function useDemoScene(
   build: BuildStage = buildStage,
 ): DemoScene {
   const [built, setBuilt] = useState<BuiltStage | null>(null)
-  const [knobs, setKnobs] = useState<KnobValues>({})
+  const [knobs, setKnobs] = useState<Knobs>({})
 
   const create = useCallback(
     async (
@@ -93,7 +93,7 @@ export function useDemoScene(
 
   const scene = usePaperScene({ create, deps: [config], knobs, onError })
 
-  const setKnob = useCallback((key: string, value: pc.Knobs[string]): void => {
+  const setKnob = useCallback((key: string, value: Knobs[string]): void => {
     setKnobs((prev) => ({ ...prev, [key]: value }))
   }, [])
 
@@ -101,7 +101,7 @@ export function useDemoScene(
     setKnobs(defaultKnobValues(built))
   }, [built])
 
-  const seedKnobs = useCallback((values: KnobValues): void => {
+  const seedKnobs = useCallback((values: Knobs): void => {
     setKnobs(values)
   }, [])
 
