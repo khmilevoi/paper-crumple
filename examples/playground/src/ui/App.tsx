@@ -131,13 +131,22 @@ export function App(): ReactNode {
   /** The "sample" picker's own bound value — see `nextLibrarySample`. Kept alongside the collapsed
    *  `shown` state rather than reviving the pre-migration two-state split. */
   const [librarySample, setLibrarySample] = useState<Sample>(BOOT_SAMPLE)
-  const [status, setStatus] = useState<StageStatus | null>({ ok: true, text: 'booting…' })
+  const [status, setStatus] = useState<StageStatus | null>(() =>
+    boot instanceof Error
+      ? { ok: false, text: `decodeState: ${boot.message}` }
+      : { ok: true, text: 'booting…' },
+  )
 
   const onObserved = useCallback((where: string, error: Error): void => {
     setStatus({ ok: false, text: `${where}: ${error.message}` })
   }, [])
 
-  const { scene, built, knobs, setKnob, resetKnobs, seedKnobs } = useDemoScene(config, onObserved)
+  const { scene, knobs, setKnob, resetKnobs } = useDemoScene(
+    config,
+    onObserved,
+    boot instanceof Error ? {} : boot.knobs,
+  )
+  const built = scene.status === 'ready' ? scene.meta : null
   const generation = scene.generation
 
   // One controller for the life of the page — the handle owns an AudioContext and decoded buffers,
@@ -171,16 +180,6 @@ export function App(): ReactNode {
   })
 
   const sprite = crumple.view?.sprite ?? null
-
-  useEffect(() => {
-    if (!(boot instanceof Error)) seedKnobs(boot.knobs)
-    // A malformed fragment is reported once, on mount — there is no external store to subscribe
-    // to instead, and the alternative is silently discarding the reader's own bad link.
-    // eslint-disable-next-line react-hooks/set-state-in-effect
-    else onObserved('decodeState', boot)
-    // Once, before the first rebuild lands — `useDemoScene` re-applies it on the way up.
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [])
 
   // --- sound --------------------------------------------------------------------------------------
 

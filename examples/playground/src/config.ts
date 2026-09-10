@@ -7,6 +7,7 @@ import pack1x1 from '@paper-crumple/motion/packs/1x1'
 import pack2x3 from '@paper-crumple/motion/packs/2x3'
 import pack3x2 from '@paper-crumple/motion/packs/3x2'
 import type { PackModule } from '@paper-crumple/motion'
+import type { StageErrorListener } from '@paper-crumple/react'
 
 export type BucketName = '1x1' | '2x3' | '3x2'
 
@@ -95,7 +96,7 @@ export interface BuiltStage {
  */
 export async function buildStage(
   config: DemoConfig,
-  onError: (e: pc.StageEvent<'error'>) => void,
+  onError: StageErrorListener,
   signal: AbortSignal,
 ): Promise<BuiltStage | Error | pc.Aborted> {
   const started = performance.now()
