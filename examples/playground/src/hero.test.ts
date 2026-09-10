@@ -29,15 +29,17 @@ describe('heroSlotStyle', () => {
 
 describe('droppedSample', () => {
   it('gives every drop its own sprite key, because a key names a picture and not a slot', () => {
-    const a = droppedSample(new File([], 'photo.png'), 'blob:one', 1)
-    const b = droppedSample(new File([], 'photo.png'), 'blob:two', 2)
+    const fileA = new File([], 'photo.png')
+    const fileB = new File([], 'photo.png')
+    const a = droppedSample(fileA, 1)
+    const b = droppedSample(fileB, 2)
     expect(a.id).not.toBe(b.id)
-    expect(a.url).toBe('blob:one')
-    expect(b.url).toBe('blob:two')
+    expect(a.src).toBe(fileA)
+    expect(b.src).toBe(fileB)
   })
 
   it('keeps the file name as the label the chips show', () => {
-    expect(droppedSample(new File([], 'camel.png'), 'blob:x', 7).label).toBe('camel.png')
+    expect(droppedSample(new File([], 'camel.png'), 7).label).toBe('camel.png')
   })
 })
 

@@ -53,8 +53,8 @@ export function heroSlotStyle(frame: pc.ViewFrame | null, cssPx: number): SlotSt
  * PICTURE, not a slot"*. Two files of one name would otherwise collide, and the second drop would
  * be reported instead of shown.
  */
-export function droppedSample(file: File, url: string, seq: number): Sample {
-  return { id: `dropped-${String(seq)}`, label: file.name, url }
+export function droppedSample(file: File, seq: number): Sample {
+  return { id: `dropped-${String(seq)}`, label: file.name, src: file }
 }
 
 /**
@@ -100,7 +100,7 @@ export function useHero(o: HeroOptions): Hero {
   const crumple = useCrumple({
     scene: o.scene,
     spriteKey: o.shown.id,
-    src: o.shown.url,
+    src: o.shown.src,
     fit: 'contain',
     tag: o.shown.id,
     duration: o.duration,

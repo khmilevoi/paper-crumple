@@ -14,7 +14,7 @@ import { DEFAULT_CONFIG } from '../config'
 import { collectDescriptors } from '../knobs'
 import { droppedSample, swapDurationFor, useHero, SWAP_DURATION_MS } from '../hero'
 import { useDemoScene } from '../scene'
-import { BROKEN_URL, DEFAULT_SAMPLE_ID, SAMPLES } from '../samples'
+import { BROKEN_URL, DEFAULT_SAMPLE_ID, nextLibrarySample, SAMPLES } from '../samples'
 import type { Sample } from '../samples'
 import { decodeState, encodeState } from '../state'
 import { prefetchSamples, glInfo } from '../stage'
@@ -39,7 +39,7 @@ const FOLD_DURATION_MS = 900
 const BROKEN_SAMPLE: Sample = {
   id: BROKEN_ID,
   label: 'broken URL (rollback demo)',
-  url: BROKEN_URL,
+  src: BROKEN_URL,
 }
 
 type SectionKey = 'source' | 'edge' | 'poses' | 'sound' | 'look'
@@ -48,19 +48,6 @@ const BOOT_SAMPLE: Sample = SAMPLES.find((s) => s.id === DEFAULT_SAMPLE_ID) ?? S
 
 function sameList(a: readonly number[], b: readonly number[]): boolean {
   return a.length === b.length && a.every((x, i) => x === b[i])
-}
-
-/**
- * The "sample" `<select>`'s next bound value. `SourceSection`'s picker only ever renders an
- * `<option>` per `SAMPLES` entry (`ui/SourceSection.tsx:94`) — a dropped file's `dropped-N` id, or
- * the rollback demo's `broken` id, has no matching option, which desyncs a controlled `<select>`
- * and prints a React warning. `target` wins only when it is a library sample; anything else keeps
- * whatever was remembered, exactly like the pre-migration two-state version, where a dropped file
- * never touched the state the picker read (`075dc4e:ui/App.tsx`'s `onDropImage` called `swapTo`
- * directly and never `setSample`).
- */
-export function nextLibrarySample(current: Sample, target: Sample): Sample {
-  return SAMPLES.some((s) => s.id === target.id) ? target : current
 }
 
 /**
@@ -564,11 +551,7 @@ export function App(): ReactNode {
   const onDropImage = useCallback(
     (file: File) => {
       dropSeq.current += 1
-      // The blob URL is deliberately NOT revoked when the swap settles. The pair guard keeps the
-      // (key, src) pair for the life of the component and compares by identity, and `useCrumple`
-      // re-acquires the key across a scene rebuild (§5.2) — which would then read a revoked URL.
-      // One live blob URL per drop is the price of the declarative source.
-      startSwap(droppedSample(file, URL.createObjectURL(file), dropSeq.current))
+      startSwap(droppedSample(file, dropSeq.current))
     },
     [startSwap],
   )
