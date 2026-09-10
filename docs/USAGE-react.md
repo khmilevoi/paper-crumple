@@ -550,6 +550,7 @@ type CrumpleOptions<S extends pc.SpriteSource> = {
   reducedMotion?: 'auto' | 'off' // default 'auto'
   onStart?: (e: pc.Events['start']) => void
   onEnd?: (e: pc.Events['end']) => void
+  onSettle?: (e: CrumpleSettleEvent) => void
   /** A `pc.StageEvent`, not a `pc.Events` member — errors never reach a view's own bus. */
   onError?: (e: pc.StageEvent<'error'>) => void
 } & pc.PinFor<S>
@@ -557,6 +558,20 @@ type CrumpleOptions<S extends pc.SpriteSource> = {
 interface Crumple {
   readonly ref: (el: HTMLCanvasElement | null) => void
   readonly state: pc.ViewState | 'detached'
+  readonly status:
+    | 'detached'
+    | 'empty'
+    | 'acquiring'
+    | 'shown'
+    | 'playing'
+    | 'swapping'
+    | 'rolled-back'
+  readonly sprite: pc.Sprite | null
+  readonly pending:
+    | { readonly key: string; readonly phase: 'acquiring'; readonly run: null }
+    | { readonly key: string; readonly phase: 'entering'; readonly run: pc.Run<pc.PlayResult> }
+    | { readonly key: string; readonly phase: 'swapping'; readonly run: pc.Run<pc.SwapResult> }
+    | null
   /** The swap is parked at the ball, waiting on its target. */
   readonly parked: boolean
   readonly pose: number // 0 while detached — 'flat', the pose a view is born at
@@ -567,9 +582,13 @@ interface Crumple {
   /** `frame` already scaled by `frameTo` into the four CSS numbers <Crumple> writes on the
    *  wrapper. `null` when `frameTo` was absent or no front is resident. */
   readonly frameStyle: { width: string; height: string; left: string; top: string } | null
+  readonly artworkStyle: { readonly width: string; readonly height: string } | null
   readonly view: pc.View | null // raw, so an unforeseen scenario stays reachable
   play(from: pc.PoseRef, to: pc.PoseRef, o?: pc.PlayOptions): pc.Run<pc.PlayResult> | null
   stop(): void
+  draw(pose: pc.PoseRef): void
+  sync(): void
+  retry(): void
   refresh(): void
 }
 
@@ -619,6 +638,16 @@ wrapped in one** (§5.1). `start` is emitted synchronously inside `view.play`, a
 is exactly where that guarantee is lost; an `AudioContext.resume()` in a start handler only runs
 inside the user gesture because of it (packages §7.1).
 
+`pending` is the request for the current `(view, spriteKey)` until it settles, and is `null` when idle.
+`onSettle` fires exactly once for a request that reaches animated completion, degraded show, or rollback,
+and never for a superseded or unmounted request. `CrumpleSettleEvent.reduced` says whether reduced-motion
+accommodation applied to that request, not merely whether an animation happened.
+
+During an animated swap, core adopts the target at the ball. Therefore `shown` and `sprite` become the
+target while descent is still running; neither means “settled”. Read `pending` or handle `onSettle` for
+that decision. `parked` is true for the wait at the ball and is cleared on end, stop/supersession, and
+disposal. It is safe for the swap spinner now; reduced motion never parks because it degrades to `show()`.
+
 `requested` and `shown` are separate because they genuinely diverge (§5.1). A swap whose target fails
 **rolls back to the previous sprite** — `state === 'crumpling.recover'`, and the `Run<SwapResult>`
 returns the target's Error — so the prop says B while the canvas shows A. The instance reports both
@@ -634,7 +663,8 @@ mean "something once went wrong", which is not a state any UI has a rendering fo
 
 ## 5. Reactive state, and why it is not event-driven
 
-`state`, `parked`, `pose`, `shown`, `requested`, `error`, `frame`, `frameStyle` and `view` are served
+`state`, `status`, `parked`, `pose`, `shown`, `sprite`, `requested`, `pending`, `error`, `frame`,
+`frameStyle`, `artworkStyle` and `view` are served
 through `useSyncExternalStore`, over a store **the binding versions on every call it makes into the
 core** (§5.5) — `view.show`, `view.draw`, `view.refresh`, `view.play`, `view.stop`, `view.swapTo`,
 `view.crumpleTo`, view creation and disposal, and the settlement of a `stage.prepare` — **and** on
@@ -680,7 +710,11 @@ pose a view is born at. `PoseRef` is an input type only (packages §10.1), so `c
 is rejected by TypeScript — the good case — and silently never true in JavaScript. Compare against a
 resolved index, or pass a reported one straight back into `play`, which is what it is for.
 
-**`onStart`, `onEnd` and `onError` are dispatched from those same subscriptions** (§5.5), through §2.1's
+`status` is derived, with `rolled-back` meaning `error !== null && requested !== shown`; it complements
+rather than replaces core `state`. `sprite` is read in the same snapshot pass as `shown`, removing the
+need to read `crumple.view?.sprite` during render.
+
+**`onStart`, `onEnd`, `onSettle` and `onError` are dispatched from those same subscriptions** (§5.5), through §2.1's
 `useEvent` — never their own `view.on` calls. Subscribing per callback would put your function's
 identity in the effect's dependencies, so an inline arrow would tear down and re-attach every render;
 omitting it from the dependencies is the stale-closure bug that replaces it. The convention has
@@ -688,9 +722,10 @@ neither.
 
 ### Imperative access
 
-`play` / `stop` / `refresh` cover the view and `scene.stage` covers everything else. `crumple.view` is
-the raw `pc.View`, deliberately exposed so an unforeseen scenario stays reachable (§5.1) —
-`view.draw(pose)` for scroll-driven scrubbing, `view.once`, `view.set`:
+`play` / `stop` / `draw` / `sync` / `retry` cover the common imperative paths and `scene.stage` covers
+everything else. `crumple.view` is the raw `pc.View`, deliberately exposed so an unforeseen scenario
+stays reachable (§5.1) — `view.once`, `view.set`, and other unforeseen calls. `view.on('step', handler)`
+is the correct run-cadence seam; no snapshot `step` field is promised.
 
 ```tsx
 const run = crumple.play('flat', 'ball', { duration: 900 })
@@ -701,7 +736,9 @@ if (run !== null) {
 }
 
 crumple.stop() // freezes at the current pose and issues NO draw — a cancel path must not render
-crumple.refresh() // one redraw at the current pose: no run, no events
+crumple.draw(pose) // one draw and one snapshot bump; no-op while detached
+crumple.sync() // re-read after an otherwise-raw view call, without drawing
+crumple.retry() // retry the current rolled-back key without key-away-and-back
 ```
 
 `crumple.play` supersedes whatever the view was doing, including a `scene.play` wave — collisions are
@@ -948,8 +985,8 @@ is also why nothing downstream of it needs a reduced-motion branch of its own.**
 `entrance` is irrelevant under `reduce`: an `entrance: 'uncrumple'` under `reduce` is `'flat'` (§5.3).
 
 Two consequences for your own UI. A view parked at `'ball'` and pulsing is motion, so under `reduce`
-the honest indicator is a static one somewhere else — and `crumple.parked` will never become true, so
-branch that spinner on `shown === null` instead. And because `show()` emits nothing at all
+the honest indicator is a static one somewhere else — and `crumple.parked` will never become true because
+reduced motion degrades to `show()`. Use `shown === null` for the loading placeholder. And because `show()` emits nothing at all
 (§5.5), the only reason your placeholder lifts on this path is that the binding versions its own
 store; there is no event behind it.
 
@@ -1062,12 +1099,17 @@ return <Crumple value={hero} className="hero" />
 
 That is the whole manoeuvre. The hook computes `crumple.frameStyle` — `frame`'s two boxes under the
 one scale `frameTo / max(artwork.w, artwork.h)`, as four CSS strings — and `<Crumple>` spreads it onto
-the wrapper. Be clear about which rectangle those four numbers describe: `width` and `height` are the
-**drawn box** — the paper, which overflows the picture by however far the edge knobs reach — and
-`left` / `top` are the negative artwork offset under the same scale, so the *artwork* lands where the
-wrapper would otherwise have sat. `frameStyle` is not the artwork's own rectangle; if that is what
-you need — to size a layout slot the paper hangs out of, say — compute it from `crumple.frame`
-yourself, as the paragraph below describes. It is recomputed after every swap and after a hull-tier
+the wrapper. `frameStyle` is the paper box written to `<Crumple>`'s wrapper, while `artworkStyle` is
+the artwork rectangle for the surrounding layout under the same scale and the same `null` convention.
+Use it directly for a surrounding slot rather than recomputing the artwork box manually:
+
+```tsx
+<div className="hero-slot" style={crumple.artworkStyle ?? undefined}>
+  <Crumple value={crumple} className="hero-paper" />
+</div>
+```
+
+Both styles are recomputed after every swap and after a hull-tier
 re-source has landed — the
 `knobEpoch` join under [Knobs](#9-knobs). Omit `frameTo` — the default — and `frameStyle` is `null`, the wrapper is left
 alone, and `frame` is still reported: that is the grid's case.
@@ -1088,13 +1130,9 @@ Threading it through `SceneOptions` would have meant stating the number twice an
 copies to agree. Naming it where it is used makes framing an **explicit request** rather than a
 behaviour keyed on how a stage the binding never saw was built.
 
-If the wrapper is not the element you want sized, do it by hand from `crumple.frame`. `ViewFrame` is
-`{ box, artwork }`: the box the view draws into and where the unpadded artwork lands inside it, both
-in that box's pixels, `null` until a front is resident (`packages/core/src/view.ts:93`). It **remembers
-nothing and needs nothing remembered** — it reports the view's current frame, so read it again after
-every swap and on every `knobEpoch` change. `frameArtwork` in `examples/playground/src/framing.ts` is
-the reference implementation — the four multiplications by one scale that `heroSlotStyle`
-(`examples/playground/src/hero.ts`) applies to size the hero slot.
+`ViewFrame` remains available for inspection: it is `{ box, artwork }`, the box the view draws into and
+where the unpadded artwork lands inside it, both in that box's pixels, `null` until a front is resident
+(`packages/core/src/view.ts:93`).
 
 ## 11. What `<Crumple>` renders
 
