@@ -3,29 +3,9 @@ import { act } from 'react'
 import { createRoot } from 'react-dom/client'
 import { afterEach, describe, expect, it } from 'vitest'
 import type { ReactNode } from 'react'
-import type { Crumple } from '@paper-crumple/react'
+import { detachedCrumple } from '@paper-crumple/react/testing'
 
 import { Stage } from './Stage'
-
-/** A crumple whose only live parts are the ones `<Crumple>` reads: `ref`, `shown`, `frameStyle`. */
-function fakeCrumple(over: Partial<Crumple> = {}): Crumple {
-  return {
-    state: 'detached',
-    parked: false,
-    pose: 0,
-    shown: null,
-    requested: null,
-    error: null,
-    frame: null,
-    frameStyle: null,
-    view: null,
-    ref: () => {},
-    play: () => null,
-    stop: () => {},
-    refresh: () => {},
-    ...over,
-  } as Crumple
-}
 
 const teardown: (() => void)[] = []
 afterEach(() => {
@@ -52,7 +32,7 @@ describe('<Stage>', () => {
   it('sizes the slot from the artwork box and hangs the paper off it out of flow', () => {
     const host = render(
       <Stage
-        hero={fakeCrumple()}
+        hero={detachedCrumple()}
         slotStyle={{ width: '240px', height: '360px' }}
         poseChip="pose 0 / 11"
         sampleChip="sweater"
@@ -76,7 +56,7 @@ describe('<Stage>', () => {
   it('leaves the slot at its stylesheet size while no front is resident', () => {
     const host = render(
       <Stage
-        hero={fakeCrumple()}
+        hero={detachedCrumple()}
         slotStyle={null}
         poseChip="pose 0 / 11"
         sampleChip="sweater"
@@ -97,7 +77,7 @@ describe('<Stage>', () => {
     const seen: (HTMLCanvasElement | null)[] = []
     const host = render(
       <Stage
-        hero={fakeCrumple({
+        hero={detachedCrumple({
           ref: (el) => {
             seen.push(el)
           },
