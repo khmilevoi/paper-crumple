@@ -138,4 +138,35 @@ describe('createFakeStage (§9)', () => {
     expect(warnings).toHaveLength(1)
     expect(fake.stage.warnings).toHaveLength(1)
   })
+
+  it('returns a real zeroed usage shape rather than a cast empty object', () => {
+    const fake = createFakeStage()
+    expect(fake.stage.usage()).toEqual({
+      bytes: 0,
+      reclaimable: 0,
+      unreclaimable: 0,
+      fronts: 0,
+      pinned: 0,
+      attached: 0,
+      handles: 0,
+    })
+  })
+
+  it('documents its run limits in behavior: view.run is null and settleRun reaches latest only', async () => {
+    const fake = createFakeStage()
+    const view = fake.stage.view({ canvas: document.createElement('canvas') })
+    if (view instanceof Error) return expect.unreachable('the view was not created')
+    const first = view.play('flat', 'ball')
+    const second = view.play('ball', 'flat')
+    let firstSettled = false
+    void first.done.then(() => {
+      firstSettled = true
+    })
+    expect(view.run).toBeNull()
+    fake.views[0]?.settleRun(undefined)
+    await expect(second.done).resolves.toBeUndefined()
+    await Promise.resolve()
+    expect(firstSettled).toBe(false)
+    first.stop()
+  })
 })

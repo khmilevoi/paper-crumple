@@ -44,7 +44,10 @@ export interface FakeViewHandle {
   readonly target: BlitTarget
   /** A view's bus carries `start`, `step` and `end` only — an `error` takes the stage's bus. */
   emit<E extends 'start' | 'step' | 'end'>(event: E, payload: Events[E]): void
-  /** Settle the run most recently returned by `play`, `swapTo` or `crumpleTo`. */
+  /**
+   * Settles the run most recently returned by `play`, `swapTo` or `crumpleTo`.
+   * This cannot select an older overlapping run; only the latest run is controllable.
+   */
   settleRun(result: PlayResult | SwapResult): void
   setState(state: ViewState): void
   setFrame(frame: ViewFrame | null): void
@@ -109,9 +112,23 @@ function makeSprite(key: string): Sprite {
   }
 }
 
-/** `usage()` is never called by the binding; the shape is not worth a hand-built literal. */
-const EMPTY_USAGE = {} as unknown as ReturnType<BlitStage['usage']>
+const EMPTY_USAGE: ReturnType<BlitStage['usage']> = {
+  bytes: 0,
+  reclaimable: 0,
+  unreclaimable: 0,
+  fronts: 0,
+  pinned: 0,
+  attached: 0,
+  handles: 0,
+}
 
+/**
+ * Creates a non-throwing `BlitStage` test double with call logs and controllable views.
+ *
+ * Requires a DOM environment because the fake creates `stage.surface.canvas` with
+ * `document.createElement('canvas')`. The fake does not model core's live `view.run` getter:
+ * `view.run` is always `null`, and `FakeViewHandle.settleRun` controls only the latest run.
+ */
 export function createFakeStage(o?: FakeStageOptions): FakeStageHandle {
   const calls: FakeCall[] = []
   const warnings: Error[] = []
