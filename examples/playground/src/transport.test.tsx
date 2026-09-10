@@ -141,24 +141,28 @@ describe('useTransport', () => {
 
   it('closes an armed swap from onSettle rather than a view end event', async () => {
     const harness = await renderTransport(createFakeStage({ sprites: ['a'] }))
+    harness.settled.mockClear()
     act(() => harness.result.current.beginSwap())
     await harness.setShown(B)
     harness.fake.views[0]?.settleRun(undefined)
     await act(async () => {})
     expect(harness.audio.beginSequence).toHaveBeenCalledTimes(1)
     expect(harness.audio.endSequence).toHaveBeenCalledTimes(1)
+    expect(harness.settled).toHaveBeenCalledTimes(1)
     expect(harness.settled).toHaveBeenCalledWith({ key: 'b', error: null, reduced: false }, true)
     await harness.unmount()
   })
 
   it('forwards rollback errors as a settled swap outcome', async () => {
     const harness = await renderTransport(createFakeStage({ sprites: ['a'] }))
+    harness.settled.mockClear()
     act(() => harness.result.current.beginSwap())
     await harness.setShown(B)
     const error = new SheetError('target failed')
     harness.fake.views[0]?.settleRun(error)
     await act(async () => {})
     expect(harness.result.current.crumple.status).toBe('rolled-back')
+    expect(harness.settled).toHaveBeenCalledTimes(1)
     expect(harness.settled).toHaveBeenCalledWith({ key: 'b', error, reduced: false }, true)
     await harness.unmount()
   })
@@ -167,10 +171,12 @@ describe('useTransport', () => {
     vi.stubGlobal('matchMedia', () => ({ matches: true }))
     try {
       const harness = await renderTransport(createFakeStage({ sprites: ['a', 'b'] }))
+      harness.settled.mockClear()
       act(() => harness.result.current.beginSwap())
       await harness.setShown(B)
       await act(async () => {})
       expect(harness.audio.endSequence).toHaveBeenCalledTimes(1)
+      expect(harness.settled).toHaveBeenCalledTimes(1)
       expect(harness.settled).toHaveBeenCalledWith({ key: 'b', error: null, reduced: true }, true)
       await harness.unmount()
     } finally {

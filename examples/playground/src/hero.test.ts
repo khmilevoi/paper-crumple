@@ -47,6 +47,7 @@ describe('useHero', () => {
     expect(fake.calls.find((call) => call.method === 'view.swapTo')?.args[0]).toBe(B.src)
     fake.views[0]?.settleRun(undefined)
     await act(async () => {})
+    expect(onSettle).toHaveBeenCalledTimes(1)
     expect(onSettle).toHaveBeenCalledWith({ key: 'b', error: null, reduced: false })
     expect(current?.requested).toBe('b')
   })

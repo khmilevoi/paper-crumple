@@ -23,7 +23,7 @@ import { useTransport } from '../transport'
 import { Diagnostics } from './Diagnostics'
 import type { Metric } from './Diagnostics'
 import { EdgeSection } from './EdgeSection'
-import { Header } from './Header'
+import { Header, type StageStatus } from './Header'
 import { FactorySection, KnobRows, libraryGroups } from './LibrarySections'
 import { LookSection } from './LookSection'
 import type { StageBackground } from './LookSection'
@@ -46,12 +46,6 @@ const BOOT_SAMPLE: Sample = SAMPLES.find((s) => s.id === DEFAULT_SAMPLE_ID) ?? S
 
 function sameList(a: readonly number[], b: readonly number[]): boolean {
   return a.length === b.length && a.every((x, i) => x === b[i])
-}
-
-/** The status line the pill shows: what the last action did, or `null` for the idle readout. */
-export interface StageStatus {
-  readonly ok: boolean
-  readonly text: string
 }
 
 export function App(): ReactNode {
