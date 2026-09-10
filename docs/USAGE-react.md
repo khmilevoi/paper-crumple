@@ -652,8 +652,8 @@ disposal. It is safe for the swap spinner now; reduced motion never parks becaus
 **rolls back to the previous sprite** — `state === 'crumpling.recover'`, and the `Run<SwapResult>`
 returns the target's Error — so the prop says B while the canvas shows A. The instance reports both
 and the Error, which also reaches your `onError` with `observed: true`, since it is on
-`crumple.error` as well. And **it does not retry.** A retry policy inside an animation library would be a
-network policy nobody asked for; if you want one, change `spriteKey` again.
+`crumple.error` as well. **The binding does not retry automatically; for an explicit retry, call
+`crumple.retry()`.**
 
 **`error` reports the last settled run, and is cleared when the next one starts** — on `start`, not
 on `end` (§5.1). That is the difference between a field you can render and one you cannot: a rollback
@@ -714,8 +714,9 @@ resolved index, or pass a reported one straight back into `play`, which is what 
 rather than replaces core `state`. `sprite` is read in the same snapshot pass as `shown`, removing the
 need to read `crumple.view?.sprite` during render.
 
-**`onStart`, `onEnd`, `onSettle` and `onError` are dispatched from those same subscriptions** (§5.5), through §2.1's
-`useEvent` — never their own `view.on` calls. Subscribing per callback would put your function's
+**`onStart`, `onEnd` and `onError` are dispatched from those subscriptions; `onSettle` is emitted by
+request settlement** (§5.5). All callbacks use §2.1's `useEvent` — never their own `view.on` calls.
+Subscribing per callback would put your function's
 identity in the effect's dependencies, so an inline arrow would tear down and re-attach every render;
 omitting it from the dependencies is the stale-closure bug that replaces it. The convention has
 neither.
