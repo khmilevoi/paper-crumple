@@ -4,9 +4,6 @@ import type { Crumple, CrumpleSettleEvent } from '@paper-crumple/react'
 import type { BuiltStage } from './config'
 import type { Sample } from './samples'
 
-/** What a swap gets when sound is off or silent — the fold has to last *something*. */
-export const SWAP_DURATION_MS = 900
-
 export interface HeroOptions {
   readonly shown: Sample
   readonly duration: number
@@ -24,16 +21,6 @@ export interface HeroOptions {
  */
 export function droppedSample(file: File, seq: number): Sample {
   return { id: `dropped-${String(seq)}`, label: file.name, src: file }
-}
-
-/**
- * `duration` is WALL TIME IN MILLISECONDS for the whole traversal (§5.1), not a multiplier, so a
- * zero would be a swap with no traversal at all rather than a request for the default.
- */
-export function swapDurationFor(fromAudio: number | null | undefined): number {
-  return fromAudio === null || fromAudio === undefined || fromAudio <= 0
-    ? SWAP_DURATION_MS
-    : fromAudio
 }
 
 /**
@@ -57,7 +44,7 @@ export function swapDurationFor(fromAudio: number | null | undefined): number {
  */
 export function useHero(o: HeroOptions): Crumple {
   const scene = useScene<BuiltStage>()
-  const frameTo = scene.status === 'ready' ? scene.meta.artworkCssPx : undefined
+  const frameTo = scene.status === 'ready' ? scene.meta?.artworkCssPx : undefined
 
   return useCrumple({
     spriteKey: o.shown.id,

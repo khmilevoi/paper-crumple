@@ -6,7 +6,7 @@ import type { ReactNode } from 'react'
 import { createRoot } from 'react-dom/client'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 
-import { droppedSample, swapDurationFor, SWAP_DURATION_MS, useHero } from './hero'
+import { droppedSample, useHero } from './hero'
 import type { Sample } from './samples'
 
 const A: Sample = { id: 'a', label: 'A', src: 'a.png' }
@@ -65,20 +65,5 @@ describe('droppedSample', () => {
 
   it('keeps the file name as the label the chips show', () => {
     expect(droppedSample(new File([], 'camel.png'), 7).label).toBe('camel.png')
-  })
-})
-
-describe('swapDurationFor', () => {
-  it('takes the audio clip length when there is one', () => {
-    expect(swapDurationFor(585)).toBe(585)
-  })
-
-  it('falls back to the demo constant when sound is off or silent', () => {
-    expect(swapDurationFor(null)).toBe(SWAP_DURATION_MS)
-    expect(swapDurationFor(undefined)).toBe(SWAP_DURATION_MS)
-  })
-
-  it('never hands the binding a zero, which is a swap with no traversal at all', () => {
-    expect(swapDurationFor(0)).toBe(SWAP_DURATION_MS)
   })
 })

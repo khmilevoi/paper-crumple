@@ -1,6 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import type { Dispatch, MutableRefObject, ReactNode, SetStateAction } from 'react'
-import * as pc from '@paper-crumple/core'
 import { fitSheet } from '@paper-crumple/motion'
 import type { Pack } from '@paper-crumple/motion'
 import { evenKeyFrames } from '@paper-crumple/motion'
@@ -8,17 +7,18 @@ import type { EdgeSpec } from '@paper-crumple/paper'
 import { PaperScene, useScene } from '@paper-crumple/react'
 
 import type { AudioHandle, SyncMode } from '../audio'
-import { createAudio, playSpec, swapSpec } from '../audio'
+import { createAudio, playSpec } from '../audio'
 import type { BuiltStage, BucketName, DemoConfig } from '../config'
 import { DEFAULT_CONFIG } from '../config'
 import { collectDescriptors } from '../knobs'
-import { droppedSample, swapDurationFor, useHero, SWAP_DURATION_MS } from '../hero'
+import { droppedSample } from '../hero'
 import { useDemoScene } from '../scene'
 import type { DemoScene } from '../scene'
 import { BROKEN_URL, DEFAULT_SAMPLE_ID, nextLibrarySample, SAMPLES } from '../samples'
 import type { Sample } from '../samples'
 import { decodeState, encodeState } from '../state'
 import { prefetchSamples, glInfo } from '../stage'
+import { useTransport } from '../transport'
 
 import { Diagnostics } from './Diagnostics'
 import type { Metric } from './Diagnostics'
@@ -33,9 +33,6 @@ import { BROKEN_ID, bucketForPacks, SourceSection } from './SourceSection'
 import { Stage } from './Stage'
 import { Transport } from './Transport'
 import { Section } from './primitives'
-
-/** What a run gets when sound is off or silent — the fold has to last *something*. */
-const FOLD_DURATION_MS = 900
 
 const BROKEN_SAMPLE: Sample = {
   id: BROKEN_ID,
@@ -236,31 +233,19 @@ function Playground({
   const { knobs, setKnob, resetKnobs } = demo
   const generation = scene.generation
 
-  const [direction, setDirection] = useState<'folding' | 'unfolding' | null>(null)
-  /** The swap's wall time, written in the click that starts it. Both writes land in one batch, so
-   *  the effect the commit schedules reads the new value when it starts the swap. */
-  const [swapDuration, setSwapDuration] = useState(SWAP_DURATION_MS)
   /** True between the click that starts a swap and the settle that ends it, so the ENTRANCE does
    *  not print "swapped to …" on the way up. */
   const swappingRef = useRef(false)
 
-  /** The swap-settle pair: the sound stops and the transport stops printing a direction. Shared by
-   *  the reduced-motion backstop below, `useHero`'s own `onEnd`, and `runFold`'s completion. `audio`
-   *  is stable for the life of the page (`useState`'s lazy initialiser runs once), so depending on
-   *  it directly is exactly as stable as a ref would have been. */
-  const endSwap = useCallback((): void => {
-    audio.endSequence()
-    setDirection(null)
-  }, [audio])
+  const { crumple, dwells, direction, busy, lastStepMs, lastDrawMs, beginSwap, draw, runFold } =
+    useTransport({
+      shown,
+      audio,
+      observed,
+      onSettle: () => {},
+    })
 
-  const crumple = useHero({
-    shown,
-    duration: swapDuration,
-    onSettle: () => endSwap(),
-    observed,
-  })
-
-  const sprite = crumple.view?.sprite ?? null
+  const sprite = crumple.sprite
 
   // --- sound --------------------------------------------------------------------------------------
 
@@ -276,24 +261,17 @@ function Playground({
   // --- status: the settle backstop and the two error/failure effects ------------------------------
 
   /**
-   * The swap settled. `onEnd` covers the animated path; this covers the reduced-motion one, where
-   * `show()` is the whole swap — one draw, no run, no start/step/end triple — and emits nothing at
-   * all. The placeholder only lifts because the binding versions its own store; there is no event
-   * behind it (USAGE §7). Without this the audio sequence would never be closed under `reduce`.
+   * The swap settled. The transport callback covers the animated path; this covers the reduced-
+   * motion one, where `show()` is the whole swap — one draw, no run, no start/step/end triple — and
+   * emits nothing at all. The placeholder only lifts because the binding versions its own store;
+   * there is no event behind it (USAGE §7). Without this the status would never close under `reduce`.
    */
   useEffect(() => {
     if (!swappingRef.current) return
     if (!isSwapSettled(crumple.requested, crumple.shown, shown.id)) return
     swappingRef.current = false
-    // Closing the transport and reporting the settle onto the status pill IS the synchronization
-    // this effect exists for — there is no external store to read either from instead (USAGE §7's
-    // own point). The suppression sits on `endSwap`, whose `setDirection(null)` is now the first
-    // setState the effect reaches; the rule reports only that one, so a second directive below
-    // would be flagged as unused.
-    // eslint-disable-next-line react-hooks/set-state-in-effect
-    endSwap()
     setStatus({ ok: true, text: `swapped to ${shown.label}` })
-  }, [crumple.requested, crumple.shown, endSwap, setStatus, shown.id, shown.label])
+  }, [crumple.requested, crumple.shown, setStatus, shown.id, shown.label])
 
   /** A swap whose target failed rolled back to the previous sprite, and the hook reports the
    *  target's Error rather than retrying: the prop says B while the canvas shows A. `error` is
@@ -336,109 +314,7 @@ function Playground({
   }, [open.sound, audio])
 
   // --- pose, transport and playback ------------------------------------------------------------
-
-  /** The interval between two consecutive scheduled renders of the last run. `step.ms` is
-   *  elapsed-since-`start`, not a per-step cost (`runner.ts`'s `stepOnce`), so the interval is
-   *  the difference of two of them — which is what the scheduler actually spent on that pose. */
-  const [lastStepMs, setLastStepMs] = useState<number | null>(null)
-  const stepAtRef = useRef<number | null>(null)
-  /** A draw-only pose change, timed around the `view.draw(...)` call itself. */
-  const [lastDrawMs, setLastDrawMs] = useState<number | null>(null)
-
-  const dwells = built?.motion.poses?.dwells ?? pc.DWELL_MS
-
   const pose = crumple.pose
-
-  /** The `step` interval the footer prints. The binding does not surface it, and the raw view is
-   *  exposed for exactly this kind of unforeseen read. */
-  const view = crumple.view
-  useEffect(() => {
-    if (view === null) return
-    stepAtRef.current = null
-    // `step` alone leaves `stepAtRef` spanning two runs — a fold that ends and a later one that
-    // starts both feed the same interval, which is not what "the last run's interval" means. `view`
-    // is a fresh object each rebuild, and this effect re-subscribes with it, but a run inside one
-    // build still crosses a `start` without the effect re-running — so the reset also has to live
-    // on the event itself.
-    const offStart = view.on('start', () => {
-      stepAtRef.current = null
-    })
-    const offStep = view.on('step', (e) => {
-      const previous = stepAtRef.current
-      stepAtRef.current = e.ms
-      if (previous !== null) setLastStepMs(e.ms - previous)
-    })
-    return () => {
-      offStart()
-      offStep()
-    }
-  }, [view])
-
-  const refresh = crumple.refresh
-  const draw = useCallback(
-    (next: number) => {
-      if (view === null) return
-      const startedAt = performance.now()
-      view.draw(next)
-      setLastDrawMs(performance.now() - startedAt)
-      // `view.draw` is draw-only and emits nothing, so the binding's store has no reason to bump
-      // and `crumple.pose` would stay stale. `refresh()` is the only re-read the instance offers,
-      // and it forces a redraw on the way — one draw more than this needs.
-      refresh()
-    },
-    [refresh, view],
-  )
-
-  /** `'flat'` / `'ball'` are input-only names; the audio schedule is computed by index, so the
-   *  same resolution has to happen here first — against the *bound* schedule's length. */
-  const poseIndex = useCallback(
-    (ref: pc.PoseRef): number => {
-      if (ref === 'flat') return 0
-      if (ref === 'ball') return dwells.length - 1
-      return ref
-    },
-    [dwells],
-  )
-
-  const play = crumple.play
-  const runFold = useCallback(
-    async (from: pc.PoseRef, to: pc.PoseRef): Promise<void> => {
-      // The pre-migration `runFold` (`075dc4e:ui/App.tsx:303`) returned on a null `view` before
-      // ever touching audio — `play(...)` returns null for exactly the same reason `view` was
-      // null there (`use-crumple.ts`'s `play` checks `core.view === null`), so checking `view`
-      // here, before `audio.beginSequence`, reproduces that guard: a Space press before the stage
-      // is ready plays no clip and leaves nothing pending.
-      if (view === null) return
-      const fromIdx = poseIndex(from)
-      const toIdx = poseIndex(to)
-      if (fromIdx === toIdx) return
-
-      // Synchronous, inside the click: that is what lets the AudioContext resume under the autoplay
-      // policy, and it hands back the clip's length as the run's `duration`. One `duration` is the
-      // whole of the sync — the library spreads it over the traversed dwells.
-      const duration = audio.beginSequence(playSpec(fromIdx, toIdx, '', dwells))
-      setDirection(toIdx > fromIdx ? 'folding' : 'unfolding')
-      // A plain function, never awaited above the call: `start` is emitted synchronously inside
-      // `view.play`, and a wrapper is exactly where that guarantee is lost (§5.1).
-      const run = play(from, to, { duration: duration ?? FOLD_DURATION_MS })
-      if (run === null) {
-        // Reached only if `view` went away between the check above and this call — audio was
-        // already begun, so it has to be ended through the shared callback, not a bare
-        // `setDirection(null)`, or `audio`'s `pending` is left set with nothing to close it.
-        endSwap()
-        return
-      }
-      const r = await run
-      endSwap()
-      if (r === pc.ABORTED) return
-      if (r instanceof Error) {
-        observed('crumple.play', r)
-        return
-      }
-      refresh()
-    },
-    [audio, dwells, endSwap, observed, play, poseIndex, refresh, view],
-  )
 
   // --- pose schedule --------------------------------------------------------------------------
 
@@ -476,8 +352,8 @@ function Playground({
         setStatus({ ok: false, text: `rejected: ${refused.message}` })
         return false
       }
-      view?.draw('flat')
-      refresh()
+      crumple.draw('flat')
+      crumple.refresh()
       return true
     },
     // `scene.stop` only, not `scene`: the analyzer does not narrow a called member expression
@@ -486,7 +362,7 @@ function Playground({
     // (`use-paper-scene.ts:251,284`), and depending on the object would re-run this effect, and
     // everything that closes over it, on every knob write.
     // eslint-disable-next-line react-hooks/exhaustive-deps
-    [built, refresh, scene.stop, setStatus, view],
+    [built, crumple.draw, crumple.refresh, scene.stop, setStatus],
   )
 
   const commitKeyFrames = useCallback(
@@ -531,14 +407,8 @@ function Playground({
   // --- swap ------------------------------------------------------------------------------------
 
   /**
-   * The swap, as a state change.
-   *
-   * The audio still begins in the click — `beginSequence` resumes the AudioContext under the
-   * autoplay policy and hands back the clip's length — and both writes land in one batch, so the
-   * effect the commit schedules starts the swap at the new duration.
-   *
-   * There is no controller here any more: `useCrumple` supersedes its own previous acquisition and
-   * run by sequence number, which is also what aborts the `add` a superseded swap started.
+   * The swap, as a state change. The transport arms its audio and duration synchronously before
+   * the new sample is handed to `useHero`; the binding then owns the acquisition and run.
    */
   const startSwap = useCallback(
     (target: Sample) => {
@@ -554,14 +424,12 @@ function Playground({
       // sequence). Swallowing the repeated click here is correct: with `spriteKey` unchanged the
       // rollback demo cannot be re-armed by clicking Swap again at all.
       if (isNoOpSwap(crumple.requested ?? shown.id, target)) return
-      const duration = audio.beginSequence(swapSpec(crumple.pose, dwells))
-      setSwapDuration(swapDurationFor(duration))
-      setDirection('folding')
+      beginSwap()
       swappingRef.current = true
       setShown(target)
       setLibrarySample((prev) => nextLibrarySample(prev, target))
     },
-    [audio, crumple.pose, crumple.requested, dwells, setLibrarySample, setShown, shown],
+    [beginSwap, crumple.requested, setLibrarySample, setShown, shown],
   )
 
   const onSwap = useCallback(() => {
@@ -585,32 +453,6 @@ function Playground({
     },
     [startSwap],
   )
-
-  // --- keyboard ---------------------------------------------------------------------------------
-
-  const busy = direction !== null
-
-  useEffect(() => {
-    const onKey = (e: KeyboardEvent): void => {
-      const tag = e.target instanceof HTMLElement ? e.target.tagName.toLowerCase() : ''
-      if (tag === 'input' || tag === 'select' || tag === 'textarea') return
-      if (busy) return
-      if (e.key === 'ArrowRight') {
-        draw(Math.min(lastPose, pose + 1))
-        e.preventDefault()
-      } else if (e.key === 'ArrowLeft') {
-        draw(Math.max(0, pose - 1))
-        e.preventDefault()
-      } else if (e.key === ' ') {
-        void (pose >= lastPose ? runFold('ball', 'flat') : runFold('flat', 'ball'))
-        e.preventDefault()
-      }
-    }
-    window.addEventListener('keydown', onKey)
-    return () => {
-      window.removeEventListener('keydown', onKey)
-    }
-  }, [busy, draw, lastPose, pose, runFold])
 
   // --- derived ----------------------------------------------------------------------------------
 
