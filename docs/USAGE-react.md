@@ -263,6 +263,13 @@ interface SceneBuild<M> {
   readonly meta: M
 }
 
+interface SceneCounters {
+  readonly warnings: readonly Error[]
+  readonly lost: boolean
+  readonly generation: number
+  readonly knobEpoch: number
+}
+
 interface SceneOptions<M = undefined> {
   create: (
     signal: AbortSignal,
@@ -285,6 +292,11 @@ type SceneSnapshot<M = undefined> = SceneCounters &
     | { readonly status: 'ready'; readonly stage: pc.BlitStage; readonly meta: M; readonly error: null }
     | { readonly status: 'failed'; readonly stage: null; readonly meta: null; readonly error: Error }
   )
+
+interface SceneMethods {
+  play(from: pc.PoseRef, to: pc.PoseRef, o?: pc.StagePlayOptions): Promise<pc.StagePlayReport<pc.View>>
+  stop(o?: { all?: boolean }): void
+}
 
 type Scene<M = undefined> = SceneSnapshot<M> & SceneMethods
 type CreateStage<M = undefined> = SceneOptions<M>['create']
@@ -560,6 +572,12 @@ type CrumpleOptions<S extends pc.SpriteSource> = {
   /** A `pc.StageEvent`, not a `pc.Events` member — errors never reach a view's own bus. */
   onError?: (e: pc.StageEvent<'error'>) => void
 } & pc.PinFor<S>
+
+interface CrumpleSettleEvent {
+  readonly key: string
+  readonly error: Error | null
+  readonly reduced: boolean
+}
 
 interface Crumple {
   readonly ref: (el: HTMLCanvasElement | null) => void

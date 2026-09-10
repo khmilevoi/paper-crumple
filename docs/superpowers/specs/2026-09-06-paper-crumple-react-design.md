@@ -73,8 +73,8 @@ const hero = useCrumple({ spriteKey: 'hero', src, entrance: 'uncrumple' })
 is fixed at `stage.view()` and cannot be changed afterwards, so it is a hook option and never a
 prop. `tag` is fixed there too (`stage.ts:1471`, and `View.tag` is a read-only accessor,
 `view.ts:88`), and under §2.1's stable `ref` the creating callback is not re-invoked — so a changed
-`fit` or `tag` is **silently ignored until the view is rebuilt**, which is worth knowing before it
-is discovered.
+`fit` or `tag` is ignored after view creation and warns once in development. The value remains fixed
+until the view is rebuilt, typically by remounting under a different React `key`.
 
 **`<Crumple value>` is the component's only form.** A second, options-taking form was designed and
 rejected: it would state the configuration in two places, and it would give the grid an imperative
@@ -436,19 +436,21 @@ interface CrumpleSettleEvent {
   readonly reduced: boolean
 }
 
+type CrumpleStatus =
+  | 'detached'
+  | 'empty'
+  | 'acquiring'
+  | 'shown'
+  | 'playing'
+  | 'swapping'
+  | 'rolled-back'
+
 interface Crumple {
   /** Identity-stable per §2.1, and that is load-bearing: React re-attaches a callback ref whose
    *  identity changed, which here means disposing and rebuilding the view every render. */
   readonly ref: (el: HTMLCanvasElement | null) => void
   readonly state: pc.ViewState | 'detached'
-  readonly status:
-    | 'detached'
-    | 'empty'
-    | 'acquiring'
-    | 'shown'
-    | 'playing'
-    | 'swapping'
-    | 'rolled-back'
+  readonly status: CrumpleStatus
   readonly sprite: pc.Sprite | null
   readonly pending:
     | { readonly key: string; readonly phase: 'acquiring'; readonly run: null }
@@ -481,6 +483,10 @@ interface Crumple {
 
 function useCrumple<S extends pc.SpriteSource>(o: CrumpleOptions<S>): Crumple
 ```
+
+The public `CrumpleStatus` type is this derived discriminant, distinct from core view `state`.
+Its `rolled-back` member means `error !== null && requested !== shown`; the other members describe
+the current request and view snapshot without changing core's state machine.
 
 **`size` is not an option and v1 is always `'managed'`.** Offering `'manual'` would have been a
 promise with nothing behind it: under `'manual'` the core never writes `canvas.width/height`
@@ -660,6 +666,10 @@ it is a trap for any caller that arms state *around* the swap it believes it jus
 that sets a fold direction and waits for `onEnd` waits forever; **a caller that arms anything must
 make the same-key check itself, before it arms**. The alternative, a snapshot field or an event
 meaning "considered and declined", is not in v1.
+
+**Compare against `crumple.requested`, never `crumple.shown`.** A rollback can leave the requested key
+different from the shown key while `error` is non-null, so `shown` is not the driver's record of the
+key it already considered.
 
 **The declarative swap hands back no handle.** `crumple.play` returns its `Run`; the swap cannot,
 because nothing calls it — the hook starts it off a `spriteKey` change. Supersession by the hook's own
@@ -880,18 +890,18 @@ for unforeseen scenarios, and between them they map this surface's edge.
   `sync()` re-reads after an otherwise-raw view call without drawing. `refresh()` retains its
   draw-and-refresh meaning for callers that need both.
 
-**A consumer doing ordinary bookkeeping over these snapshots writes effects, and lints against
-them.** `usePaperScene` and `useCrumple` avoid setState-in-an-effect internally by owning a versioned
-store and reading it through `useSyncExternalStore`; that store is not exported (§3), so a consumer
-synchronising ordinary UI state off the snapshots — a status pill, a mount timing, a swap-settle flag
-— has `useEffect` plus `useState` and nothing else. That is what `eslint-plugin-react-hooks@7.1.1`
-reports at **error** level under `react-hooks/set-state-in-effect`; in that plugin's `recommended`
-config `exhaustive-deps` is only a `warn`, and it is `set-state-in-effect` (with `refs`) that bites.
-`examples/playground/src/ui/App.tsx` carries suppressions only for this unresolved
-`set-state-in-effect` shape, each justified in a line; the shipped stable methods and callbacks no
-longer require dependency suppressions. These effects synchronise with an external store the
-consumer cannot reach. Either the package publishes a small store primitive to build on, or this
-remaining concern persists; §11 names the alternative.
+**Some consumer-specific snapshot bookkeeping still needs effects.** `usePaperScene` and
+`useCrumple` avoid setState-in-an-effect internally by owning a versioned
+store and reading it through `useSyncExternalStore`; that store is not exported (§3). The shipped
+`onReady`, `onFailed`, and `onSettle` callbacks, together with the stable methods and callbacks, cover
+the corresponding scene and request events without consumer bookkeeping effects. Where a consumer
+needs to synchronise its own state from a snapshot and no shipped callback covers that case, the
+store-primitive deferral remains: `useEffect` plus `useState` is the only current option, and
+`eslint-plugin-react-hooks@7.1.1` reports the pattern at **error** level under
+`react-hooks/set-state-in-effect`.
+The current playground migration and its remaining App suppressions are separately owned by P7;
+this design record does not claim that cleanup has landed. §11 names the store primitive as the
+alternative for cases the shipped callbacks do not cover.
 
 ## 6. What `<Crumple>` renders
 

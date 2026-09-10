@@ -60,10 +60,12 @@ function Hero({ selected }: { selected: { id: string; src: string } }): JSX.Elem
   })
 
   return (
-    <Crumple value={crumple} className="hero">
-      {crumple.shown === null ? <span>Loading…</span> : null}
+    <>
+      <Crumple value={crumple} className="hero">
+        {crumple.shown === null ? <span>Loading…</span> : null}
+      </Crumple>
       {crumple.parked ? <span>Loading the next picture…</span> : null}
-    </Crumple>
+    </>
   )
 }
 ```
