@@ -19,6 +19,12 @@ branch, and the entrance's three calls — mirror `packages/react/src/use-event.
 `use-crumple.ts` but are trimmed for reading and are not compiled; treat them as an account of the
 behaviour, not as the code.
 
+The current consumer supplies no exercise for these documented behaviors: `useScene()` without an
+explicit scene, `scene.play`, `entrance: 'uncrumple'`, `onStart`, `reducedMotion: 'off'`,
+`canvasProps`, the `children` placeholder, `pin`/`ImageBitmap`, and SSR. This is consumer-coverage
+status, not a claim that the package tests are absent; the playground coverage work is separately
+owned by P7.
+
 The additive core amendment this document was written to anticipate — a `SwapToOptions` interface
 carrying `key`, which `view.swapTo` takes in place of `SwapOptions` — **has shipped**, with the
 binding, in the form described here. It is exported from the core's barrel
@@ -1294,12 +1300,53 @@ From §11, and each is deferred with a reason rather than forgotten:
   mounting the `Crumple` that will show the key — see [the acquisition
   shape](#the-acquisition-shape-behind-every-sprite).
 - **Audio.** `@paper-crumple/audio` is still deferred by packages §3.4.
-- **A test double for your own components.** The package's own suite runs against a fake `BlitStage`
-  and a StrictMode-aware harness, but none of that is exported (`packages/react/src/index.ts`) —
-  it is test scaffolding, and nothing in the published graph imports it. Unit-testing a component
-  built on these hooks therefore means either a real WebGL2 context or an injectable seam of your
-  own around `create`, which is what the playground did.
-
 And two things that are the *application's* job rather than the binding's (§10): generating a knob
 panel from the runtime descriptors — a control panel built from `stage.knobs` is an application, not a
 binding — and the audio wiring in a `start` handler.
+
+## 15. Testing
+
+The pure testing subpath exports these public values and types:
+
+```ts
+import {
+  buildingScene,
+  createFakeStage,
+  deferred,
+  detachedCrumple,
+  failedScene,
+  readyScene,
+  type FakeCall,
+  type FakeStageHandle,
+  type FakeStageOptions,
+  type FakeViewHandle,
+} from '@paper-crumple/react/testing'
+```
+
+`createFakeStage` needs a DOM because it creates a canvas. Put
+`/** @vitest-environment jsdom */` at the top of a Vitest file. Testing Library configures
+React's act environment; bare `act` users should set:
+
+```ts
+;(globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true
+```
+
+`matchMedia` is guarded and needs no stub unless the test exercises `reducedMotion: 'auto'` with
+reduction enabled. The fake has two deliberate limitations: `view.run` always reads `null`, and
+`FakeViewHandle.settleRun` controls only the latest run.
+
+For example, assert the calls relevant to the behavior under test:
+
+```ts
+const fake = createFakeStage({ sprites: ['hero'] })
+const scene = readyScene(fake.stage)
+
+// Render the consumer under <PaperScene value={scene}> with the test renderer of your choice.
+expect(fake.calls.filter(({ method }) => method === 'add')).toHaveLength(0)
+expect(fake.calls.filter(({ method }) => method === 'view')).toHaveLength(1)
+```
+
+`render`, `renderHook`, `renderCrumple`, and `flush` are internal and are not exported. The testing
+helpers may add fields within a major version but never remove fields within that major. Consumers
+should assert the calls and fields relevant to their behavior rather than exact-object equality over
+every helper field.
