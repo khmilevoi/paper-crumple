@@ -93,10 +93,14 @@ describe('useDemoScene', () => {
   it('forwards a build failure through onFailed without a built sidecar', async () => {
     const error = new Error('no webgl2 here')
     mockedBuild.mockResolvedValue(error)
+    const onReady = vi.fn()
     const onFailed = vi.fn()
-    const probe = renderHook(() => useDemoScene(DEFAULT_CONFIG, () => {}, {}, { onFailed }))
+    const probe = renderHook(() =>
+      useDemoScene(DEFAULT_CONFIG, () => {}, {}, { onReady, onFailed }),
+    )
     await settle()
     expect(probe.value?.scene).toMatchObject({ status: 'failed', error, meta: null })
+    expect(onReady).not.toHaveBeenCalled()
     expect(onFailed).toHaveBeenCalledWith(error, { lost: false, generation: 0 })
   })
 })
