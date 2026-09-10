@@ -1,6 +1,7 @@
 import type { ReactNode } from 'react'
+import type { Knobs } from '@paper-crumple/core'
 import type { DemoConfig } from '../config'
-import type { Entry, KnobValues } from '../knobs'
+import type { Entry } from '../knobs'
 import { isNumberLike, stepOf } from '../knobs'
 import { GROUP_ORDER, labelFor } from '../labels'
 import { Slider } from './primitives'
@@ -88,7 +89,7 @@ export function libraryGroups(entries: readonly Entry[]): LibraryGroup[] {
 
 export interface KnobRowsProps {
   readonly entries: readonly Entry[]
-  readonly knobs: KnobValues
+  readonly knobs: Knobs
   /** A knob write is declarative now: it moves React state and `usePaperScene` writes the stage.
    *  A refusal arrives asynchronously through the scene's `onError`, so there is no Error to
    *  return. Every call site already ignored the return value. */

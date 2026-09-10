@@ -1,57 +1,74 @@
-import { describe, expect, it } from 'vitest'
-import { droppedSample, heroSlotStyle, swapDurationFor, SWAP_DURATION_MS } from './hero'
+// @vitest-environment jsdom
+import { createFakeStage, readyScene } from '@paper-crumple/react/testing'
+import { PaperScene, type Crumple } from '@paper-crumple/react'
+import { act, createElement } from 'react'
+import type { ReactNode } from 'react'
+import { createRoot } from 'react-dom/client'
+import { afterEach, describe, expect, it, vi } from 'vitest'
 
-describe('heroSlotStyle', () => {
-  it('is the artwork box at cssPx on its long side, which frameStyle does not carry', () => {
-    // `frameStyle` gives the PAPER box (400×500, scaled) offset onto the picture. The slot is the
-    // picture's own rectangle: 200×300 at 360 css px on the long side is 1.2 css px per box px.
-    expect(
-      heroSlotStyle({ box: { w: 400, h: 500 }, artwork: { x: 50, y: 70, w: 200, h: 300 } }, 360),
-    ).toEqual({ width: '240px', height: '360px' })
+import { droppedSample, useHero } from './hero'
+import type { Sample } from './samples'
+
+const A: Sample = { id: 'a', label: 'A', src: 'a.png' }
+const B: Sample = { id: 'b', label: 'B', src: 'b.png' }
+
+let root: ReturnType<typeof createRoot> | null = null
+afterEach(() => {
+  if (root === null) return
+  act(() => {
+    root?.unmount()
   })
+  root = null
+})
 
-  it('uses the width when the artwork is landscape', () => {
-    expect(
-      heroSlotStyle({ box: { w: 500, h: 400 }, artwork: { x: 70, y: 50, w: 300, h: 200 } }, 360),
-    ).toEqual({ width: '360px', height: '240px' })
-  })
-
-  it('is null while no front is resident, so the slot keeps its stylesheet size', () => {
-    expect(heroSlotStyle(null, 360)).toBeNull()
-  })
-
-  it('lays out a zero box, not a NaN one, for a frame with no artwork', () => {
-    expect(
-      heroSlotStyle({ box: { w: 0, h: 0 }, artwork: { x: 0, y: 0, w: 0, h: 0 } }, 360),
-    ).toEqual({ width: '0px', height: '0px' })
+describe('useHero', () => {
+  it('uses the provided scene and swaps without an explicit scene option', async () => {
+    const fake = createFakeStage({ sprites: ['a', 'b'] })
+    const onSettle = vi.fn()
+    let shown = A
+    const current: { value: Crumple | null } = { value: null }
+    const baseScene = readyScene(fake.stage)
+    if (baseScene.status !== 'ready') {
+      expect.fail(`readyScene returned ${baseScene.status}`)
+    }
+    const scene = { ...baseScene, meta: { artworkCssPx: 360 } }
+    const activeRoot = createRoot(document.createElement('div'))
+    root = activeRoot
+    function Probe(): ReactNode {
+      current.value = useHero({ shown, duration: 800, onSettle, observed: vi.fn() })
+      return createElement('canvas', { ref: current.value.ref })
+    }
+    const render = async (): Promise<void> => {
+      await act(async () => {
+        activeRoot.render(createElement(PaperScene, { value: scene }, createElement(Probe)))
+      })
+    }
+    await render()
+    onSettle.mockClear()
+    shown = B
+    await render()
+    expect(fake.calls.filter((call) => call.method === 'view.swapTo')).toHaveLength(1)
+    expect(fake.calls.find((call) => call.method === 'view.swapTo')?.args[0]).toBe(B.src)
+    fake.views[0]?.settleRun(undefined)
+    await act(async () => {})
+    expect(onSettle).toHaveBeenCalledTimes(1)
+    expect(onSettle).toHaveBeenCalledWith({ key: 'b', error: null, reduced: false })
+    expect(current.value?.requested).toBe('b')
   })
 })
 
 describe('droppedSample', () => {
   it('gives every drop its own sprite key, because a key names a picture and not a slot', () => {
-    const a = droppedSample(new File([], 'photo.png'), 'blob:one', 1)
-    const b = droppedSample(new File([], 'photo.png'), 'blob:two', 2)
+    const fileA = new File([], 'photo.png')
+    const fileB = new File([], 'photo.png')
+    const a = droppedSample(fileA, 1)
+    const b = droppedSample(fileB, 2)
     expect(a.id).not.toBe(b.id)
-    expect(a.url).toBe('blob:one')
-    expect(b.url).toBe('blob:two')
+    expect(a.src).toBe(fileA)
+    expect(b.src).toBe(fileB)
   })
 
   it('keeps the file name as the label the chips show', () => {
-    expect(droppedSample(new File([], 'camel.png'), 'blob:x', 7).label).toBe('camel.png')
-  })
-})
-
-describe('swapDurationFor', () => {
-  it('takes the audio clip length when there is one', () => {
-    expect(swapDurationFor(585)).toBe(585)
-  })
-
-  it('falls back to the demo constant when sound is off or silent', () => {
-    expect(swapDurationFor(null)).toBe(SWAP_DURATION_MS)
-    expect(swapDurationFor(undefined)).toBe(SWAP_DURATION_MS)
-  })
-
-  it('never hands the binding a zero, which is a swap with no traversal at all', () => {
-    expect(swapDurationFor(0)).toBe(SWAP_DURATION_MS)
+    expect(droppedSample(new File([], 'camel.png'), 7).label).toBe('camel.png')
   })
 })

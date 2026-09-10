@@ -74,7 +74,7 @@ function num(v: string | number | boolean | undefined, fallback: number): number
 }
 
 /**
- * `knobs` is the LIVE bag, keyed the way `knobs.ts`'s `KnobValues` keys everything — patch keys
+ * `knobs` is the LIVE bag, keyed the way core `Knobs` keys everything — patch keys
  * (`sheet.edgeVariance`, not `edgeVariance`). Every fallback comes from `defaultsFor(spec)`
  * (ruling R3), never a bare literal.
  */

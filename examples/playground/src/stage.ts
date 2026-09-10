@@ -74,7 +74,7 @@ export function prefetchSamples(
     // torn-down build silent.
     if (signal.aborted) return
     for (const sample of rest) {
-      const add = built.stage.add(sample.url, { key: sample.id, signal })
+      const add = built.stage.add(sample.src, { key: sample.id, signal })
       pending.set(sample.id, add)
       void add.then(() => pending.delete(sample.id))
     }

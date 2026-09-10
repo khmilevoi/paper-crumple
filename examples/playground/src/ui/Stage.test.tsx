@@ -32,8 +32,7 @@ describe('<Stage>', () => {
   it('sizes the slot from the artwork box and hangs the paper off it out of flow', () => {
     const host = render(
       <Stage
-        hero={detachedCrumple()}
-        slotStyle={{ width: '240px', height: '360px' }}
+        hero={detachedCrumple({ artworkStyle: { width: '240px', height: '360px' } })}
         poseChip="pose 0 / 11"
         sampleChip="sweater"
         edgeChip="smooth · clean"
@@ -57,7 +56,6 @@ describe('<Stage>', () => {
     const host = render(
       <Stage
         hero={detachedCrumple()}
-        slotStyle={null}
         poseChip="pose 0 / 11"
         sampleChip="sweater"
         edgeChip="smooth · clean"
@@ -82,7 +80,6 @@ describe('<Stage>', () => {
             seen.push(el)
           },
         })}
-        slotStyle={null}
         poseChip="pose 0 / 11"
         sampleChip="sweater"
         edgeChip="smooth · clean"

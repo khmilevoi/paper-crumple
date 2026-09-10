@@ -34,23 +34,30 @@ controls — is gone.
 
 ## How it is put together
 
-| file             | what it owns                                                                                 |
-| ---------------- | -------------------------------------------------------------------------------------------- |
-| `src/main.tsx`   | the React root, and the duplicate-core check that must run before it                         |
-| `src/ui/App.tsx` | all page state, the playback and swap paths, and the diagnostics figures                     |
-| `src/ui/*.tsx`   | one component per node group of the mockup                                                   |
-| `src/scene.ts`   | the stage lifecycle over `usePaperScene`: build, dispose, and the knob carry-over on rebuild |
-| `src/hero.ts`    | the one hero view over `useCrumple`: entrance, swap and the frame style the slot renders     |
-| `src/stage.ts`   | prefetching the other samples, and the renderer string the diagnostics footer uses           |
-| `src/config.ts`  | `DemoConfig` — everything §6.5 calls a factory option — and `buildStage`                     |
-| `src/knobs.ts`   | descriptor collection, keyed the way `stage.set` wants                                       |
-| `src/audio.ts`   | the sound controller, headless: a snapshot plus a subscription                               |
-| `src/state.ts`   | the URL fragment, encoded and decoded                                                        |
+| file               | what it owns                                                                       |
+| ------------------ | ---------------------------------------------------------------------------------- |
+| `src/main.tsx`     | the React root, and the duplicate-core check that must run before it               |
+| `src/ui/App.tsx`   | page state, scene readiness/failure callbacks, and the diagnostics figures         |
+| `src/ui/*.tsx`     | one component per node group of the mockup                                         |
+| `src/scene.ts`     | builds `Scene<BuiltStage>`, owns the stage lifecycle, and controls the knobs       |
+| `src/hero.ts`      | the one hero view over `useCrumple`, consuming the provided scene                  |
+| `src/transport.ts` | fold, scrub, keyboard, and timing behavior                                         |
+| `src/stage.ts`     | prefetching the other samples, and the renderer string the diagnostics footer uses |
+| `src/config.ts`    | `DemoConfig` — everything §6.5 calls a factory option — and `buildStage`           |
+| `src/knobs.ts`     | descriptor collection, keyed the way `stage.set` wants                             |
+| `src/audio.ts`     | the sound controller, headless: a snapshot plus a subscription                     |
+| `src/state.ts`     | the URL fragment, encoded and decoded                                              |
 
 **Factory options rebuild; knobs do not.** That split (§6.5) is why `scene.ts`'s `useDemoScene`
-depends on exactly `config`: a knob write goes straight to the live stage and costs one draw. A
+depends on exactly `config`: a knob write goes straight to the live stage and costs one draw. The
+completed build is carried in `scene.meta`, while `scene.stage.defaults` supplies the live
+defaults; the playground does not need a sidecar build object or an explicit default expansion. A
 rebuild is not a reset — every knob a reader moved away from its default is carried onto the new
-stage, and any key the new slot set no longer declares is skipped.
+stage, and any key the new slot set no longer declares is skipped. Dropped files remain direct
+`File`/`Blob` sources and are reclaimable without object URLs.
+
+Scene readiness and failure are callback-driven: `App` handles the `onReady` and `onFailed`
+callbacks exposed by `useDemoScene` instead of polling scene state.
 
 The address bar is always a live share link: every landed rebuild and every knob write rewrites the
 fragment with `replaceState`, so dragging a slider adds no history entries.
@@ -117,3 +124,15 @@ Every narrowed Error the page observes — a refused knob write, a stage build t
 that 404'd and rolled back, an audio asset that is not there — goes to the header's status pill and
 nowhere else. That is the mockup's own error channel (its `statusBad` branch carries exactly this
 kind of message), and a second log panel beside it would only be one more thing to keep in sync.
+
+## Tests
+
+```sh
+# Playground tests only, using the repository's unit project
+pnpm --filter @paper-crumple/playground test
+
+# The repository-wide unit and type suite; this also sweeps playground tests
+pnpm test
+```
+
+DOM hook tests opt into jsdom per file and use `@paper-crumple/react/testing` for full-interface fakes.
