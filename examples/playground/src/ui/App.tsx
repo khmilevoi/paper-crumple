@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import type { Dispatch, MutableRefObject, ReactNode, SetStateAction } from 'react'
+import * as pc from '@paper-crumple/core'
 import { fitSheet } from '@paper-crumple/motion'
 import type { Pack } from '@paper-crumple/motion'
 import { evenKeyFrames } from '@paper-crumple/motion'
@@ -169,8 +170,8 @@ function Playground({
 }: PlaygroundProps): ReactNode {
   const scene = useScene<BuiltStage>()
   const built = scene.status === 'ready' ? scene.meta : null
-  const { knobs, setKnob, resetKnobs } = demo
-  const generation = scene.generation
+  const { knobs, setKnob } = demo
+  const { stop } = scene
 
   const transport = useTransport({
     shown,
@@ -241,15 +242,7 @@ function Playground({
   /** The pack the selects are built from. Every built-in pack stores the same twelve frames and
    *  `setPoses` checks a draft against every resident pack anyway, so the first resident one is as
    *  good as any. */
-  const pack = useMemo(
-    () => built?.motion.packs()[0] ?? null,
-    // `generation` is what makes this re-read after a rebuild swaps the slot underneath, and
-    // `crumple.shown` is what makes it re-read when a sprite LANDS: `packs()` lists the resident
-    // packs and there are none before the first `add` resolves, which is strictly after `built`
-    // (§9.2). Neither is read in the body.
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-    [built, generation, crumple.shown],
-  )
+  const pack = built?.motion.packs()[0] ?? null
   /** `null` means "whatever the pack's manifest says"; anything else is the reader's own draft,
    *  and it survives a rebuild the way the open sections do. */
   const keyFrames = useMemo(
@@ -265,7 +258,7 @@ function Playground({
       // through the new key frames, so every run stops first and every view goes back to pose 0,
       // which exists in every schedule. `scene.stop` is the stable method; `scene` itself is a
       // fresh object on every `knobEpoch` bump and must not be a dependency here.
-      scene.stop({ all: true })
+      stop({ all: true })
       const manifest = sameList(draftPoses, resident.keyFrames)
       const refused = built.motion.setPoses(manifest ? null : { keyFrames: [...draftPoses] })
       if (refused !== undefined) {
@@ -273,16 +266,9 @@ function Playground({
         return false
       }
       crumple.draw('flat')
-      crumple.refresh()
       return true
     },
-    // `scene.stop` only, not `scene`: the analyzer does not narrow a called member expression
-    // (`scene.stop({...})`) the way it narrows a plain property read, so it still asks for the
-    // base identifier — but `scene`'s identity moves on every `knobEpoch` bump
-    // (`use-paper-scene.ts:251,284`), and depending on the object would re-run this effect, and
-    // everything that closes over it, on every knob write.
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-    [built, crumple.draw, crumple.refresh, scene.stop, setStatus],
+    [built, crumple.draw, stop, setStatus],
   )
 
   const commitKeyFrames = useCallback(
@@ -533,20 +519,21 @@ function Playground({
   // The address bar is always a live share link: `replaceState`, so a knob drag adds no history
   // entry, and never `pushState`.
   useEffect(() => {
-    const changed: Record<string, string | number | boolean> = {}
-    for (const { key, k } of entries) {
-      const v = knobs[key]
-      if (v !== undefined && v !== k.default) changed[key] = v
+    const changed: Record<string, pc.Knobs[string]> = {}
+    if (scene.status === 'ready') {
+      for (const [key, value] of Object.entries(knobs)) {
+        if (value !== scene.stage.defaults[key]) changed[key] = value
+      }
     }
     history.replaceState(null, '', encodeState(config, changed))
-  }, [config, entries, knobs])
+  }, [config, knobs, scene])
 
   const onReset = useCallback(() => {
     setDraft(null)
-    resetKnobs()
+    demo.resetKnobs()
     setConfig(DEFAULT_CONFIG)
     setStatus({ ok: true, text: 'reset to manifest defaults' })
-  }, [resetKnobs, setConfig, setDraft, setStatus])
+  }, [demo, setConfig, setDraft, setStatus])
 
   // --- render -----------------------------------------------------------------------------------
 
