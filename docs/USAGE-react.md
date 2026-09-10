@@ -787,13 +787,15 @@ decided by scope, not by method, and the narrower scope wins (packages §4.4).
 **`spriteKey` is the trigger.** The swap fires when it changes; `src` is read as the source for the
 new key, and nothing else about the render causes a swap.
 
-**A request for the key already shown is refused before anything observable happens**, and that is
-worth knowing before you build a transport on top of it: the hook returns before `requested` moves,
+**A request for the key already considered by the driver is refused before anything observable happens**,
+and that is worth knowing before you build a transport on top of it: the hook returns before
+`requested` moves,
 before its sequence number advances, and before any library call — so no `add`, no run, no
 `start` / `end`, and **no change to the snapshot at all**. From the outside "the request produced
-silence" and "the request was never considered" are the same thing. If you arm state when you ask for
-a swap — a spinner, a fold direction, an audio sequence — make the same-key check yourself, before
-you arm it.
+silence" and "the request was never considered" are the same thing. The check is against
+`crumple.requested`, not `crumple.shown`: after a rollback, the requested key can still be the failed
+target while the shown key is the previous sprite. If you arm state when you ask for a swap — a
+spinner, a fold direction, an audio sequence — make the same-key check yourself, before you arm it.
 
 ```tsx
 function Hero({ selected }: { selected: Item }) {
