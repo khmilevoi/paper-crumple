@@ -16,6 +16,7 @@ import {
   type CrumpleFrameStyle,
   type CrumpleOptions,
   type CrumpleProps,
+  type StageErrorListener,
 } from './index.js'
 
 declare const bitmap: ImageBitmap
@@ -54,6 +55,10 @@ test('fit is a hook option and never a prop (§2)', () => {
   expectTypeOf<CrumpleOptions<string>['fit']>().toEqualTypeOf<Fit | undefined>()
   expectTypeOf<CrumpleProps>().not.toHaveProperty('fit')
   expectTypeOf<CrumpleProps>().not.toHaveProperty('frameTo')
+})
+
+test('onError uses the binding-owned StageErrorListener (§4.3)', () => {
+  expectTypeOf<NonNullable<CrumpleOptions<string>['onError']>>().toEqualTypeOf<StageErrorListener>()
 })
 
 test('state carries all seven view states plus detached (§5.2)', () => {

@@ -21,6 +21,9 @@ import type {
   CrumpleStatus,
 } from './index.js'
 
+// --- P6: binding-owned callback names (§4.3) ---
+import type { CreateStage, StageErrorListener } from './index.js'
+
 test('usePaperScene takes SceneOptions and returns a Scene, with meta defaulting to undefined', () => {
   expectTypeOf<Parameters<typeof usePaperScene<undefined>>[0]>().toEqualTypeOf<SceneOptions>()
   expectTypeOf<ReturnType<typeof usePaperScene<undefined>>>().toEqualTypeOf<Scene>()
@@ -82,4 +85,13 @@ test('the crumple carries draw, sync and retry (§2.2, §2.6)', () => {
   expectTypeOf(crumple.draw).toEqualTypeOf<(pose: PoseRef) => void>()
   expectTypeOf(crumple.sync).toEqualTypeOf<() => void>()
   expectTypeOf(crumple.retry).toEqualTypeOf<() => void>()
+})
+
+test('the React root exports the binding-owned callback names (§4.3)', () => {
+  expectTypeOf<CreateStage>().toEqualTypeOf<SceneOptions['create']>()
+  expectTypeOf<CreateStage<{ id: string }>>().toEqualTypeOf<
+    SceneOptions<{ id: string }>['create']
+  >()
+  expectTypeOf<StageErrorListener>().toEqualTypeOf<NonNullable<SceneOptions['onError']>>()
+  expectTypeOf<NonNullable<CrumpleOptions<string>['onError']>>().toEqualTypeOf<StageErrorListener>()
 })

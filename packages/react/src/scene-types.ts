@@ -11,6 +11,9 @@ import type {
 
 export type SceneStatus = 'building' | 'ready' | 'failed'
 
+/** A listener for errors reported through a stage's binding-facing error channel (§4.3). */
+export type StageErrorListener = (e: StageEvent<'error'>) => void
+
 /**
  * What `create` resolves to when the consumer has build metadata to carry (§3.2). Returning a
  * bare `BlitStage` is still legal and means `meta` is `undefined` — which is exactly what the
@@ -44,7 +47,7 @@ export interface SceneOptions<M = undefined> {
    * `Record<string, …>` is the honest type: the binding cannot name the slots by design.
    */
   knobs?: Knobs
-  onError?: (e: StageEvent<'error'>) => void
+  onError?: StageErrorListener
   /**
    * Fires once per landed build (§3.1), synchronously after the `ready` bump and before React
    * re-renders — so a consumer no longer re-derives the transition from `status` and `generation`
@@ -81,6 +84,9 @@ export interface SceneOptions<M = undefined> {
    */
   onKnobRefused?: (key: string, value: Knobs[string], error: Error) => void
 }
+
+/** The scene factory accepted by `usePaperScene` (§4.3). */
+export type CreateStage<M = undefined> = SceneOptions<M>['create']
 
 /** The four fields every branch of `SceneSnapshot` carries, whatever the status (§4.1). */
 export interface SceneCounters {

@@ -16,6 +16,8 @@ import type {
   SceneMethods,
   SceneOptions,
   SceneSnapshot,
+  CreateStage,
+  StageErrorListener,
 } from './scene-types.js'
 import { usePaperScene } from './use-paper-scene.js'
 
@@ -104,4 +106,16 @@ test('the positional form infers M from create when no type argument is given (�
     meta: { id: 'x' },
   })
   expectTypeOf(usePaperScene(create, [])).toEqualTypeOf<Scene<{ id: string }>>()
+})
+
+test('CreateStage names the complete create callback and defaults metadata to undefined (§4.3)', () => {
+  expectTypeOf<CreateStage>().toEqualTypeOf<SceneOptions['create']>()
+  expectTypeOf<CreateStage<{ id: string }>>().toEqualTypeOf<
+    SceneOptions<{ id: string }>['create']
+  >()
+})
+
+test('StageErrorListener names the scene onError callback exactly (§4.3)', () => {
+  expectTypeOf<StageErrorListener>().toEqualTypeOf<(e: StageEvent<'error'>) => void>()
+  expectTypeOf<NonNullable<SceneOptions['onError']>>().toEqualTypeOf<StageErrorListener>()
 })
