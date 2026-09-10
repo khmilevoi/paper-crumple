@@ -75,8 +75,8 @@ export const PACKAGES = /** @type {readonly PackageSpec[]} */ ([
   {
     dir: 'react',
     name: '@paper-crumple/react',
-    subpaths: ['.'],
-    required: [...ALWAYS, ...entryTriple('index')],
+    subpaths: ['.', './testing'],
+    required: [...ALWAYS, ...entryTriple('index'), ...entryTriple('testing')],
   },
 ])
 
