@@ -184,9 +184,9 @@ prop.
 **`fit` and `tag` are fixed when the view is created, and changing them later does nothing** — `tag`
 is written at `stage.view()` (`packages/core/src/stage.ts:1471`) and `View.tag` is a read-only
 accessor (`view.ts:86`). Because the `ref` that creates the view is identity-stable (next section),
-the creating callback is not re-invoked, so **a changed `fit` or `tag` is silently ignored until the
-view is rebuilt.** Worth knowing before it is discovered: if these must vary, vary the React `key` of
-the component that owns them.
+the creating callback is not re-invoked, so **a changed `fit` or `tag` is ignored and warns once in
+development until the view is rebuilt.** If these must vary, remount the owner under a different
+React `key` to create a view with the new fixed values.
 
 ## 1. Every function this package hands you is identity-stable
 
@@ -606,6 +606,16 @@ const bitmap = useCrumple({ spriteKey: 'hero', src: myImageBitmap, pin: true })
 //                                                                 ^ required, and the compiler says so
 ```
 
+`File` is a `Blob`, so it may be passed directly as `src`; do not create an object URL:
+
+```tsx
+function useDroppedPaper(file: File, dropId: number): Crumple {
+  return useCrumple({ spriteKey: `dropped-${dropId}`, src: file })
+}
+```
+
+Keep a unique key because two files with the same filename can still be different pictures.
+
 The qualifier is the core's own: a source widened to the whole `SpriteSource` union — read out of a
 data model rather than written at the call site — passes the tuple test and reaches the runtime check
 instead (`source.ts:61-65`). The binding inherits that hole exactly, neither widening it nor claiming
@@ -647,6 +657,24 @@ During an animated swap, core adopts the target at the ball. Therefore `shown` a
 target while descent is still running; neither means “settled”. Read `pending` or handle `onSettle` for
 that decision. `parked` is true for the wait at the ball and is cleared on end, stop/supersession, and
 disposal. It is safe for the swap spinner now; reduced motion never parks because it degrades to `show()`.
+
+**Compare against `crumple.requested`, never `crumple.shown`.** `shown` can be the target from the ball
+onward and can differ after rollback; `requested` records the key the driver already considered.
+
+Use `onSettle` for transport completion:
+
+```tsx
+const crumple = useCrumple({
+  spriteKey: selected.id,
+  src: selected.src,
+  onSettle: ({ key, error, reduced }) => {
+    console.info('request settled', { key, failed: error !== null, reduced })
+  },
+})
+```
+
+Keep `onEnd` for consumers that genuinely need the view-run event; do not combine animated `onEnd`
+with an effect over `shown` to infer request settlement.
 
 `requested` and `shown` are separate because they genuinely diverge (§5.1). A swap whose target fails
 **rolls back to the previous sprite** — `state === 'crumpling.recover'`, and the `Run<SwapResult>`
@@ -729,18 +757,27 @@ stays reachable (§5.1) — `view.once`, `view.set`, and other unforeseen calls.
 is the correct run-cadence seam; no snapshot `step` field is promised.
 
 ```tsx
+if (crumple.view === null) return
+const audio = new Audio('/fold.mp3')
+void audio.play()
 const run = crumple.play('flat', 'ball', { duration: 900 })
-if (run !== null) {
-  const r = await run // `Run` is a thenable; awaiting it is awaiting the settled result
-  if (r === pc.ABORTED) return // abort first, as its own early return (packages §10.5)
-  if (r instanceof Error) report(r) // PlayResult = undefined | PoseError | Aborted
-}
+if (run === null) return // assertion guard: the render snapshot said a view existed
+const result = await run
+if (result === pc.ABORTED) return
+if (result instanceof Error) console.error(result)
 
 crumple.stop() // freezes at the current pose and issues NO draw — a cancel path must not render
 crumple.draw(pose) // one draw and one snapshot bump; no-op while detached
 crumple.sync() // re-read after an otherwise-raw view call, without drawing
 crumple.retry() // retry the current rolled-back key without key-away-and-back
 ```
+
+Gate side effects before calling `play`: a `null` return is too late to undo audio or another side
+effect. It means the view was detached and nothing else.
+
+The binding reports no acquisition or ready-to-first-sprite timing. `onReady` is scene-ready timing,
+`onStart` occurs after the sprite is resident, and neither measures the front bake; there is no
+`shownAt` field.
 
 `crumple.play` supersedes whatever the view was doing, including a `scene.play` wave — collisions are
 decided by scope, not by method, and the narrower scope wins (packages §4.4).
@@ -1040,10 +1077,19 @@ On every change the hook diffs it against the last applied map and writes **only
 attempted. Re-sending the whole object every render is therefore free, which is what lets you keep the
 knobs in ordinary React state.
 
-**Only the keys *present* in the object are ever written, and removing one does not reset it.** The
-binding does not know a key's default and does not go looking for it, so a key you drop keeps
-whatever value it last had on the stage. A "reset everything" affordance is therefore your own: write
-the defaults out explicitly rather than emptying the object.
+After a key has been applied, omitting it from the next `knobs` object writes `stage.defaults[key]`.
+Undeclared keys are silently skipped, and the batch produces one `knobEpoch` bump. Flat keys use the
+bare key for a shared binding; slot-local bindings use `namespace.key`.
+
+```tsx
+const [knobs, setKnobs] = useState<pc.Knobs>({})
+const scene = usePaperScene({ create, deps, knobs })
+
+<button onClick={() => setKnobs({})}>Reset knobs</button>
+```
+
+For a synchronous refusal path, keep `scene.stage.set({ [key]: value })`. The declarative path costs
+the React render/effect cycle; it does not promise a synchronous result from `knobs`.
 
 **The one-call-per-key rule is what makes "one bad key does not abandon the batch" true** rather than
 a wish. `normalise` returns on the first invalid key and writes nothing
