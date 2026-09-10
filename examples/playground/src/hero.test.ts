@@ -26,13 +26,17 @@ describe('useHero', () => {
     const fake = createFakeStage({ sprites: ['a', 'b'] })
     const onSettle = vi.fn()
     let shown = A
-    let current: Crumple | null = null
-    const scene = { ...readyScene(fake.stage), meta: { artworkCssPx: 360 } }
+    const current: { value: Crumple | null } = { value: null }
+    const baseScene = readyScene(fake.stage)
+    if (baseScene.status !== 'ready') {
+      expect.fail(`readyScene returned ${baseScene.status}`)
+    }
+    const scene = { ...baseScene, meta: { artworkCssPx: 360 } }
     const activeRoot = createRoot(document.createElement('div'))
     root = activeRoot
     function Probe(): ReactNode {
-      current = useHero({ shown, duration: 800, onSettle, observed: vi.fn() })
-      return createElement('canvas', { ref: current.ref })
+      current.value = useHero({ shown, duration: 800, onSettle, observed: vi.fn() })
+      return createElement('canvas', { ref: current.value.ref })
     }
     const render = async (): Promise<void> => {
       await act(async () => {
@@ -49,7 +53,7 @@ describe('useHero', () => {
     await act(async () => {})
     expect(onSettle).toHaveBeenCalledTimes(1)
     expect(onSettle).toHaveBeenCalledWith({ key: 'b', error: null, reduced: false })
-    expect(current?.requested).toBe('b')
+    expect(current.value?.requested).toBe('b')
   })
 })
 

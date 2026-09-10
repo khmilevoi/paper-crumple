@@ -183,18 +183,20 @@ function Playground({
         readyAtRef.current = null
         setMountMs((previous) => previous ?? performance.now() - startedAt)
       }
-      if (!wasSwap) return
       if (event.error !== null) {
         setStatus({
           ok: false,
-          text: `swap failed, rolled back to the previous sprite: ${event.error.message}`,
+          text: wasSwap
+            ? `swap failed, rolled back to the previous sprite: ${event.error.message}`
+            : `image failed: ${event.error.message}`,
         })
         return
       }
+      if (!wasSwap) return
       setStatus({ ok: true, text: `swapped to ${shown.label}` })
     },
   })
-  const { crumple, dwells, lastStepMs, lastDrawMs } = transport
+  const { crumple, dwells, lastStepMs, lastDrawMs, beginSwap, cancelSwap } = transport
 
   const sprite = crumple.sprite
 
@@ -236,6 +238,7 @@ function Playground({
 
   // --- pose, transport and playback ------------------------------------------------------------
   const pose = crumple.pose
+  const drawFlat = crumple.draw
 
   // --- pose schedule --------------------------------------------------------------------------
 
@@ -258,6 +261,7 @@ function Playground({
       // through the new key frames, so every run stops first and every view goes back to pose 0,
       // which exists in every schedule. `scene.stop` is the stable method; `scene` itself is a
       // fresh object on every `knobEpoch` bump and must not be a dependency here.
+      if (crumple.pending !== null) cancelSwap(crumple.pending.key)
       stop({ all: true })
       const manifest = sameList(draftPoses, resident.keyFrames)
       const refused = built.motion.setPoses(manifest ? null : { keyFrames: [...draftPoses] })
@@ -265,10 +269,10 @@ function Playground({
         setStatus({ ok: false, text: `rejected: ${refused.message}` })
         return false
       }
-      crumple.draw('flat')
+      drawFlat('flat')
       return true
     },
-    [built, crumple.draw, stop, setStatus],
+    [built, cancelSwap, crumple.pending, drawFlat, stop, setStatus],
   )
 
   const commitKeyFrames = useCallback(
@@ -320,16 +324,16 @@ function Playground({
     (target: Sample) => {
       if (target.id === crumple.requested) {
         if (crumple.status === 'rolled-back') {
-          transport.beginSwap()
+          beginSwap(target.id)
           crumple.retry()
         }
         return
       }
-      transport.beginSwap()
+      beginSwap(target.id)
       setShown(target)
       setLibrarySample((prev) => nextLibrarySample(prev, target))
     },
-    [crumple, setLibrarySample, setShown, transport],
+    [beginSwap, crumple, setLibrarySample, setShown],
   )
 
   const onSwap = useCallback(() => {
@@ -490,9 +494,10 @@ function Playground({
 
   const applyConfig = useCallback(
     (next: DemoConfig) => {
+      if (crumple.pending !== null) cancelSwap(crumple.pending.key)
       setConfig(next)
     },
-    [setConfig],
+    [cancelSwap, crumple.pending, setConfig],
   )
 
   // `edgeShape`, `edgeFinish` and `edgeWidthUnit` are all factory options, so every segment
@@ -529,11 +534,12 @@ function Playground({
   }, [config, knobs, scene])
 
   const onReset = useCallback(() => {
+    if (crumple.pending !== null) cancelSwap(crumple.pending.key)
     setDraft(null)
     demo.resetKnobs()
     setConfig(DEFAULT_CONFIG)
     setStatus({ ok: true, text: 'reset to manifest defaults' })
-  }, [demo, setConfig, setDraft, setStatus])
+  }, [cancelSwap, crumple.pending, demo, setConfig, setDraft, setStatus])
 
   // --- render -----------------------------------------------------------------------------------
 

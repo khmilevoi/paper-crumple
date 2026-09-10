@@ -21,6 +21,7 @@ interface TransportHarness {
   readonly audio: {
     beginSequence: ReturnType<typeof vi.fn>
     endSequence: ReturnType<typeof vi.fn>
+    cancel: ReturnType<typeof vi.fn>
   }
   readonly settled: ReturnType<typeof vi.fn>
   readonly result: { current: TransportHandle }
@@ -40,11 +41,12 @@ afterEach(() => {
 
 async function renderTransport(
   fake: FakeStageHandle,
-  observed: ReturnType<typeof vi.fn> = vi.fn(),
+  observed: ReturnType<typeof vi.fn<(where: string, error: Error) => void>> = vi.fn(),
 ): Promise<TransportHarness> {
   const audio = {
     beginSequence: vi.fn(() => 600),
     endSequence: vi.fn(),
+    cancel: vi.fn(),
   }
   const settled = vi.fn()
   const result: { current: TransportHandle } = { current: null as unknown as TransportHandle }
@@ -142,7 +144,7 @@ describe('useTransport', () => {
   it('closes an armed swap from onSettle rather than a view end event', async () => {
     const harness = await renderTransport(createFakeStage({ sprites: ['a'] }))
     harness.settled.mockClear()
-    act(() => harness.result.current.beginSwap())
+    act(() => harness.result.current.beginSwap('b'))
     await harness.setShown(B)
     harness.fake.views[0]?.settleRun(undefined)
     await act(async () => {})
@@ -156,7 +158,7 @@ describe('useTransport', () => {
   it('forwards rollback errors as a settled swap outcome', async () => {
     const harness = await renderTransport(createFakeStage({ sprites: ['a'] }))
     harness.settled.mockClear()
-    act(() => harness.result.current.beginSwap())
+    act(() => harness.result.current.beginSwap('b'))
     await harness.setShown(B)
     const error = new SheetError('target failed')
     harness.fake.views[0]?.settleRun(error)
@@ -172,7 +174,7 @@ describe('useTransport', () => {
     try {
       const harness = await renderTransport(createFakeStage({ sprites: ['a', 'b'] }))
       harness.settled.mockClear()
-      act(() => harness.result.current.beginSwap())
+      act(() => harness.result.current.beginSwap('b'))
       await harness.setShown(B)
       await act(async () => {})
       expect(harness.audio.endSequence).toHaveBeenCalledTimes(1)
@@ -202,6 +204,40 @@ describe('useTransport', () => {
     await expect(done).resolves.toBeUndefined()
     expect(harness.audio.endSequence).toHaveBeenCalledTimes(1)
     expect(observed).toHaveBeenCalledWith('crumple.play', error)
+    await harness.unmount()
+  })
+
+  it('cancels an armed swap without fabricating settlement', async () => {
+    const harness = await renderTransport(createFakeStage({ sprites: ['a', 'b'] }))
+    harness.settled.mockClear()
+    act(() => harness.result.current.beginSwap('b'))
+    await harness.setShown(B)
+
+    act(() => harness.result.current.cancelSwap('b'))
+
+    expect(harness.result.current.direction).toBeNull()
+    expect(harness.audio.cancel).toHaveBeenCalledTimes(1)
+    expect(harness.audio.endSequence).not.toHaveBeenCalled()
+    expect(harness.settled).not.toHaveBeenCalled()
+    await harness.unmount()
+  })
+
+  it('does not let stale cancellation close a successor request', async () => {
+    const C: Sample = { id: 'c', label: 'C', src: 'c.png' }
+    const harness = await renderTransport(createFakeStage({ sprites: ['a', 'b', 'c'] }))
+    act(() => harness.result.current.beginSwap('b'))
+    await harness.setShown(B)
+    act(() => harness.result.current.beginSwap('c'))
+    await harness.setShown(C)
+    harness.audio.cancel.mockClear()
+
+    act(() => harness.result.current.cancelSwap('b'))
+
+    expect(harness.result.current.direction).toBe('folding')
+    expect(harness.audio.cancel).not.toHaveBeenCalled()
+    act(() => harness.result.current.cancelSwap('c'))
+    expect(harness.result.current.direction).toBeNull()
+    expect(harness.audio.cancel).toHaveBeenCalledTimes(1)
     await harness.unmount()
   })
 

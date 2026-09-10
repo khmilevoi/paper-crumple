@@ -4,7 +4,7 @@ import { useCallback, useEffect, useRef, useState } from 'react'
 import { useScene } from '@paper-crumple/react'
 import type { Crumple, CrumpleSettleEvent } from '@paper-crumple/react'
 
-import type { AudioHandle } from './audio'
+import type { AudioHandle, SequenceSpec } from './audio'
 import { playSpec, swapSpec } from './audio'
 import type { BuiltStage } from './config'
 import { useHero } from './hero'
@@ -19,7 +19,7 @@ export type TransportDirection = 'folding' | 'unfolding' | null
 
 export interface TransportOptions {
   readonly shown: Sample
-  readonly audio: Pick<AudioHandle, 'beginSequence' | 'endSequence'>
+  readonly audio: Pick<AudioHandle, 'beginSequence' | 'endSequence' | 'cancel'>
   readonly observed: (where: string, error: Error) => void
   readonly onSettle: (event: CrumpleSettleEvent, wasSwap: boolean) => void
 }
@@ -31,7 +31,8 @@ export interface TransportHandle {
   readonly busy: boolean
   readonly lastStepMs: number | null
   readonly lastDrawMs: number | null
-  readonly beginSwap: () => void
+  readonly beginSwap: (key: string) => void
+  readonly cancelSwap: (key: string) => void
   readonly draw: (pose: number) => void
   readonly runFold: (from: PoseRef, to: PoseRef) => Promise<void>
 }
@@ -42,6 +43,8 @@ export function swapDurationFor(fromAudio: number | null | undefined): number {
     ? DEFAULT_RUN_DURATION_MS
     : fromAudio
 }
+
+type TransportOwner = { readonly kind: 'swap'; readonly key: string } | { readonly kind: 'fold' }
 
 export function useTransport(o: TransportOptions): TransportHandle {
   const { audio, observed, onSettle, shown } = o
@@ -54,19 +57,41 @@ export function useTransport(o: TransportOptions): TransportHandle {
   const [lastStepMs, setLastStepMs] = useState<number | null>(null)
   const [lastDrawMs, setLastDrawMs] = useState<number | null>(null)
   const stepAtRef = useRef<number | null>(null)
+  const ownerRef = useRef<TransportOwner | null>(null)
 
-  const endTransport = useCallback((): void => {
-    audio.endSequence()
-    setDirection(null)
-  }, [audio])
+  const beginTransport = useCallback(
+    (
+      owner: TransportOwner,
+      nextDirection: Exclude<TransportDirection, null>,
+      spec: SequenceSpec,
+    ): number | undefined => {
+      if (ownerRef.current !== null) audio.cancel()
+      ownerRef.current = owner
+      setDirection(nextDirection)
+      return audio.beginSequence(spec)
+    },
+    [audio],
+  )
+
+  const closeTransport = useCallback(
+    (owner: TransportOwner, settled: boolean): void => {
+      if (ownerRef.current !== owner) return
+      ownerRef.current = null
+      if (settled) audio.endSequence()
+      else audio.cancel()
+      setDirection(null)
+    },
+    [audio],
+  )
 
   const onHeroSettle = useCallback(
     (event: CrumpleSettleEvent): void => {
-      const wasSwap = direction !== null
-      if (wasSwap) endTransport()
+      const owner = ownerRef.current
+      const wasSwap = owner?.kind === 'swap' && owner.key === event.key
+      if (wasSwap) closeTransport(owner, true)
       onSettle(event, wasSwap)
     },
-    [direction, endTransport, onSettle],
+    [closeTransport, onSettle],
   )
 
   const crumple = useHero({
@@ -104,11 +129,23 @@ export function useTransport(o: TransportOptions): TransportHandle {
     [drawPose],
   )
 
-  const beginSwap = useCallback((): void => {
-    const duration = audio.beginSequence(swapSpec(crumple.pose, dwells))
-    setSwapDuration(swapDurationFor(duration))
-    setDirection('folding')
-  }, [audio, crumple.pose, dwells])
+  const beginSwap = useCallback(
+    (key: string): void => {
+      const owner: TransportOwner = { kind: 'swap', key }
+      const duration = beginTransport(owner, 'folding', swapSpec(crumple.pose, dwells))
+      setSwapDuration(swapDurationFor(duration))
+    },
+    [beginTransport, crumple.pose, dwells],
+  )
+
+  const cancelSwap = useCallback(
+    (key: string): void => {
+      const owner = ownerRef.current
+      if (owner?.kind !== 'swap' || owner.key !== key) return
+      closeTransport(owner, false)
+    },
+    [closeTransport],
+  )
 
   const play = crumple.play
   const runFold = useCallback(
@@ -117,8 +154,12 @@ export function useTransport(o: TransportOptions): TransportHandle {
       const toIdx = to === 'flat' ? 0 : to === 'ball' ? dwells.length - 1 : to
       if (fromIdx === toIdx) return
 
-      const duration = audio.beginSequence(playSpec(fromIdx, toIdx, '', dwells))
-      setDirection(toIdx > fromIdx ? 'folding' : 'unfolding')
+      const owner: TransportOwner = { kind: 'fold' }
+      const duration = beginTransport(
+        owner,
+        toIdx > fromIdx ? 'folding' : 'unfolding',
+        playSpec(fromIdx, toIdx, '', dwells),
+      )
       try {
         const run = play(from, to, { duration: duration ?? DEFAULT_RUN_DURATION_MS })
         if (run === null) return
@@ -131,10 +172,10 @@ export function useTransport(o: TransportOptions): TransportHandle {
       } catch (reason: unknown) {
         observed('crumple.play', reason instanceof Error ? reason : new Error(String(reason)))
       } finally {
-        endTransport()
+        closeTransport(owner, true)
       }
     },
-    [audio, dwells, endTransport, observed, play],
+    [beginTransport, closeTransport, dwells, observed, play],
   )
 
   const busy = crumple.pending !== null || crumple.state === 'playing'
@@ -171,6 +212,7 @@ export function useTransport(o: TransportOptions): TransportHandle {
     lastStepMs,
     lastDrawMs,
     beginSwap,
+    cancelSwap,
     draw,
     runFold,
   }
