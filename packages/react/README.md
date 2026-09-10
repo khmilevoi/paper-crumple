@@ -52,6 +52,8 @@ function Gallery(): JSX.Element {
 }
 
 function Hero({ selected }: { selected: { id: string; src: string } }): JSX.Element {
+  // The default reducedMotion: 'auto' consults matchMedia('(prefers-reduced-motion: reduce)')
+  // before entrances and swaps, showing the target directly when reduced motion is preferred.
   const crumple = useCrumple({
     spriteKey: selected.id,
     src: selected.src,
