@@ -48,61 +48,6 @@ function sameList(a: readonly number[], b: readonly number[]): boolean {
   return a.length === b.length && a.every((x, i) => x === b[i])
 }
 
-/**
- * Whether a swap to `target` would be a no-op the library itself never reports back on. `useCrumple`
- * refuses a same-key request before it does anything observable — `syncSprite`'s
- * `core.synced.key === key` check (`packages/react/src/use-crumple.ts:261`) returns before an
- * `add`, a run, or an `end` event, so nothing would ever arrive to close a transport this component
- * armed for the swap (Finding A). `startSwap` must never begin one.
- *
- * `requestedKey` MUST be `crumple.requested` (falling back to the request in flight, `shown.id`,
- * before anything has landed) — the key `useCrumple` itself compares at `use-crumple.ts:261`, where
- * it moves in lockstep with `core.synced.key` (`packages/react/src/crumple-state.ts:47`,
- * `use-crumple.ts:264`). It is NOT `crumple.shown`: that is `view?.sprite?.key`
- * (`crumple-state.ts:46`), the sprite actually on the canvas, and it diverges from `requested`
- * precisely on the rollback path — a failed acquisition rolls back, leaving `synced.key` /
- * `requested` at `'broken'` while `shown` is still the previous sprite's key. Comparing against
- * `shown` instead re-arms `direction` and `swappingRef` on a second "Swap" click for the broken
- * sample, then bails out of `setShown` on an identical object: the
- * `[view, spriteKey, src, syncSprite]` effect (`use-crumple.ts:286-289`) never re-fires, and nothing
- * ever clears those flags — the transport, keyboard and Swap button go dead until reload.
- *
- * Swallowing the repeated broken-URL click here is correct, not a regression: with `spriteKey`
- * unchanged `useCrumple` refuses by construction, and `rememberPair` refuses a changed `src` under
- * the same key, so the rollback demo cannot be re-armed by clicking Swap again at all — the guard's
- * job is to swallow the click rather than arm a transport for a run that can never happen.
- */
-export function isNoOpSwap(requestedKey: string, target: Sample): boolean {
-  return target.id === requestedKey
-}
-
-/**
- * Whether the swap this component started has reached the sprite it asked for (§9.3).
- *
- * All three values, not two. `crumple.requested === crumple.shown` alone is true AT REST — and the
- * commit right after a "Swap" click is at rest as far as the snapshot is concerned: `startSwap`
- * arms `swappingRef` and calls `setShown(target)`, so the effect re-runs on the new `shown.label`
- * while the snapshot it reads is still the pre-click one, both values naming the PREVIOUS sprite.
- * Gating on the pair alone would consume the transport and print the new label at the start of the
- * swap instead of the end. `requested` moves one commit later, inside `useCrumple`'s own
- * `syncSprite` effect (`use-crumple.ts:286-289`); `shown` moves when the sprite lands.
- *
- * `requested !== shownKey` is also exactly the rollback path — a failed acquisition leaves
- * `requested` at `'broken'` while the previous sprite is still on the canvas — so this never fires
- * for a swap that did not happen. That path is closed by the error effect, which clears
- * `swappingRef` itself.
- *
- * It reports the ball, not the true end, while `adopt` still moves `shown` mid-fold (§0.1). §2.1's
- * `onSettle` is the real fix and is not this plan's.
- */
-export function isSwapSettled(
-  requested: string | null,
-  shownKey: string | null,
-  targetKey: string,
-): boolean {
-  return requested === targetKey && shownKey === targetKey
-}
-
 /** The status line the pill shows: what the last action did, or `null` for the idle readout. */
 export interface StageStatus {
   readonly ok: boolean
@@ -233,17 +178,28 @@ function Playground({
   const { knobs, setKnob, resetKnobs } = demo
   const generation = scene.generation
 
-  /** True between the click that starts a swap and the settle that ends it, so the ENTRANCE does
-   *  not print "swapped to …" on the way up. */
-  const swappingRef = useRef(false)
-
-  const { crumple, dwells, direction, busy, lastStepMs, lastDrawMs, beginSwap, draw, runFold } =
-    useTransport({
-      shown,
-      audio,
-      observed,
-      onSettle: () => {},
-    })
+  const transport = useTransport({
+    shown,
+    audio,
+    observed,
+    onSettle(event, wasSwap) {
+      const startedAt = readyAtRef.current
+      if (startedAt !== null && event.error === null) {
+        readyAtRef.current = null
+        setMountMs((previous) => previous ?? performance.now() - startedAt)
+      }
+      if (!wasSwap) return
+      if (event.error !== null) {
+        setStatus({
+          ok: false,
+          text: `swap failed, rolled back to the previous sprite: ${event.error.message}`,
+        })
+        return
+      }
+      setStatus({ ok: true, text: `swapped to ${shown.label}` })
+    },
+  })
+  const { crumple, dwells, lastStepMs, lastDrawMs } = transport
 
   const sprite = crumple.sprite
 
@@ -257,36 +213,6 @@ function Playground({
       }),
     [audio],
   )
-
-  // --- status: the settle backstop and the two error/failure effects ------------------------------
-
-  /**
-   * The swap settled. The transport callback covers the animated path; this covers the reduced-
-   * motion one, where `show()` is the whole swap — one draw, no run, no start/step/end triple — and
-   * emits nothing at all. The placeholder only lifts because the binding versions its own store;
-   * there is no event behind it (USAGE §7). Without this the status would never close under `reduce`.
-   */
-  useEffect(() => {
-    if (!swappingRef.current) return
-    if (!isSwapSettled(crumple.requested, crumple.shown, shown.id)) return
-    swappingRef.current = false
-    setStatus({ ok: true, text: `swapped to ${shown.label}` })
-  }, [crumple.requested, crumple.shown, setStatus, shown.id, shown.label])
-
-  /** A swap whose target failed rolled back to the previous sprite, and the hook reports the
-   *  target's Error rather than retrying: the prop says B while the canvas shows A. `error` is
-   *  cleared when the next run starts, so this pill clears itself on the next interaction. */
-  useEffect(() => {
-    const failed = crumple.error
-    if (failed === null) return
-    swappingRef.current = false
-    // The status pill IS the sync target for `crumple.error` — there is nowhere else this reads
-    // from and nothing to subscribe to instead.
-    setStatus({
-      ok: false,
-      text: `swap failed, rolled back to the previous sprite: ${failed.message}`,
-    })
-  }, [crumple.error, setStatus])
 
   // --- panel state ----------------------------------------------------------------------------
 
@@ -412,24 +338,18 @@ function Playground({
    */
   const startSwap = useCallback(
     (target: Sample) => {
-      // A same-key request is a silent no-op in `useCrumple` (see `isNoOpSwap`) — nothing would
-      // ever arrive to clear `direction` or `swappingRef`, so no swap that cannot run may leave the
-      // transport armed. This is the root guard for the whole class, not just one caller's route.
-      // Compared against `crumple.requested ?? shown.id` — the key `useCrumple` itself compares at
-      // `use-crumple.ts:261`, which moves in lockstep with `core.synced.key`. NOT `crumple.shown`:
-      // that is the sprite actually on the canvas, and it diverges from `requested` precisely on the
-      // rollback path — a failed acquisition leaves `requested` at `'broken'` while `shown` is still
-      // the previous sprite's key. Comparing against `shown` would re-arm the transport on a second
-      // broken-URL click and nothing would ever disarm it (see `isNoOpSwap`'s doc for the full
-      // sequence). Swallowing the repeated click here is correct: with `spriteKey` unchanged the
-      // rollback demo cannot be re-armed by clicking Swap again at all.
-      if (isNoOpSwap(crumple.requested ?? shown.id, target)) return
-      beginSwap()
-      swappingRef.current = true
+      if (target.id === crumple.requested) {
+        if (crumple.status === 'rolled-back') {
+          transport.beginSwap()
+          crumple.retry()
+        }
+        return
+      }
+      transport.beginSwap()
       setShown(target)
       setLibrarySample((prev) => nextLibrarySample(prev, target))
     },
-    [beginSwap, crumple.requested, setLibrarySample, setShown, shown],
+    [crumple, setLibrarySample, setShown, transport],
   )
 
   const onSwap = useCallback(() => {
@@ -485,32 +405,13 @@ function Playground({
       ? 'key frames —'
       : `key frames ${keyFrames.map((s) => frameFor(s)).join(' → ')}`
 
-  /**
-   * What the stage chip and the "source" summary show — NOT the picker (that binds to
-   * `librarySample.id`, above). `shown` is the state that DRIVES the request — it becomes the
-   * broken sample the instant a rollback demo is clicked, so `crumple.shown` (the sprite key
-   * `<Crumple>` is really showing) is read instead: a rollback leaves it at the PREVIOUS sprite's
-   * key, which is what App.tsx:398's old `swapTarget === BROKEN_ID` guard also kept the chip on.
-   * Before anything has ever landed, `crumple.shown` is `null` and `shown.id` (the request in
-   * flight) is the only thing there is to show.
-   */
-  const sampleId = crumple.shown ?? shown.id
+  const sampleId =
+    crumple.status === 'rolled-back' ? (crumple.shown ?? shown.id) : (crumple.requested ?? shown.id)
+  const busy = transport.busy
 
   /** The design's two decimals, but only while they fit: past 10 ms the tile is 150px wide and
    *  the second decimal is what pushes the value into an ellipsis. */
   const msText = (v: number): string => (v < 10 ? v.toFixed(2) : v.toFixed(1))
-
-  /**
-   * `mountMs` re-derived. `useStage` timed `mountHero` around its own `add` + `view` + `show`, and
-   * printed the front bake (`addMs`) separately. `useCrumple` owns the `add` now and reports no
-   * timing, so what is left to measure is scene-ready → the first sprite on screen. The front bake
-   * on its own has no seam left; the `hull` tile prints an em dash and says why.
-   */
-  useEffect(() => {
-    const startedAt = readyAtRef.current
-    if (crumple.shown === null || startedAt === null) return
-    setMountMs((prev) => prev ?? performance.now() - startedAt)
-  }, [crumple.shown, readyAtRef, setMountMs])
 
   const metrics = useMemo((): Metric[] => {
     if (built === null || sprite === null) {
@@ -593,7 +494,7 @@ function Playground({
         })
 
   const transportReadout =
-    `${direction === null ? '' : `${direction} · `}` +
+    `${transport.direction === null ? '' : `${transport.direction} · `}` +
     `stored frame ${String(frameFor(keyFrames[Math.min(pose, keyFrames.length - 1)]))} · ` +
     `${String(Math.round(dwells[Math.min(pose, dwells.length - 1)] ?? 0))} ms / step`
 
@@ -684,15 +585,15 @@ function Playground({
             pose={pose}
             readout={transportReadout}
             busy={busy}
-            onFold={() => void runFold('flat', 'ball')}
-            onUnfold={() => void runFold('ball', 'flat')}
+            onFold={() => void transport.runFold('flat', 'ball')}
+            onUnfold={() => void transport.runFold('ball', 'flat')}
             onStepBack={() => {
-              draw(Math.max(0, pose - 1))
+              transport.draw(Math.max(0, pose - 1))
             }}
             onStepForward={() => {
-              draw(Math.min(lastPose, pose + 1))
+              transport.draw(Math.min(lastPose, pose + 1))
             }}
-            onGoto={draw}
+            onGoto={transport.draw}
           />
 
           <Diagnostics

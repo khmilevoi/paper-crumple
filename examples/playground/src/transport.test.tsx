@@ -2,6 +2,7 @@
 import { createFakeStage, deferred, readyScene } from '@paper-crumple/react/testing'
 import type { FakeStageHandle } from '@paper-crumple/react/testing'
 import { PaperScene } from '@paper-crumple/react'
+import { SheetError } from '@paper-crumple/core'
 import type { PlayResult, Run, Sprite } from '@paper-crumple/core'
 import { act, createElement } from 'react'
 import type { ReactNode } from 'react'
@@ -138,7 +139,7 @@ describe('useTransport', () => {
     await harness.unmount()
   })
 
-  it('arms a swap before the shown sample changes and forwards its settle', async () => {
+  it('closes an armed swap from onSettle rather than a view end event', async () => {
     const harness = await renderTransport(createFakeStage({ sprites: ['a'] }))
     act(() => harness.result.current.beginSwap())
     await harness.setShown(B)
@@ -148,6 +149,33 @@ describe('useTransport', () => {
     expect(harness.audio.endSequence).toHaveBeenCalledTimes(1)
     expect(harness.settled).toHaveBeenCalledWith({ key: 'b', error: null, reduced: false }, true)
     await harness.unmount()
+  })
+
+  it('forwards rollback errors as a settled swap outcome', async () => {
+    const harness = await renderTransport(createFakeStage({ sprites: ['a'] }))
+    act(() => harness.result.current.beginSwap())
+    await harness.setShown(B)
+    const error = new SheetError('target failed')
+    harness.fake.views[0]?.settleRun(error)
+    await act(async () => {})
+    expect(harness.result.current.crumple.status).toBe('rolled-back')
+    expect(harness.settled).toHaveBeenCalledWith({ key: 'b', error, reduced: false }, true)
+    await harness.unmount()
+  })
+
+  it('closes reduced-motion swaps from onSettle without a view end event', async () => {
+    vi.stubGlobal('matchMedia', () => ({ matches: true }))
+    try {
+      const harness = await renderTransport(createFakeStage({ sprites: ['a', 'b'] }))
+      act(() => harness.result.current.beginSwap())
+      await harness.setShown(B)
+      await act(async () => {})
+      expect(harness.audio.endSequence).toHaveBeenCalledTimes(1)
+      expect(harness.settled).toHaveBeenCalledWith({ key: 'b', error: null, reduced: true }, true)
+      await harness.unmount()
+    } finally {
+      vi.unstubAllGlobals()
+    }
   })
 
   it('ends audio and observes a rejected fold run', async () => {
