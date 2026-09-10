@@ -229,8 +229,9 @@ What this buys you in practice:
   over a changed `sheet` **does not rebuild**. It is used by the next rebuild `deps` asks for. That
   is §4.1's contract, not an accident of the pattern.
 
-The crumple handle's `draw`, `sync`, `retry`, and `onSettle` additions are identity-stable, as are
-the scene callbacks `onReady`, `onFailed`, and `onKnobRefused`. `create` and `onError` are already `useEvent`-wrapped, so consumer
+The crumple methods `draw`, `sync`, and `retry`, the crumple option callback `onSettle`, and the
+scene option callbacks `onReady`, `onFailed`, and `onKnobRefused` are identity-stable. `create` and
+`onError` are already `useEvent`-wrapped, so consumer
 `useCallback` wrappers around them are unnecessary. If the installed `react-hooks/exhaustive-deps`
 analyser does not recognise a member expression, destructure the called member first, for example
 `const { stop } = scene`, and use that variable in the dependency array.
