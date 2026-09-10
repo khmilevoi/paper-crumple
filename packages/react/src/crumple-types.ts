@@ -8,13 +8,12 @@ import type {
   Run,
   Sprite,
   SpriteSource,
-  StageEvent,
   SwapResult,
   View,
   ViewFrame,
   ViewState,
 } from '@paper-crumple/core'
-import type { Scene } from './scene-types.js'
+import type { Scene, StageErrorListener } from './scene-types.js'
 
 /** `'flat'` is the default: `show()` with no animation, which is the state `stage.mount` leaves. */
 export type Entrance = 'flat' | 'uncrumple'
@@ -111,7 +110,7 @@ export type CrumpleOptions<S extends SpriteSource> = {
   onStart?: (e: Events['start']) => void
   onEnd?: (e: Events['end']) => void
   /** A `StageEvent`, not an `Events` member — errors never reach a view's own bus (§5.5). */
-  onError?: (e: StageEvent<'error'>) => void
+  onError?: StageErrorListener
   /**
    * Exactly once per request that reaches an outcome — animated end, degraded show, rollback.
    * Never for a superseded or unmounted request (§2.1). This, and not `onEnd`, is what a consumer
