@@ -1,5 +1,5 @@
 // @vitest-environment jsdom
-import { SheetError } from '@paper-crumple/core'
+import { ABORTED, SheetError } from '@paper-crumple/core'
 import { bakedMotion } from '@paper-crumple/motion'
 import type { Pack } from '@paper-crumple/motion'
 import pack1x1 from '@paper-crumple/motion/packs/1x1'
@@ -119,7 +119,10 @@ function sceneHarness(fake: FakeStageHandle): SceneHarness {
     buildMs: 1,
     artworkCssPx: 360,
   }
-  const stop = vi.fn((options?: { all?: boolean }) => fake.stage.stop(options))
+  const stop = vi.fn((options?: { all?: boolean }) => {
+    fake.stage.stop(options)
+    for (const view of fake.views) view.settleRun(ABORTED)
+  })
   const scene = {
     ...readyScene(fake.stage),
     meta: built,
@@ -214,5 +217,41 @@ describe('App request outcomes', () => {
     expect(audio.cancel).toHaveBeenCalledTimes(1)
     expect(audio.endSequence).not.toHaveBeenCalled()
     expect(app.querySelector('.transport-readout')?.textContent).not.toContain('folding')
+  })
+
+  it('stops a swap when Reset keeps the existing default configuration', async () => {
+    const audio = audioHarness()
+    mockedCreateAudio.mockReturnValue(audio.handle)
+    const fake = createFakeStage({ sprites: ['sweater', 'trench'] })
+    const scene = sceneHarness(fake)
+    currentDemo = scene.demo
+    const app = await renderApp()
+    const reset = app.querySelector<HTMLButtonElement>('.header-reset')
+    const sample = app.querySelector<HTMLSelectElement>('select[aria-label="sample"]')
+    expect(reset).not.toBeNull()
+    expect(sample).not.toBeNull()
+    if (reset === null || sample === null) return
+
+    act(() => reset.click())
+    await act(async () => {})
+    await act(async () => change(sample, 'trench'))
+    expect(app.querySelector('.transport-readout')?.textContent).toContain('folding')
+
+    act(() => reset.click())
+    await act(async () => {})
+
+    expect(scene.stop).toHaveBeenCalledWith({ all: true })
+    expect(audio.cancel).toHaveBeenCalledTimes(1)
+    expect(audio.endSequence).not.toHaveBeenCalled()
+    expect(app.querySelector<HTMLButtonElement>('.btn-inline')?.disabled).toBe(false)
+    expect(app.querySelector('[role="status"]')?.textContent).toContain(
+      'reset to manifest defaults',
+    )
+
+    fake.views[0]?.settleRun(new SheetError('late rollback'))
+    await act(async () => {})
+    expect(app.querySelector('[role="status"]')?.textContent).toContain(
+      'reset to manifest defaults',
+    )
   })
 })

@@ -534,12 +534,15 @@ function Playground({
   }, [config, knobs, scene])
 
   const onReset = useCallback(() => {
-    if (crumple.pending !== null) cancelSwap(crumple.pending.key)
+    if (crumple.pending !== null) {
+      cancelSwap(crumple.pending.key)
+      stop({ all: true })
+    }
     setDraft(null)
     demo.resetKnobs()
     setConfig(DEFAULT_CONFIG)
     setStatus({ ok: true, text: 'reset to manifest defaults' })
-  }, [cancelSwap, crumple.pending, demo, setConfig, setDraft, setStatus])
+  }, [cancelSwap, crumple.pending, demo, setConfig, setDraft, setStatus, stop])
 
   // --- render -----------------------------------------------------------------------------------
 
