@@ -1,5 +1,10 @@
 import type { Events, View } from '@paper-crumple/core'
-import type { CrumpleSnapshot } from './crumple-types.js'
+import type {
+  CrumplePending,
+  CrumpleSnapshot,
+  CrumpleState,
+  CrumpleStatus,
+} from './crumple-types.js'
 
 /**
  * The mutable record the snapshot is read out of. One per hook instance, never replaced — the
@@ -9,6 +14,9 @@ export interface CrumpleCore {
   view: View | null
   /** The spriteKey last asked for. Survives a scene rebuild: it is the consumer's prop. */
   requested: string | null
+  /** The open request, or `null` when idle. Set when one opens and cleared at exactly one place
+   *  in the hook — see `settle` in `use-crumple.ts` (§2.1). */
+  pending: CrumplePending | null
   error: Error | null
   parked: boolean
   /** The resolved ball index the current run reported at `start`. Only a swap carries one. */
@@ -21,6 +29,7 @@ export function createCrumpleCore(): CrumpleCore {
   return {
     view: null,
     requested: null,
+    pending: null,
     error: null,
     parked: false,
     via: undefined,
@@ -29,12 +38,37 @@ export function createCrumpleCore(): CrumpleCore {
 }
 
 /**
- * What the versioned store holds. `frameStyle` is NOT part of it: it is derived from the published
- * `frame` and the `frameTo` PROP in the hook's render (§2.7), because a prop mirrored into this
- * record through an effect lags its own commit by one bump — the lag that left the first entrance
- * measuring 0 × 0 (§9.1).
+ * What the versioned store holds. `frameStyle` and `artworkStyle` are NOT part of it: both are
+ * derived from the published `frame` and the `frameTo` PROP in the hook's render (§2.7, §2.3),
+ * because a prop mirrored into this record through an effect lags its own commit by one bump —
+ * the lag that left the first entrance measuring 0 × 0 (§9.1).
  */
-export type CrumpleReading = Omit<CrumpleSnapshot, 'frameStyle'>
+export type CrumpleReading = Omit<CrumpleSnapshot, 'frameStyle' | 'artworkStyle'>
+
+/**
+ * Precedence, and each step earns its place (§2.5):
+ *
+ * 1. No view is `detached` before anything else can be said.
+ * 2. An open request wins over everything below it — `error` is cleared at `start`, not at `end`,
+ *    and the degraded path has no `start` at all, so a stale rollback error can still be standing
+ *    while the next request acquires. The request is the more informative of the two.
+ * 3. `rolled-back` is `error !== null && requested !== shown`: the prop says B, the canvas shows A.
+ * 4. A live run with no request behind it is a `play()` the consumer started.
+ * 5. Then the two resting states.
+ */
+function statusOf(core: CrumpleCore, state: CrumpleState, shown: string | null): CrumpleStatus {
+  if (state === 'detached') return 'detached'
+  const pending = core.pending
+  if (pending !== null) {
+    if (pending.phase === 'acquiring') return 'acquiring'
+    if (pending.phase === 'swapping') return 'swapping'
+    return 'playing'
+  }
+  if (core.error !== null && core.requested !== shown) return 'rolled-back'
+  if (state !== 'idle' && state !== 'disposed') return 'playing'
+  if (shown === null) return 'empty'
+  return 'shown'
+}
 
 /**
  * Re-read the getters into one reading. The caller caches it: `view.state`, `view.pose` and
@@ -43,12 +77,18 @@ export type CrumpleReading = Omit<CrumpleSnapshot, 'frameStyle'>
  */
 export function readCrumple(core: CrumpleCore): CrumpleReading {
   const view = core.view
+  const sprite = view?.sprite ?? null
+  const state: CrumpleState = view?.state ?? 'detached'
+  const shown = sprite?.key ?? null
   return {
-    state: view?.state ?? 'detached',
+    state,
+    status: statusOf(core, state, shown),
     parked: core.parked,
     pose: view?.pose ?? 0,
-    shown: view?.sprite?.key ?? null,
+    shown,
+    sprite,
     requested: core.requested,
+    pending: core.pending,
     error: core.error,
     frame: view?.frame ?? null,
     view,

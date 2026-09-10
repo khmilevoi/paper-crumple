@@ -11,18 +11,25 @@ import { render } from './testing/render.js'
 function instance(o?: Partial<CrumpleValue>): CrumpleValue {
   return {
     state: 'detached',
+    status: 'detached',
     parked: false,
     pose: 0,
     shown: null,
+    sprite: null,
     requested: null,
+    pending: null,
     error: null,
     frame: null,
     frameStyle: null,
+    artworkStyle: null,
     view: null,
     ref: () => {},
     play: () => null,
     stop: () => {},
     refresh: () => {},
+    draw: () => {},
+    sync: () => {},
+    retry: () => {},
     ...o,
   }
 }

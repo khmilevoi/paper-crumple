@@ -1,6 +1,7 @@
 import type {
   BlitStage,
   Events,
+  Fit,
   PlayOptions,
   PlayResult,
   PoseRef,
@@ -9,7 +10,7 @@ import type {
   StageEvent,
   View,
 } from '@paper-crumple/core'
-import { ABORTED } from '@paper-crumple/core'
+import { isAborted } from '@paper-crumple/core'
 import { useEffect, useLayoutEffect, useMemo, useState, useSyncExternalStore } from 'react'
 import { acquire, pendingAcquisition, stageSignal } from './acquire.js'
 import type { Crumple } from './crumple.js'
@@ -21,8 +22,8 @@ import {
   readCrumple,
   type CrumpleReading,
 } from './crumple-state.js'
-import type { CrumpleOptions, ReducedMotion } from './crumple-types.js'
-import { frameStyleFor } from './frame-style.js'
+import type { CrumpleOptions, CrumpleSettleEvent, ReducedMotion } from './crumple-types.js'
+import { artworkStyleFor, frameStyleFor } from './frame-style.js'
 import { rememberPair } from './pair-guard.js'
 import { useScene } from './scene-context.js'
 import { createVersionedStore } from './store.js'
@@ -48,6 +49,39 @@ function prefersReducedMotion(mode: ReducedMotion | undefined): boolean {
   return globalThis.matchMedia('(prefers-reduced-motion: reduce)').matches
 }
 
+/**
+ * §2.8's gate runs in development only. `globalThis.process` is read through a cast rather than as
+ * a bare `process` identifier so the package needs no `@types/node`; an environment with no
+ * `process` at all is treated as development, which is the usual library convention. The same
+ * shape `usePaperScene`'s duplicate-core gate uses, restated here rather than shared: the two
+ * files are owned by different plans in this run and a shared helper would couple them.
+ */
+function isDevelopment(): boolean {
+  const env = (globalThis as { process?: { env?: { NODE_ENV?: string } } }).process?.env
+  return env?.NODE_ENV !== 'production'
+}
+
+/**
+ * `fit` and `tag` are fixed at `stage.view()` and look reactive because they are hook options
+ * (§2.8). Recreating the view when either moves is too heavy — it replays the entrance — so the
+ * drift is reported and nothing else happens. Once per view: the warning is a mistake to fix, not
+ * a per-render log. `View.fit` is not readable from core, which is why the created pair is
+ * remembered rather than re-read off the view.
+ */
+function warnFixedOptions(live: CrumpleLive, fit: Fit | undefined, tag: string | undefined): void {
+  if (!isDevelopment()) return
+  const created = live.created
+  if (created === null || live.warnedFixed) return
+  if (created.fit === fit && created.tag === tag) return
+  live.warnedFixed = true
+  console.warn(
+    `[paper-crumple] useCrumple: 'fit' and 'tag' are fixed when the view is created and a change ` +
+      `to either has no effect. This view was created with fit=${String(created.fit)} ` +
+      `tag=${String(created.tag)} and now sees fit=${String(fit)} tag=${String(tag)}. ` +
+      `Remount the <Crumple> under a new React key to apply new values.`,
+  )
+}
+
 /** Everything the hook owns that is not part of the snapshot. One per hook instance. */
 interface CrumpleLive {
   stage: BlitStage | null
@@ -57,6 +91,13 @@ interface CrumpleLive {
   run: AbortController | null
   /** Bumped by every supersession, so a settled continuation can tell it is stale. */
   seq: number
+  /** Errors observed during this request, including frame failures absent from `Run.done`. */
+  requestError: Error | null
+  /** What `stage.view()` was actually given, so §2.8's drift check has something to compare
+   *  against — core exposes `View.tag` but not `View.fit`. */
+  created: { fit: Fit | undefined; tag: string | undefined } | null
+  /** §2.8 warns once per view, and this is reset when one is created. */
+  warnedFixed: boolean
 }
 
 export function useCrumple<S extends SpriteSource>(o: CrumpleOptions<S>): Crumple {
@@ -73,6 +114,9 @@ export function useCrumple<S extends SpriteSource>(o: CrumpleOptions<S>): Crumpl
     offs: [],
     run: null,
     seq: 0,
+    requestError: null,
+    created: null,
+    warnedFixed: false,
   }))
   const [pairs] = useState(() => new Map<string, SpriteSource>())
 
@@ -88,6 +132,17 @@ export function useCrumple<S extends SpriteSource>(o: CrumpleOptions<S>): Crumpl
   const frameTo = o.frameTo
   const frameStyle = useMemo(
     () => frameStyleFor(snapshot.frame, frameTo),
+    [snapshot.frame, frameTo],
+  )
+
+  /**
+   * The same inputs, the same scale, the same `null` convention — derived here rather than
+   * mirrored, for the reason `frameStyle` above is (§2.3, §2.7). One render publishes both, so a
+   * layout that reserves the artwork box and a wrapper that takes the paper box can never be a
+   * bump out of step with each other.
+   */
+  const artworkStyle = useMemo(
+    () => artworkStyleFor(snapshot.frame, frameTo),
     [snapshot.frame, frameTo],
   )
 
@@ -146,8 +201,73 @@ export function useCrumple<S extends SpriteSource>(o: CrumpleOptions<S>): Crumpl
   const report = useEvent((error: Error): void => {
     // eslint-disable-next-line react-hooks/immutability -- `core` is an intentionally mutable record held once per hook instance and never replaced; `store.bump()` publishes each write (§5.5).
     core.error = error
+    // eslint-disable-next-line react-hooks/immutability -- `live` is an intentionally mutable record held once per hook instance and never replaced; it tracks the pair's own bookkeeping and is never handed to a consumer.
+    if (core.pending !== null) live.requestError = error
     store.bump()
     dispatchError({ error, observed: true, view: core.view })
+  })
+
+  const dispatchSettle = useEvent((e: CrumpleSettleEvent): void => {
+    o.onSettle?.(e)
+  })
+
+  /**
+   * The one place a request ends (§2.1). Every success path and every failure path of the sprite
+   * driver funnels through it, which is what makes "exactly once per request" a property of the
+   * code rather than of four call sites agreeing.
+   *
+   * `seq` is the whole of "never for a superseded or unmounted request": supersession bumps
+   * `live.seq` in `syncSprite` and `destroy()` bumps it too, so a continuation that settles after
+   * either one carries a stale `seq` and stops here. `core.pending` is deliberately not consulted
+   * — a request superseded a microtask before its own settlement would otherwise clear its
+   * successor's `pending` on the way past.
+   *
+   * The error, when there is one, takes the same two routes it always did: `crumple.error` and
+   * `onError` with `observed: true` (§7). `onSettle` is a third exit for the SAME value, and §7's
+   * telemetry filter on `!observed` is what stops it being counted twice.
+   *
+   * `Run.done` can resolve `undefined` after core reported a dropped frame and an incomplete
+   * `end`, so the current request's observed error also contributes to its outcome. It has
+   * already reached `onError` and must not be dispatched again. Errors from earlier requests
+   * are excluded: a successful flat entrance or degraded retry has no `start` to clear the old
+   * rollback notice (§2.6), so settlement clears it instead. Cancellation never reaches here
+   * (see `cancel`), so a stop neither sets nor clears.
+   */
+  const settle = useEvent(
+    (seq: number, key: string, error: Error | null, reduced: boolean): void => {
+      if (seq !== live.seq) return
+      const observed = live.requestError
+      const outcome = error ?? observed
+      // eslint-disable-next-line react-hooks/immutability -- `core` is an intentionally mutable record held once per hook instance and never replaced; `store.bump()` publishes each write (§5.5).
+      core.pending = null
+      core.error = outcome
+      store.bump()
+      if (error !== null && error !== observed) {
+        dispatchError({ error, observed: true, view: core.view })
+      }
+      // `onError` can synchronously retry or unmount, invalidating this request mid-settlement.
+      if (seq !== live.seq) return
+      dispatchSettle({ key, error: outcome, reduced })
+    },
+  )
+
+  /**
+   * A request that was CANCELLED rather than settled: `stop()` on the live run, `crumple.stop()`,
+   * a `play()` that ends the run under it, or an acquisition the stage's own disposal aborted.
+   * Core resolves such a run with the `ABORTED` sentinel, which is deliberately not an `Error`, so
+   * an `instanceof Error` test maps it to the same payload a clean animated end produces.
+   *
+   * A stop is none of the three outcomes `onSettle` documents — animated end, degraded show,
+   * rollback — so nothing is dispatched and `error` is left exactly as the cancelled request found
+   * it. The request is still over, so `pending` is released: leaving it latched would strand
+   * `status` on `swapping` for a run nobody is running. Supersession bumps `seq` first and is
+   * therefore already handled by the same guard `settle` uses.
+   */
+  const cancel = useEvent((seq: number): void => {
+    if (seq !== live.seq) return
+    // eslint-disable-next-line react-hooks/immutability -- `core` is an intentionally mutable record held once per hook instance and never replaced; `store.bump()` publishes each write (§5.5).
+    core.pending = null
+    store.bump()
   })
 
   /**
@@ -173,6 +293,7 @@ export function useCrumple<S extends SpriteSource>(o: CrumpleOptions<S>): Crumpl
     stage.on('error', (e) => {
       if (e.view !== view) return
       core.error = e.error
+      if (core.pending !== null) live.requestError = e.error
       store.bump()
       dispatchError(e)
     }),
@@ -194,36 +315,52 @@ export function useCrumple<S extends SpriteSource>(o: CrumpleOptions<S>): Crumpl
     ): void => {
       void (async () => {
         const got = await acquire(stage, opts.spriteKey, opts.src, opts.pin, controller.signal)
-        if (got === ABORTED || seq !== live.seq) return
+        if (isAborted(got)) {
+          cancel(seq)
+          return
+        }
+        if (seq !== live.seq) return
+        // Read once, on the path this request actually took, and carried into the payload: it is
+        // the accommodation that applied, not "did anything animate" (§2.1).
+        const reduced = prefersReducedMotion(opts.reducedMotion)
         if (got instanceof Error) {
-          report(got)
+          settle(seq, opts.spriteKey, got, reduced)
           return
         }
         const refused = view.show(got)
+        if (seq !== live.seq) return
         if (refused !== undefined) {
-          report(refused)
+          settle(seq, opts.spriteKey, refused, reduced)
           return
         }
         // An `entrance: 'uncrumple'` under `reduce` is `'flat'`: `show()` is one draw, with no run
-        // and no start/step/end triple, which is why nothing downstream needs its own branch.
-        if (opts.entrance !== 'uncrumple' || prefersReducedMotion(opts.reducedMotion)) {
-          store.bump()
+        // and no start/step/end triple, which is why nothing downstream needs its own branch. It
+        // still SETTLES — it is a request that reached an outcome — and this is the fourth clear
+        // site §2.1's "three sites" gloss omits.
+        if (opts.entrance !== 'uncrumple' || reduced) {
+          settle(seq, opts.spriteKey, null, reduced)
           return
         }
         // The order is load-bearing: `draw` resolves a PoseRef against the SHOWN sprite's clip,
         // so a `draw('ball')` before the `show` resolves against a pose count of 1 and silently
         // draws the flat sheet.
         view.draw('ball')
+        if (seq !== live.seq) return
         const run = view.play('ball', 'flat', {
           duration: opts.duration,
           signal: controller.signal,
         })
+        // Core emits lifecycle callbacks before returning; a callback may own a new request now.
+        if (seq !== live.seq) return
+        // eslint-disable-next-line react-hooks/immutability -- `core` is an intentionally mutable record held once per hook instance and never replaced; `store.bump()` publishes each write (§5.5).
+        core.pending = { key: opts.spriteKey, phase: 'entering', run }
         store.bump()
-        // No `result instanceof Error` branch here, unlike the swap's below: the `draw('ball')`
-        // above has already resolved the same pose the entrance plays, so the failure mode the
-        // swap guards against — a target whose sprite errors mid-run — cannot arise on this path.
-        void run.done.then(() => {
-          if (seq === live.seq) store.bump()
+        void run.done.then((result) => {
+          if (isAborted(result)) {
+            cancel(seq)
+            return
+          }
+          settle(seq, opts.spriteKey, result instanceof Error ? result : null, false)
         })
       })()
     },
@@ -243,22 +380,28 @@ export function useCrumple<S extends SpriteSource>(o: CrumpleOptions<S>): Crumpl
       controller: AbortController,
       seq: number,
     ): void => {
-      if (prefersReducedMotion(opts.reducedMotion)) {
+      const reduced = prefersReducedMotion(opts.reducedMotion)
+      if (reduced) {
         // `show()` IS the degraded swap — instant, pose 0, no run — so the accommodation needs no
-        // API of its own, and it goes through `acquire` exactly as the entrance does.
+        // API of its own, and it goes through `acquire` exactly as the entrance does. It emits no
+        // `end`, which is exactly why `onSettle` and not `onEnd` is what a consumer branches on.
         void (async () => {
           const got = await acquire(stage, opts.spriteKey, opts.src, opts.pin, controller.signal)
-          if (got === ABORTED || seq !== live.seq) return
+          if (isAborted(got)) {
+            cancel(seq)
+            return
+          }
+          if (seq !== live.seq) return
           if (got instanceof Error) {
-            report(got)
+            settle(seq, opts.spriteKey, got, true)
             return
           }
           const refused = view.show(got)
           if (refused !== undefined) {
-            report(refused)
+            settle(seq, opts.spriteKey, refused, true)
             return
           }
-          store.bump()
+          settle(seq, opts.spriteKey, null, true)
         })()
         return
       }
@@ -266,30 +409,34 @@ export function useCrumple<S extends SpriteSource>(o: CrumpleOptions<S>): Crumpl
       // The in-flight map gates `swapTo` too: a concurrent second `swapTo` on a key whose `add` is
       // still in flight is refused by `reserved`, which is private to the core. Joining the
       // existing acquisition and handing the promise to `crumpleTo` is the same park, and costs
-      // one ingest rather than two.
-      const pending = pendingAcquisition(stage, opts.spriteKey)
+      // one ingest rather than two. Named `pendingAdd`, not `pending`: `pending` is the snapshot
+      // field now, and one of the two shadowing the other in this function would be a trap.
+      const pendingAdd = pendingAcquisition(stage, opts.spriteKey)
       const run =
-        pending === undefined
+        pendingAdd === undefined
           ? view.swapTo(opts.src, {
               key: opts.spriteKey,
               duration: opts.duration,
               signal: controller.signal,
             })
-          : view.crumpleTo(pending, { duration: opts.duration, signal: controller.signal })
+          : view.crumpleTo(pendingAdd, { duration: opts.duration, signal: controller.signal })
+      if (seq !== live.seq) return
+      // eslint-disable-next-line react-hooks/immutability -- `core` is an intentionally mutable record held once per hook instance and never replaced; `store.bump()` publishes each write (§5.5).
+      core.pending = { key: opts.spriteKey, phase: 'swapping', run }
       store.bump()
       void run.done.then((result) => {
-        if (seq !== live.seq) return
         // A swap whose target fails rolls back to the previous sprite and the Run returns the
-        // target's Error, so the prop says B while the canvas shows A. Reported through `report`,
-        // the same route every other failure in this hook takes, so `onError` sees it too;
-        // `report` already bumps, so this branch and the success branch below each bump exactly
-        // once. Reported, never retried: a retry policy inside an animation library is a network
-        // policy nobody asked for.
-        if (result instanceof Error) {
-          report(result)
+        // target's Error, so the prop says B while the canvas shows A. `settle` puts it on
+        // `crumple.error` and through `onError` — the route it always took — and hands it to
+        // `onSettle` as the outcome of this request. Reported, never retried automatically: a
+        // retry policy inside an animation library is a network policy nobody asked for, which is
+        // what `retry()` is for (§2.6). A stopped swap is not a rollback and not a success: it
+        // resolves the `ABORTED` sentinel, which is not an `Error`, and goes to `cancel`.
+        if (isAborted(result)) {
+          cancel(seq)
           return
         }
-        store.bump()
+        settle(seq, opts.spriteKey, result instanceof Error ? result : null, false)
       })
     },
   )
@@ -316,14 +463,20 @@ export function useCrumple<S extends SpriteSource>(o: CrumpleOptions<S>): Crumpl
     // eslint-disable-next-line react-hooks/immutability -- `core` is an intentionally mutable record held once per hook instance and never replaced; `store.bump()` publishes each write (§5.5).
     core.synced = { view, key }
     core.requested = key
+    // The request opens here, before the path is known; `enter`/`swap` refine the phase and hang
+    // the typed run on it as soon as there is one (§2.1).
+    core.pending = { key, phase: 'acquiring', run: null }
     // eslint-disable-next-line react-hooks/immutability -- `live` is an intentionally mutable record held once per hook instance and never replaced; it tracks the pair's own bookkeeping and is never handed to a consumer.
     live.seq += 1
     const seq = live.seq
     // Supersession: the previous acquisition or run is aborted, which is what aborts the `add` a
     // superseded swap started so a second swap does not pay for an ingest nobody will show.
     live.run?.abort()
+    // Aborting emits `end` synchronously, whose consumer may retry or detach this view.
+    if (seq !== live.seq) return
     const controller = new AbortController()
     live.run = controller
+    live.requestError = null
     store.bump()
     // Whether this is the entrance or a swap is decided by whether the view is showing anything:
     // `crumpleTo` on an empty view degenerates to `show()`, so there is no ball to park at before
@@ -335,12 +488,31 @@ export function useCrumple<S extends SpriteSource>(o: CrumpleOptions<S>): Crumpl
     swap(view, stage, opts, controller, seq)
   })
 
+  /**
+   * The escape from a rolled-back key (§2.6). Clearing `synced` IS the bypass: it is the only
+   * thing refusing the re-request, and `syncSprite` rebuilds everything else — a new `seq`, a new
+   * controller, a fresh `pending` — from the current options.
+   */
+  const retry = useEvent((): void => {
+    const view = core.view
+    if (view === null) return
+    // eslint-disable-next-line react-hooks/immutability -- `core` is an intentionally mutable record held once per hook instance and never replaced; `store.bump()` publishes each write (§5.5).
+    core.synced = null
+    syncSprite(view)
+  })
+
   const view = snapshot.view
   const { spriteKey, src } = o
   useEffect(() => {
     if (view === null) return
     syncSprite(view)
   }, [view, spriteKey, src, syncSprite])
+
+  const fit = o.fit
+  const tag = o.tag
+  useEffect(() => {
+    warnFixedOptions(live, fit, tag)
+  }, [fit, tag, view, live])
 
   const knobEpoch = scene.knobEpoch
   useEffect(() => {
@@ -395,6 +567,7 @@ export function useCrumple<S extends SpriteSource>(o: CrumpleOptions<S>): Crumpl
     // eslint-disable-next-line react-hooks/immutability -- `core` is an intentionally mutable record held once per hook instance and never replaced; `store.bump()` publishes each write (§5.5).
     core.view = null
     core.synced = null
+    core.pending = null
     core.parked = false
     core.via = undefined
     // Leaves the element's last blitted pixels in place; the element itself is the consumer's.
@@ -420,6 +593,8 @@ export function useCrumple<S extends SpriteSource>(o: CrumpleOptions<S>): Crumpl
     core.view = created
     // eslint-disable-next-line react-hooks/immutability -- `live` is an intentionally mutable record held once per hook instance and never replaced; it tracks the pair's own bookkeeping and is never handed to a consumer.
     live.offs = listen(created, stage)
+    live.created = { fit: opts.fit, tag: opts.tag }
+    live.warnedFixed = false
     store.bump()
   })
 
@@ -480,6 +655,17 @@ export function useCrumple<S extends SpriteSource>(o: CrumpleOptions<S>): Crumpl
     store.bump()
   })
 
+  const draw = useEvent((pose: PoseRef): void => {
+    const view = core.view
+    if (view === null) return
+    view.draw(pose)
+    store.bump()
+  })
+
+  const sync = useEvent((): void => {
+    store.bump()
+  })
+
   // Deliberately a fresh object per render: it carries the reactive snapshot (§2.1).
-  return { ...snapshot, frameStyle, ref, play, stop, refresh }
+  return { ...snapshot, frameStyle, artworkStyle, ref, play, stop, refresh, draw, sync, retry }
 }
