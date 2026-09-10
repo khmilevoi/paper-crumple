@@ -119,17 +119,19 @@ export function useTransport(o: TransportOptions): TransportHandle {
 
       const duration = audio.beginSequence(playSpec(fromIdx, toIdx, '', dwells))
       setDirection(toIdx > fromIdx ? 'folding' : 'unfolding')
-      const run = play(from, to, { duration: duration ?? DEFAULT_RUN_DURATION_MS })
-      if (run === null) {
+      try {
+        const run = play(from, to, { duration: duration ?? DEFAULT_RUN_DURATION_MS })
+        if (run === null) return
+        const result = await run
+        if (result === pc.ABORTED) return
+        if (result instanceof Error) {
+          observed('crumple.play', result)
+          return
+        }
+      } catch (reason: unknown) {
+        observed('crumple.play', reason instanceof Error ? reason : new Error(String(reason)))
+      } finally {
         endTransport()
-        return
-      }
-      const result = await run
-      endTransport()
-      if (result === pc.ABORTED) return
-      if (result instanceof Error) {
-        observed('crumple.play', result)
-        return
       }
     },
     [audio, dwells, endTransport, observed, play],

@@ -2,7 +2,7 @@
 import { createFakeStage, deferred, readyScene } from '@paper-crumple/react/testing'
 import type { FakeStageHandle } from '@paper-crumple/react/testing'
 import { PaperScene } from '@paper-crumple/react'
-import type { Sprite } from '@paper-crumple/core'
+import type { PlayResult, Run, Sprite } from '@paper-crumple/core'
 import { act, createElement } from 'react'
 import type { ReactNode } from 'react'
 import { createRoot } from 'react-dom/client'
@@ -37,7 +37,10 @@ afterEach(() => {
   root = null
 })
 
-async function renderTransport(fake: FakeStageHandle): Promise<TransportHarness> {
+async function renderTransport(
+  fake: FakeStageHandle,
+  observed: ReturnType<typeof vi.fn> = vi.fn(),
+): Promise<TransportHarness> {
   const audio = {
     beginSequence: vi.fn(() => 600),
     endSequence: vi.fn(),
@@ -53,7 +56,7 @@ async function renderTransport(fake: FakeStageHandle): Promise<TransportHarness>
     const transport = useTransport({
       shown,
       audio,
-      observed: vi.fn(),
+      observed,
       onSettle: settled,
     })
     result.current = transport
@@ -81,6 +84,24 @@ async function renderTransport(fake: FakeStageHandle): Promise<TransportHarness>
         activeRoot.unmount()
       })
       root = null
+    },
+  }
+}
+
+function rejectingRun(): { readonly run: Run<PlayResult>; reject(error: Error): void } {
+  let rejectDone: ((reason?: unknown) => void) | undefined
+  const done = new Promise<PlayResult>((_resolve, reject) => {
+    rejectDone = reject
+  })
+  const run: Run<PlayResult> = {
+    done,
+    then: (onFulfilled, onRejected) => done.then(onFulfilled, onRejected),
+    stop: () => {},
+  }
+  return {
+    run,
+    reject(error: Error): void {
+      rejectDone?.(error)
     },
   }
 }
@@ -126,6 +147,27 @@ describe('useTransport', () => {
     expect(harness.audio.beginSequence).toHaveBeenCalledTimes(1)
     expect(harness.audio.endSequence).toHaveBeenCalledTimes(1)
     expect(harness.settled).toHaveBeenCalledWith({ key: 'b', error: null, reduced: false }, true)
+    await harness.unmount()
+  })
+
+  it('ends audio and observes a rejected fold run', async () => {
+    const observed = vi.fn()
+    const harness = await renderTransport(createFakeStage({ sprites: ['a'] }), observed)
+    const rejected = rejectingRun()
+    const view = harness.fake.views[0]?.view
+    expect(view).not.toBeUndefined()
+    if (view === undefined) return
+    view.play = () => rejected.run
+
+    let done: Promise<void> | undefined
+    act(() => {
+      done = harness.result.current.runFold('flat', 'ball')
+    })
+    const error = new Error('run rejected')
+    rejected.reject(error)
+    await expect(done).resolves.toBeUndefined()
+    expect(harness.audio.endSequence).toHaveBeenCalledTimes(1)
+    expect(observed).toHaveBeenCalledWith('crumple.play', error)
     await harness.unmount()
   })
 
