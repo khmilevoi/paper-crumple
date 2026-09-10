@@ -1,19 +1,20 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
-import type { ReactNode } from 'react'
+import type { Dispatch, MutableRefObject, ReactNode, SetStateAction } from 'react'
 import * as pc from '@paper-crumple/core'
 import { fitSheet } from '@paper-crumple/motion'
 import type { Pack } from '@paper-crumple/motion'
 import { evenKeyFrames } from '@paper-crumple/motion'
 import type { EdgeSpec } from '@paper-crumple/paper'
-import { PaperScene } from '@paper-crumple/react'
+import { PaperScene, useScene } from '@paper-crumple/react'
 
 import type { AudioHandle, SyncMode } from '../audio'
 import { createAudio, playSpec, swapSpec } from '../audio'
-import type { BucketName, DemoConfig } from '../config'
+import type { BuiltStage, BucketName, DemoConfig } from '../config'
 import { DEFAULT_CONFIG } from '../config'
 import { collectDescriptors } from '../knobs'
 import { droppedSample, swapDurationFor, useHero, SWAP_DURATION_MS } from '../hero'
 import { useDemoScene } from '../scene'
+import type { DemoScene } from '../scene'
 import { BROKEN_URL, DEFAULT_SAMPLE_ID, nextLibrarySample, SAMPLES } from '../samples'
 import type { Sample } from '../samples'
 import { decodeState, encodeState } from '../state'
@@ -112,7 +113,7 @@ export interface StageStatus {
 }
 
 export function App(): ReactNode {
-  // --- boot state, scene and hero ----------------------------------------------------------------
+  // --- boot state and scene owner ----------------------------------------------------------------
 
   // The fragment a reader may have opened this page with, decoded exactly once. A malformed one
   // falls back to `DEFAULT_CONFIG` rather than producing a blank page.
@@ -141,17 +142,99 @@ export function App(): ReactNode {
     setStatus({ ok: false, text: `${where}: ${error.message}` })
   }, [])
 
-  const { scene, knobs, setKnob, resetKnobs } = useDemoScene(
-    config,
-    onObserved,
-    boot instanceof Error ? {} : boot.knobs,
-  )
-  const built = scene.status === 'ready' ? scene.meta : null
-  const generation = scene.generation
+  const [draft, setDraft] = useState<readonly number[] | null>(null)
 
   // One controller for the life of the page — the handle owns an AudioContext and decoded buffers,
   // and a second one would be a second context.
   const [audio] = useState<AudioHandle>(() => createAudio(onObserved))
+  const [mountMs, setMountMs] = useState<number | null>(null)
+  const readyAtRef = useRef<number | null>(null)
+
+  const demo = useDemoScene(config, onObserved, boot instanceof Error ? {} : boot.knobs, {
+    onReady(built, info) {
+      setStatus(null)
+      readyAtRef.current = performance.now()
+      setMountMs(null)
+      prefetchSamples(built, shown, info.signal)
+      if (draft === null) return
+      const refused = built.motion.setPoses({ keyFrames: [...draft] })
+      if (refused !== undefined) setStatus({ ok: false, text: `rejected: ${refused.message}` })
+    },
+    onFailed(error, info) {
+      setStatus({
+        ok: false,
+        text: info.lost
+          ? 'the WebGL2 context was lost — reload to rebuild'
+          : `stage build failed: ${error.message}`,
+      })
+    },
+  })
+
+  return (
+    <PaperScene value={demo.scene}>
+      <Playground
+        config={config}
+        setConfig={setConfig}
+        shown={shown}
+        setShown={setShown}
+        librarySample={librarySample}
+        setLibrarySample={setLibrarySample}
+        status={status}
+        setStatus={setStatus}
+        draft={draft}
+        setDraft={setDraft}
+        audio={audio}
+        mountMs={mountMs}
+        setMountMs={setMountMs}
+        readyAtRef={readyAtRef}
+        observed={onObserved}
+        demo={demo}
+      />
+    </PaperScene>
+  )
+}
+
+interface PlaygroundProps {
+  config: DemoConfig
+  setConfig: Dispatch<SetStateAction<DemoConfig>>
+  shown: Sample
+  setShown: Dispatch<SetStateAction<Sample>>
+  librarySample: Sample
+  setLibrarySample: Dispatch<SetStateAction<Sample>>
+  status: StageStatus | null
+  setStatus: Dispatch<SetStateAction<StageStatus | null>>
+  draft: readonly number[] | null
+  setDraft: Dispatch<SetStateAction<readonly number[] | null>>
+  audio: AudioHandle
+  mountMs: number | null
+  setMountMs: Dispatch<SetStateAction<number | null>>
+  readyAtRef: MutableRefObject<number | null>
+  observed: (where: string, error: Error) => void
+  demo: DemoScene
+}
+
+function Playground({
+  config,
+  setConfig,
+  shown,
+  setShown,
+  librarySample,
+  setLibrarySample,
+  status,
+  setStatus,
+  draft,
+  setDraft,
+  audio,
+  mountMs,
+  setMountMs,
+  readyAtRef,
+  observed,
+  demo,
+}: PlaygroundProps): ReactNode {
+  const scene = useScene<BuiltStage>()
+  const built = scene.status === 'ready' ? scene.meta : null
+  const { knobs, setKnob, resetKnobs } = demo
+  const generation = scene.generation
 
   const [direction, setDirection] = useState<'folding' | 'unfolding' | null>(null)
   /** The swap's wall time, written in the click that starts it. Both writes land in one batch, so
@@ -176,7 +259,7 @@ export function App(): ReactNode {
     shown,
     duration: swapDuration,
     onEnd: endSwap,
-    observed: onObserved,
+    observed,
   })
 
   const sprite = crumple.view?.sprite ?? null
@@ -212,7 +295,7 @@ export function App(): ReactNode {
     // eslint-disable-next-line react-hooks/set-state-in-effect
     endSwap()
     setStatus({ ok: true, text: `swapped to ${shown.label}` })
-  }, [crumple.requested, crumple.shown, endSwap, shown.id, shown.label])
+  }, [crumple.requested, crumple.shown, endSwap, setStatus, shown.id, shown.label])
 
   /** A swap whose target failed rolled back to the previous sprite, and the hook reports the
    *  target's Error rather than retrying: the prop says B while the canvas shows A. `error` is
@@ -223,27 +306,11 @@ export function App(): ReactNode {
     swappingRef.current = false
     // The status pill IS the sync target for `crumple.error` — there is nowhere else this reads
     // from and nothing to subscribe to instead.
-    // eslint-disable-next-line react-hooks/set-state-in-effect
     setStatus({
       ok: false,
       text: `swap failed, rolled back to the previous sprite: ${failed.message}`,
     })
-  }, [crumple.error])
-
-  /** A lost context also moves `status` to `'failed'` (§4.1), and a failed scene hands out a stage
-   *  on which nothing works — so the pill says so rather than printing an idle readout. */
-  useEffect(() => {
-    if (scene.status !== 'failed') return
-    // Same as above: the status pill is the sync target for `scene.status`, not derived data a
-    // render could compute instead — a failed scene is a real external event.
-    // eslint-disable-next-line react-hooks/set-state-in-effect
-    setStatus({
-      ok: false,
-      text: scene.lost
-        ? 'the WebGL2 context was lost — reload to rebuild'
-        : `stage build failed: ${scene.error?.message ?? 'unknown'}`,
-    })
-  }, [scene.status, scene.lost, scene.error])
+  }, [crumple.error, setStatus])
 
   // --- panel state ----------------------------------------------------------------------------
 
@@ -367,12 +434,12 @@ export function App(): ReactNode {
       endSwap()
       if (r === pc.ABORTED) return
       if (r instanceof Error) {
-        onObserved('crumple.play', r)
+        observed('crumple.play', r)
         return
       }
       refresh()
     },
-    [audio, dwells, endSwap, onObserved, play, poseIndex, refresh, view],
+    [audio, dwells, endSwap, observed, play, poseIndex, refresh, view],
   )
 
   // --- pose schedule --------------------------------------------------------------------------
@@ -391,7 +458,6 @@ export function App(): ReactNode {
   )
   /** `null` means "whatever the pack's manifest says"; anything else is the reader's own draft,
    *  and it survives a rebuild the way the open sections do. */
-  const [draft, setDraft] = useState<readonly number[] | null>(null)
   const keyFrames = useMemo(
     () => draft ?? (pack === null ? [] : [...pack.keyFrames]),
     [draft, pack],
@@ -422,41 +488,8 @@ export function App(): ReactNode {
     // (`use-paper-scene.ts:251,284`), and depending on the object would re-run this effect, and
     // everything that closes over it, on every knob write.
     // eslint-disable-next-line react-hooks/exhaustive-deps
-    [built, refresh, scene.stop, view],
+    [built, refresh, scene.stop, setStatus, view],
   )
-
-  // Re-point the schedule at the stage a rebuild just produced. A rebuild is a fresh
-  // `bakedMotion()` with no override, so whatever draft the reader was editing is re-applied here.
-  useEffect(() => {
-    if (built === null || pack === null) return
-    // Nothing to apply, nothing to stop. `applyPoses` pays for every call with
-    // `scene.stop({ all: true })` and a `draw('flat')`, and the first sprite landing reaches this
-    // effect through `pack`'s own identity — which is mid-entrance (§9.2, §0.1). Re-applying a
-    // schedule the resident pack already carries is a no-op the library would accept
-    // (`setPoses(null)`), so paying for it would only cut the entrance short. A draft that
-    // differs is a real re-application and still runs, exactly as it did across a rebuild.
-    if (sameList(keyFrames, pack.keyFrames)) return
-    // The only state this can touch is the status pill, and only when the library REFUSES the
-    // draft — which is the one thing a reader must be told about a schedule that did not take.
-    // eslint-disable-next-line react-hooks/set-state-in-effect
-    applyPoses(keyFrames, pack)
-    // Only when a new stage lands or the resident pack itself moves: `keyFrames` changing from an
-    // edit is applied by the edit itself.
-    //
-    // `crumple.shown` is deliberately ABSENT here while the memo above depends on it, and that
-    // asymmetry is load-bearing. There it is what makes `packs()` be re-read at all; here `pack`
-    // already carries the result, because `residentPacks()` hands back `store.get(bucket)`
-    // (`motion/src/source.ts:150`), so `pack`'s identity moves exactly when the resident set
-    // does, including the `null` → `Pack` transition at the first landing — the whole of §9.2.
-    // What `crumple.shown` would add is only the LATER landings, where `packs()[0]` is the same
-    // `Pack` object: on those this effect would re-run once per swap and, whenever the reader
-    // holds a draft that differs from the manifest, re-pay `scene.stop({ all: true })` +
-    // `draw('flat')` at the ball and cut the run short. Nothing is lost by leaving it out —
-    // `setPoses` is a slot-level override the clips read through getters (`source.ts:299-306`),
-    // and `load()` checks it against each arriving pack, so a newly landed sprite already carries
-    // the draft.
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [generation, built, pack])
 
   const commitKeyFrames = useCallback(
     (draft: readonly number[]) => {
@@ -468,7 +501,7 @@ export function App(): ReactNode {
         text: `key frames ${draft.map((s) => pack.frames[s]?.index ?? s).join(' → ')}`,
       })
     },
-    [applyPoses, pack, setStatus],
+    [applyPoses, pack, setDraft, setStatus],
   )
 
   const onCountChange = useCallback(
@@ -530,7 +563,7 @@ export function App(): ReactNode {
       setShown(target)
       setLibrarySample((prev) => nextLibrarySample(prev, target))
     },
-    [audio, crumple.pose, crumple.requested, dwells, shown],
+    [audio, crumple.pose, crumple.requested, dwells, setLibrarySample, setShown, shown],
   )
 
   const onSwap = useCallback(() => {
@@ -580,23 +613,6 @@ export function App(): ReactNode {
       window.removeEventListener('keydown', onKey)
     }
   }, [busy, draw, lastPose, pose, runFold])
-
-  // --- prefetch ------------------------------------------------------------------------------
-
-  useEffect(() => {
-    if (built === null) return
-    const controller = new AbortController()
-    // Through the built stage, and safe: the binding's `acquire` retries a live-key refusal through
-    // `prepare`, which joins the winner of the race rather than failing a correct sequence. The
-    // returned map is deliberately dropped — the binding's own in-flight registry is what a swap
-    // joins now.
-    prefetchSamples(built, shown, controller.signal)
-    return () => {
-      controller.abort()
-    }
-    // Only when a new stage lands. A swap must not re-run the prefetch.
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [generation, built])
 
   // --- derived ----------------------------------------------------------------------------------
 
@@ -650,20 +666,11 @@ export function App(): ReactNode {
    * timing, so what is left to measure is scene-ready → the first sprite on screen. The front bake
    * on its own has no seam left; the `hull` tile prints an em dash and says why.
    */
-  const [mountMs, setMountMs] = useState<number | null>(null)
-  const readyAtRef = useRef<number | null>(null)
-  useEffect(() => {
-    readyAtRef.current = scene.status === 'ready' ? performance.now() : null
-    // Clearing the previous build's reading is the sync this effect exists for; the fresh
-    // measurement is written by the effect below once a sprite actually lands.
-    // eslint-disable-next-line react-hooks/set-state-in-effect
-    setMountMs(null)
-  }, [scene.status, generation])
   useEffect(() => {
     const startedAt = readyAtRef.current
     if (crumple.shown === null || startedAt === null) return
     setMountMs((prev) => prev ?? performance.now() - startedAt)
-  }, [crumple.shown])
+  }, [crumple.shown, readyAtRef, setMountMs])
 
   const metrics = useMemo((): Metric[] => {
     if (built === null || sprite === null) {
@@ -760,9 +767,12 @@ export function App(): ReactNode {
 
   // --- config plumbing --------------------------------------------------------------------------
 
-  const applyConfig = useCallback((next: DemoConfig) => {
-    setConfig(next)
-  }, [])
+  const applyConfig = useCallback(
+    (next: DemoConfig) => {
+      setConfig(next)
+    },
+    [setConfig],
+  )
 
   // `edgeShape`, `edgeFinish` and `edgeWidthUnit` are all factory options, so every segment
   // rebuilds the stage (design 2026-09-05 §6.5) — `EdgeSection` calls this with the WHOLE spec,
@@ -801,222 +811,220 @@ export function App(): ReactNode {
     resetKnobs()
     setConfig(DEFAULT_CONFIG)
     setStatus({ ok: true, text: 'reset to manifest defaults' })
-  }, [resetKnobs, setStatus])
+  }, [resetKnobs, setConfig, setDraft, setStatus])
 
   // --- render -----------------------------------------------------------------------------------
 
   const edgeChip = `${config.edgeShape} · ${config.edgeFinish}`
 
   return (
-    <PaperScene value={scene}>
-      <div className="page">
-        <Header
-          status={shownStatus}
-          chip={`bucket ${bucketShown} · ${String(poseCount)} ${poseCount === 1 ? 'pose' : 'poses'}`}
-          onReset={onReset}
-        />
+    <div className="page">
+      <Header
+        status={shownStatus}
+        chip={`bucket ${bucketShown} · ${String(poseCount)} ${poseCount === 1 ? 'pose' : 'poses'}`}
+        onReset={onReset}
+      />
 
-        <main className="main">
-          <section className="stage-column">
-            <Stage
-              hero={crumple}
-              slotStyle={slotStyle}
-              poseChip={`pose ${String(pose)} / ${String(lastPose)}`}
-              sampleChip={sampleId}
-              edgeChip={edgeChip}
-              background={background}
-              onDropImage={onDropImage}
-            />
+      <main className="main">
+        <section className="stage-column">
+          <Stage
+            hero={crumple}
+            slotStyle={slotStyle}
+            poseChip={`pose ${String(pose)} / ${String(lastPose)}`}
+            sampleChip={sampleId}
+            edgeChip={edgeChip}
+            background={background}
+            onDropImage={onDropImage}
+          />
 
-            <Transport
-              steps={keyFrames.map((slot, i) => ({
-                top: String(frameFor(slot)),
-                title: `pose ${String(i)} · stored frame ${String(frameFor(slot))}`,
-              }))}
-              pose={pose}
-              readout={transportReadout}
+          <Transport
+            steps={keyFrames.map((slot, i) => ({
+              top: String(frameFor(slot)),
+              title: `pose ${String(i)} · stored frame ${String(frameFor(slot))}`,
+            }))}
+            pose={pose}
+            readout={transportReadout}
+            busy={busy}
+            onFold={() => void runFold('flat', 'ball')}
+            onUnfold={() => void runFold('ball', 'flat')}
+            onStepBack={() => {
+              draw(Math.max(0, pose - 1))
+            }}
+            onStepForward={() => {
+              draw(Math.min(lastPose, pose + 1))
+            }}
+            onGoto={draw}
+          />
+
+          <Diagnostics
+            metrics={metrics}
+            keyFrameLine={keyFrameLine}
+            glInfo={built === null ? 'no stage' : glInfo(built)}
+          />
+        </section>
+
+        <aside className="sidebar">
+          <Section
+            number="01"
+            title="Source"
+            summary={`${sampleId} · ${bucketShown}`}
+            open={open.source}
+            onToggle={() => {
+              toggle('source')
+            }}
+          >
+            <SourceSection
+              sampleId={librarySample.id}
+              packs={config.packs}
+              swapTarget={swapTarget}
               busy={busy}
-              onFold={() => void runFold('flat', 'ball')}
-              onUnfold={() => void runFold('ball', 'flat')}
-              onStepBack={() => {
-                draw(Math.max(0, pose - 1))
+              onSampleChange={(id) => {
+                const next = SAMPLES.find((s) => s.id === id)
+                if (next === undefined) return
+                startSwap(next)
+                // Same as `onSwap`'s own re-derivation below: the swap-to select must never keep
+                // naming the sample just picked here, or the next Swap click becomes the no-op
+                // `startSwap`'s guard now refuses silently (Finding A).
+                setSwapTarget(SAMPLES.find((s) => s.id !== next.id)?.id ?? BROKEN_ID)
               }}
-              onStepForward={() => {
-                draw(Math.min(lastPose, pose + 1))
+              onPacksChange={(packs: readonly BucketName[]) => {
+                applyConfig({ ...config, packs })
               }}
-              onGoto={draw}
+              onSyntheticUnavailable={() => {
+                setStatus({ ok: false, text: 'no synthetic bucket source in this build' })
+              }}
+              onSwapTargetChange={setSwapTarget}
+              onSwap={onSwap}
             />
+          </Section>
 
-            <Diagnostics
-              metrics={metrics}
-              keyFrameLine={keyFrameLine}
-              glInfo={built === null ? 'no stage' : glInfo(built)}
+          <Section
+            number="02"
+            title="Edge"
+            summary={edgeChip}
+            open={open.edge}
+            onToggle={() => {
+              toggle('edge')
+            }}
+          >
+            <EdgeSection
+              entries={entries}
+              knobs={knobs}
+              spec={{
+                shape: config.edgeShape,
+                finish: config.edgeFinish,
+                widthUnit: config.edgeWidthUnit,
+              }}
+              onSpecChange={onSpecChange}
+              onSet={setKnob}
+              overscanHeadroom={config.overscanHeadroom}
             />
-          </section>
+          </Section>
 
-          <aside className="sidebar">
-            <Section
-              number="01"
-              title="Source"
-              summary={`${sampleId} · ${bucketShown}`}
-              open={open.source}
-              onToggle={() => {
-                toggle('source')
+          <Section
+            number="03"
+            title="Poses"
+            summary={`${String(poseCount)} ${poseCount === 1 ? 'pose' : 'poses'}`}
+            open={open.poses}
+            onToggle={() => {
+              toggle('poses')
+            }}
+          >
+            <PosesSection
+              frames={storedFrames}
+              keyFrames={keyFrames}
+              disabled={pack === null}
+              onCountChange={onCountChange}
+              onKeyFrameChange={onKeyFrameChange}
+              onManifest={() => {
+                if (pack !== null) commitKeyFrames([...pack.keyFrames])
               }}
-            >
-              <SourceSection
-                sampleId={librarySample.id}
-                packs={config.packs}
-                swapTarget={swapTarget}
-                busy={busy}
-                onSampleChange={(id) => {
-                  const next = SAMPLES.find((s) => s.id === id)
-                  if (next === undefined) return
-                  startSwap(next)
-                  // Same as `onSwap`'s own re-derivation below: the swap-to select must never keep
-                  // naming the sample just picked here, or the next Swap click becomes the no-op
-                  // `startSwap`'s guard now refuses silently (Finding A).
-                  setSwapTarget(SAMPLES.find((s) => s.id !== next.id)?.id ?? BROKEN_ID)
-                }}
-                onPacksChange={(packs: readonly BucketName[]) => {
-                  applyConfig({ ...config, packs })
-                }}
-                onSyntheticUnavailable={() => {
-                  setStatus({ ok: false, text: 'no synthetic bucket source in this build' })
-                }}
-                onSwapTargetChange={setSwapTarget}
-                onSwap={onSwap}
-              />
-            </Section>
-
-            <Section
-              number="02"
-              title="Edge"
-              summary={edgeChip}
-              open={open.edge}
-              onToggle={() => {
-                toggle('edge')
+              onEven={() => {
+                onCountChange(keyFrames.length)
               }}
-            >
-              <EdgeSection
-                entries={entries}
-                knobs={knobs}
-                spec={{
-                  shape: config.edgeShape,
-                  finish: config.edgeFinish,
-                  widthUnit: config.edgeWidthUnit,
-                }}
-                onSpecChange={onSpecChange}
-                onSet={setKnob}
-                overscanHeadroom={config.overscanHeadroom}
-              />
-            </Section>
+            />
+          </Section>
 
-            <Section
-              number="03"
-              title="Poses"
-              summary={`${String(poseCount)} ${poseCount === 1 ? 'pose' : 'poses'}`}
-              open={open.poses}
-              onToggle={() => {
-                toggle('poses')
+          <Section
+            number="04"
+            title="Sound"
+            summary={audioSnapshot.summary}
+            open={open.sound}
+            onToggle={() => {
+              toggle('sound')
+            }}
+          >
+            <SoundSection
+              snapshot={audioSnapshot}
+              lines={soundLines}
+              onClipChange={(id) => {
+                audio.setClip(id)
               }}
-            >
-              <PosesSection
-                frames={storedFrames}
-                keyFrames={keyFrames}
-                disabled={pack === null}
-                onCountChange={onCountChange}
-                onKeyFrameChange={onKeyFrameChange}
-                onManifest={() => {
-                  if (pack !== null) commitKeyFrames([...pack.keyFrames])
-                }}
-                onEven={() => {
-                  onCountChange(keyFrames.length)
-                }}
-              />
-            </Section>
-
-            <Section
-              number="04"
-              title="Sound"
-              summary={audioSnapshot.summary}
-              open={open.sound}
-              onToggle={() => {
-                toggle('sound')
+              onVolumeChange={(v) => {
+                audio.setVolume(v)
               }}
-            >
-              <SoundSection
-                snapshot={audioSnapshot}
-                lines={soundLines}
-                onClipChange={(id) => {
-                  audio.setClip(id)
-                }}
-                onVolumeChange={(v) => {
-                  audio.setVolume(v)
-                }}
-                onSyncChange={(m: SyncMode) => {
-                  audio.setSync(m)
-                }}
-              />
-            </Section>
-
-            <Section
-              number="05"
-              title="Look & debug"
-              summary={
-                typeof knobs['motion.debug'] === 'string' ? knobs['motion.debug'] : 'composite'
-              }
-              open={open.look}
-              onToggle={() => {
-                toggle('look')
+              onSyncChange={(m: SyncMode) => {
+                audio.setSync(m)
               }}
-            >
-              <LookSection
-                entries={entries}
-                knobs={knobs}
-                onSet={setKnob}
-                background={background}
-                onBackgroundChange={setBackground}
-              />
-            </Section>
+            />
+          </Section>
 
-            {/*
+          <Section
+            number="05"
+            title="Look & debug"
+            summary={
+              typeof knobs['motion.debug'] === 'string' ? knobs['motion.debug'] : 'composite'
+            }
+            open={open.look}
+            onToggle={() => {
+              toggle('look')
+            }}
+          >
+            <LookSection
+              entries={entries}
+              knobs={knobs}
+              onSet={setKnob}
+              background={background}
+              onBackgroundChange={setBackground}
+            />
+          </Section>
+
+          {/*
               Everything past "05" has NO counterpart in the mockup: the library knobs the design's
               curated subset leaves out, then the factory options. Both are kept deliberately, and
               both are numbered on from the design's own sequence.
             */}
-            {groups.map((g, i) => {
-              const number = String(i + 6).padStart(2, '0')
-              return (
-                <Section
-                  key={g.group}
-                  number={number}
-                  title={g.group}
-                  summary={`${String(g.entries.length)} ${g.entries.length === 1 ? 'knob' : 'knobs'}`}
-                  open={openExtra[g.group] ?? false}
-                  onToggle={() => {
-                    setOpenExtra((prev) => ({ ...prev, [g.group]: !(prev[g.group] ?? false) }))
-                  }}
-                >
-                  <KnobRows entries={g.entries} knobs={knobs} onSet={setKnob} />
-                </Section>
-              )
-            })}
+          {groups.map((g, i) => {
+            const number = String(i + 6).padStart(2, '0')
+            return (
+              <Section
+                key={g.group}
+                number={number}
+                title={g.group}
+                summary={`${String(g.entries.length)} ${g.entries.length === 1 ? 'knob' : 'knobs'}`}
+                open={openExtra[g.group] ?? false}
+                onToggle={() => {
+                  setOpenExtra((prev) => ({ ...prev, [g.group]: !(prev[g.group] ?? false) }))
+                }}
+              >
+                <KnobRows entries={g.entries} knobs={knobs} onSet={setKnob} />
+              </Section>
+            )
+          })}
 
-            <Section
-              number={String(groups.length + 6).padStart(2, '0')}
-              title="Factory options"
-              summary={`${String(config.artworkCssPx)} px · ${String(config.budgetMb)} MB`}
-              open={openExtra['factory'] ?? false}
-              onToggle={() => {
-                setOpenExtra((prev) => ({ ...prev, factory: !(prev['factory'] ?? false) }))
-              }}
-            >
-              <FactorySection config={config} onChange={applyConfig} />
-            </Section>
-          </aside>
-        </main>
-      </div>
-    </PaperScene>
+          <Section
+            number={String(groups.length + 6).padStart(2, '0')}
+            title="Factory options"
+            summary={`${String(config.artworkCssPx)} px · ${String(config.budgetMb)} MB`}
+            open={openExtra['factory'] ?? false}
+            onToggle={() => {
+              setOpenExtra((prev) => ({ ...prev, factory: !(prev['factory'] ?? false) }))
+            }}
+          >
+            <FactorySection config={config} onChange={applyConfig} />
+          </Section>
+        </aside>
+      </main>
+    </div>
   )
 }
