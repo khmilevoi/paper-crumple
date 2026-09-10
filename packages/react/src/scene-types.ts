@@ -1,6 +1,7 @@
 import type {
   Aborted,
   BlitStage,
+  Knobs,
   PoseRef,
   StageEvent,
   StagePlayOptions,
@@ -8,12 +9,19 @@ import type {
   View,
 } from '@paper-crumple/core'
 
-/** What a knob value may be (spec §4.3, §6.2): flat primitives, nothing structured. */
-export type KnobValue = string | number | boolean
-
 export type SceneStatus = 'building' | 'ready' | 'failed'
 
-export interface SceneOptions {
+/**
+ * What `create` resolves to when the consumer has build metadata to carry (§3.2). Returning a
+ * bare `BlitStage` is still legal and means `meta` is `undefined` — which is exactly what the
+ * `M = undefined` default type parameter describes.
+ */
+export interface SceneBuild<M> {
+  readonly stage: BlitStage
+  readonly meta: M
+}
+
+export interface SceneOptions<M = undefined> {
   /**
    * `onError` is handed DOWN so the consumer can spread it into `paperStage`'s own `onError`.
    * `StageOptions.onError` is wired before the surface exists, and the consumer writes the
@@ -23,24 +31,59 @@ export interface SceneOptions {
   create: (
     signal: AbortSignal,
     onError: (e: StageEvent<'error'>) => void,
-  ) => Promise<BlitStage | Error | Aborted>
+  ) => Promise<SceneBuild<M> | BlitStage | Error | Aborted>
   /**
    * A rebuild is decided by `deps` and by nothing else. Structural comparison of the options bag
    * was rejected: `sheet` and `motion` are objects returned by factory calls, so a consumer who
    * forgets a `useMemo` would recreate the WebGL2 context on every render.
    */
   deps: readonly unknown[]
-  knobs?: Readonly<Record<string, KnobValue>>
+  /**
+   * Core's own `Knobs` (§4.2). The binding used to declare a `KnobValue` of its own, which
+   * collided by name with core's *generic* `KnobValue<D>` and gave one type three spellings.
+   * `Record<string, …>` is the honest type: the binding cannot name the slots by design.
+   */
+  knobs?: Knobs
   onError?: (e: StageEvent<'error'>) => void
+  /**
+   * Fires once per landed build (§3.1), synchronously after the `ready` bump and before React
+   * re-renders — so a consumer no longer re-derives the transition from `status` and `generation`
+   * in an effect that needs a `set-state-in-effect` suppression.
+   *
+   * `info.signal` is the build effect's own controller. It is already aborted on rebuild and on
+   * unmount, so work started here is cancelled without returning a cleanup.
+   */
+  onReady?: (build: SceneBuild<M>, info: { generation: number; signal: AbortSignal }) => void
+  /**
+   * Fires at most once per build (§3.1), synchronously after the bump that moved the snapshot to
+   * `failed`: a `create` that returned an Error, a `create` that threw, a duplicate-core startup
+   * failure, or a lost context. `info.lost` separates the last from the rest.
+   *
+   * A loss is reported from the stage's own `error` event rather than from `lost`, because core
+   * emits the orphaned `GlError` immediately after `lost` in the same synchronous stack and
+   * reporting from `lost` would hand this callback a placeholder while the snapshot ends up
+   * holding the real cause. The residue: a `lost` with no cause ever emitted leaves the snapshot
+   * `failed` and calls nothing here.
+   *
+   * `info.generation` is read at report time and therefore means two different things, which
+   * `info.lost` is what separates. On a loss (`lost: true`) it is the generation of the build
+   * that was lost — that build landed, so the counter had already been bumped for it. On every
+   * other failure (`lost: false`) nothing landed, so it is the generation of the last *successful*
+   * build, and `0` when none has ever landed. A `lost: false` report never names the build that
+   * failed, because a build that never landed was never numbered.
+   */
+  onFailed?: (error: Error, info: { lost: boolean; generation: number }) => void
+  /**
+   * A declarative knob write the stage refused. `onError` also receives it (§0.3), but a
+   * `StageEvent` has nowhere to put the key, and the key is the only thing that tells a consumer
+   * which control to roll back. A carry-forward onto a replacement stage stays silent here for
+   * exactly the reason it stays silent on `onError` (§4.1): the consumer did not write it.
+   */
+  onKnobRefused?: (key: string, value: Knobs[string], error: Error) => void
 }
 
-/** The reactive half of a `Scene`, rebuilt as one cached object per store bump (§5.5). */
-export interface SceneSnapshot {
-  readonly status: SceneStatus
-  /** Non-null exactly when `status === 'ready'`. */
-  readonly stage: BlitStage | null
-  /** Non-null exactly when `status === 'failed'`. */
-  readonly error: Error | null
+/** The four fields every branch of `SceneSnapshot` carries, whatever the status (§4.1). */
+export interface SceneCounters {
   /** `stage.warnings`, re-read on every bump — the array grows at runtime. */
   readonly warnings: readonly Error[]
   /** `stage.lost`. A lost context also moves `status` to `'failed'`. */
@@ -52,11 +95,40 @@ export interface SceneSnapshot {
 }
 
 /**
- * Memoised, and changes identity only when one of its fields does (§2.1): it is the value of
- * `<PaperScene value={scene}>`, so a fresh identity per render would re-render the whole subtree
- * and re-run every crumple effect that depends on it.
+ * The reactive half of a `Scene`, rebuilt as one cached object per store bump (§5.5).
+ *
+ * §4.1: the "non-null exactly when" invariants used to live in comments, which meant every
+ * consumer wrote `scene.error?.message ?? 'unknown'` inside a branch that had already proved the
+ * error was there. Each status pins `stage`, `meta` and `error`, so a status check narrows all
+ * three and removes every `?.` and `!`.
  */
-export interface Scene extends SceneSnapshot {
+export type SceneSnapshot<M = undefined> = SceneCounters &
+  (
+    | {
+        readonly status: 'building'
+        readonly stage: null
+        readonly meta: null
+        readonly error: null
+      }
+    | {
+        readonly status: 'ready'
+        readonly stage: BlitStage
+        readonly meta: M
+        readonly error: null
+      }
+    | {
+        readonly status: 'failed'
+        readonly stage: null
+        readonly meta: null
+        readonly error: Error
+      }
+  )
+
+/**
+ * The instance methods a `Scene` adds to its snapshot. Split out so `Scene` can be an
+ * intersection with a union, which an `interface … extends` cannot be.
+ */
+export interface SceneMethods {
   /**
    * On a scene that is not `ready` this is not an error and does not queue: it resolves to an
    * empty report with `completed: false`, which is what a broadcast over zero eligible views
@@ -66,3 +138,10 @@ export interface Scene extends SceneSnapshot {
   /** A no-op on a scene that is not `ready`. */
   stop(o?: { all?: boolean }): void
 }
+
+/**
+ * Memoised, and changes identity only when one of its fields does (§2.1): it is the value of
+ * `<PaperScene value={scene}>`, so a fresh identity per render would re-render the whole subtree
+ * and re-run every crumple effect that depends on it.
+ */
+export type Scene<M = undefined> = SceneSnapshot<M> & SceneMethods

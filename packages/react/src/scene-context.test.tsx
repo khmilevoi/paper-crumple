@@ -1,10 +1,12 @@
 /**
  * @vitest-environment jsdom
  */
+import { createElement, type ReactNode } from 'react'
 import { expect, test } from 'vitest'
 import { PaperScene, useScene } from './scene-context.js'
 import type { Scene } from './scene-types.js'
-import { render, renderHook } from './testing/render.js'
+import { usePaperScene } from './use-paper-scene.js'
+import { flush, render, renderHook } from './testing/render.js'
 import { createFakeStage } from './testing/fake-stage.js'
 
 function readyScene(): Scene {
@@ -12,6 +14,7 @@ function readyScene(): Scene {
   return {
     status: 'ready',
     stage: fake.stage,
+    meta: undefined,
     error: null,
     warnings: [],
     lost: false,
@@ -72,5 +75,28 @@ test('the no-provider scene play resolves to an empty report and stop is a no-op
     completed: false,
   })
   expect(scene.stop()).toBeUndefined()
+  await harness.unmount()
+})
+
+test('a typed scene round-trips through the provider (§3.2)', async () => {
+  interface Built {
+    readonly label: string
+  }
+  const seen: Array<Built | null> = []
+  const Consumer = (): null => {
+    seen.push(useScene<Built>().meta)
+    return null
+  }
+  const fake = createFakeStage()
+  const Host = (): ReactNode => {
+    const scene = usePaperScene<Built>({
+      create: async () => ({ stage: fake.stage, meta: { label: 'carried' } }),
+      deps: [1],
+    })
+    return createElement(PaperScene<Built>, { value: scene }, createElement(Consumer))
+  }
+  const harness = await render(createElement(Host))
+  await flush()
+  expect(seen.at(-1)).toEqual({ label: 'carried' })
   await harness.unmount()
 })

@@ -191,6 +191,7 @@ test('a join that settles after a detach with no epoch move reports nothing (§4
   const detached: Scene = {
     status: 'building',
     stage: null,
+    meta: null,
     error: null,
     warnings: [],
     lost: false,

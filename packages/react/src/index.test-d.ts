@@ -10,23 +10,27 @@ import {
   type SceneOptions,
 } from './index.js'
 
-test('usePaperScene takes SceneOptions and returns a Scene', () => {
-  expectTypeOf(usePaperScene).parameter(0).toEqualTypeOf<SceneOptions>()
-  expectTypeOf(usePaperScene).returns.toEqualTypeOf<Scene>()
+test('usePaperScene takes SceneOptions and returns a Scene, with meta defaulting to undefined', () => {
+  expectTypeOf<Parameters<typeof usePaperScene<undefined>>[0]>().toEqualTypeOf<SceneOptions>()
+  expectTypeOf<ReturnType<typeof usePaperScene<undefined>>>().toEqualTypeOf<Scene>()
 })
 
 test('useScene returns a Scene, never null — the no-provider case is a failed scene (§4.2)', () => {
-  expectTypeOf(useScene).returns.toEqualTypeOf<Scene>()
+  expectTypeOf<ReturnType<typeof useScene<undefined>>>().toEqualTypeOf<Scene>()
 })
 
 test('PaperScene takes a Scene, not options', () => {
-  expectTypeOf<Parameters<typeof PaperScene>[0]['value']>().toEqualTypeOf<Scene>()
+  expectTypeOf<Parameters<typeof PaperScene<undefined>>[0]['value']>().toEqualTypeOf<Scene>()
 })
 
 test('scene.stage narrows to BlitStage once status is checked', () => {
   const scene = {} as Scene
   if (scene.stage !== null) {
     expectTypeOf(scene.stage).toEqualTypeOf<BlitStage>()
+  }
+  // §4.1: `scene.error.message` after a status check, with no `?.` and no `!`.
+  if (scene.status === 'failed') {
+    expectTypeOf(scene.error.message).toEqualTypeOf<string>()
   }
 })
 
