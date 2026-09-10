@@ -1,7 +1,7 @@
 import { useCallback, useMemo, useState } from 'react'
 import * as pc from '@paper-crumple/core'
 import { usePaperScene } from '@paper-crumple/react'
-import type { KnobValue, Scene } from '@paper-crumple/react'
+import type { Scene } from '@paper-crumple/react'
 
 import type { BuiltStage, DemoConfig } from './config'
 import { buildStage } from './config'
@@ -20,7 +20,7 @@ export interface DemoScene {
   readonly scene: Scene
   readonly built: BuiltStage | null
   readonly knobs: KnobValues
-  readonly setKnob: (key: string, value: KnobValue) => void
+  readonly setKnob: (key: string, value: pc.Knobs[string]) => void
   readonly resetKnobs: () => void
   readonly seedKnobs: (values: KnobValues) => void
 }
@@ -35,7 +35,7 @@ export interface DemoScene {
  */
 export function defaultKnobValues(built: BuiltStage | null): KnobValues {
   if (built === null) return {}
-  const out: Record<string, KnobValue> = {}
+  const out: Record<string, pc.Knobs[string]> = {}
   for (const e of collectDescriptors(built)) out[e.key] = defaultValue(e.k)
   return out
 }
@@ -93,7 +93,7 @@ export function useDemoScene(
 
   const scene = usePaperScene({ create, deps: [config], knobs, onError })
 
-  const setKnob = useCallback((key: string, value: KnobValue): void => {
+  const setKnob = useCallback((key: string, value: pc.Knobs[string]): void => {
     setKnobs((prev) => ({ ...prev, [key]: value }))
   }, [])
 
