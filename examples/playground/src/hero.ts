@@ -39,8 +39,8 @@ export function droppedSample(file: File, seq: number): Sample {
  * carries the drawn box's own aspect, so there is nothing left to letterbox, and the two differ
  * only by the sub-pixel rounding between them — `contain` spends that on a sub-pixel bar rather
  * than a sub-pixel stretch.
- * It is fixed at `stage.view()` and a later change is silently ignored, which is why it is a hook
- * option and never a prop.
+ * Both `fit` and `tag` are fixed at `stage.view()`: the tag identifies this persistent hero view,
+ * not whichever sample it currently shows.
  */
 export function useHero(o: HeroOptions): Crumple {
   const scene = useScene<BuiltStage>()
@@ -50,7 +50,7 @@ export function useHero(o: HeroOptions): Crumple {
     spriteKey: o.shown.id,
     src: o.shown.src,
     fit: 'contain',
-    tag: o.shown.id,
+    tag: 'hero',
     duration: o.duration,
     frameTo,
     onSettle: o.onSettle,

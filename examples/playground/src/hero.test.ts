@@ -14,6 +14,7 @@ const B: Sample = { id: 'b', label: 'B', src: 'b.png' }
 
 let root: ReturnType<typeof createRoot> | null = null
 afterEach(() => {
+  vi.restoreAllMocks()
   if (root === null) return
   act(() => {
     root?.unmount()
@@ -25,6 +26,7 @@ describe('useHero', () => {
   it('uses the provided scene and swaps without an explicit scene option', async () => {
     const fake = createFakeStage({ sprites: ['a', 'b'] })
     const onSettle = vi.fn()
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {})
     let shown = A
     const current: { value: Crumple | null } = { value: null }
     const baseScene = readyScene(fake.stage)
@@ -54,6 +56,8 @@ describe('useHero', () => {
     expect(onSettle).toHaveBeenCalledTimes(1)
     expect(onSettle).toHaveBeenCalledWith({ key: 'b', error: null, reduced: false })
     expect(current.value?.requested).toBe('b')
+    expect(fake.views[0]?.view.tag).toBe('hero')
+    expect(warn).not.toHaveBeenCalled()
   })
 })
 

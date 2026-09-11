@@ -45,6 +45,24 @@ type SectionKey = 'source' | 'edge' | 'poses' | 'sound' | 'look'
 
 const BOOT_SAMPLE: Sample = SAMPLES.find((s) => s.id === DEFAULT_SAMPLE_ID) ?? SAMPLES[0]
 
+interface SourceState {
+  readonly requested: Sample
+  readonly retained: Sample | null
+  readonly failed: string | null
+}
+
+interface PrefetchState {
+  readonly stage: pc.BlitStage
+  readonly targets: ReadonlySet<string>
+}
+
+const EMPTY_TARGETS: ReadonlySet<string> = new Set()
+
+function sourceForRebuild(source: SourceState): SourceState {
+  if (source.failed !== source.requested.id || source.retained === null) return source
+  return { requested: source.retained, retained: source.retained, failed: null }
+}
+
 function sameList(a: readonly number[], b: readonly number[]): boolean {
   return a.length === b.length && a.every((x, i) => x === b[i])
 }
@@ -59,15 +77,16 @@ export function App(): ReactNode {
     boot instanceof Error ? DEFAULT_CONFIG : boot.config,
   )
 
-  /**
-   * The picture on screen. ONE state, not two: under `useStage` a different SAMPLE rebuilt the
-   * stage because `mountHero` mounted it, and `shown` tracked what a swap had moved to. `create`
-   * does not read the sample, and §4.1 says to put in `deps` only what `create` reads — so the
-   * sample left `deps`, and a source pick is a swap now.
-   */
-  const [shown, setShown] = useState<Sample>(BOOT_SAMPLE)
-  /** The "sample" picker's own bound value — see `nextLibrarySample`. Kept alongside the collapsed
-   *  `shown` state rather than reviving the pre-migration two-state split. */
+  /** The declaratively requested picture plus the full last successful source. A failed request
+   * stays requested for retry, but a later stage rebuild reacquires `retained` instead. Keeping the
+   * complete Sample is required for dropped Files, which cannot be recovered from `SAMPLES`. */
+  const [source, setSource] = useState<SourceState>({
+    requested: BOOT_SAMPLE,
+    retained: null,
+    failed: null,
+  })
+  /** The built-in sample picker's own bound value. Dropped and deliberately broken sources never
+   * become options in that picker, so this stays separate from the requested source policy. */
   const [librarySample, setLibrarySample] = useState<Sample>(BOOT_SAMPLE)
   const [status, setStatus] = useState<StageStatus | null>(() =>
     boot instanceof Error
@@ -86,13 +105,20 @@ export function App(): ReactNode {
   const [audio] = useState<AudioHandle>(() => createAudio(onObserved))
   const [mountMs, setMountMs] = useState<number | null>(null)
   const readyAtRef = useRef<number | null>(null)
+  const prefetchOwnerRef = useRef<object | null>(null)
+  const [prefetch, setPrefetch] = useState<PrefetchState | null>(null)
 
   const demo = useDemoScene(config, onObserved, boot instanceof Error ? {} : boot.knobs, {
     onReady(built, info) {
       setStatus(null)
       readyAtRef.current = performance.now()
       setMountMs(null)
-      prefetchSamples(built, shown, info.signal)
+      const owner = {}
+      prefetchOwnerRef.current = owner
+      prefetchSamples(built, source.requested, info.signal, (stage, targets) => {
+        if (info.signal.aborted || prefetchOwnerRef.current !== owner) return
+        setPrefetch({ stage, targets })
+      })
       if (draft === null) return
       const refused = built.motion.setPoses({ keyFrames: [...draft] })
       if (refused !== undefined) setStatus({ ok: false, text: `rejected: ${refused.message}` })
@@ -112,8 +138,9 @@ export function App(): ReactNode {
       <Playground
         config={config}
         setConfig={setConfig}
-        shown={shown}
-        setShown={setShown}
+        source={source}
+        setSource={setSource}
+        prefetch={prefetch}
         librarySample={librarySample}
         setLibrarySample={setLibrarySample}
         status={status}
@@ -134,8 +161,9 @@ export function App(): ReactNode {
 interface PlaygroundProps {
   config: DemoConfig
   setConfig: Dispatch<SetStateAction<DemoConfig>>
-  shown: Sample
-  setShown: Dispatch<SetStateAction<Sample>>
+  source: SourceState
+  setSource: Dispatch<SetStateAction<SourceState>>
+  prefetch: PrefetchState | null
   librarySample: Sample
   setLibrarySample: Dispatch<SetStateAction<Sample>>
   status: StageStatus | null
@@ -153,8 +181,9 @@ interface PlaygroundProps {
 function Playground({
   config,
   setConfig,
-  shown,
-  setShown,
+  source,
+  setSource,
+  prefetch,
   librarySample,
   setLibrarySample,
   status,
@@ -172,18 +201,25 @@ function Playground({
   const built = scene.status === 'ready' ? scene.meta : null
   const { knobs, setKnob } = demo
   const { stop } = scene
+  const shown = source.requested
+  const prefetching =
+    built !== null && prefetch?.stage === built.stage ? prefetch.targets : EMPTY_TARGETS
 
   const transport = useTransport({
     shown,
     audio,
     observed,
     onSettle(event, wasSwap) {
+      if (event.key !== shown.id) return
       const startedAt = readyAtRef.current
       if (startedAt !== null && event.error === null) {
         readyAtRef.current = null
         setMountMs((previous) => previous ?? performance.now() - startedAt)
       }
       if (event.error !== null) {
+        setSource((current) =>
+          current.requested.id === event.key ? { ...current, failed: event.key } : current,
+        )
         setStatus({
           ok: false,
           text: wasSwap
@@ -192,6 +228,11 @@ function Playground({
         })
         return
       }
+      setSource((current) =>
+        current.requested.id === event.key
+          ? { requested: current.requested, retained: current.requested, failed: null }
+          : current,
+      )
       if (!wasSwap) return
       setStatus({ ok: true, text: `swapped to ${shown.label}` })
     },
@@ -322,18 +363,22 @@ function Playground({
    */
   const startSwap = useCallback(
     (target: Sample) => {
+      if (prefetching.has(target.id)) return
       if (target.id === crumple.requested) {
         if (crumple.status === 'rolled-back') {
+          setSource((current) =>
+            current.requested.id === target.id ? { ...current, failed: null } : current,
+          )
           beginSwap(target.id)
           crumple.retry()
         }
         return
       }
       beginSwap(target.id)
-      setShown(target)
+      setSource((current) => ({ ...current, requested: target, failed: null }))
       setLibrarySample((prev) => nextLibrarySample(prev, target))
     },
-    [beginSwap, crumple, setLibrarySample, setShown],
+    [beginSwap, crumple, prefetching, setLibrarySample, setSource],
   )
 
   const onSwap = useCallback(() => {
@@ -495,9 +540,10 @@ function Playground({
   const applyConfig = useCallback(
     (next: DemoConfig) => {
       if (crumple.pending !== null) cancelSwap(crumple.pending.key)
+      setSource(sourceForRebuild)
       setConfig(next)
     },
-    [cancelSwap, crumple.pending, setConfig],
+    [cancelSwap, crumple.pending, setConfig, setSource],
   )
 
   // `edgeShape`, `edgeFinish` and `edgeWidthUnit` are all factory options, so every segment
@@ -540,9 +586,10 @@ function Playground({
     }
     setDraft(null)
     demo.resetKnobs()
+    if (config !== DEFAULT_CONFIG) setSource(sourceForRebuild)
     setConfig(DEFAULT_CONFIG)
     setStatus({ ok: true, text: 'reset to manifest defaults' })
-  }, [cancelSwap, crumple.pending, demo, setConfig, setDraft, setStatus, stop])
+  }, [cancelSwap, config, crumple.pending, demo, setConfig, setDraft, setSource, setStatus, stop])
 
   // --- render -----------------------------------------------------------------------------------
 
@@ -608,6 +655,7 @@ function Playground({
               packs={config.packs}
               swapTarget={swapTarget}
               busy={busy}
+              preparing={prefetching}
               onSampleChange={(id) => {
                 const next = SAMPLES.find((s) => s.id === id)
                 if (next === undefined) return

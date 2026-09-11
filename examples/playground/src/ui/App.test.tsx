@@ -5,7 +5,7 @@ import type { Pack } from '@paper-crumple/motion'
 import pack1x1 from '@paper-crumple/motion/packs/1x1'
 import { paperSheet } from '@paper-crumple/paper'
 import type { Scene } from '@paper-crumple/react'
-import { createFakeStage, readyScene } from '@paper-crumple/react/testing'
+import { createFakeStage, deferred, readyScene } from '@paper-crumple/react/testing'
 import type { FakeStageHandle } from '@paper-crumple/react/testing'
 import { act } from 'react'
 import { createRoot } from 'react-dom/client'
@@ -14,10 +14,14 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import type { AudioHandle, AudioSnapshot } from '../audio'
 import { createAudio } from '../audio'
 import type { BuiltStage } from '../config'
+import { DEFAULT_CONFIG } from '../config'
 import type { DemoScene } from '../scene'
+import type { DemoSceneEvents } from '../scene'
 import { useDemoScene } from '../scene'
+import { encodeState } from '../state'
 
 import { App } from './App'
+import { BROKEN_ID } from './SourceSection'
 
 vi.mock('../audio', async () => {
   const actual = await vi.importActual<typeof import('../audio')>('../audio')
@@ -40,6 +44,7 @@ interface AudioHarness {
 }
 
 interface SceneHarness {
+  readonly built: BuiltStage
   readonly demo: DemoScene
   readonly stop: ReturnType<typeof vi.fn>
 }
@@ -47,6 +52,7 @@ interface SceneHarness {
 let root: ReturnType<typeof createRoot> | null = null
 let container: HTMLDivElement | null = null
 let currentDemo: DemoScene | null = null
+let currentEvents: DemoSceneEvents | null = null
 
 afterEach(() => {
   if (root !== null) {
@@ -56,11 +62,15 @@ afterEach(() => {
   root = null
   container = null
   currentDemo = null
+  currentEvents = null
+  history.replaceState(null, '', `${location.pathname}${location.search}`)
+  vi.unstubAllGlobals()
   vi.clearAllMocks()
 })
 
 beforeEach(() => {
-  mockedUseDemoScene.mockImplementation(() => {
+  mockedUseDemoScene.mockImplementation((_config, _observed, _initialKnobs, events) => {
+    currentEvents = events ?? null
     if (currentDemo === null) return new Error('test scene is missing') as unknown as DemoScene
     return currentDemo
   })
@@ -129,6 +139,7 @@ function sceneHarness(fake: FakeStageHandle): SceneHarness {
     stop,
   } as Scene<BuiltStage>
   return {
+    built,
     stop,
     demo: {
       scene,
@@ -137,6 +148,36 @@ function sceneHarness(fake: FakeStageHandle): SceneHarness {
       resetKnobs: vi.fn(),
     },
   }
+}
+
+async function settle(): Promise<void> {
+  await act(async () => {
+    await Promise.resolve()
+  })
+}
+
+function buttonNamed(app: ParentNode, name: string): HTMLButtonElement | null {
+  return (
+    [...app.querySelectorAll<HTMLButtonElement>('button')].find(
+      (button) => button.textContent?.trim() === name,
+    ) ?? null
+  )
+}
+
+async function failBrokenSwap(
+  app: HTMLDivElement,
+  fake: FakeStageHandle,
+  message = 'target failed',
+): Promise<void> {
+  const target = app.querySelector<HTMLSelectElement>('select[aria-label="swap target"]')
+  const swap = buttonNamed(app, 'Swap')
+  expect(target).not.toBeNull()
+  expect(swap).not.toBeNull()
+  if (target === null || swap === null) return
+  act(() => change(target, BROKEN_ID))
+  act(() => swap.click())
+  fake.views[0]?.settleRun(new SheetError(message))
+  await settle()
 }
 
 async function renderApp(): Promise<HTMLDivElement> {
@@ -253,5 +294,227 @@ describe('App request outcomes', () => {
     expect(app.querySelector('[role="status"]')?.textContent).toContain(
       'reset to manifest defaults',
     )
+  })
+
+  it('rebuilds Reset from the last successful sample after a settled rollback', async () => {
+    history.replaceState(null, '', encodeState({ ...DEFAULT_CONFIG, edgeShape: 'torn' }, {}))
+    const audio = audioHarness()
+    mockedCreateAudio.mockReturnValue(audio.handle)
+    const original = createFakeStage({ sprites: ['sweater'] })
+    currentDemo = sceneHarness(original).demo
+    const app = await renderApp()
+    await settle()
+    original.views[0]?.settleRun(undefined)
+    await settle()
+    await failBrokenSwap(app, original, 'broken target')
+    expect(app.querySelector('[role="status"]')?.textContent).toContain(
+      'swap failed, rolled back to the previous sprite: broken target',
+    )
+
+    const acquired: { readonly key: string; readonly src: unknown }[] = []
+    const fresh = createFakeStage({
+      add: async (src, options) => {
+        acquired.push({ key: options.key, src })
+        return fresh.addSprite(options.key)
+      },
+    })
+    currentDemo = sceneHarness(fresh).demo
+    const reset = app.querySelector<HTMLButtonElement>('.header-reset')
+    expect(reset).not.toBeNull()
+    expect(mockedUseDemoScene.mock.calls.at(-1)?.[0].edgeShape).toBe('torn')
+    act(() => reset?.click())
+    await settle()
+
+    expect(acquired).toContainEqual({
+      key: 'sweater',
+      src: '/samples/garment-sweater.png',
+    })
+    expect(acquired.some(({ key }) => key === BROKEN_ID)).toBe(false)
+    expect(app.querySelectorAll('.pose-step')).toHaveLength(6)
+    const poses = [...app.querySelectorAll<HTMLButtonElement>('.section-header')].find((button) =>
+      button.textContent?.includes('Poses'),
+    )
+    act(() => poses?.click())
+    expect(
+      app.querySelector<HTMLButtonElement>('button[aria-label="one pose more"]')?.disabled,
+    ).toBe(false)
+  })
+
+  it('retains the complete dropped File through rollback and a config rebuild', async () => {
+    const audio = audioHarness()
+    mockedCreateAudio.mockReturnValue(audio.handle)
+    const original = createFakeStage({ sprites: ['sweater'] })
+    currentDemo = sceneHarness(original).demo
+    const app = await renderApp()
+    const file = new File(['paper'], 'kept.png', { type: 'image/png' })
+    const drop = new Event('drop', { bubbles: true, cancelable: true })
+    Object.defineProperty(drop, 'dataTransfer', { value: { files: [file] } })
+    act(() => app.querySelector('.stage')?.dispatchEvent(drop))
+    original.views[0]?.settleRun(undefined)
+    await settle()
+    await failBrokenSwap(app, original)
+    act(() => buttonNamed(app, 'Fold')?.click())
+    original.views[0]?.emit('start', { from: 0, to: 5 })
+    original.views[0]?.settleRun(undefined)
+    await settle()
+
+    const acquired: { readonly key: string; readonly src: unknown }[] = []
+    const fresh = createFakeStage({
+      add: async (src, options) => {
+        acquired.push({ key: options.key, src })
+        return fresh.addSprite(options.key)
+      },
+    })
+    currentDemo = sceneHarness(fresh).demo
+    const bucket = [...app.querySelectorAll<HTMLButtonElement>('button')].find(
+      (button) => button.textContent?.trim() === '1x1',
+    )
+    expect(bucket).not.toBeUndefined()
+    act(() => bucket?.click())
+    await settle()
+
+    expect(acquired).toHaveLength(1)
+    expect(acquired[0]?.key).toBe('dropped-1')
+    expect(acquired[0]?.src).toBe(file)
+  })
+
+  it('does not let an older rollback replace a newer pending request during rebuild', async () => {
+    const audio = audioHarness()
+    mockedCreateAudio.mockReturnValue(audio.handle)
+    const original = createFakeStage({ sprites: ['sweater'] })
+    currentDemo = sceneHarness(original).demo
+    const app = await renderApp()
+    await failBrokenSwap(app, original, 'older failure')
+
+    const sample = app.querySelector<HTMLSelectElement>('select[aria-label="sample"]')
+    expect(sample).not.toBeNull()
+    if (sample === null) return
+    await act(async () => change(sample, 'trench'))
+
+    const acquired: string[] = []
+    const fresh = createFakeStage({
+      add: async (_src, options) => {
+        acquired.push(options.key)
+        return fresh.addSprite(options.key)
+      },
+    })
+    currentDemo = sceneHarness(fresh).demo
+    const bucket = [...app.querySelectorAll<HTMLButtonElement>('button')].find(
+      (button) => button.textContent?.trim() === '1x1',
+    )
+    act(() => bucket?.click())
+    await settle()
+    original.views[0]?.settleRun(new SheetError('stale settle'))
+    await settle()
+
+    expect(acquired).toEqual(['trench'])
+    expect(app.querySelector('[role="status"]')?.textContent).not.toContain('stale settle')
+  })
+
+  it('gates only a target whose startup prefetch is scheduled or in flight', async () => {
+    let idle: IdleRequestCallback | null = null
+    vi.stubGlobal('requestIdleCallback', (callback: IdleRequestCallback) => {
+      idle = callback
+      return 1
+    })
+    const trench = deferred<ReturnType<FakeStageHandle['addSprite']>>()
+    const fake = createFakeStage({
+      sprites: ['sweater'],
+      add: async (_src, options) =>
+        options.key === 'trench'
+          ? trench.promise
+          : options.key === 'jeans'
+            ? new SheetError('optional prefetch failed')
+            : fake.addSprite(options.key),
+    })
+    const scene = sceneHarness(fake)
+    currentDemo = scene.demo
+    const audio = audioHarness()
+    mockedCreateAudio.mockReturnValue(audio.handle)
+    const app = await renderApp()
+    const signal = new AbortController().signal
+    act(() => currentEvents?.onReady?.(scene.built, { generation: 1, signal }))
+    await settle()
+
+    const sample = app.querySelector<HTMLSelectElement>('select[aria-label="sample"]')
+    const trenchOption = sample?.querySelector<HTMLOptionElement>('option[value="trench"]')
+    const swap = buttonNamed(app, 'Swap')
+    expect(sample).not.toBeNull()
+    expect(trenchOption?.disabled).toBe(true)
+    expect(swap?.disabled).toBe(true)
+    if (sample === null || swap === null) return
+
+    act(() => change(sample, 'trench'))
+    act(() => swap.click())
+    expect(audio.beginSequence).not.toHaveBeenCalled()
+    expect(fake.calls.filter((call) => call.method === 'view.swapTo')).toHaveLength(0)
+
+    act(() => {
+      idle?.({ didTimeout: false, timeRemaining: () => 50 })
+    })
+    await settle()
+    expect(swap.disabled).toBe(true)
+    expect(sample.querySelector<HTMLOptionElement>('option[value="jeans"]')?.disabled).toBe(false)
+    trench.resolve(fake.addSprite('trench'))
+    await settle()
+
+    expect(trenchOption?.disabled).toBe(false)
+    expect(swap.disabled).toBe(false)
+    act(() => swap.click())
+    expect(audio.beginSequence).toHaveBeenCalledTimes(1)
+    expect(
+      fake.calls.filter(
+        (call) =>
+          call.method === 'add' &&
+          (call.args[1] as { readonly key?: string } | undefined)?.key === 'trench',
+      ),
+    ).toHaveLength(1)
+  })
+
+  it('does not let an old stage completion release a new stage prefetch gate', async () => {
+    const idle: IdleRequestCallback[] = []
+    vi.stubGlobal('requestIdleCallback', (callback: IdleRequestCallback) => {
+      idle.push(callback)
+      return idle.length
+    })
+    const oldTrench = deferred<ReturnType<FakeStageHandle['addSprite']>>()
+    const newTrench = deferred<ReturnType<FakeStageHandle['addSprite']>>()
+    const oldFake = createFakeStage({
+      sprites: ['sweater'],
+      add: async (_src, options) =>
+        options.key === 'trench' ? oldTrench.promise : oldFake.addSprite(options.key),
+    })
+    const oldScene = sceneHarness(oldFake)
+    currentDemo = oldScene.demo
+    mockedCreateAudio.mockReturnValue(audioHarness().handle)
+    const app = await renderApp()
+    const oldEvents = currentEvents
+    const oldSignal = new AbortController().signal
+    act(() => oldEvents?.onReady?.(oldScene.built, { generation: 1, signal: oldSignal }))
+
+    const newFake = createFakeStage({
+      sprites: ['sweater'],
+      add: async (_src, options) =>
+        options.key === 'trench' ? newTrench.promise : newFake.addSprite(options.key),
+    })
+    const newScene = sceneHarness(newFake)
+    currentDemo = newScene.demo
+    await renderApp()
+    const newSignal = new AbortController().signal
+    act(() => currentEvents?.onReady?.(newScene.built, { generation: 2, signal: newSignal }))
+    act(() => {
+      for (const callback of idle) {
+        callback({ didTimeout: false, timeRemaining: () => 50 })
+      }
+    })
+    await settle()
+
+    oldTrench.resolve(oldFake.addSprite('trench'))
+    await settle()
+    expect(buttonNamed(app, 'Swap')?.disabled).toBe(true)
+
+    newTrench.resolve(newFake.addSprite('trench'))
+    await settle()
+    expect(buttonNamed(app, 'Swap')?.disabled).toBe(false)
   })
 })

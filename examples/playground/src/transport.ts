@@ -10,11 +10,6 @@ import type { BuiltStage } from './config'
 import { useHero } from './hero'
 import type { Sample } from './samples'
 
-/** What a swap gets when sound is off or silent — the fold has to last *something*. */
-const DEFAULT_RUN_DURATION_MS = 900
-
-export const SWAP_DURATION_MS = DEFAULT_RUN_DURATION_MS
-
 export type TransportDirection = 'folding' | 'unfolding' | null
 
 export interface TransportOptions {
@@ -37,11 +32,11 @@ export interface TransportHandle {
   readonly runFold: (from: PoseRef, to: PoseRef) => Promise<void>
 }
 
-/** A duration from a silent or disabled clip must still leave the runner a real traversal. */
-export function swapDurationFor(fromAudio: number | null | undefined): number {
-  return fromAudio === null || fromAudio === undefined || fromAudio <= 0
-    ? DEFAULT_RUN_DURATION_MS
-    : fromAudio
+/** Silent or invalid audio keeps the exact authored duration of the swap armed for this run. */
+export function swapDurationFor(fromAudio: number | null | undefined, authored: number): number {
+  return typeof fromAudio === 'number' && Number.isFinite(fromAudio) && fromAudio > 0
+    ? fromAudio
+    : authored
 }
 
 type TransportOwner = { readonly kind: 'swap'; readonly key: string } | { readonly kind: 'fold' }
@@ -53,7 +48,7 @@ export function useTransport(o: TransportOptions): TransportHandle {
   const dwells = built?.motion.poses?.dwells ?? pc.DWELL_MS
 
   const [direction, setDirection] = useState<TransportDirection>(null)
-  const [swapDuration, setSwapDuration] = useState(SWAP_DURATION_MS)
+  const [swapDuration, setSwapDuration] = useState(() => swapSpec(0, dwells).authored)
   const [lastStepMs, setLastStepMs] = useState<number | null>(null)
   const [lastDrawMs, setLastDrawMs] = useState<number | null>(null)
   const stepAtRef = useRef<number | null>(null)
@@ -132,8 +127,9 @@ export function useTransport(o: TransportOptions): TransportHandle {
   const beginSwap = useCallback(
     (key: string): void => {
       const owner: TransportOwner = { kind: 'swap', key }
-      const duration = beginTransport(owner, 'folding', swapSpec(crumple.pose, dwells))
-      setSwapDuration(swapDurationFor(duration))
+      const spec = swapSpec(crumple.pose, dwells)
+      const duration = beginTransport(owner, 'folding', spec)
+      setSwapDuration(swapDurationFor(duration, spec.authored))
     },
     [beginTransport, crumple.pose, dwells],
   )
@@ -161,7 +157,7 @@ export function useTransport(o: TransportOptions): TransportHandle {
         playSpec(fromIdx, toIdx, '', dwells),
       )
       try {
-        const run = play(from, to, { duration: duration ?? DEFAULT_RUN_DURATION_MS })
+        const run = play(from, to, { duration })
         if (run === null) return
         const result = await run
         if (result === pc.ABORTED) return

@@ -9,7 +9,7 @@ import type { ReactNode } from 'react'
 import { createRoot } from 'react-dom/client'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 
-import { swapDurationFor, SWAP_DURATION_MS, useTransport } from './transport'
+import { swapDurationFor, useTransport } from './transport'
 import type { TransportHandle } from './transport'
 import type { Sample } from './samples'
 
@@ -44,7 +44,7 @@ async function renderTransport(
   observed: ReturnType<typeof vi.fn<(where: string, error: Error) => void>> = vi.fn(),
 ): Promise<TransportHarness> {
   const audio = {
-    beginSequence: vi.fn(() => 600),
+    beginSequence: vi.fn((): number | undefined => 600),
     endSequence: vi.fn(),
     cancel: vi.fn(),
   }
@@ -141,6 +141,44 @@ describe('useTransport', () => {
     await harness.unmount()
   })
 
+  it.each([
+    ['fold', 'flat', 'ball'],
+    ['unfold', 'ball', 'flat'],
+  ] as const)(
+    'leaves authored %s timing intact when audio supplies no duration',
+    async (_, from, to) => {
+      const harness = await renderTransport(createFakeStage({ sprites: ['a'] }))
+      harness.audio.beginSequence.mockReturnValue(undefined)
+
+      let done: Promise<void> | undefined
+      act(() => {
+        done = harness.result.current.runFold(from, to)
+      })
+
+      const play = harness.fake.calls.find((call) => call.method === 'view.play')
+      expect(play?.args[2]).toEqual({ duration: undefined })
+      harness.fake.views[0]?.settleRun(undefined)
+      await act(async () => done)
+      await harness.unmount()
+    },
+  )
+
+  it('passes a positive scaled-audio duration through to an ordinary fold exactly', async () => {
+    const harness = await renderTransport(createFakeStage({ sprites: ['a'] }))
+    harness.audio.beginSequence.mockReturnValue(585)
+
+    let done: Promise<void> | undefined
+    act(() => {
+      done = harness.result.current.runFold('flat', 'ball')
+    })
+
+    const play = harness.fake.calls.find((call) => call.method === 'view.play')
+    expect(play?.args[2]).toEqual({ duration: 585 })
+    harness.fake.views[0]?.settleRun(undefined)
+    await act(async () => done)
+    await harness.unmount()
+  })
+
   it('closes an armed swap from onSettle rather than a view end event', async () => {
     const harness = await renderTransport(createFakeStage({ sprites: ['a'] }))
     harness.settled.mockClear()
@@ -152,6 +190,37 @@ describe('useTransport', () => {
     expect(harness.audio.endSequence).toHaveBeenCalledTimes(1)
     expect(harness.settled).toHaveBeenCalledTimes(1)
     expect(harness.settled).toHaveBeenCalledWith({ key: 'b', error: null, reduced: false }, true)
+    await harness.unmount()
+  })
+
+  it('uses the armed swap specification for audio and fixed-mode authored timing', async () => {
+    const harness = await renderTransport(createFakeStage({ sprites: ['a', 'b'] }))
+    harness.audio.beginSequence.mockReturnValue(undefined)
+
+    act(() => harness.result.current.beginSwap('b'))
+    await harness.setShown(B)
+
+    expect(harness.audio.beginSequence).toHaveBeenCalledWith(
+      expect.objectContaining({ label: 'swap from 0', authored: 985 }),
+    )
+    const swap = harness.fake.calls.find((call) => call.method === 'view.swapTo')
+    expect(swap?.args[1]).toMatchObject({ key: 'b', duration: 985 })
+    await harness.unmount()
+  })
+
+  it('does not leak a scaled duration into the next fixed-mode swap', async () => {
+    const C: Sample = { id: 'c', label: 'C', src: 'c.png' }
+    const harness = await renderTransport(createFakeStage({ sprites: ['a', 'b', 'c'] }))
+    harness.audio.beginSequence.mockReturnValueOnce(640).mockReturnValueOnce(undefined)
+
+    act(() => harness.result.current.beginSwap('b'))
+    await harness.setShown(B)
+    act(() => harness.result.current.beginSwap('c'))
+    await harness.setShown(C)
+
+    const swaps = harness.fake.calls.filter((call) => call.method === 'view.swapTo')
+    expect((swaps[0]?.args[1] as { duration?: number }).duration).toBe(640)
+    expect((swaps[1]?.args[1] as { duration?: number }).duration).toBe(985)
     await harness.unmount()
   })
 
@@ -267,15 +336,17 @@ describe('useTransport', () => {
 
 describe('swapDurationFor', () => {
   it('takes the audio clip length when there is one', () => {
-    expect(swapDurationFor(585)).toBe(585)
+    expect(swapDurationFor(585, 985)).toBe(585)
   })
 
-  it('falls back to the demo constant when sound is off or silent', () => {
-    expect(swapDurationFor(null)).toBe(SWAP_DURATION_MS)
-    expect(swapDurationFor(undefined)).toBe(SWAP_DURATION_MS)
+  it('falls back to the armed swap authored timing when sound is off or silent', () => {
+    expect(swapDurationFor(null, 985)).toBe(985)
+    expect(swapDurationFor(undefined, 985)).toBe(985)
   })
 
-  it('never hands the binding a zero, which is a swap with no traversal at all', () => {
-    expect(swapDurationFor(0)).toBe(SWAP_DURATION_MS)
+  it('rejects zero and invalid audio durations in favor of authored timing', () => {
+    expect(swapDurationFor(0, 985)).toBe(985)
+    expect(swapDurationFor(Number.NaN, 985)).toBe(985)
+    expect(swapDurationFor(Number.POSITIVE_INFINITY, 985)).toBe(985)
   })
 })

@@ -58,6 +58,7 @@ export interface SourceSectionProps {
   readonly packs: readonly BucketName[]
   readonly swapTarget: string
   readonly busy: boolean
+  readonly preparing: ReadonlySet<string>
   readonly onSampleChange: (id: string) => void
   readonly onPacksChange: (packs: readonly BucketName[]) => void
   readonly onSyntheticUnavailable: () => void
@@ -70,6 +71,7 @@ export function SourceSection({
   packs,
   swapTarget,
   busy,
+  preparing,
   onSampleChange,
   onPacksChange,
   onSyntheticUnavailable,
@@ -78,6 +80,7 @@ export function SourceSection({
 }: SourceSectionProps): ReactNode {
   const active = bucketForPacks(packs)
   const swapChoices = SAMPLES.filter((s) => s.id !== sampleId)
+  const preparingTarget = preparing.has(swapTarget)
 
   return (
     <>
@@ -92,7 +95,7 @@ export function SourceSection({
           }}
         >
           {SAMPLES.map((s) => (
-            <option key={s.id} value={s.id}>
+            <option key={s.id} value={s.id} disabled={preparing.has(s.id)}>
               {sampleLabel(s.id)}
             </option>
           ))}
@@ -134,14 +137,20 @@ export function SourceSection({
           ))}
           <option value={BROKEN_ID}>{BROKEN_LABEL}</option>
         </select>
-        <button type="button" className="btn-inline" onClick={onSwap} disabled={busy}>
+        <button
+          type="button"
+          className="btn-inline"
+          onClick={onSwap}
+          disabled={busy || preparingTarget}
+        >
           Swap
         </button>
       </div>
 
       <p className="note">
-        Swap runs the animated hero transition — fold to a ball, load, unfold. The sample picker
-        above sets what loads at boot.
+        {preparingTarget
+          ? `${sampleLabel(swapTarget)} is being prepared for swapping.`
+          : 'Swap runs the animated hero transition — fold to a ball, load, unfold. The sample picker above sets what loads at boot.'}
       </p>
     </>
   )
