@@ -147,7 +147,9 @@ V8; Node 22 and 24 were not measured. Both behavior probes produced 64 views at 
 128 step events including startup, 64 pending timers and unchanged semantic revisions.
 
 The focused grid allocation estimate was 136,544 bytes per operation for current source and
-130,352 for the loader control, with no GC during either sample set. Their p50/p95 values were
+130,352 for the loader control. The final-probe GC counter was zero in both runs; the harness
+resets that counter per probe and records only the final probe, so GC during earlier probes
+cannot be excluded. Their p50/p95 values were
 0.0394/0.1139 ms and 0.0392/0.1324 ms respectively. This is structural evidence of an avoidable
 clean-path allocation, not a timing improvement claim or exact accounting of the earlier
 48-byte-per-view difference. Heap and JIT variation prevent that stronger interpretation.
