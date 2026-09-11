@@ -37,6 +37,7 @@ export function createTargetViewController<S extends BindingStage>(
   const replacements = new Set<() => void>()
   let target: TargetFor<S> | null = null
   let attachment = 0
+  let creating: { stage: S; target: TargetFor<S>; generation: number } | null = null
   let sequence = 0
   let gate: RequestGate | null = null
   let requestError: Error | null = null
@@ -75,7 +76,11 @@ export function createTargetViewController<S extends BindingStage>(
     invoke(() => latest().onError?.({ error, observed: true, view: core.view }))
   }
   const release = (): void => {
-    if (core.view === null && gate === null) return
+    // Invalidate a factory call even before its View has been returned to us.
+    if (core.view === null && gate === null) {
+      if (creating !== null) attachment += 1
+      return
+    }
     sequence += 1
     const current = gate
     gate = null
@@ -99,14 +104,41 @@ export function createTargetViewController<S extends BindingStage>(
   }
   const ensureView = (): void => {
     const stage = options.scene.stage
-    if (stage === null || target === null || core.view !== null) return
-    const created = options.createView(stage, target)
+    if (disposed || stage === null || stage.disposed || target === null || core.view !== null)
+      return
+    if (
+      creating?.stage === stage &&
+      creating.target === target &&
+      creating.generation === attachment
+    )
+      return
+    const reservation = { stage, target, generation: ++attachment }
+    creating = reservation
+    let created: View | Error
+    try {
+      created = options.createView(stage, reservation.target)
+    } finally {
+      if (creating === reservation) creating = null
+    }
+    // Stage.view publishes lifecycle synchronously. Callbacks can detach, dispose, or
+    // attach a successor before the factory returns; only this reservation may commit.
+    if (
+      disposed ||
+      stage.disposed ||
+      options.scene.stage !== stage ||
+      target !== reservation.target ||
+      attachment !== reservation.generation ||
+      core.view !== null
+    ) {
+      if (!(created instanceof Error)) created.dispose()
+      return
+    }
     if (created instanceof Error) {
       report(created)
       return
     }
+    if (created.state === 'disposed') return
     core.view = created
-    attachment += 1
     const current = (): boolean => core.view === created
     offs = [
       created.on('start', (event) => {
