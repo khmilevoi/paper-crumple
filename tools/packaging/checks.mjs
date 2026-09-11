@@ -45,8 +45,13 @@ export const PACKAGES = /** @type {readonly PackageSpec[]} */ ([
   {
     dir: 'core',
     name: '@paper-crumple/core',
-    subpaths: ['.', './unstable'],
-    required: [...ALWAYS, ...entryTriple('index'), ...entryTriple('unstable')],
+    subpaths: ['.', './unstable', './bindings'],
+    required: [
+      ...ALWAYS,
+      ...entryTriple('index'),
+      ...entryTriple('unstable'),
+      ...entryTriple('bindings'),
+    ],
   },
   {
     dir: 'paper',

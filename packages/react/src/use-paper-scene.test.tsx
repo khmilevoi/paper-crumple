@@ -4,6 +4,7 @@
 import { ABORTED } from '@paper-crumple/core'
 import type { BlitStage } from '@paper-crumple/core'
 import { afterEach, expect, test, vi } from 'vitest'
+import { act } from 'react'
 import type { SceneOptions } from './scene-types.js'
 import { usePaperScene } from './use-paper-scene.js'
 import { createFakeStage, type FakeStageHandle } from './testing/fake-stage.js'
@@ -11,6 +12,30 @@ import { deferred } from './testing/deferred.js'
 import { flush, renderHook } from './testing/render.js'
 
 const CORE_MARKER_KEY = Symbol.for('paper-crumple.core')
+
+test('direct raw disposal clears scene metadata and prevents future scene commands', async () => {
+  const fake = createFakeStage()
+  const create = vi.fn(async () => ({ stage: fake.stage, meta: { title: 'hero' } }))
+  const harness = await renderHook(() => usePaperScene({ create, deps: [] }))
+  await flush()
+  await act(async () => {
+    fake.stage.dispose()
+    const immediateCalls = fake.calls.length
+    await harness.result.current.play('flat', 'ball')
+    harness.result.current.stop()
+    expect(fake.calls).toHaveLength(immediateCalls)
+  })
+  await flush()
+  expect(harness.result.current.stage).toBeNull()
+  expect(harness.result.current.meta).toBeNull()
+  expect(harness.result.current.status).toBe('failed')
+  const before = fake.calls.length
+  await harness.result.current.play('flat', 'ball')
+  harness.result.current.stop()
+  expect(fake.calls).toHaveLength(before)
+  expect(create).toHaveBeenCalledTimes(1)
+  await harness.unmount()
+})
 
 afterEach(() => {
   vi.restoreAllMocks()

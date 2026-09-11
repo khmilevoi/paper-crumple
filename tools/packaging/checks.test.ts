@@ -20,9 +20,20 @@ const coreNames = [
   'package/dist/unstable.js',
   'package/dist/unstable.js.map',
   'package/dist/unstable.d.ts',
+  'package/dist/bindings.js',
+  'package/dist/bindings.js.map',
+  'package/dist/bindings.d.ts',
 ]
 
 describe('checkEntries', () => {
+  it('requires the stable bindings entry in the published core tarball', () => {
+    expect(
+      checkEntries(
+        core,
+        coreNames.filter((name) => name !== 'package/dist/bindings.js'),
+      ),
+    ).toEqual(['@paper-crumple/core: missing package/dist/bindings.js'])
+  })
   it('accepts the required set plus tsdown’s content-hashed shared chunks', () => {
     const withChunks = [
       ...coreNames,
@@ -135,7 +146,7 @@ describe('checkPackedManifest', () => {
       ...base,
       name: '@paper-crumple/core',
       peerDependencies: { typescript: '>=5.0' },
-      exports: { '.': {}, './unstable': {} },
+      exports: { '.': {}, './unstable': {}, './bindings': {} },
     }
 
     expect(checkPackedManifest(core, coreManifest)).toEqual([])
@@ -146,7 +157,7 @@ describe('checkPackedManifest', () => {
       ...base,
       name: '@paper-crumple/core',
       peerDependencies: { typescript: '>=5.0', '@paper-crumple/core': '^1.0.0' },
-      exports: { '.': {}, './unstable': {} },
+      exports: { '.': {}, './unstable': {}, './bindings': {} },
     }
 
     expect(checkPackedManifest(core, coreManifest)).toEqual([
