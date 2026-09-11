@@ -1,7 +1,7 @@
-import type { Aborted, StageCommon, StageEvent } from '../index.js'
+import type { Aborted, BlitStage, DirectStage, HostedStage, StageEvent } from '../index.js'
 
-export type BindingStage = Pick<StageCommon, 'changes' | 'disposed' | 'lost' | 'on' | 'dispose'>
-export type SceneFactory<S extends BindingStage> = (
+export type BindingStage = BlitStage | DirectStage | HostedStage
+export type SceneFactory<S extends BindingStage = BlitStage> = (
   signal: AbortSignal,
   onError: (event: StageEvent<'error'>) => void,
 ) => Promise<S | Error | Aborted>
@@ -9,9 +9,10 @@ export type SceneFactory<S extends BindingStage> = (
 export type SceneControllerStatus = 'idle' | 'building' | 'ready' | 'failed' | 'disposed'
 
 /** One factory lifetime. Rebuilding requires a new controller, including after raw disposal. */
-export interface SceneController<S extends BindingStage> {
+export interface SceneController<S extends BindingStage = BlitStage> {
   readonly signal: AbortSignal
   readonly status: SceneControllerStatus
+  readonly disposed: boolean
   /** Live stages only; cleared synchronously by the raw lifecycle notification. */
   readonly stage: S | null
   readonly error: Error | null

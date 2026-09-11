@@ -13,6 +13,7 @@ export function createSceneController<S extends BindingStage>(
   let owned: S | null = null
   let live: S | null = null
   let error: Error | null = null
+  let lossCause: Error | null = null
   let lost = false
   let resolved = false
   let pending: Promise<S | Error | Aborted> | null = null
@@ -60,8 +61,10 @@ export function createSceneController<S extends BindingStage>(
       return
     }
     if (!owned?.lost) return
+    // Lifecycle notification can precede the loss error; replace its fallback once only.
+    lossCause ??= cause ?? null
     const next =
-      cause ??
+      lossCause ??
       error ??
       new GlError('the WebGL2 context was lost; dispose this stage and build a new one')
     const changed = status !== 'failed' || error !== next
@@ -77,10 +80,10 @@ export function createSceneController<S extends BindingStage>(
   }
 
   const ensure = (): Promise<S | Error | Aborted> => {
+    if (pending !== null) return pending
     if (status === 'disposed') return Promise.resolve(ABORTED)
     if (status === 'failed') return Promise.resolve(error ?? ABORTED)
     if (live !== null) return Promise.resolve(live)
-    if (pending !== null) return pending
     status = 'building'
     // Install the promise before publishing: a synchronous subscriber can call ensure again.
     pending = Promise.resolve()
@@ -138,6 +141,9 @@ export function createSceneController<S extends BindingStage>(
     signal: controller.signal,
     get status() {
       return status
+    },
+    get disposed() {
+      return status === 'disposed'
     },
     get stage() {
       return live

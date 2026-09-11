@@ -3,6 +3,7 @@
  */
 import { ABORTED, type Aborted } from '@paper-crumple/core'
 import { expect, test, vi } from 'vitest'
+import { act } from 'react'
 import { usePaperScene } from './use-paper-scene.js'
 import { createFakeStage, type FakeStageHandle } from './testing/fake-stage.js'
 import { flush, renderHook } from './testing/render.js'
@@ -161,16 +162,19 @@ test('onFailed fires once on a loss, with lost true and the stage’s own GlErro
   await flush()
   expect(onFailed).not.toHaveBeenCalled()
 
-  fake.lose()
+  await act(async () => fake.lose())
   await flush()
   expect(onFailed).toHaveBeenCalledTimes(1)
   expect(onFailed.mock.calls[0]?.[0]?.name).toBe('GlError')
   expect(onFailed.mock.calls[0]?.[1]).toEqual({ lost: true, generation: 1 })
 
   // A second error on an already-lost stage must not re-report.
-  fake.emit('error', { error: new Error('and another'), observed: false, view: null })
+  await act(async () => {
+    fake.emit('error', { error: new Error('and another'), observed: false, view: null })
+  })
   await flush()
   expect(onFailed).toHaveBeenCalledTimes(1)
+  expect(harness.result.current.error).toBe(onFailed.mock.calls[0]?.[0])
   await harness.unmount()
 })
 
