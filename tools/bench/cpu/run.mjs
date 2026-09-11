@@ -19,6 +19,7 @@ import { dirname, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { formatTable, runScenario } from './harness.mjs'
 import { scenarios } from './scenarios.mjs'
+import { reactivityScenarios } from './reactivity.mjs'
 import { callScenarios } from './calls.mjs'
 import { TRACKED_CALLS } from './recording-gl.mjs'
 
@@ -54,7 +55,7 @@ const args = parseArgs(process.argv.slice(2))
 if (args === null) process.exit()
 
 const matches = (s) => args.filter.length === 0 || args.filter.some((f) => s.name.includes(f))
-const selected = scenarios.filter(matches)
+const selected = [...scenarios, ...reactivityScenarios].filter(matches)
 const selectedCalls = callScenarios.filter(matches)
 
 if (args.list) {

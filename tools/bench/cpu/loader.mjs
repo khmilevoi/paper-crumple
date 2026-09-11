@@ -4,8 +4,8 @@
  * `--experimental-strip-types` the `bench:cpu` script does not pass — run the bench on 24+).
  * Two rewrites, nothing else:
  *
- *   - `@paper-crumple/core`, `@paper-crumple/core/unstable`, `@paper-crumple/paper`,
- *     `@paper-crumple/motion` -> the matching `packages/<name>/src/*.ts` barrel, so one copy of
+ *   - `@paper-crumple/core`, its `unstable` and `bindings` entries, `@paper-crumple/paper`,
+ *     `@paper-crumple/motion`, `@paper-crumple/reatom` -> the matching source barrel, so one copy of
  *     core is shared by every package (the `instanceof` guarantee of spec 10.4 holds in the bench
  *     exactly as it does in a real install).
  *   - a relative `./x.js` specifier -> `./x.ts` when that file exists, which is how the sources

@@ -112,6 +112,8 @@
 import { afterAll, beforeAll, describe, expect, it } from 'vitest'
 import { commands } from 'vitest/browser'
 import { artworkBlob } from './artwork.js'
+import { observeSmoothReactivity, reactivityModes } from './reactivity.js'
+import type { ReactivityMode } from './reactivity.js'
 import {
   bakedMotion,
   isAborted,
@@ -206,6 +208,7 @@ const THRESHOLDS = {
 } as const
 
 interface RowSpec {
+  readonly observation?: ReactivityMode
   readonly name: string
   /** The plan's row id, and `RowSummary.row`. */
   readonly row: string
@@ -281,6 +284,15 @@ const ROWS: readonly RowSpec[] = [
     drag: false,
     dpr: 2,
   },
+  ...reactivityModes.map((observation) => ({
+    name: `smooth.reactivity-${observation}.dpr1`,
+    row: `reactivity-${observation}`,
+    cadence: 'burst' as const,
+    source: 'url' as const,
+    drag: false,
+    dpr: 1,
+    observation,
+  })),
 ]
 
 /** The rows that mount the 6×5 grid; `idle` needs it on screen, `sequential` must not have it. */
@@ -1052,7 +1064,9 @@ async function runRow(spec: RowSpec): Promise<RowResult | Error> {
   const acc: Acc = {}
   const uninstall = installPhaseTimers(sheet, motion, acc)
   const owned: ImageBitmap[] = []
+  let observation: Awaited<ReturnType<typeof observeSmoothReactivity>> | undefined
   const cleanup = (): void => {
+    observation?.dispose()
     uninstall()
     host.remove()
     for (const b of owned) b.close()
@@ -1106,6 +1120,13 @@ async function runRow(spec: RowSpec): Promise<RowResult | Error> {
     cells.push({ view, canvas: canvases[i] })
   }
   const mountMs = performance.now() - mountedAt
+  if (spec.observation !== undefined) {
+    observation = await observeSmoothReactivity(
+      spec.observation,
+      stage,
+      cells.map((cell, i) => ({ ...cell, source: pool[0][i] })),
+    )
+  }
   await sleep(SETTLE_MS)
 
   // The sequential probe, from the last slice (never a storm target): `VIEWS` awaited adds of the
@@ -1162,20 +1183,28 @@ async function runRow(spec: RowSpec): Promise<RowResult | Error> {
       }
     }
     const before = cells.map((c) => c.view.sprite)
-    storms.push(
-      await runStorm({
-        spec,
-        stage,
-        cells,
-        waves,
-        iteration: k,
-        acc,
-        errors,
-        plan,
-        idealMs,
-        ...(profiled ? { profileLabel: `${spec.name}.${REAL_GPU ? 'gpu' : 'sw'}` } : {}),
-      }),
-    )
+    const observationBefore = observation?.snapshot()
+    const storm = await runStorm({
+      spec,
+      stage,
+      cells,
+      waves,
+      iteration: k,
+      acc,
+      errors,
+      plan,
+      idealMs,
+      ...(profiled ? { profileLabel: `${spec.name}.${REAL_GPU ? 'gpu' : 'sw'}` } : {}),
+    })
+    observation?.flush()
+    storms.push({
+      ...storm,
+      ...(observation === undefined
+        ? {}
+        : {
+            observation: { before: observationBefore!, after: observation.snapshot() },
+          }),
+    })
     // The swapped-out sprites go the way a gallery's previous page eventually goes — outside
     // the window, so every storm starts from thirty resident fronts and nothing else. A
     // superseded first wave's sprite is not shown by anyone; the stage still holds it.
@@ -1191,6 +1220,8 @@ async function runRow(spec: RowSpec): Promise<RowResult | Error> {
   }
   owned.push(...pendingClose)
 
+  observation?.dispose()
+  const observationCleanup = observation?.snapshot()
   stage.dispose()
   cleanup()
   await commands.smoothEmulate(1, VIEWPORT.w, VIEWPORT.h)
@@ -1227,6 +1258,7 @@ async function runRow(spec: RowSpec): Promise<RowResult | Error> {
     idealMs,
     storms,
     best,
+    ...(observationCleanup === undefined ? {} : { observationCleanup }),
     ...(verdict === undefined ? {} : { verdict }),
     summary,
     ...(note === undefined ? {} : { note }),
@@ -1253,6 +1285,30 @@ describe('smooth', () => {
       expect(row).not.toBeInstanceOf(Error)
       if (row instanceof Error) return
       rows.push(row)
+      if (spec.observation !== undefined) {
+        expect(row.observationCleanup?.activeStepSubscriptions).toBe(0)
+        expect(row.observationCleanup?.activeSemanticSubscriptions).toBe(0)
+        for (const storm of row.storms) {
+          expect(storm.tasks.source).toBe('tracing')
+          expect(storm.input.handled).toBeGreaterThanOrEqual(MIN_INPUT_EVENTS)
+          expect(storm.frames.n).toBeGreaterThanOrEqual(MIN_FRAME_INTERVALS)
+          expect(storm.adds.ok).toBe(VIEWS)
+          expect(storm.adds.failed).toBe(0)
+          expect(storm.adds.distinctRects).toBe(VIEWS)
+          expect(storm.adds.distinctPixels).toBe(VIEWS)
+          expect(storm.observation?.after.activeStepSubscriptions).toBe(
+            spec.observation === 'progress' ? VIEWS : 0,
+          )
+          expect(storm.observation?.after.activeSemanticSubscriptions).toBe(
+            spec.observation === 'raw' ? 0 : VIEWS * 3,
+          )
+          const publications =
+            storm.observation!.after.progressPublications -
+            storm.observation!.before.progressPublications
+          if (spec.observation === 'progress') expect(publications).toBeGreaterThan(0)
+          else expect(publications).toBe(0)
+        }
+      }
       if (CHECK && row.verdict !== undefined) {
         expect(
           row.verdict.checks

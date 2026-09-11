@@ -162,6 +162,13 @@ describe('the core duplication hazard (§10.4)', () => {
     expect(manifest.devDependencies?.['@reatom/core']).toBe('1001.3.0')
     for (const name of ['react', 'react-dom', '@paper-crumple/paper', '@paper-crumple/motion']) {
       expect(manifest.peerDependencies?.[name]).toBeUndefined()
+      expect(manifest.dependencies?.[name]).toBeUndefined()
+    }
+    // React is a pinned test-only dependency for real Provider integration.
+    expect(manifest.devDependencies?.react).toBe('19.2.8')
+    expect(manifest.devDependencies?.['react-dom']).toBe('19.2.8')
+    expect(manifest.devDependencies?.['@reatom/react']).toBe('1001.0.1')
+    for (const name of ['@paper-crumple/paper', '@paper-crumple/motion']) {
       expect(manifest.devDependencies?.[name]).toBeUndefined()
     }
   })

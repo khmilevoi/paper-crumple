@@ -203,8 +203,9 @@ describe('useTransport', () => {
     expect(harness.audio.beginSequence).toHaveBeenCalledWith(
       expect.objectContaining({ label: 'swap from 0', authored: 985 }),
     )
-    const swap = harness.fake.calls.find((call) => call.method === 'view.swapTo')
-    expect(swap?.args[1]).toMatchObject({ key: 'b', duration: 985 })
+    const swap = harness.fake.calls.find((call) => call.method === 'view.crumpleTo')
+    expect(swap?.args[1]).toMatchObject({ duration: 985 })
+    expect(await swap?.args[0]).toBe(harness.fake.sprites.get('b'))
     await harness.unmount()
   })
 
@@ -218,7 +219,7 @@ describe('useTransport', () => {
     act(() => harness.result.current.beginSwap('c'))
     await harness.setShown(C)
 
-    const swaps = harness.fake.calls.filter((call) => call.method === 'view.swapTo')
+    const swaps = harness.fake.calls.filter((call) => call.method === 'view.crumpleTo')
     expect((swaps[0]?.args[1] as { duration?: number }).duration).toBe(640)
     expect((swaps[1]?.args[1] as { duration?: number }).duration).toBe(985)
     await harness.unmount()

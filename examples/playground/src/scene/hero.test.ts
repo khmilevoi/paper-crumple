@@ -49,8 +49,10 @@ describe('useHero', () => {
     onSettle.mockClear()
     shown = B
     await render()
-    expect(fake.calls.filter((call) => call.method === 'view.swapTo')).toHaveLength(1)
-    expect(fake.calls.find((call) => call.method === 'view.swapTo')?.args[0]).toBe(B.src)
+    expect(fake.calls.filter((call) => call.method === 'view.crumpleTo')).toHaveLength(1)
+    expect(await fake.calls.find((call) => call.method === 'view.crumpleTo')?.args[0]).toBe(
+      fake.sprites.get('b'),
+    )
     fake.views[0]?.settleRun(undefined)
     await act(async () => {})
     expect(onSettle).toHaveBeenCalledTimes(1)

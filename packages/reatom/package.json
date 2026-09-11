@@ -35,6 +35,7 @@
   "scripts": {
     "build": "tsdown"
   },
+  "dependencies": {},
   "peerDependencies": {
     "@paper-crumple/core": "workspace:^",
     "@reatom/core": "^1001.3.0",

@@ -33,9 +33,9 @@ jobs:
           node-version: ${{ matrix.node-version }}
           cache: pnpm
       - run: pnpm install --frozen-lockfile
-      # Core exports ./dist, so nothing resolves @paper-crumple/core across a package
-      # boundary until core is built. Every lane that typechecks or tests must build first.
-      - run: pnpm exec turbo run build --filter=@paper-crumple/core
+      # Published packages export ./dist, so public imports across a package
+      # boundary require a build. Every lane that typechecks or tests must build first.
+      - run: pnpm exec turbo run build --filter=@paper-crumple/core --filter=@paper-crumple/paper --filter=@paper-crumple/motion --filter=@paper-crumple/react --filter=@paper-crumple/reatom
       - run: pnpm lint
       - run: pnpm format:check
       - run: pnpm typecheck
@@ -52,9 +52,9 @@ jobs:
           node-version: '24'
           cache: pnpm
       - run: pnpm install --frozen-lockfile
-      # Core exports ./dist, so nothing resolves @paper-crumple/core across a package
-      # boundary until core is built. Every lane that typechecks or tests must build first.
-      - run: pnpm exec turbo run build --filter=@paper-crumple/core
+      # Published packages export ./dist, so public imports across a package
+      # boundary require a build. Every lane that typechecks or tests must build first.
+      - run: pnpm exec turbo run build --filter=@paper-crumple/core --filter=@paper-crumple/paper --filter=@paper-crumple/motion --filter=@paper-crumple/react --filter=@paper-crumple/reatom
       - run: pnpm exec playwright install --with-deps chromium
       - run: pnpm test:gl
 
@@ -69,9 +69,9 @@ jobs:
           node-version: '24'
           cache: pnpm
       - run: pnpm install --frozen-lockfile
-      # publint, attw and the entry-list check all read `dist/`, so all three packages build here
+      # publint, attw and the entry-list check all read `dist/`, so all five packages build here
       # and not just core: this lane packs what a consumer would install.
-      - run: pnpm exec turbo run build --filter=@paper-crumple/core --filter=@paper-crumple/paper --filter=@paper-crumple/motion
+      - run: pnpm exec turbo run build --filter=@paper-crumple/core --filter=@paper-crumple/paper --filter=@paper-crumple/motion --filter=@paper-crumple/react --filter=@paper-crumple/reatom
       - run: pnpm verify:deps
       # Prints each tarball's entry list into the log — spec 14's "review the pack output" — and
       # then asserts it, so the review is binding rather than advisory.

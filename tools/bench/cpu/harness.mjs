@@ -153,6 +153,7 @@ export async function runScenario(scenario, options = {}) {
     opsPerSec: medianMs > 0 ? 1000 / medianMs : Infinity,
     alloc,
     profile: profilePath,
+    ...(scenario.evidence === undefined ? {} : { evidence: scenario.evidence(ctx) }),
   }
 }
 

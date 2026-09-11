@@ -13,7 +13,7 @@
  *                                               # BENCH_GATE / --gate is the old spelling)
  *
  * `run.mjs` turns those flags into the environment this config reads; `-t <name>` also works,
- * since every row is a test named after itself. Build core, paper and motion first: the bench
+ * since every row is a test named after itself. Build core, paper, motion and Reatom first: the bench
  * imports their dist entry points (`deps.ts`).
  *
  * The launch flags are the GL bench's — the `gl` project's SwiftShader triple, or the ANGLE D3D11

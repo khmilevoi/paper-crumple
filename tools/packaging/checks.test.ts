@@ -5,6 +5,7 @@ import {
   checkPackUrls,
   checkPackedManifest,
   checkTiles,
+  checkSourceMaps,
 } from './checks.mjs'
 
 const core = PACKAGES.find((p) => p.dir === 'core')!
@@ -26,6 +27,14 @@ const coreNames = [
 ]
 
 describe('checkEntries', () => {
+  it('permits the generated core facade to omit its own map', () => {
+    expect(
+      checkEntries(
+        core,
+        coreNames.filter((name) => name !== 'package/dist/index.js.map'),
+      ),
+    ).toEqual([])
+  })
   it('checks the Reatom package entry and rejects missing declarations', () => {
     const reatom = PACKAGES.find((p) => p.dir === 'reatom')!
     expect(reatom).toBeDefined()
@@ -86,6 +95,53 @@ describe('checkEntries', () => {
     expect(checkEntries(core, [...coreNames, 'package/.npmignore'])).toEqual([
       '@paper-crumple/core: unexpected entry package/.npmignore',
     ])
+  })
+})
+
+describe('checkSourceMaps', () => {
+  const entry = (name: string, text: string) => ({
+    name: `package/dist/${name}`,
+    data: Buffer.from(text),
+  })
+  const map = JSON.stringify({ version: 3, sources: ['../src/stage.ts'], mappings: 'AAAA' })
+  const chunk = entry(
+    'stage-12345678.js',
+    'export const stage = 1;\n//# sourceMappingURL=stage-12345678.js.map',
+  )
+  const facade = entry(
+    'index.js',
+    'import { stage } from "./stage-12345678.js";\nexport { stage };',
+  )
+  it('accepts only a declaration-only core facade with mapped executable chunks', () => {
+    expect(checkSourceMaps(core, [facade, chunk, entry('stage-12345678.js.map', map)])).toEqual([])
+  })
+  it('requires maps for executable facade code and every shared chunk', () => {
+    expect(checkSourceMaps(core, [entry('index.js', 'export const stage = 1;')])).toEqual([
+      '@paper-crumple/core: missing source map for package/dist/index.js',
+    ])
+    expect(checkSourceMaps(core, [facade, chunk])).toEqual([
+      '@paper-crumple/core: missing source map for package/dist/stage-12345678.js',
+    ])
+  })
+  it('rejects empty maps and a facade pointing at an absent chunk', () => {
+    expect(checkSourceMaps(core, [chunk, entry('stage-12345678.js.map', '{}')])).toEqual([
+      '@paper-crumple/core: invalid source map package/dist/stage-12345678.js.map',
+    ])
+    expect(checkSourceMaps(core, [facade])).toEqual([
+      '@paper-crumple/core: missing source map for package/dist/index.js',
+    ])
+  })
+  it('does not extend the facade exception to other packages or side-effect imports', () => {
+    expect(
+      checkSourceMaps(paper, [facade, chunk, entry('stage-12345678.js.map', map)])[0],
+    ).toContain('index.js')
+    expect(
+      checkSourceMaps(core, [
+        entry('index.js', 'import "./stage-12345678.js";'),
+        chunk,
+        entry('stage-12345678.js.map', map),
+      ])[0],
+    ).toContain('index.js')
   })
 })
 

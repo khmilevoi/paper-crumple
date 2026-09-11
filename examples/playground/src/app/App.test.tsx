@@ -349,13 +349,13 @@ describe('App request outcomes', () => {
     const app = await renderApp()
 
     await failBrokenSwap(app, fake)
-    const firstSwap = fake.calls.find((call) => call.method === 'view.swapTo')
+    const firstSwap = fake.calls.find((call) => call.method === 'view.crumpleTo')
     expect((firstSwap?.args[1] as { duration?: number }).duration).toBe(640)
 
     act(() => buttonNamed(app, 'Swap')?.click())
     await settle()
 
-    const swaps = fake.calls.filter((call) => call.method === 'view.swapTo')
+    const swaps = fake.calls.filter((call) => call.method === 'view.crumpleTo')
     expect((swaps[1]?.args[1] as { duration?: number }).duration).toBe(985)
   })
 
@@ -466,7 +466,7 @@ describe('App request outcomes', () => {
     act(() => change(sample, 'trench'))
     act(() => swap.click())
     expect(audio.beginSequence).not.toHaveBeenCalled()
-    expect(fake.calls.filter((call) => call.method === 'view.swapTo')).toHaveLength(0)
+    expect(fake.calls.filter((call) => call.method === 'view.crumpleTo')).toHaveLength(0)
 
     act(() => {
       idle?.({ didTimeout: false, timeRemaining: () => 50 })

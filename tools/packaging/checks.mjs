@@ -3,6 +3,7 @@
  * filesystem or spawns a process lives in `verify-packaging.mjs`, so every rule here is unit-
  * testable without a build.
  */
+import ts from 'typescript'
 
 /** The one docs URL all three manifests and all three READMEs point at (spec 14, amendment 26). */
 export const DOCS_URL =
@@ -104,6 +105,9 @@ export function checkEntries(spec, names) {
   const present = new Set(names)
 
   for (const required of spec.required) {
+    // rolldown emits no map for the declaration-only core facade. Its exact
+    // contents and every executable chunk are verified by checkSourceMaps.
+    if (spec.dir === 'core' && required === 'package/dist/index.js.map') continue
     if (!present.has(required)) failures.push(`${spec.name}: missing ${required}`)
   }
   for (const name of names) {
@@ -112,6 +116,68 @@ export function checkEntries(spec, names) {
     failures.push(`${spec.name}: unexpected entry ${name}`)
   }
 
+  return failures
+}
+
+/**
+ * Verify real packed JavaScript, including maps for hashed implementation chunks.
+ * Only core's generated import/export facade may omit a map: it has no original
+ * executable statements to map. A future executable entry automatically loses this exception.
+ * @param {PackageSpec} spec
+ * @param {readonly {name: string, data: Buffer}[]} entries
+ * @returns {string[]}
+ */
+export function checkSourceMaps(spec, entries) {
+  const files = new Map(entries.map((entry) => [entry.name, entry.data.toString('utf8')]))
+  const failures = []
+  for (const [name, code] of files) {
+    if (!name.endsWith('.js')) continue
+    const mapName = `${name}.map`
+    const source = ts.createSourceFile(name, code, ts.ScriptTarget.Latest, false, ts.ScriptKind.JS)
+    const facade =
+      spec.dir === 'core' &&
+      name === 'package/dist/index.js' &&
+      source.statements.some(ts.isImportDeclaration) &&
+      source.statements.some(ts.isExportDeclaration) &&
+      source.statements.every((statement) => {
+        if (ts.isExportDeclaration(statement)) {
+          return (
+            statement.moduleSpecifier === undefined &&
+            statement.exportClause !== undefined &&
+            ts.isNamedExports(statement.exportClause)
+          )
+        }
+        if (
+          !ts.isImportDeclaration(statement) ||
+          !statement.importClause ||
+          !ts.isStringLiteral(statement.moduleSpecifier)
+        )
+          return false
+        const target = statement.moduleSpecifier.text
+        return (
+          /^\.\/[\w-]+-[A-Za-z0-9_-]{8}\.js$/.test(target) &&
+          files.has(`package/dist/${target.slice(2)}`)
+        )
+      })
+    const rawMap = files.get(mapName)
+    if (rawMap === undefined) {
+      if (!facade) failures.push(`${spec.name}: missing source map for ${name}`)
+      continue
+    }
+    try {
+      const map = JSON.parse(rawMap)
+      if (
+        map.version !== 3 ||
+        !Array.isArray(map.sources) ||
+        map.sources.length === 0 ||
+        typeof map.mappings !== 'string' ||
+        map.mappings.length === 0
+      )
+        failures.push(`${spec.name}: invalid source map ${mapName}`)
+    } catch {
+      failures.push(`${spec.name}: invalid source map ${mapName}`)
+    }
+  }
   return failures
 }
 

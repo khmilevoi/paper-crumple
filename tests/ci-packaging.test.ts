@@ -24,12 +24,23 @@ describe('the packaging lane', () => {
     expect(job!.strategy).toBeUndefined()
   })
 
-  it('builds all three published packages before packing them', () => {
+  it('builds all five published packages before packing them', () => {
     const build = runs.find((r) => r.includes('turbo run build'))
     expect(build).toBe(
-      'pnpm exec turbo run build --filter=@paper-crumple/core --filter=@paper-crumple/paper --filter=@paper-crumple/motion',
+      'pnpm exec turbo run build --filter=@paper-crumple/core --filter=@paper-crumple/paper --filter=@paper-crumple/motion --filter=@paper-crumple/react --filter=@paper-crumple/reatom',
     )
     expect(runs.indexOf(build!)).toBeLessThan(runs.indexOf('pnpm verify:packaging'))
+  })
+
+  it.each(['level1', 'level2'])('builds all public imports before %s tests', (name) => {
+    const commands = workflow.jobs[name]!.steps!.flatMap((step) => step.run ?? [])
+    const build = commands.find((command) => command.includes('turbo run build'))!
+    for (const pkg of ['core', 'paper', 'motion', 'react', 'reatom']) {
+      expect(build).toContain(`--filter=@paper-crumple/${pkg}`)
+    }
+    expect(commands.indexOf(build)).toBeLessThan(
+      commands.findIndex((command) => command.startsWith('pnpm test')),
+    )
   })
 
   it('runs the zero-dependency gate and the tarball gate', () => {
