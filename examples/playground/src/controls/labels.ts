@@ -1,5 +1,5 @@
 /**
- * The demo owns its labels, and `ui/LibrarySections.tsx` groups the leftover knobs by the `group`
+ * The demo owns its labels, and `controls/LibrarySections.tsx` groups the leftover knobs by the `group`
  * below — the design's own curated sections carry their labels literally instead, so only the
  * knobs the mockup leaves out are ever rendered from this table.
  *

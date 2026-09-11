@@ -2,7 +2,7 @@
  * A one-to-one translation of `Paper Crumple Control Panel v2.dc.html` into classes.
  *
  * The mockup styles every node inline; this file is that same set of declarations, moved onto a
- * class per node so the React tree in `src/ui/` can stay readable. Every value below — colour,
+ * class per node so the domain components in `src/` can stay readable. Every value below — colour,
  * radius, padding, font size, gap — is copied verbatim from the corresponding inline `style`
  * attribute in the design file. Where a number here disagrees with the design, this file is
  * wrong; the design is the source of truth.

@@ -1,8 +1,8 @@
 import type { ReactNode } from 'react'
 import type { Knobs } from '@paper-crumple/core'
-import type { Entry } from '../knobs'
-import { isNumberLike, stepOf } from '../knobs'
-import { Segmented, Slider } from './primitives'
+import type { Entry } from '../controls/knobs'
+import { isNumberLike, stepOf } from '../controls/knobs'
+import { Segmented, Slider } from '../controls/primitives'
 
 /**
  * The design's five look sliders, in its order and under its labels — which are also the labels

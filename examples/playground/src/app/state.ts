@@ -1,5 +1,5 @@
-import type { BucketName, DemoConfig } from './config'
-import { BUCKET_NAMES, DEFAULT_CONFIG } from './config'
+import type { BucketName, DemoConfig } from '../scene/config'
+import { BUCKET_NAMES, DEFAULT_CONFIG } from '../scene/config'
 import type { Knobs } from '@paper-crumple/core'
 import type { EdgeFinish, EdgeShape, EdgeWidthUnit } from '@paper-crumple/paper'
 

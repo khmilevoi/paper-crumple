@@ -1,7 +1,7 @@
 import type { ReactNode } from 'react'
-import type { AudioSnapshot, SyncMode } from '../audio'
-import { SYNC_MODES } from '../audio'
-import { Segmented, Slider } from './primitives'
+import type { AudioSnapshot, SyncMode } from './audio'
+import { SYNC_MODES } from './audio'
+import { Segmented, Slider } from '../controls/primitives'
 
 export interface SoundSectionProps {
   readonly snapshot: AudioSnapshot

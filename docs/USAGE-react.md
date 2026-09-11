@@ -1244,8 +1244,8 @@ the expensive way, in the pre-migration hero implementation — a canvas with no
 layout size from those attributes, the two feed each other, and the element grows by
 `devicePixelRatio` per blit until it hits the front size. Every box around the canvas is sized off
 `crumple.frame` today rather than off the canvas's own attributes — `value.frameStyle` for the
-wrapper, `heroSlotStyle` (`examples/playground/src/hero.ts`) and the `frameArtwork` it calls
-(`examples/playground/src/framing.ts`) for the playground's own layout slot — so the loop has nothing
+wrapper, `heroSlotStyle` (`examples/playground/src/scene/hero.ts`) and the `frameArtwork` it calls
+(`examples/playground/src/scene/framing.ts`) for the playground's own layout slot — so the loop has nothing
 to feed on. The exclusion is safe to state absolutely only because `'manual'` is not offered.
 
 

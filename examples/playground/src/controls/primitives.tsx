@@ -1,6 +1,6 @@
 import { useCallback, useRef } from 'react'
 import type { ReactNode } from 'react'
-import { decimals, pctOf } from '../knobs'
+import { decimals, pctOf } from './knobs'
 
 /**
  * The four controls `Paper Crumple Control Panel v2.dc.html` builds everything else out of, one

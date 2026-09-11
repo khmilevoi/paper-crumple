@@ -6,11 +6,11 @@ import {
 } from '@paper-crumple/core/unstable'
 import { defaultsFor, edgeParamsFrom } from '@paper-crumple/paper'
 import type { EdgeFinish, EdgeShape, EdgeSpec, EdgeWidthUnit } from '@paper-crumple/paper'
-import type { BuiltStage, DemoConfig } from './config'
-import { buildStage } from './config'
-import { ceilingsFor, reserveRadiusFor } from './edge-ceilings'
-import { frameArtwork } from './framing'
-import type { Framing } from './framing'
+import type { BuiltStage, DemoConfig } from '../scene/config'
+import { buildStage } from '../scene/config'
+import { ceilingsFor, reserveRadiusFor } from '../paper/edge-ceilings'
+import { frameArtwork } from '../scene/framing'
+import type { Framing } from '../scene/framing'
 
 /**
  * A static comparison figure: every §6 edge cell of design 2026-09-05, drawn from the real

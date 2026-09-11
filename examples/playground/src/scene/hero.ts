@@ -2,25 +2,13 @@ import { useCrumple, useScene } from '@paper-crumple/react'
 import type { Crumple, CrumpleSettleEvent } from '@paper-crumple/react'
 
 import type { BuiltStage } from './config'
-import type { Sample } from './samples'
+import type { Sample } from '../source/samples'
 
 export interface HeroOptions {
   readonly shown: Sample
   readonly duration: number
   readonly onSettle: (event: CrumpleSettleEvent) => void
   readonly observed: (where: string, error: Error) => void
-}
-
-/**
- * A dropped file, as a sample.
- *
- * `seq` is in the key and is not decoration: `useCrumple` keeps a `Map<spriteKey, src>` and refuses
- * a key it has already seen bound to a different source, comparing by identity — *"a key names a
- * PICTURE, not a slot"*. Two files of one name would otherwise collide, and the second drop would
- * be reported instead of shown.
- */
-export function droppedSample(file: File, seq: number): Sample {
-  return { id: `dropped-${String(seq)}`, label: file.name, src: file }
 }
 
 /**

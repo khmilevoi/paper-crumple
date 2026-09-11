@@ -7,61 +7,44 @@ import { evenKeyFrames } from '@paper-crumple/motion'
 import type { EdgeSpec } from '@paper-crumple/paper'
 import { PaperScene, useScene } from '@paper-crumple/react'
 
-import type { AudioHandle, SyncMode } from '../audio'
-import { createAudio, playSpec } from '../audio'
-import type { BuiltStage, BucketName, DemoConfig } from '../config'
-import { DEFAULT_CONFIG } from '../config'
-import { collectDescriptors } from '../knobs'
-import { droppedSample } from '../hero'
-import { useDemoScene } from '../scene'
-import type { DemoScene } from '../scene'
-import { BROKEN_URL, DEFAULT_SAMPLE_ID, nextLibrarySample, SAMPLES } from '../samples'
-import type { Sample } from '../samples'
-import { decodeState, encodeState } from '../state'
-import { prefetchSamples, glInfo } from '../stage'
-import { useTransport } from '../transport'
+import {
+  BOOT_SAMPLE,
+  BROKEN_SAMPLE,
+  EMPTY_TARGETS,
+  sourceForRebuild,
+  type SourceState,
+  type PrefetchState,
+} from '../source/state'
+import type { AudioHandle, SyncMode } from '../sound/audio'
+import { createAudio, playSpec } from '../sound/audio'
+import type { BuiltStage, BucketName, DemoConfig } from '../scene/config'
+import { DEFAULT_CONFIG } from '../scene/config'
+import { collectDescriptors } from '../controls/knobs'
+import { droppedSample } from '../source/samples'
+import { useDemoScene } from '../scene/scene'
+import type { DemoScene } from '../scene/scene'
+import { BROKEN_ID, nextLibrarySample, SAMPLES } from '../source/samples'
+import type { Sample } from '../source/samples'
+import { decodeState, encodeState } from './state'
+import { prefetchSamples } from '../source/prefetch'
+import { glInfo } from '../diagnostics/gl-info'
+import { useTransport } from '../playback/use-transport'
 
-import { Diagnostics } from './Diagnostics'
-import type { Metric } from './Diagnostics'
-import { EdgeSection } from './EdgeSection'
+import { Diagnostics } from '../diagnostics/Diagnostics'
+import { diagnosticsMetrics } from '../diagnostics/metrics'
+import { EdgeSection } from '../paper/EdgeSection'
 import { Header, type StageStatus } from './Header'
-import { FactorySection, KnobRows, libraryGroups } from './LibrarySections'
-import { LookSection } from './LookSection'
-import type { StageBackground } from './LookSection'
-import { PosesSection, MAX_POSES, MIN_POSES } from './PosesSection'
-import { SoundSection } from './SoundSection'
-import { BROKEN_ID, bucketForPacks, SourceSection } from './SourceSection'
-import { Stage } from './Stage'
-import { Transport } from './Transport'
-import { Section } from './primitives'
-
-const BROKEN_SAMPLE: Sample = {
-  id: BROKEN_ID,
-  label: 'broken URL (rollback demo)',
-  src: BROKEN_URL,
-}
+import { FactorySection, KnobRows, libraryGroups } from '../controls/LibrarySections'
+import { LookSection } from '../paper/LookSection'
+import type { StageBackground } from '../paper/LookSection'
+import { PosesSection, MAX_POSES, MIN_POSES } from '../playback/PosesSection'
+import { SoundSection } from '../sound/SoundSection'
+import { bucketForPacks, SourceSection } from '../source/SourceSection'
+import { Stage } from '../scene/Stage'
+import { Transport } from '../playback/Transport'
+import { Section } from '../controls/primitives'
 
 type SectionKey = 'source' | 'edge' | 'poses' | 'sound' | 'look'
-
-const BOOT_SAMPLE: Sample = SAMPLES.find((s) => s.id === DEFAULT_SAMPLE_ID) ?? SAMPLES[0]
-
-interface SourceState {
-  readonly requested: Sample
-  readonly retained: Sample | null
-  readonly failed: string | null
-}
-
-interface PrefetchState {
-  readonly stage: pc.BlitStage
-  readonly targets: ReadonlySet<string>
-}
-
-const EMPTY_TARGETS: ReadonlySet<string> = new Set()
-
-function sourceForRebuild(source: SourceState): SourceState {
-  if (source.failed !== source.requested.id || source.retained === null) return source
-  return { requested: source.retained, retained: source.retained, failed: null }
-}
 
 function sameList(a: readonly number[], b: readonly number[]): boolean {
   return a.length === b.length && a.every((x, i) => x === b[i])
@@ -437,73 +420,10 @@ function Playground({
     crumple.status === 'rolled-back' ? (crumple.shown ?? shown.id) : (crumple.requested ?? shown.id)
   const busy = transport.busy
 
-  /** The design's two decimals, but only while they fit: past 10 ms the tile is 150px wide and
-   *  the second decimal is what pushes the value into an ellipsis. */
-  const msText = (v: number): string => (v < 10 ? v.toFixed(2) : v.toFixed(1))
-
-  const metrics = useMemo((): Metric[] => {
-    if (built === null || sprite === null) {
-      return [
-        { label: 'texture', value: '—' },
-        { label: 'sheet', value: '—' },
-        { label: 'bucket / stretch', value: '—' },
-        { label: 'pass a / mount', value: '—' },
-        { label: 'hull', value: '—' },
-        { label: 'draw / step', value: '—' },
-      ]
-    }
-    const fitText = fit ?? '—'
-    return [
-      {
-        label: 'texture',
-        value: `${String(sprite.frontSize.w)} × ${String(sprite.frontSize.h)}`,
-        title: 'the front texture the sheet is baked into',
-      },
-      {
-        label: 'sheet',
-        value:
-          typeof fitText === 'string'
-            ? fitText
-            : `${String(Math.round(fitText.sheetW))} × ${String(Math.round(fitText.sheetH))} px`,
-        title: "the baked sheet stretched onto the silhouette's bounding box",
-      },
-      {
-        label: 'bucket / stretch',
-        value:
-          typeof fitText === 'string'
-            ? fitText
-            : `${fitText.bucket} · ×${fitText.stretch.toFixed(3)}${fitText.clamped ? ' (clamped)' : ''}`,
-        title: 'which baked bucket this silhouette lands in, and its non-uniform stretch',
-      },
-      {
-        label: 'pass a / mount',
-        value: `${msText(built.buildMs)} / ${mountMs === null ? '—' : msText(mountMs)} ms`,
-        title:
-          'a: paperStage + both slots · mount: scene ready → the first sprite on screen, timed ' +
-          'here because useCrumple owns the add() inside it',
-      },
-      {
-        label: 'hull',
-        // The front bake used to be timed on its own, around `stage.add`. `useCrumple` owns that
-        // call now and reports no timing, and there is no seam left to measure it at.
-        value: '—',
-        title: 'the front bake — no longer separately timeable: the binding owns add()',
-      },
-      {
-        // The design's tile here reads "draw / upload". Nothing in the library reports an upload
-        // separately — the front upload happens inside `add()`, which the `hull` tile above
-        // already times — so this pairs the two per-frame numbers that ARE measurable and says so
-        // in its own label rather than printing something else under the design's.
-        label: 'draw / step',
-        value: `${lastDrawMs === null ? '—' : msText(lastDrawMs)} / ${
-          lastStepMs === null ? '—' : msText(lastStepMs)
-        } ms`,
-        title:
-          'draw: one draw-only pose change, timed here · step: the last run’s interval between ' +
-          'two scheduled renders',
-      },
-    ]
-  }, [built, fit, lastDrawMs, lastStepMs, mountMs, sprite])
+  const metrics = useMemo(
+    () => diagnosticsMetrics({ built, sprite, fit, lastDrawMs, lastStepMs, mountMs }),
+    [built, fit, lastDrawMs, lastStepMs, mountMs, sprite],
+  )
 
   /**
    * The design's own idle status: what the stage is, not what the last action was. `useDemoScene`

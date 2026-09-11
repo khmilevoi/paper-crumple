@@ -1,5 +1,5 @@
 import type { KnobDescriptor, Knobs, NumberKnob, IntKnob } from '@paper-crumple/core'
-import type { BuiltStage } from './config'
+import type { BuiltStage } from '../scene/config'
 
 /**
  * The write-back key. A `binds` descriptor is one core-owned value both slots share, and the

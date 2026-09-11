@@ -64,7 +64,7 @@ export const DEFAULT_CONFIG: DemoConfig = {
   // fraction of the radius.
   //
   // Raised from 0.25 to 0.3 for task 9 (edge redesign, §9): at 0.25 the live `edgeVariance`
-  // ceiling (design §8.6's frozen reserve, `examples/playground/src/edge-ceilings.ts`) tops out
+  // ceiling (design §8.6's frozen reserve, `examples/playground/src/paper/edge-ceilings.ts`) tops out
   // at 0.976 of its 0..1 range on `torn`/`clean` — just short of the descriptor's own maximum, so
   // the slider's top few percent silently refused. `torn`/`clean` needs 0.263 of headroom to reach
   // `edgeVariance = 1` exactly (solving `R * (1 + room) = 2 * W_default + 2 * slop` for `room`);

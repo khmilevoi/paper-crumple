@@ -684,7 +684,7 @@ runtime descriptors — `sheet.knobs` and `motion.knobs` off a live build — ge
 without a hand-written list. Where the snippet reads `k.ui?.label`, the demo does not lean on the
 descriptors for it: `paper` declares no `ui` on any descriptor, while `motion` declares one on all
 six, so a panel that only ever consulted `k.ui?.label` would render half its rows unlabelled. The
-label table `k.ui?.label` falls back to here lives in `examples/playground/src/labels.ts`, keyed by
+label table `k.ui?.label` falls back to here lives in `examples/playground/src/controls/labels.ts`, keyed by
 the same namespaced patch key this section derives above — and a key the table doesn't cover still
 renders, under its raw key, rather than being dropped.
 

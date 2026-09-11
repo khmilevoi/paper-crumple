@@ -37,3 +37,17 @@ export function nextLibrarySample(current: Sample, target: Sample): Sample {
 
 /** Deliberately absent. The swap panel offers it so the rollback path can be seen, not described. */
 export const BROKEN_URL = '/samples/does-not-exist.png'
+
+/**
+ * A dropped file, as a sample.
+ *
+ * `seq` is in the key and is not decoration: `useCrumple` keeps a `Map<spriteKey, src>` and refuses
+ * a key it has already seen bound to a different source, comparing by identity — *"a key names a
+ * PICTURE, not a slot"*. Two files of one name would otherwise collide, and the second drop would
+ * be reported instead of shown.
+ */
+export function droppedSample(file: File, seq: number): Sample {
+  return { id: `dropped-${String(seq)}`, label: file.name, src: file }
+}
+
+export const BROKEN_ID = 'broken'

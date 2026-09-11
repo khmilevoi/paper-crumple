@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest'
 import { frameArtwork } from './framing'
 import { DEFAULT_CONFIG } from './config'
-import { decodeState, encodeState } from './state'
+import { decodeState, encodeState } from '../app/state'
 
 describe('frameArtwork', () => {
   it('pins the artwork at cssPx on its long side and scales the box by the same factor', () => {

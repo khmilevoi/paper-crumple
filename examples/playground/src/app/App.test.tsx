@@ -11,25 +11,25 @@ import { act } from 'react'
 import { createRoot } from 'react-dom/client'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
-import type { AudioHandle, AudioSnapshot } from '../audio'
-import { createAudio } from '../audio'
-import type { BuiltStage } from '../config'
-import { DEFAULT_CONFIG } from '../config'
-import type { DemoScene } from '../scene'
-import type { DemoSceneEvents } from '../scene'
-import { useDemoScene } from '../scene'
-import { encodeState } from '../state'
+import type { AudioHandle, AudioSnapshot } from '../sound/audio'
+import { createAudio } from '../sound/audio'
+import type { BuiltStage } from '../scene/config'
+import { DEFAULT_CONFIG } from '../scene/config'
+import type { DemoScene } from '../scene/scene'
+import type { DemoSceneEvents } from '../scene/scene'
+import { useDemoScene } from '../scene/scene'
+import { encodeState } from './state'
 
 import { App } from './App'
-import { BROKEN_ID } from './SourceSection'
+import { BROKEN_ID } from '../source/samples'
 
-vi.mock('../audio', async () => {
-  const actual = await vi.importActual<typeof import('../audio')>('../audio')
+vi.mock('../sound/audio', async () => {
+  const actual = await vi.importActual<typeof import('../sound/audio')>('../sound/audio')
   return { ...actual, createAudio: vi.fn() }
 })
 
-vi.mock('../scene', async () => {
-  const actual = await vi.importActual<typeof import('../scene')>('../scene')
+vi.mock('../scene/scene', async () => {
+  const actual = await vi.importActual<typeof import('../scene/scene')>('../scene/scene')
   return { ...actual, useDemoScene: vi.fn() }
 })
 

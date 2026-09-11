@@ -1,9 +1,9 @@
 import type { ReactNode } from 'react'
 import type { Knobs } from '@paper-crumple/core'
-import type { DemoConfig } from '../config'
-import type { Entry } from '../knobs'
-import { isNumberLike, stepOf } from '../knobs'
-import { GROUP_ORDER, labelFor } from '../labels'
+import type { DemoConfig } from '../scene/config'
+import type { Entry } from './knobs'
+import { isNumberLike, stepOf } from './knobs'
+import { GROUP_ORDER, labelFor } from './labels'
 import { Slider } from './primitives'
 
 /**

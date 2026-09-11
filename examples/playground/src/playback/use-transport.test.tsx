@@ -9,9 +9,9 @@ import type { ReactNode } from 'react'
 import { createRoot } from 'react-dom/client'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 
-import { swapDurationFor, useTransport } from './transport'
-import type { TransportHandle } from './transport'
-import type { Sample } from './samples'
+import { swapDurationFor, useTransport } from './use-transport'
+import type { TransportHandle } from './use-transport'
+import type { Sample } from '../source/samples'
 
 const A: Sample = { id: 'a', label: 'A', src: 'a.png' }
 const B: Sample = { id: 'b', label: 'B', src: 'b.png' }

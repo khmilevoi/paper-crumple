@@ -1,8 +1,8 @@
 import type { ReactNode } from 'react'
-import type { BucketName } from '../config'
-import { BUCKET_NAMES } from '../config'
-import { SAMPLES } from '../samples'
-import { Segmented } from './primitives'
+import type { BucketName } from '../scene/config'
+import { BUCKET_NAMES } from '../scene/config'
+import { BROKEN_ID, SAMPLES } from './samples'
+import { Segmented } from '../controls/primitives'
 
 /**
  * The mockup's own sample labels (`Paper Crumple Control Panel v2.dc.html`'s `SAMPLES` constant),
@@ -20,7 +20,6 @@ const MOCKUP_SAMPLE_LABEL: ReadonlyMap<string, string> = new Map([
   ['camel-coat', 'photo — camel wool coat (has background)'],
 ])
 
-export const BROKEN_ID = 'broken'
 const BROKEN_LABEL = 'broken URL (rollback demo)'
 
 export function sampleLabel(id: string): string {

@@ -3,10 +3,10 @@ import { SHARED_KNOBS } from '@paper-crumple/core'
 import type { IntKnob, NumberKnob } from '@paper-crumple/core'
 import type { Knobs } from '@paper-crumple/core'
 import type { EdgeSpec } from '@paper-crumple/paper'
-import type { Entry } from '../knobs'
-import { isNumberLike, stepOf } from '../knobs'
-import { ceilingsFor } from '../edge-ceilings'
-import { Segmented, Slider, SubCard } from './primitives'
+import type { Entry } from '../controls/knobs'
+import { isNumberLike, stepOf } from '../controls/knobs'
+import { ceilingsFor } from './edge-ceilings'
+import { Segmented, Slider, SubCard } from '../controls/primitives'
 
 /**
  * design 2026-09-05 §2.2's shape-only knobs, one array per `edgeSpec.shape` — `HULL_ROWS` /

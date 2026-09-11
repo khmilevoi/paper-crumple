@@ -4,11 +4,11 @@ import { useCallback, useEffect, useRef, useState } from 'react'
 import { useScene } from '@paper-crumple/react'
 import type { Crumple, CrumpleSettleEvent } from '@paper-crumple/react'
 
-import type { AudioHandle, SequenceSpec } from './audio'
-import { playSpec, swapSpec } from './audio'
-import type { BuiltStage } from './config'
-import { useHero } from './hero'
-import type { Sample } from './samples'
+import type { AudioHandle, SequenceSpec } from '../sound/audio'
+import { playSpec, swapSpec } from '../sound/audio'
+import type { BuiltStage } from '../scene/config'
+import { useHero } from '../scene/hero'
+import type { Sample } from '../source/samples'
 
 export type TransportDirection = 'folding' | 'unfolding' | null
 

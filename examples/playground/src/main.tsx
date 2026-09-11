@@ -1,6 +1,6 @@
 import { createRoot } from 'react-dom/client'
 import * as pc from '@paper-crumple/core'
-import { App } from './ui/App'
+import { App } from './app/App'
 
 /**
  * No `<StrictMode>`, deliberately: its development double-invoke would build, mount and dispose a
