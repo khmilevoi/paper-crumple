@@ -1,4 +1,6 @@
 import type { Rect, Size } from './geometry.js'
+import type { ChangePublisher, ChangeSource } from './changes.js'
+import type { Knobs } from './knobs.js'
 import type { KnobDescriptor } from './forward.js'
 import type { KnobSetter, SpriteKnobPatch } from './knob-patch.js'
 import type { KnobValues } from './knob-registry.js'
@@ -16,6 +18,11 @@ type AnySlot = readonly KnobDescriptor[]
  * several views sharing one front texture.
  */
 export interface Sprite {
+  readonly changes: ChangeSource
+  /** Whether this sprite currently holds a front texture. */
+  readonly resident: boolean
+  /** Local accepted overrides; parent stage values are read separately. */
+  readonly appliedKnobs: Readonly<Knobs>
   readonly key: string
   /** Exposed rather than derived twice: `size: 'manual'` and any layout code need it (amend. 13). */
   readonly frontSize: Size
@@ -31,6 +38,7 @@ export interface Sprite {
 
 /** The stage's own row. Never handed to a consumer; `Sprite` is the read-only face of it. */
 export interface SpriteRecord {
+  readonly changes: ChangePublisher
   readonly key: string
   readonly sprite: Sprite
   source: NormalizedSource

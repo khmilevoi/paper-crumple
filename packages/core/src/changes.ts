@@ -22,7 +22,50 @@ const areas: readonly ChangeArea[] = [
   'state',
 ]
 
-export function createChanges(): ChangePublisher {
+/** Internal stage transaction: queues only publishers with observed, dirty areas. */
+export function createChangeBatch() {
+  const pending = new Set<() => void>()
+  const cleanup = new Set<() => void>()
+  let depth = 0
+  let flushing = false
+  function flush(): void {
+    if (depth !== 0 || flushing) return
+    flushing = true
+    try {
+      while (pending.size > 0) {
+        const next = pending.values().next().value
+        if (next === undefined) break
+        pending.delete(next)
+        next()
+      }
+      for (const done of cleanup) done()
+      cleanup.clear()
+    } finally {
+      flushing = false
+    }
+  }
+  return {
+    batch<T>(operation: () => T): T {
+      depth += 1
+      try {
+        return operation()
+      } finally {
+        depth -= 1
+        flush()
+      }
+    },
+    schedule(deliver: () => void): void {
+      pending.add(deliver)
+      flush()
+    },
+    after(done: () => void): void {
+      cleanup.add(done)
+      flush()
+    },
+  }
+}
+
+export function createChanges(group?: ReturnType<typeof createChangeBatch>): ChangePublisher {
   const listeners: (Set<() => void> | undefined)[] = Array.from({ length: areas.length })
   const revisions = Array.from({ length: areas.length }, () => 0)
   let dirty = 0
@@ -77,7 +120,10 @@ export function createChanges(): ChangePublisher {
 
   function emit(area: ChangeArea): void {
     mark(area)
-    if (depth === 0) flush()
+    if (depth === 0 && dirty !== 0) {
+      if (group === undefined) flush()
+      else group.schedule(flush)
+    }
   }
 
   function batch<T>(operation: () => T): T {
@@ -86,7 +132,10 @@ export function createChanges(): ChangePublisher {
       return operation()
     } finally {
       depth -= 1
-      if (depth === 0) flush()
+      if (depth === 0 && dirty !== 0) {
+        if (group === undefined) flush()
+        else group.schedule(flush)
+      }
     }
   }
 
@@ -103,7 +152,7 @@ export function createChanges(): ChangePublisher {
     subscribe,
     revision: (area) => revisions[areas.indexOf(area)] ?? 0,
     emit,
-    batch,
+    batch: group === undefined ? batch : (operation) => group.batch(() => batch(operation)),
     clear,
   }
 }

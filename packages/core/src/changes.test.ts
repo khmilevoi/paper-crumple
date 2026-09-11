@@ -1,5 +1,42 @@
 import { afterEach, expect, it, vi } from 'vitest'
-import { createChanges } from './changes.js'
+import { createChanges, createChangeBatch } from './changes.js'
+
+it('defers only observed publishers across a shared atomic boundary', () => {
+  const group = createChangeBatch()
+  const a = createChanges(group)
+  const b = createChanges(group)
+  const reads: number[] = []
+  let value = 0
+  a.subscribe('content', () => reads.push(value))
+  b.subscribe('resources', () => reads.push(value))
+  group.batch(() => {
+    a.emit('content')
+    b.emit('resources')
+    expect(a.revision('content')).toBe(1)
+    expect(reads).toEqual([])
+    value = 2
+  })
+  expect(reads).toEqual([2, 2])
+})
+
+it('shared delivery handles reentrant batches and clearing another pending publisher', () => {
+  const group = createChangeBatch()
+  const a = createChanges(group)
+  const b = createChanges(group)
+  const seen: string[] = []
+  a.subscribe('content', () => {
+    seen.push('a')
+    b.clear()
+    group.batch(() => b.emit('resources'))
+  })
+  b.subscribe('resources', () => seen.push('b'))
+  group.batch(() => {
+    a.emit('content')
+    b.emit('resources')
+  })
+  expect(seen).toEqual(['a'])
+  expect(b.revision('resources')).toBe(2)
+})
 
 afterEach(() => {
   vi.unstubAllGlobals()

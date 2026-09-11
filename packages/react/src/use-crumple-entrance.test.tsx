@@ -1,3 +1,4 @@
+import { makeFakeSprite } from './testing/fake-stage.js'
 /**
  * @vitest-environment jsdom
  */
@@ -97,7 +98,7 @@ test('two Crumples sharing a spriteKey in one commit produce exactly one add (§
   const scene = readyScene(fake.stage)
   const probe = await renderCrumple({ spriteKey: 'hero', src: 'hero.png' }, { scene })
   const second = await renderCrumple({ spriteKey: 'hero', src: 'hero.png' }, { scene })
-  gate.resolve({ key: 'hero' } as Sprite)
+  gate.resolve(makeFakeSprite('hero'))
   await flush()
   expect(fake.calls.filter((c) => c.method === 'add')).toHaveLength(1)
   expect(probe.current.shown).toBe('hero')
@@ -116,7 +117,7 @@ test('a resident key with an evicted front waits on prepare rather than lifting 
   expect(fake.calls.map((c) => c.method)).toContain('prepare')
   expect(fake.calls.map((c) => c.method)).not.toContain('view.show')
   expect(probe.current.shown).toBeNull()
-  gate.resolve({ key: 'hero' } as Sprite)
+  gate.resolve(makeFakeSprite('hero'))
   await flush()
   expect(probe.current.shown).toBe('hero')
   await probe.unmount()
@@ -145,7 +146,7 @@ test('an unmount mid-acquisition shows nothing and reports nothing (§7)', async
     { scene: readyScene(fake.stage) },
   )
   await probe.unmount()
-  gate.resolve({ key: 'hero' } as Sprite)
+  gate.resolve(makeFakeSprite('hero'))
   await flush()
   expect(fake.calls.map((c) => c.method)).not.toContain('view.show')
 })
@@ -186,7 +187,7 @@ test('a show refusal is reported on error, reaches onError, and starts no run', 
   if (view === undefined) return
   expect(view.sprite).toBeNull()
   view.show = () => refused
-  gate.resolve({ key: 'hero' } as Sprite)
+  gate.resolve(makeFakeSprite('hero'))
   await flush()
   expect(probe.current.error).toBe(refused)
   expect(onError).toHaveBeenCalledTimes(1)

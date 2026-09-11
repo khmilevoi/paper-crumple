@@ -1,3 +1,4 @@
+import { makeFakeSprite } from './testing/fake-stage.js'
 /**
  * @vitest-environment jsdom
  */
@@ -169,7 +170,7 @@ test('a key whose acquisition is in flight is joined with crumpleTo, not swapTo 
   expect(fake.calls.filter((c) => c.method === 'view.crumpleTo')).toHaveLength(1)
   expect(fake.calls.filter((c) => c.method === 'view.swapTo')).toHaveLength(0)
   expect(fake.calls.filter((c) => c.method === 'add')).toHaveLength(1)
-  gate.resolve({ key: 'b' } as Sprite)
+  gate.resolve(makeFakeSprite('b'))
   await flush()
   await first.unmount()
   await second.unmount()

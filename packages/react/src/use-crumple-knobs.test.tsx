@@ -1,3 +1,4 @@
+import { makeFakeSprite } from './testing/fake-stage.js'
 /**
  * @vitest-environment jsdom
  */
@@ -140,7 +141,7 @@ test('the re-frame reads the frame the sprite moved TO, not the one it is leavin
   // While the re-source is in flight the old frame still stands.
   expect(probe.current.frame).toBe(FRAME)
   fake.views[0]?.setFrame(MOVED)
-  gate.resolve({ key: 'hero' } as Sprite)
+  gate.resolve(makeFakeSprite('hero'))
   await flush()
   expect(probe.current.frame).toBe(MOVED)
   expect(probe.current.frameStyle?.left).toBe('-28.8px')
@@ -162,7 +163,7 @@ test('a crumple with no sprite yet skips the join entirely (§4.3)', async () =>
   // acquisition is already building at the live knob values.
   expect(fake.calls.filter((c) => c.method === 'prepare')).toHaveLength(before)
   expect(probe.current.error).toBeNull()
-  gate.resolve({ key: 'hero' } as Sprite)
+  gate.resolve(makeFakeSprite('hero'))
   await flush()
   await probe.unmount()
 })

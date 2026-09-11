@@ -1,4 +1,6 @@
-import type { Sprite, View, ViewFrame } from '@paper-crumple/core'
+import { makeFakeSprite } from './testing/fake-stage.js'
+import { createChanges } from '../../core/src/changes.js'
+import type { View, ViewFrame } from '@paper-crumple/core'
 import { expect, test } from 'vitest'
 import { createCrumpleCore, onRunEnd, onRunStart, onRunStep, readCrumple } from './crumple-state.js'
 
@@ -8,7 +10,9 @@ function fakeView(o?: { sprite?: string; frame?: ViewFrame }): View {
   return {
     state: 'crumpling.rise',
     pose: 3,
-    sprite: o?.sprite === undefined ? null : ({ key: o.sprite } as Sprite),
+    changes: createChanges(),
+    appliedKnobs: {},
+    sprite: o?.sprite === undefined ? null : makeFakeSprite(o.sprite),
     frame: o?.frame ?? null,
   } as unknown as View
 }
@@ -104,8 +108,15 @@ test('start clears the error, so a rollback notice goes the moment the next run 
 test('sprite is read in the same pass as shown, so the two never skew (§2.4)', () => {
   const core = createCrumpleCore()
   expect(readCrumple(core).sprite).toBeNull()
-  const sprite = { key: 'a' } as Sprite
-  core.view = { state: 'idle', pose: 0, sprite, frame: null } as unknown as View
+  const sprite = makeFakeSprite('a')
+  core.view = {
+    state: 'idle',
+    pose: 0,
+    sprite,
+    frame: null,
+    changes: createChanges(),
+    appliedKnobs: {},
+  } as unknown as View
   const reading = readCrumple(core)
   expect(reading.sprite).toBe(sprite)
   expect(reading.shown).toBe('a')
@@ -120,7 +131,14 @@ test('status is detached with no view, whatever else the record says (§2.5)', (
 
 test('the in-flight statuses come from pending, and beat a stale rollback (§2.5)', () => {
   const core = createCrumpleCore()
-  core.view = { state: 'idle', pose: 0, sprite: { key: 'a' }, frame: null } as unknown as View
+  core.view = {
+    state: 'idle',
+    pose: 0,
+    sprite: makeFakeSprite('a'),
+    frame: null,
+    changes: createChanges(),
+    appliedKnobs: {},
+  } as unknown as View
   core.requested = 'b'
   // No `start` fires on the degraded path, so a previous rollback's error is still standing while
   // the next request acquires. The request is the more informative of the two.
@@ -131,7 +149,14 @@ test('the in-flight statuses come from pending, and beat a stale rollback (§2.5
 
 test('status is rolled-back when the request and the canvas disagree after an error (§2.5)', () => {
   const core = createCrumpleCore()
-  core.view = { state: 'idle', pose: 0, sprite: { key: 'a' }, frame: null } as unknown as View
+  core.view = {
+    state: 'idle',
+    pose: 0,
+    sprite: makeFakeSprite('a'),
+    frame: null,
+    changes: createChanges(),
+    appliedKnobs: {},
+  } as unknown as View
   core.requested = 'b'
   core.error = new Error('the target never arrived')
   expect(readCrumple(core).status).toBe('rolled-back')
@@ -139,7 +164,14 @@ test('status is rolled-back when the request and the canvas disagree after an er
 
 test('an error on the key that IS shown is not a rollback (§2.5)', () => {
   const core = createCrumpleCore()
-  core.view = { state: 'idle', pose: 0, sprite: { key: 'a' }, frame: null } as unknown as View
+  core.view = {
+    state: 'idle',
+    pose: 0,
+    sprite: makeFakeSprite('a'),
+    frame: null,
+    changes: createChanges(),
+    appliedKnobs: {},
+  } as unknown as View
   core.requested = 'a'
   core.error = new Error('a knob refused')
   expect(readCrumple(core).status).toBe('shown')
@@ -147,13 +179,27 @@ test('an error on the key that IS shown is not a rollback (§2.5)', () => {
 
 test('a view showing nothing and asking for nothing is empty (§2.5)', () => {
   const core = createCrumpleCore()
-  core.view = { state: 'idle', pose: 0, sprite: null, frame: null } as unknown as View
+  core.view = {
+    state: 'idle',
+    pose: 0,
+    sprite: null,
+    frame: null,
+    changes: createChanges(),
+    appliedKnobs: {},
+  } as unknown as View
   expect(readCrumple(core).status).toBe('empty')
 })
 
 test('a run the consumer started with play() reads as playing without a pending (§2.5)', () => {
   const core = createCrumpleCore()
-  core.view = { state: 'playing', pose: 4, sprite: { key: 'a' }, frame: null } as unknown as View
+  core.view = {
+    state: 'playing',
+    pose: 4,
+    sprite: makeFakeSprite('a'),
+    frame: null,
+    changes: createChanges(),
+    appliedKnobs: {},
+  } as unknown as View
   core.requested = 'a'
   expect(readCrumple(core).status).toBe('playing')
 })

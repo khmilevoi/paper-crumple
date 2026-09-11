@@ -30,6 +30,8 @@ const FLAT_POSE_INDEX = 0
 
 /** Everything the runner needs from whoever owns the pixels. P9 implements this on a `View`. */
 export interface RunHost {
+  /** Optional semantic transaction, separate from the synchronous legacy event bus. */
+  batch?<T>(operation: () => T): T
   /** Emits on the host's own bus, synchronously. `error` is deliberately absent — see below. */
   emit<E extends 'start' | 'step' | 'end'>(event: E, payload: Events[E]): void
   /**
@@ -109,6 +111,7 @@ export interface RunControllerConfig {
 type LiveSettleValue = undefined | Aborted | AddError
 
 interface LiveRun {
+  readonly run: Run<PlayResult | SwapResult>
   readonly owner: RunOwner
   readonly from: number
   readonly to: number
@@ -124,6 +127,7 @@ interface LiveRun {
 }
 
 export interface RunController<T = unknown> {
+  readonly run: Run<PlayResult | SwapResult> | null
   /** The live run's owner, or `null` when the host is idle. §4.4 compares against this. */
   readonly owner: RunOwner | null
   readonly live: boolean
@@ -150,6 +154,7 @@ export function createRunController<T = unknown>(
   const dwells = config.dwells ?? DWELL_MS
   const { poseCount } = config
   let current: LiveRun | null = null
+  const batch = host.batch ?? (<R>(operation: () => R): R => operation())
   let disposed = false
   /** Up for the whole of `supersede`; `play` and `crumple` refuse to install a run while it is. */
   let superseding = false
@@ -317,6 +322,7 @@ export function createRunController<T = unknown>(
       if (record !== null) cancel(record)
     })
     const r: LiveRun = {
+      run: handle.run,
       owner,
       from,
       to,
@@ -392,6 +398,7 @@ export function createRunController<T = unknown>(
       if (record !== null) cancel(record)
     })
     const r: LiveRun = {
+      run: handle.run,
       owner,
       from,
       // Every crumple ends flat: `to` is 0 and `via` marks the ball it rose through.
@@ -438,6 +445,10 @@ export function createRunController<T = unknown>(
     let holdElapsed = false
 
     function leaveBallIfReady(run: LiveRun, swap: SwapPlan): void {
+      batch(() => leaveBall(run, swap))
+    }
+
+    function leaveBall(run: LiveRun, swap: SwapPlan): void {
       const settled = outcome
       if (current !== run || leftBall || !holdElapsed || settled === null) return
       leftBall = true
@@ -537,15 +548,18 @@ export function createRunController<T = unknown>(
   }
 
   return {
+    get run() {
+      return current?.run ?? null
+    },
     get owner() {
       return current?.owner ?? null
     },
     get live() {
       return current !== null
     },
-    play,
-    crumple,
-    stop,
-    dispose,
+    play: (from, to, o) => batch(() => play(from, to, o)),
+    crumple: (from, target, o) => batch(() => crumple(from, target, o)),
+    stop: (o) => batch(() => stop(o)),
+    dispose: () => batch(dispose),
   }
 }

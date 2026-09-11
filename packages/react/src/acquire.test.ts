@@ -1,3 +1,4 @@
+import { makeFakeSprite } from './testing/fake-stage.js'
 /**
  * @vitest-environment jsdom
  */
@@ -39,7 +40,7 @@ test('two acquisitions of one key in flight together produce exactly one add (cl
   const fake = createFakeStage({ add: () => gate.promise })
   const first = acquire(fake.stage, 'hero', 'hero.png', undefined, never)
   const second = acquire(fake.stage, 'hero', 'hero.png', undefined, never)
-  gate.resolve({ key: 'hero' } as Sprite)
+  gate.resolve(makeFakeSprite('hero'))
   expect(await first).toBe(await second)
   expect(fake.calls.filter((c) => c.method === 'add')).toHaveLength(1)
 })
@@ -49,7 +50,7 @@ test('the in-flight entry is readable while it is open and gone once it settles'
   const fake = createFakeStage({ add: () => gate.promise })
   const inFlight = acquire(fake.stage, 'hero', 'hero.png', undefined, never)
   expect(pendingAcquisition(fake.stage, 'hero')).toBeDefined()
-  gate.resolve({ key: 'hero' } as Sprite)
+  gate.resolve(makeFakeSprite('hero'))
   await inFlight
   expect(pendingAcquisition(fake.stage, 'hero')).toBeUndefined()
 })
@@ -70,7 +71,7 @@ test('a joiner that has itself unmounted converts the settled value to ABORTED (
 })
 
 test('a live-key SheetError is retried exactly once through prepare (clause 5)', async () => {
-  const sprite = { key: 'hero' } as Sprite
+  const sprite = makeFakeSprite('hero')
   const fake = createFakeStage({
     add: async () => liveKeyRefusal('hero'),
     prepare: async () => sprite,
