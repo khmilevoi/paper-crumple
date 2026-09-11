@@ -151,11 +151,13 @@ export function reatomScene<S extends BindingStage>({ name, create }: SceneOptio
     sourceClaims.set(key, claim)
     // Only consumers are cancelled: core still owns any shared acquisition already in flight.
     previous.controller.abort()
-    const current = () => sourceClaims.get(key) === claim && claim.replacing
+    const current = () => sourceClaims.get(key) === claim
     return {
       current,
       settle(source?: SpriteSource) {
-        if (!current()) return
+        // A committed predecessor is a successor's rollback source, never its active claim.
+        if (source !== undefined) claim.source = source
+        if (!current() || !claim.replacing) return
         claim.source = source ?? previous.source
         claim.replacing = false
       },

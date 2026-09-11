@@ -119,6 +119,7 @@ export function createResource<S extends BindingStage>(
       const signal = abortVar.require().signal
       const release = cancelWithOwner(controller.signal)
       let replacement: SourceReplacement | undefined
+      let awaitingRaw = false
       try {
         source.set(() => next)
         const stage = await wrap(scope.ready())
@@ -128,9 +129,25 @@ export function createResource<S extends BindingStage>(
         if (signal.aborted || (replacement !== undefined && !replacement.current()))
           return toAsyncValue<Sprite>(ABORTED)
         if (nextOptions?.pin) stage.pin(key)
-        const sprite = toAsyncValue<Sprite>(
-          await wrap(stage.replace(key, coreSource(next), { signal })),
-        )
+        const pending = stage
+          .replace(key, coreSource(next), { signal })
+          .then(
+            bind((result) => {
+              // Core commits before synchronous callbacks can abort this caller or start a successor.
+              // Reconcile that result in the owner even when wrap has already rejected on abort.
+              if (
+                result !== ABORTED &&
+                !(result instanceof Error) &&
+                controller.stage === stage &&
+                stage.get(key) === result
+              )
+                replacement?.settle(next)
+              return result
+            }, owner),
+          )
+          .finally(bind(() => replacement?.settle(), owner))
+        awaitingRaw = true
+        const sprite = toAsyncValue<Sprite>(await wrap(pending))
         if (
           controller.stage !== stage ||
           signal.aborted ||
@@ -138,14 +155,13 @@ export function createResource<S extends BindingStage>(
           !replacement?.current()
         )
           return toAsyncValue<Sprite>(ABORTED)
-        replacement.settle(next)
         pin = nextOptions?.pin ?? pin
         toAsyncValue(sprite.set(desiredKnobs as never))
         if (signal.aborted) return toAsyncValue<Sprite>(ABORTED)
         return sprite
       } finally {
         release()
-        replacement?.settle()
+        if (!awaitingRaw) replacement?.settle()
       }
     },
     `${name}.replace`,

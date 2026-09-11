@@ -17,6 +17,85 @@ import { reatomScene } from './scene.js'
 import { deferred, isolated, sceneFixture } from './testing.js'
 
 it(
+  'retains an applied replacement source when a raw commit callback aborts its caller',
+  isolated(async () => {
+    const { stage } = await wrap(sceneFixture())
+    const scene = reatomScene({ name: 'replacement.commit-abort', create: async () => stage })
+    const a = async () => asBitmap(fakeBitmap({ width: 40 }))
+    const b = async () => asBitmap(fakeBitmap({ width: 80 }))
+    const resource = scene.resource({ name: 'resource', key: 'shared', source: a })
+    const raw = await wrap(resource.prepare())
+    const replace = action(() => resource.replace(b), 'caller.replace').extend(withAbort())
+    const off = raw.changes.subscribe(
+      'resources',
+      bind(() => {
+        if (raw.resident && raw.rect.w === 80) replace.abort()
+      }),
+    )
+    const result = await wrap(replace().catch((error: unknown) => error))
+    expect(isAbort(result)).toBe(true)
+    expect(stage.get('shared')).toBe(raw)
+    expect(raw.rect.w).toBe(80)
+    expect(scene.resource({ name: 'alias', key: 'shared', source: b })).toBe(resource)
+    expect(() => scene.resource({ name: 'invalid', key: 'shared', source: a })).toThrow('replace')
+    expect(await wrap(resource.prepare())).toBe(raw)
+    off()
+    scene.dispose()
+  }),
+)
+
+it.each(['success', 'failure'] as const)(
+  'keeps the applied source coherent when a raw commit callback starts a successor with %s',
+  async (outcome) =>
+    isolated(async () => {
+      const { stage } = await wrap(sceneFixture())
+      const scene = reatomScene({
+        name: `replacement.successor.${outcome}`,
+        create: async () => stage,
+      })
+      const a = async () => asBitmap(fakeBitmap({ width: 40 }))
+      const b = async () => asBitmap(fakeBitmap({ width: 80 }))
+      const image = deferred<ImageBitmap>()
+      const entered = deferred<void>()
+      const c = () => {
+        entered.resolve()
+        return image.promise
+      }
+      const resource = scene.resource({ name: 'resource', key: 'shared', source: a })
+      const raw = await wrap(resource.prepare())
+      let successor: Promise<unknown> | undefined
+      const off = raw.changes.subscribe(
+        'resources',
+        bind(() => {
+          if (raw.resident && raw.rect.w === 80 && successor === undefined)
+            successor = resource.replace(c).catch((error: unknown) => error)
+        }),
+      )
+      const first = resource.replace(b).catch((error: unknown) => error)
+      await wrap(entered.promise)
+      expect(isAbort(await wrap(first))).toBe(true)
+      expect(() => scene.resource({ name: 'blocked', key: 'shared', source: b })).toThrow(
+        'replacement',
+      )
+      if (outcome === 'success') image.resolve(asBitmap(fakeBitmap({ width: 120 })))
+      else image.reject(new Error('successor failed'))
+      const result = await wrap(successor!)
+      const applied = outcome === 'success' ? c : b
+      if (outcome === 'failure') {
+        expect(result).toBeInstanceOf(Error)
+        expect(stage.get('shared')).toBeUndefined()
+      } else expect(result).toBe(raw)
+      expect(scene.resource({ name: 'alias', key: 'shared', source: applied })).toBe(resource)
+      expect(() => scene.resource({ name: 'invalid', key: 'shared', source: a })).toThrow('replace')
+      resource.source.set(() => applied)
+      const restored = await wrap(resource.prepare())
+      expect(restored.rect.w).toBe(outcome === 'success' ? 120 : 80)
+      off()
+      scene.dispose()
+    })(),
+)
+
+it(
   'blocks source claims during replacement and restores the old descriptor after failure',
   isolated(async () => {
     const { stage } = await wrap(sceneFixture())
