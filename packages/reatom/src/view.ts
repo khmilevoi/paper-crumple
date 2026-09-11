@@ -10,6 +10,8 @@ import {
   type Sprite,
   type SpriteSource,
   type View,
+  type ViewFrame,
+  type ViewState,
 } from '@paper-crumple/core'
 import {
   createCrumpleCore,
@@ -35,7 +37,7 @@ import {
 } from '@reatom/core'
 import { observeExternal, readAtRevision } from './observable.js'
 import { createProgress } from './progress.js'
-import { reatomRun } from './run.js'
+import { reatomRun, type RunModel } from './run.js'
 import { cancelWithOwner } from './owner.js'
 import { joinReady } from './ready.js'
 import { toAsyncValue } from './result.js'
@@ -334,7 +336,7 @@ function createView<S extends BindingStage>(
     (trigger) => ({ getState: readRenderValue, subscribe: () => subscribeRenderChanges(trigger) }),
     `${name}.render`,
   )
-  const play = action((from: PoseRef, to: PoseRef, settings?: PlayOptions) => {
+  const play = action((from: PoseRef, to: PoseRef, settings?: PlayOptions): RunModel<undefined> => {
     assertOwner()
     const run = controller.play(from, to, settings)
     if (run instanceof Error) {
@@ -383,8 +385,10 @@ function createView<S extends BindingStage>(
     raw: observe('raw', readRaw, ['lifecycle']),
     shown: observe('shown', () => controller.view?.sprite?.key ?? null, ['content']),
     sprite: observe('sprite', () => controller.view?.sprite ?? null, ['content']),
-    state: observe('state', () => controller.view?.state ?? 'detached', ['state']),
-    frame: observe('frame', readFrame, ['geometry']),
+    state: observe<ViewState | 'detached'>('state', () => controller.view?.state ?? 'detached', [
+      'state',
+    ]),
+    frame: observe<ViewFrame | null>('frame', readFrame, ['geometry']),
     appliedKnobs: observe(
       'appliedKnobs',
       readAtRevision(readRaw, 'settings', () => controller.view?.appliedKnobs ?? emptyKnobs),

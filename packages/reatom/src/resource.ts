@@ -3,6 +3,8 @@ import {
   type BitmapSupplier,
   type ChangeArea,
   type Knobs,
+  type Rect,
+  type Size,
   type Sprite,
   type SpriteSource,
 } from '@paper-crumple/core'
@@ -180,12 +182,12 @@ export function createResource<S extends BindingStage>(
       remove,
       raw: observe('raw', readRaw, []),
       resident: observe('resident', () => readRaw()?.resident ?? false, ['resources']),
-      frontSize: observe(
+      frontSize: observe<Size | null>(
         'frontSize',
         readAtRevision(readRaw, 'geometry', () => readRaw()?.frontSize ?? null),
         ['geometry'],
       ),
-      rect: observe('rect', () => readRaw()?.rect ?? null, ['geometry']),
+      rect: observe<Rect | null>('rect', () => readRaw()?.rect ?? null, ['geometry']),
       attachCount: observe('attachCount', () => readRaw()?.attachCount ?? 0, ['resources']),
       pinned: observe('pinned', () => readRaw()?.pinned ?? false, ['resources']),
       appliedKnobs: observe(

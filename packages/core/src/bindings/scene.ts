@@ -110,7 +110,8 @@ export function createSceneController<S extends BindingStage>(
           publish()
           return built
         }
-        owned = built
+        const stage: S = built
+        owned = stage
         if (built.disposed) {
           dispose()
           return ABORTED
@@ -120,7 +121,7 @@ export function createSceneController<S extends BindingStage>(
           built.on('error', (event) => {
             // Refusals are observed returns, not the stage's orphaned context-loss cause.
             invalidate(
-              built.lost && !event.observed && event.view === null ? event.error : undefined,
+              stage.lost && !event.observed && event.view === null ? event.error : undefined,
             )
             dispatch(event)
           }),

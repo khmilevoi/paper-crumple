@@ -1,5 +1,7 @@
 import type {
   ChangeArea,
+  GlCaps,
+  KnobDescriptor,
   Knobs,
   PoseRef,
   SpriteSource,
@@ -24,7 +26,7 @@ import {
 import { observeExternal, readAtRevision } from './observable.js'
 import { joinReady } from './ready.js'
 import { toAsyncValue } from './result.js'
-import { createResource } from './resource.js'
+import { createResource, type ResourceModel } from './resource.js'
 import { createViewModel } from './view.js'
 import type { Ready, ResourceOptions, SceneOptions, SurfaceSize, ViewOptions } from './types.js'
 
@@ -175,7 +177,9 @@ export function reatomScene<S extends BindingStage>({ name, create }: SceneOptio
       mintKey: () => `${name}.view:${++viewKey}`,
     })
   }
-  const resource = <Source extends SpriteSource>(options: ResourceOptions<Source>) => {
+  const resource = <Source extends SpriteSource>(
+    options: ResourceOptions<Source>,
+  ): ResourceModel => {
     assertOwner()
     claimSource(options.key, options.source)
     const found = resources.get(options.key)
@@ -222,8 +226,11 @@ export function reatomScene<S extends BindingStage>({ name, create }: SceneOptio
       },
       ['lifecycle', 'resources'],
     ),
-    capabilities: observe('capabilities', () => controller.stage?.caps ?? null),
-    descriptors: observe('descriptors', () => controller.stage?.knobs ?? emptyDescriptors),
+    capabilities: observe<GlCaps | null>('capabilities', () => controller.stage?.caps ?? null),
+    descriptors: observe<readonly KnobDescriptor[]>(
+      'descriptors',
+      () => controller.stage?.knobs ?? emptyDescriptors,
+    ),
     defaults: observe('defaults', () => controller.stage?.defaults ?? emptyKnobs),
     appliedKnobs: observe(
       'appliedKnobs',
