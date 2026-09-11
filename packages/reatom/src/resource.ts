@@ -1,5 +1,6 @@
 import {
   ABORTED,
+  type BitmapSupplier,
   type ChangeArea,
   type Knobs,
   type Sprite,
@@ -29,6 +30,17 @@ export function createResource<S extends BindingStage>(
   let pin = options.pin
   const source = atom<SpriteSource>(() => options.source, `${name}.source`)
   const knobs = atom<Knobs>({}, `${name}.knobs`)
+  const suppliers = new WeakMap<BitmapSupplier, BitmapSupplier>()
+  const coreSource = (desired: SpriteSource): SpriteSource => {
+    if (typeof desired !== 'function') return desired
+    let bound = suppliers.get(desired)
+    if (bound === undefined) {
+      // Core retains suppliers for later re-supply, outside the initiating command's frame.
+      bound = bind(desired, owner)
+      suppliers.set(desired, bound)
+    }
+    return bound
+  }
   const readRaw = () => controller.stage?.get(key) ?? null
   const subscribeReplacement = (trigger: () => void) => {
     let stage = controller.stage
@@ -74,7 +86,7 @@ export function createResource<S extends BindingStage>(
         )
       }
       const sprite = toAsyncValue<Sprite>(
-        await wrap(createAcquisitions(stage).acquire(key, desiredSource, pin, signal)),
+        await wrap(createAcquisitions(stage).acquire(key, coreSource(desiredSource), pin, signal)),
       )
       // Dynamic descriptor keys are validated by core's registry, as in the core view binding.
       toAsyncValue(sprite.set(desiredKnobs as never))
@@ -95,7 +107,9 @@ export function createResource<S extends BindingStage>(
         const stage = await wrap(scope.ready())
         if (controller.stage !== stage) return toAsyncValue<Sprite>(ABORTED)
         if (nextOptions?.pin) stage.pin(key)
-        const sprite = toAsyncValue<Sprite>(await wrap(stage.replace(key, next, { signal })))
+        const sprite = toAsyncValue<Sprite>(
+          await wrap(stage.replace(key, coreSource(next), { signal })),
+        )
         registeredSource = next
         pin = nextOptions?.pin ?? pin
         toAsyncValue(sprite.set(desiredKnobs as never))

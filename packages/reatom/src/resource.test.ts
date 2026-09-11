@@ -1,9 +1,88 @@
-import { action, bind, computed, context, isAbort, notify, withAbort, wrap } from '@reatom/core'
+import {
+  action,
+  atom,
+  bind,
+  computed,
+  context,
+  isAbort,
+  notify,
+  top,
+  withAbort,
+  wrap,
+} from '@reatom/core'
 import { expect, it, vi } from 'vitest'
 import { makeReactiveCanvas } from '../../core/src/testing/reactive-stage.js'
 import { asBitmap, fakeBitmap } from '../../core/src/testing/fake-source.js'
 import { reatomScene } from './scene.js'
 import { deferred, isolated, sceneFixture } from './testing.js'
+
+it.each(['initial', 'replacement', 'evicted'] as const)(
+  'retained %s suppliers read and resume in the model owner context',
+  async (phase) =>
+    isolated(async () => {
+      const owner = context()
+      const width = atom(41, `supplier.${phase}.width`)
+      const { stage } = await wrap(sceneFixture())
+      const scene = reatomScene({ name: `supplier.${phase}`, create: async () => stage })
+      const bitmaps: ReturnType<typeof fakeBitmap>[] = []
+      const seen: unknown[] = []
+      const ownedFrames: boolean[] = []
+      let requiresContext = phase !== 'evicted'
+      const supplier = vi.fn(async () => {
+        if (requiresContext) {
+          seen.push([context(), width()])
+          ownedFrames.push(top() === owner)
+          await wrap(Promise.resolve())
+          seen.push([context(), width()])
+          ownedFrames.push(top() === owner)
+        }
+        const bitmap = fakeBitmap({ width: 41 })
+        bitmaps.push(bitmap)
+        return asBitmap(bitmap)
+      })
+      const source = phase === 'replacement' ? '/initial.png' : supplier
+      const resource = scene.resource({ name: 'a', key: 'a', source })
+      const add = vi.spyOn(stage, 'add')
+      try {
+        await wrap(resource.prepare())
+        if (phase === 'replacement') await wrap(resource.replace(supplier))
+        if (phase === 'evicted') {
+          requiresContext = true
+          await wrap(stage.add('/other.png', { key: 'other' }))
+          stage.budget({ bytes: 0 })
+          expect(resource.resident()).toBe(false)
+          stage.budget({ bytes: Infinity })
+          // The retained callback must also work when raw core is invoked outside Reatom.
+          const prepared = await wrap(Promise.resolve().then(() => stage.prepare('a')))
+          expect(prepared).toBe(resource.raw())
+          expect(resource.resident()).toBe(true)
+        }
+        expect(seen).toEqual([
+          [owner, 41],
+          [owner, 41],
+        ])
+        expect(ownedFrames).toEqual([true, true])
+        expect(resource.source()).toBe(supplier)
+        expect(scene.resource({ name: 'alias', key: 'a', source: supplier })).toBe(resource)
+        if (phase === 'initial') {
+          const bound = add.mock.calls[0]?.[0]
+          expect(bound).not.toBe(supplier)
+          const calls = supplier.mock.calls.length
+          resource.source()
+          resource.raw()
+          resource.frontSize()
+          expect(supplier).toHaveBeenCalledTimes(calls)
+          resource.remove()
+          await wrap(resource.prepare())
+          expect(add.mock.calls[1]?.[0]).toBe(bound)
+        }
+      } finally {
+        scene.dispose()
+      }
+      expect(bitmaps.length).toBeGreaterThan(0)
+      expect(bitmaps.every((bitmap) => bitmap.closes === 1)).toBe(true)
+    })(),
+)
 
 it(
   'caches model identity per key, refuses implicit source replacement, and prepares lazily',
