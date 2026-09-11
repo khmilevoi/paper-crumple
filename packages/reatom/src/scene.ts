@@ -96,14 +96,17 @@ export function reatomScene<S extends BindingStage>({ name, create }: SceneOptio
     assertOwner()
     const stage = controller.stage ?? (await wrap(ready()))
     const operation = abortVar.require()
-    const stop = bind(() => stage.stop(), owner)
     const cancel = bind(() => operation.abort(), owner)
-    operation.signal.addEventListener('abort', stop, { once: true })
     controller.signal.addEventListener('abort', cancel, { once: true })
+    if (controller.signal.aborted) cancel()
+    // The signal owns this broadcast's live runs and delayed starts. A stage-wide stop
+    // could cancel a newer raw broadcast which has already superseded these runs.
+    const signal = options?.signal
+      ? AbortSignal.any([operation.signal, options.signal])
+      : operation.signal
     try {
-      return await wrap(stage.play(from, to, options))
+      return await wrap(stage.play(from, to, { ...options, signal }))
     } finally {
-      operation.signal.removeEventListener('abort', stop)
       controller.signal.removeEventListener('abort', cancel)
     }
   }, `${name}.play`).extend(withAsyncData({ initState: null as StagePlayReport<View> | null }))
