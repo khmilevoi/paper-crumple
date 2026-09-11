@@ -164,6 +164,7 @@ function createView<S extends BindingStage>(
       if (scope.controller.stage === null) await wrap(scope.ready())
       if (seq !== requestSequence || current !== attachment || signal.aborted)
         return toAsyncValue<Sprite>(ABORTED)
+      if (controller.creationError !== null) return toAsyncValue<Sprite>(controller.creationError)
       const inputs = bindInputs(next, settings)
       releaseSource = cancelWithOwner(scope.claimSource(inputs.key, next))
       // Scene validation also recognizes a resource model's explicit replace().
@@ -218,7 +219,9 @@ function createView<S extends BindingStage>(
       scope.controller.disposed ||
       target === null ||
       automaticAttachment === attachment ||
-      (controller.view === null && scope.controller.stage !== null)
+      (controller.view === null &&
+        scope.controller.stage !== null &&
+        controller.creationError === null)
     )
       return
     // Adoption and request publication share this notification. Reserve before ready()

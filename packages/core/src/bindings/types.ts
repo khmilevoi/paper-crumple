@@ -199,6 +199,8 @@ export interface TargetViewController<T> {
   readonly requested: string | null
   readonly pending: boolean
   readonly error: Error | null
+  /** Failure of the current View creation attempt; cleared before replacement or release. */
+  readonly creationError: Error | null
   readonly frame: ViewFrame | null
   readonly attachmentGeneration: number
   readonly requestGeneration: number

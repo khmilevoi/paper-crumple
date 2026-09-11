@@ -38,6 +38,7 @@ export function createTargetViewController<S extends BindingStage>(
   let target: TargetFor<S> | null = null
   let attachment = 0
   let creating: { stage: S; target: TargetFor<S>; generation: number } | null = null
+  let creationError: Error | null = null
   let sequence = 0
   let gate: RequestGate | null = null
   let requestError: Error | null = null
@@ -76,6 +77,7 @@ export function createTargetViewController<S extends BindingStage>(
     invoke(() => latest().onError?.({ error, observed: true, view: core.view }))
   }
   const release = (): void => {
+    creationError = null
     // Invalidate a factory call even before its View has been returned to us.
     if (core.view === null && gate === null) {
       if (creating !== null) attachment += 1
@@ -110,6 +112,7 @@ export function createTargetViewController<S extends BindingStage>(
     // and disposal before creating a replacement, even after detach invalidated it.
     if (creating !== null) return
     const reservation = { stage, target, generation: ++attachment }
+    creationError = null
     creating = reservation
     let created: View | Error
     try {
@@ -132,7 +135,11 @@ export function createTargetViewController<S extends BindingStage>(
       return
     }
     if (created instanceof Error) {
+      creationError = created
       report(created)
+      // A failed authoritative attempt is also a settled attachment. A callback
+      // may already have replaced it; never notify for that obsolete refusal.
+      if (attachment === reservation.generation && creationError === created) replaced()
       return
     }
     if (created.state === 'disposed') return
@@ -358,6 +365,9 @@ export function createTargetViewController<S extends BindingStage>(
     },
     get error() {
       return core.error
+    },
+    get creationError() {
+      return creationError
     },
     get frame() {
       return core.view?.frame ?? null
