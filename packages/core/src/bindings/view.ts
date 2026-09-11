@@ -1,4 +1,5 @@
-import { isAborted } from '../abort.js'
+import { ABORTED, isAborted } from '../abort.js'
+import { ViewError } from '../errors.js'
 import type { BlitStage, PlayResult, Run, SwapResult, View } from '../index.js'
 import { rethrowFromMicrotask } from '../emitter.js'
 import { createAcquisitions } from './acquire.js'
@@ -13,6 +14,7 @@ import type {
   ViewController,
   ViewControllerOptions,
   ViewInputs,
+  ViewRequestResult,
 } from './types.js'
 
 function reducedMotion(mode: ViewInputs['reducedMotion']): boolean {
@@ -38,11 +40,20 @@ export function createTargetViewController<S extends BindingStage>(
   let sequence = 0
   let gate: RequestGate | null = null
   let requestError: Error | null = null
-  let pendingRequest: Promise<void> = Promise.resolve()
+  let errorRevision = 0
+  let disposed = false
+  let pendingRequest: Promise<ViewRequestResult> = Promise.resolve(ABORTED)
   let offs: Array<() => void> = []
   let offScene: (() => void) | null = null
 
-  const publish = (): void => options.onChange()
+  const invoke = (listener: () => void): void => {
+    try {
+      listener()
+    } catch (cause) {
+      rethrowFromMicrotask(cause)
+    }
+  }
+  const publish = (): void => invoke(options.onChange)
   const replaced = (): void => {
     for (const listener of [...replacements]) {
       if (!replacements.has(listener)) continue
@@ -55,12 +66,13 @@ export function createTargetViewController<S extends BindingStage>(
     publish()
   }
   const report = (error: Error): void => {
+    errorRevision += 1
     core.error = error
     if (core.pending !== null) requestError = error
     const version = attachment
     publish()
     if (version !== attachment) return
-    latest().onError?.({ error, observed: true, view: core.view })
+    invoke(() => latest().onError?.({ error, observed: true, view: core.view }))
   }
   const release = (): void => {
     if (core.view === null && gate === null) return
@@ -101,27 +113,32 @@ export function createTargetViewController<S extends BindingStage>(
         if (!current()) return
         onRunStart(core, event)
         publish()
-        if (current()) latest().onStart?.(event)
+        if (current()) invoke(() => latest().onStart?.(event))
       }),
-      created.on('step', (event) => {
-        if (!current()) return
-        const parked = core.parked
-        onRunStep(core, event)
-        if (parked !== core.parked) publish()
-        if (current()) options.onStep?.(event)
-      }),
+      ...(options.onStep === undefined
+        ? []
+        : [
+            created.on('step', (event) => {
+              if (!current()) return
+              const parked = core.parked
+              onRunStep(core, event)
+              if (parked !== core.parked) publish()
+              if (current()) invoke(() => options.onStep?.(event))
+            }),
+          ]),
       created.on('end', (event) => {
         if (!current()) return
         onRunEnd(core)
         publish()
-        if (current()) latest().onEnd?.(event)
+        if (current()) invoke(() => latest().onEnd?.(event))
       }),
       stage.on('error', (event) => {
         if (!current() || event.view !== created) return
         core.error = event.error
+        errorRevision += 1
         if (core.pending !== null) requestError = event.error
         publish()
-        if (current()) latest().onError?.(event)
+        if (current()) invoke(() => latest().onError?.(event))
       }),
       created.changes.subscribe('lifecycle', () => {
         if (!current()) return
@@ -143,19 +160,21 @@ export function createTargetViewController<S extends BindingStage>(
     key: string,
     error: Error | null,
     reduced: boolean,
-  ): void => {
-    if (!request.current()) return
+  ): ViewRequestResult => {
+    if (!request.current()) return ABORTED
     const observed = requestError
     const outcome = error ?? observed
     core.pending = null
     core.error = outcome
+    const result = outcome ?? core.view?.sprite ?? new ViewError('the request has no shown Sprite')
     request.finish()
     publish()
-    if (seq !== sequence) return
+    if (seq !== sequence) return ABORTED
     if (error !== null && error !== observed) {
-      latest().onError?.({ error, observed: true, view: core.view })
+      invoke(() => latest().onError?.({ error, observed: true, view: core.view }))
     }
-    if (seq === sequence) latest().onSettle?.({ key, error: outcome, reduced })
+    if (seq === sequence) invoke(() => latest().onSettle?.({ key, error: outcome, reduced }))
+    return seq === sequence ? result : ABORTED
   }
   const cancel = (request: RequestGate): void => {
     if (!request.current()) return
@@ -169,28 +188,46 @@ export function createTargetViewController<S extends BindingStage>(
     opts: ViewInputs,
     run: Run<PlayResult> | Run<SwapResult>,
     phase: 'entering' | 'swapping',
-  ): Promise<void> => {
+  ): Promise<ViewRequestResult> => {
     request.adopt(run)
-    if (!request.current()) return Promise.resolve()
+    if (!request.current()) return Promise.resolve(ABORTED)
     core.pending =
       phase === 'entering'
         ? { key: opts.key, phase, run: run as Run<PlayResult> }
         : { key: opts.key, phase, run: run as Run<SwapResult> }
     publish()
     return run.done.then((result) => {
-      if (isAborted(result)) cancel(request)
-      else settle(request, seq, opts.key, result instanceof Error ? result : null, false)
+      if (isAborted(result)) {
+        cancel(request)
+        return ABORTED
+      }
+      return settle(request, seq, opts.key, result instanceof Error ? result : null, false)
     })
   }
-  const request = (): Promise<void> => {
+  const unavailable = (): Error =>
+    new ViewError(
+      disposed ? 'this view controller is disposed' : 'this view controller is detached',
+    )
+  const request = (
+    key?: string,
+    source?: ViewInputs['source'],
+    requestOptions?: { pin?: true; signal?: AbortSignal },
+  ): Promise<ViewRequestResult> => {
     const view = core.view
     const stage = options.scene.stage
-    if (view === null || stage === null) return Promise.resolve()
-    const opts = latest()
+    if (disposed || view === null || stage === null) return Promise.resolve(unavailable())
+    if (requestOptions?.signal?.aborted) return Promise.resolve(ABORTED)
+    const opts = {
+      ...latest(),
+      ...(key !== undefined && { key }),
+      ...(source !== undefined && { source }),
+      ...(requestOptions?.pin && { pin: requestOptions.pin }),
+    }
+    inputs = opts
     const mismatch = rememberPair(pairs, opts.key, opts.source)
     if (mismatch !== undefined) {
       report(mismatch)
-      return Promise.resolve()
+      return Promise.resolve(mismatch)
     }
     if (core.synced?.view === view && core.synced.key === opts.key) return pendingRequest
     core.synced = { view, key: opts.key }
@@ -198,68 +235,98 @@ export function createTargetViewController<S extends BindingStage>(
     core.pending = { key: opts.key, phase: 'acquiring', run: null }
     sequence += 1
     const seq = sequence
+    let resolveResponse!: (value: ViewRequestResult) => void
+    const response = new Promise<ViewRequestResult>((resolve) => {
+      resolveResponse = resolve
+    })
+    pendingRequest = response
     gate?.cancel()
     // Run.stop emits end synchronously: a callback may already have retried or detached.
-    if (seq !== sequence) return Promise.resolve()
+    if (seq !== sequence) {
+      resolveResponse(ABORTED)
+      return response
+    }
     const current = createRequestGate(
       () => seq === sequence && core.view === view,
       options.scene.signal,
     )
     gate = current
+    const abortResponse = (): void => resolveResponse(ABORTED)
+    current.signal.addEventListener('abort', abortResponse, { once: true })
+    const abort = (): void => {
+      if (!current.current()) return
+      core.pending = null
+      current.cancel()
+      publish()
+    }
+    requestOptions?.signal?.addEventListener('abort', abort, { once: true })
     requestError = null
-    publish()
-    if (!current.current()) return Promise.resolve()
+    replaced()
+    if (!current.current()) {
+      resolveResponse(ABORTED)
+      return response
+    }
     const acquisitions = createAcquisitions(stage)
     const reduced = reducedMotion(opts.reducedMotion)
-    let work: Promise<void>
+    let work: Promise<ViewRequestResult>
     if (view.sprite === null || reduced) {
       work = acquisitions
         .acquire(opts.key, opts.source, opts.pin, current.signal)
         .then(async (got) => {
-          if (!current.current()) return
+          if (!current.current()) return ABORTED
           if (isAborted(got)) {
             cancel(current)
-            return
+            return ABORTED
           }
           if (got instanceof Error) {
-            settle(current, seq, opts.key, got, reduced)
-            return
+            return settle(current, seq, opts.key, got, reduced)
           }
+          if (opts.pin) stage.pin(got.key)
           const entering = view.sprite === null
           const refused = view.show(got)
-          if (!current.current()) return
+          if (!current.current()) return ABORTED
           if (refused !== undefined) {
-            settle(current, seq, opts.key, refused, reduced)
-            return
+            return settle(current, seq, opts.key, refused, reduced)
           }
           if (!entering || opts.entrance !== 'uncrumple' || reduced) {
-            settle(current, seq, opts.key, null, reduced)
-            return
+            return settle(current, seq, opts.key, null, reduced)
           }
           view.draw('ball')
-          if (!current.current()) return
+          if (!current.current()) return ABORTED
           const run = view.play('ball', 'flat', { duration: opts.duration, signal: current.signal })
-          await track(current, seq, opts, run, 'entering')
+          return track(current, seq, opts, run, 'entering')
         })
     } else {
-      // Keep the call synchronous: onStart may need the browser's user gesture.
-      const pending = acquisitions.pending(opts.key)
-      const run =
-        pending === undefined
-          ? view.swapTo(opts.source, {
-              key: opts.key,
-              duration: opts.duration,
-              signal: current.signal,
-            })
-          : view.crumpleTo(pending, { duration: opts.duration, signal: current.signal })
+      // The registry owns source work; this View only owns its Run. Keep start synchronous.
+      const pending = acquisitions.acquire(opts.key, opts.source, opts.pin).then((got) => {
+        if (opts.pin && !isAborted(got) && !(got instanceof Error)) stage.pin(got.key)
+        return got
+      })
+      const run = view.crumpleTo(pending, { duration: opts.duration, signal: current.signal })
       work = track(current, seq, opts, run, 'swapping')
     }
-    if (seq === sequence) pendingRequest = work
-    return work
+    void work.then((result) => {
+      requestOptions?.signal?.removeEventListener('abort', abort)
+      current.signal.removeEventListener('abort', abortResponse)
+      resolveResponse(result)
+    })
+    return response
   }
   return {
     get view() {
       return core.view
+    },
+    get requested() {
+      return core.requested
+    },
+    get pending() {
+      return core.pending !== null
+    },
+    get error() {
+      return core.error
+    },
+    get frame() {
+      return core.view?.frame ?? null
     },
     get attachmentGeneration() {
       return attachment
@@ -268,6 +335,11 @@ export function createTargetViewController<S extends BindingStage>(
       return sequence
     },
     attach(next) {
+      if (disposed) return
+      if (next === null) {
+        detach()
+        return
+      }
       if (next === target && core.view !== null) return
       if (target !== next) release()
       target = next
@@ -279,6 +351,12 @@ export function createTargetViewController<S extends BindingStage>(
       if (options.scene.status === 'idle') void options.scene.ensure()
     },
     detach,
+    dispose() {
+      if (disposed) return
+      disposed = true
+      detach()
+      replacements.clear()
+    },
     subscribeReplacement(listener) {
       replacements.add(listener)
       return () => {
@@ -304,7 +382,7 @@ export function createTargetViewController<S extends BindingStage>(
     },
     play(from, to, opts) {
       const view = core.view
-      if (view === null) return null
+      if (view === null) return unavailable()
       const run = view.play(from, to, { duration: latest().duration, ...opts })
       publish()
       return run
@@ -318,10 +396,18 @@ export function createTargetViewController<S extends BindingStage>(
       publish()
     },
     draw(pose) {
-      if (core.view !== null) {
-        core.view.draw(pose)
-        publish()
-      }
+      if (core.view === null) return unavailable()
+      const before = errorRevision
+      core.view.draw(pose)
+      publish()
+      return before !== errorRevision ? (core.error ?? undefined) : undefined
+    },
+    set(patch) {
+      if (core.view === null) return unavailable()
+      // The controller accepts runtime descriptor keys; View validates their scope and values.
+      const result = core.view.set(patch as never)
+      publish()
+      return result
     },
     sync: publish,
     prepare() {
@@ -331,9 +417,17 @@ export function createTargetViewController<S extends BindingStage>(
       if (view === null || stage === null || !sprite) return () => {}
       const acquisitions = createAcquisitions(stage)
       if (acquisitions.pending(sprite.key) !== undefined) return () => {}
+      const preparedSequence = sequence
       let cancelled = false
       void stage.prepare(sprite.key, { signal: acquisitions.signal }).then((got) => {
-        if (cancelled || core.view !== view || isAborted(got)) return
+        if (
+          cancelled ||
+          core.view !== view ||
+          view.sprite !== sprite ||
+          sequence !== preparedSequence ||
+          isAborted(got)
+        )
+          return
         if (got instanceof Error) {
           report(got)
           return
@@ -353,13 +447,14 @@ export function createViewController(options: ViewControllerOptions<BlitStage>):
   const latest = (): ViewInputs => options.readLatest?.() ?? inputs
   const controller = createTargetViewController({
     ...options,
-    readLatest: latest,
     createView: (stage, target) => stage.view(target),
   })
   let canvas: HTMLCanvasElement | null = null
+  const update = controller.updateOptions
   return Object.assign(controller, {
     updateOptions(next: Partial<ViewInputs>) {
       inputs = { ...inputs, ...next }
+      update(next)
     },
     ref(element: HTMLCanvasElement | null) {
       if (element === canvas && (element === null || controller.view !== null)) return

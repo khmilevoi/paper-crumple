@@ -77,13 +77,13 @@ test('retry re-requests a rolled-back key the synced check would refuse forever 
   await probe.rerender({ options: { spriteKey: 'b', src: 'b.png' } })
   fake.views[0]?.settleRun(new SheetError('the target never arrived'))
   await flush()
-  const swaps = fake.calls.filter((c) => c.method === 'view.swapTo').length
+  const swaps = fake.calls.filter((c) => c.method === 'view.crumpleTo').length
   // `synced` is written BEFORE the swap and is never reset on failure, so without `retry` the
   // only escape is key-away-and-back, which plays a full fold to a sprite already shown.
   await probe.run(() => {
     probe.current.retry()
   })
-  expect(fake.calls.filter((c) => c.method === 'view.swapTo')).toHaveLength(swaps + 1)
+  expect(fake.calls.filter((c) => c.method === 'view.crumpleTo')).toHaveLength(swaps + 1)
   expect(probe.current.requested).toBe('b')
   await probe.unmount()
 })

@@ -474,9 +474,9 @@ test('a replayed flat entrance clears the error the swap it replaces left standi
   await probe.unmount()
 })
 
-test.each(['play', 'swapTo', 'crumpleTo'] as const)(
+test.each(['entrance', 'fresh acquisition', 'shared acquisition'] as const)(
   'retry from synchronous %s onStart leaves a pending handle that stops the successor',
-  async (method) => {
+  async (scenario) => {
     const fake = createFakeStage({ sprites: ['a'], add: () => new Promise(() => {}) })
     const real = installRealRuns(fake)
     const onSettle = vi.fn()
@@ -494,7 +494,7 @@ test.each(['play', 'swapTo', 'crumpleTo'] as const)(
       onStart,
     }
     const probe = await renderCrumple(options, { scene: null })
-    if (method === 'play') {
+    if (scenario === 'entrance') {
       await probe.rerender({
         scene: readyScene(fake.stage),
         options: { ...options, entrance: 'uncrumple' },
@@ -502,11 +502,11 @@ test.each(['play', 'swapTo', 'crumpleTo'] as const)(
     } else {
       await probe.rerender({ scene: readyScene(fake.stage) })
       onSettle.mockClear()
-      if (method === 'crumpleTo') {
+      if (scenario === 'shared acquisition') {
         void acquire(fake.stage, 'b', 'b.png', undefined, new AbortController().signal)
       }
       await probe.rerender({ options: { ...options, spriteKey: 'b', src: 'b.png' } })
-      expect(fake.views[0]?.view[method]).toHaveBeenCalled()
+      expect(fake.views[0]?.view.crumpleTo).toHaveBeenCalled()
     }
     expect(onStart).toHaveBeenCalledTimes(2)
     expect(real.controllers[0]?.live).toBe(true)

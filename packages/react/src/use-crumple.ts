@@ -156,10 +156,10 @@ export function useCrumple<S extends SpriteSource>(o: CrumpleOptions<S>): Crumpl
   }, [o.fit, o.tag, view, live])
 
   useEffect(() => live.controller?.prepare(), [scene.knobEpoch, live])
-  const play = useEvent(
-    (from: PoseRef, to: PoseRef, options?: PlayOptions) =>
-      live.controller?.play(from, to, options) ?? null,
-  )
+  const play = useEvent((from: PoseRef, to: PoseRef, options?: PlayOptions) => {
+    const result = live.controller?.play(from, to, options)
+    return result instanceof Error ? null : (result ?? null)
+  })
   const stop = useEvent((): void => {
     live.controller?.stop()
   })

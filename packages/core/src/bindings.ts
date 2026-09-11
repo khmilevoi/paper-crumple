@@ -21,6 +21,7 @@ export type {
   ViewController,
   ViewControllerOptions,
   ViewInputs,
+  ViewRequestResult,
   Entrance,
   ReducedMotion,
   CrumpleState,

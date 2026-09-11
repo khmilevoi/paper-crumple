@@ -6,6 +6,11 @@ import type {
   DirectTarget,
   HostedStage,
   HostedTarget,
+  Sprite,
+  SpriteSource,
+  Aborted,
+  PlayResult,
+  Run,
 } from '../index.js'
 import { createSceneController, createTargetViewController } from '../bindings.js'
 import type { TargetFor, TargetViewController } from '../bindings.js'
@@ -13,6 +18,20 @@ import type { TargetFor, TargetViewController } from '../bindings.js'
 declare const blit: BlitStage
 declare const direct: DirectStage
 declare const hosted: HostedStage
+
+it('the baseline controller keeps typed results and nullable attachment', () => {
+  type Controller = TargetViewController<BlitTarget>
+  expectTypeOf<ReturnType<Controller['request']>>().toEqualTypeOf<
+    Promise<Sprite | Error | Aborted>
+  >()
+  expectTypeOf<Parameters<Controller['request']>>().toEqualTypeOf<
+    [key: string, source: SpriteSource, options?: { pin?: true; signal?: AbortSignal }]
+  >()
+  expectTypeOf<Parameters<Controller['attach']>>().toEqualTypeOf<[target: BlitTarget | null]>()
+  expectTypeOf<ReturnType<Controller['play']>>().toEqualTypeOf<Run<PlayResult> | Error>()
+  expectTypeOf<ReturnType<Controller['draw']>>().toEqualTypeOf<Error | undefined>()
+  expectTypeOf<Controller['pending']>().toEqualTypeOf<boolean>()
+})
 
 it('generic targets retain each raw stage mode and callback inference', () => {
   expectTypeOf<TargetFor<BlitStage>>().toEqualTypeOf<BlitTarget>()

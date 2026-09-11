@@ -6,6 +6,7 @@ import { createFakeStage } from '../../../react/src/testing/fake-stage.js'
 import { makeReactiveCanvas, makeReactiveStage } from '../testing/reactive-stage.js'
 import { createSceneController } from './scene.js'
 import { createTargetViewController, createViewController } from './view.js'
+import type { ViewRequestResult } from './types.js'
 
 // Route the shared fake to the same real core module; source/dist Aborted symbols are nominal.
 vi.mock('@paper-crumple/core', () => import('../index.js'))
@@ -133,7 +134,7 @@ it('retry from onError supersedes the failed settlement without stranding pendin
   const scene = createSceneController(async () => fake.stage as unknown as BlitStage)
   await scene.ensure()
   const settled: string[] = []
-  let retry: Promise<void> | undefined
+  let retry: Promise<ViewRequestResult> | undefined
   const controller = createViewController({
     scene,
     source: '/a.png',

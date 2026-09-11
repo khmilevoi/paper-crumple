@@ -6,6 +6,7 @@ import type {
   HostedStage,
   StageEvent,
   Fit,
+  Knobs,
   PlayOptions,
   PlayResult,
   PoseRef,
@@ -192,19 +193,36 @@ export interface RenderValue {
   readonly shown: string | null
   readonly frameStyle: CrumpleFrameStyle | null
 }
-export interface TargetViewController<T> extends Omit<CrumpleMethods, 'ref' | 'retry'> {
+export type ViewRequestResult = Sprite | Error | Aborted
+export interface TargetViewController<T> {
   readonly view: View | null
+  readonly requested: string | null
+  readonly pending: boolean
+  readonly error: Error | null
+  readonly frame: ViewFrame | null
   readonly attachmentGeneration: number
   readonly requestGeneration: number
   /** Attach creates a View only. The adapter owns the initial request. */
-  attach(target: T): void
+  attach(target: T | null): void
   /** Releases the raw View, retaining inputs and stage-owned resources. */
   detach(): void
   subscribeReplacement(listener: () => void): () => void
   updateOptions(options: Partial<ViewInputs>): void
   read(): CrumpleSnapshot
-  request(): Promise<void>
-  retry(): Promise<void>
+  request(): Promise<ViewRequestResult>
+  request(
+    key: string,
+    source: SpriteSource,
+    options?: { pin?: true; signal?: AbortSignal },
+  ): Promise<ViewRequestResult>
+  retry(): Promise<ViewRequestResult>
+  play(from: PoseRef, to: PoseRef, options?: PlayOptions): Run<PlayResult> | Error
+  draw(pose: PoseRef): Error | undefined
+  set(patch: Knobs): Error | undefined
+  stop(): void
+  dispose(): void
+  refresh(): void
+  sync(): void
   prepare(): () => void
 }
 export interface ViewController extends TargetViewController<TargetFor<BlitStage>> {
