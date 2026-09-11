@@ -8,7 +8,8 @@ the guarantee is structural rather than a matter of discipline.
 (`cpu.sdf.*`, `cpu.contours.*`, `cpu.hull.*`, `cpu.ingest.1024`, …), the scheduler and knob paths
 over a 64-view grid with fake slots (`cpu.step.grid64`, `cpu.knobs.patch`), and the GL call
 counts the real slots issue per operation against a recording `WebGL2RenderingContext`
-(`calls.add.1024.hull`, `calls.step.grid64`, …). It runs the packages' sources under plain Node
+(`calls.add.1024.hull`, `calls.step.grid64`, …). Each result reports median (p50), p90, and p95
+single-operation latency. It runs the packages' sources under plain Node
 through a resolve hook (`loader.mjs`), writes JSON to `BENCH_OUT` (default `tools/bench/out/`,
 gitignored) and, with `--profile`, a `.cpuprofile` per scenario that `profile-summary.mjs` ranks.
 
