@@ -86,8 +86,7 @@ export const PACKAGES = /** @type {readonly PackageSpec[]} */ ([
     dir: 'reatom',
     name: '@paper-crumple/reatom',
     subpaths: ['.'],
-    // The scaffold entry is an empty module; tsdown emits no map until it has runtime code.
-    required: [...ALWAYS, 'package/dist/index.js', 'package/dist/index.d.ts'],
+    required: [...ALWAYS, ...entryTriple('index')],
   },
 ])
 

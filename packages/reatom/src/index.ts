@@ -1,2 +1,3 @@
 /** Reatom bindings for paper-crumple. */
-export {}
+export { reatomRun } from './run.js'
+export type { RunModel } from './run.js'

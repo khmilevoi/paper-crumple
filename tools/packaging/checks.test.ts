@@ -34,6 +34,7 @@ describe('checkEntries', () => {
       'package/LICENSE',
       'package/README.md',
       'package/dist/index.js',
+      'package/dist/index.js.map',
       'package/dist/index.d.ts',
     ]
     expect(checkEntries(reatom, names)).toEqual([])
@@ -43,6 +44,12 @@ describe('checkEntries', () => {
         names.filter((name) => !name.endsWith('.d.ts')),
       ),
     ).toEqual(['@paper-crumple/reatom: missing package/dist/index.d.ts'])
+    expect(
+      checkEntries(
+        reatom,
+        names.filter((name) => !name.endsWith('.js.map')),
+      ),
+    ).toEqual(['@paper-crumple/reatom: missing package/dist/index.js.map'])
   })
   it('requires the stable bindings entry in the published core tarball', () => {
     expect(
