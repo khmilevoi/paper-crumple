@@ -38,8 +38,7 @@ const entryTriple = (/** @type {string} */ base) => [
 ]
 
 /**
- * The four published packages. The fourth is `@paper-crumple/react`, the React binding; there is
- * still no bundle package, because amendment 23 cancelled it.
+ * The five published packages. There is no bundle package (amendment 23).
  */
 export const PACKAGES = /** @type {readonly PackageSpec[]} */ ([
   {
@@ -82,6 +81,13 @@ export const PACKAGES = /** @type {readonly PackageSpec[]} */ ([
     name: '@paper-crumple/react',
     subpaths: ['.', './testing'],
     required: [...ALWAYS, ...entryTriple('index'), ...entryTriple('testing')],
+  },
+  {
+    dir: 'reatom',
+    name: '@paper-crumple/reatom',
+    subpaths: ['.'],
+    // The scaffold entry is an empty module; tsdown emits no map until it has runtime code.
+    required: [...ALWAYS, 'package/dist/index.js', 'package/dist/index.d.ts'],
   },
 ])
 

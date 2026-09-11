@@ -26,6 +26,24 @@ const coreNames = [
 ]
 
 describe('checkEntries', () => {
+  it('checks the Reatom package entry and rejects missing declarations', () => {
+    const reatom = PACKAGES.find((p) => p.dir === 'reatom')!
+    expect(reatom).toBeDefined()
+    const names = [
+      'package/package.json',
+      'package/LICENSE',
+      'package/README.md',
+      'package/dist/index.js',
+      'package/dist/index.d.ts',
+    ]
+    expect(checkEntries(reatom, names)).toEqual([])
+    expect(
+      checkEntries(
+        reatom,
+        names.filter((name) => !name.endsWith('.d.ts')),
+      ),
+    ).toEqual(['@paper-crumple/reatom: missing package/dist/index.d.ts'])
+  })
   it('requires the stable bindings entry in the published core tarball', () => {
     expect(
       checkEntries(

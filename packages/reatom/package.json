@@ -1,0 +1,54 @@
+{
+  "name": "@paper-crumple/reatom",
+  "version": "0.0.0",
+  "description": "Reatom models for paper-crumple scenes and animations.",
+  "keywords": [
+    "reatom",
+    "webgl2",
+    "animation",
+    "paper-crumple"
+  ],
+  "license": "MIT",
+  "homepage": "https://github.com/paper-crumple/paper-crumple/tree/main/packages/core#readme",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/paper-crumple/paper-crumple.git",
+    "directory": "packages/reatom"
+  },
+  "type": "module",
+  "sideEffects": false,
+  "engines": {
+    "node": ">=22"
+  },
+  "files": [
+    "dist"
+  ],
+  "publishConfig": {
+    "access": "public"
+  },
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "default": "./dist/index.js"
+    }
+  },
+  "scripts": {
+    "build": "tsdown"
+  },
+  "dependencies": {},
+  "peerDependencies": {
+    "@paper-crumple/core": "workspace:^",
+    "@reatom/core": "^1001.3.0",
+    "typescript": ">=5.0"
+  },
+  "peerDependenciesMeta": {
+    "typescript": {
+      "optional": true
+    }
+  },
+  "devDependencies": {
+    "@paper-crumple/core": "workspace:*",
+    "@reatom/core": "1001.3.0",
+    "typescript": "catalog:"
+  }
+}

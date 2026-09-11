@@ -29,12 +29,12 @@ describe('the workspace glob', () => {
     expect(workspace).not.toMatch(/bundle/)
   })
 
-  it('holds exactly five packages: four published and one private tsconfig', () => {
+  it('holds exactly six packages: five published and one private tsconfig', () => {
     const dirs = readdirSync(join(root, 'packages'), { withFileTypes: true })
       .filter((entry) => entry.isDirectory())
       .map((entry) => entry.name)
       .sort()
-    expect(dirs).toEqual(['core', 'motion', 'paper', 'react', 'tsconfig'])
+    expect(dirs).toEqual(['core', 'motion', 'paper', 'react', 'reatom', 'tsconfig'])
   })
 
   it('has no bundle package, because amendment 23 cancelled it', () => {

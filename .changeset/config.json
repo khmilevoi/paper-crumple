@@ -2,7 +2,13 @@
   "changelog": "@changesets/cli/changelog",
   "commit": false,
   "fixed": [
-    ["@paper-crumple/core", "@paper-crumple/paper", "@paper-crumple/motion", "@paper-crumple/react"]
+    [
+      "@paper-crumple/core",
+      "@paper-crumple/paper",
+      "@paper-crumple/motion",
+      "@paper-crumple/react",
+      "@paper-crumple/reatom"
+    ]
   ],
   "linked": [],
   "access": "public",

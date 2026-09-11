@@ -20,13 +20,14 @@ interface TurboConfig {
 describe('Changesets', () => {
   const config = readJson<ChangesetsConfig>('.changeset/config.json')
 
-  it('fixes the four published packages to one version number', () => {
+  it('fixes the five published packages to one version number', () => {
     expect(config.fixed).toEqual([
       [
         '@paper-crumple/core',
         '@paper-crumple/paper',
         '@paper-crumple/motion',
         '@paper-crumple/react',
+        '@paper-crumple/reatom',
       ],
     ])
   })
