@@ -2,11 +2,13 @@ import { ABORTED, type Aborted } from '@paper-crumple/core'
 import {
   abortVar,
   action,
+  type AsyncExt,
   clearStack,
   context,
   isAbort,
   throwAbort,
   withAsyncData,
+  withCallHook,
   wrap,
 } from '@reatom/core'
 import { describe, expect, it } from 'vitest'
@@ -38,50 +40,106 @@ describe('Result conversion into native Reatom async state', () => {
   )
 
   it(
-    'matches native success, failure, cancellation, recovery and reset state',
+    'converts deferred Result fulfillment into native outcomes, events and status',
     isolated(async () => {
       const operation = action(
-        async (value: number | Error | Aborted) => toAsyncValue(value),
+        async (input: Promise<number | Error | Aborted>) => toAsyncValue(await wrap(input)),
         'result.operation',
-      ).extend(withAsyncData({ initState: 0 }))
-      const control = action(async (value: number | Error | Aborted) => {
+      ).extend(withAsyncData({ initState: 0, status: true }))
+      const control = action(async (input: Promise<number | Error | Aborted>) => {
+        const value = await wrap(input)
         if (value === ABORTED) return throwAbort()
         if (value instanceof Error) return Promise.reject(value)
         return value
-      }, 'result.control').extend(withAsyncData({ initState: 0 }))
+      }, 'result.control').extend(withAsyncData({ initState: 0, status: true }))
+      const unconverted = action(
+        async (input: Promise<number | Error | Aborted>) => await wrap(input),
+        'result.unconverted',
+      ).extend(withAsyncData({ initState: 0, status: true }))
       const snapshot = (target: typeof operation) => ({
         data: target.data(),
         error: target.error(),
         pending: target.pending(),
         ready: target.ready(),
+        status: target.status(),
       })
+      const observe = <T>(
+        target: AsyncExt<[Promise<number | Error | Aborted>], T, Error | undefined>,
+      ) => {
+        const rejected: unknown[] = []
+        const settled: unknown[] = []
+        target.onReject.extend(withCallHook(({ error }) => rejected.push(error)))
+        target.onSettle.extend(withCallHook((result) => settled.push(result)))
+        return { rejected, settled }
+      }
+      const actualEvents = observe(operation)
+      const nativeEvents = observe(control)
+      const rawEvents = observe(unconverted)
       const failure = new Error('failed')
       for (const value of [7, failure, ABORTED, 9] as const) {
-        const actual = operation(value)
-        const native = control(value)
+        let finish: (value: number | Error | Aborted) => void = () => {}
+        const input = new Promise<number | Error | Aborted>((resolve) => {
+          finish = resolve
+        })
+        const actual = operation(input)
+        const native = control(input)
+        const raw = unconverted(input)
+        const previousSettled = actualEvents.settled.length
         expect(snapshot(operation)).toEqual(snapshot(control))
         expect(operation.pending()).toBe(1)
         expect(operation.ready()).toBe(false)
-        const [actualResult, nativeResult] = await wrap(
-          Promise.all([
-            actual.then(
-              (value) => value,
-              (reason) => reason,
-            ),
-            native.then(
-              (value) => value,
-              (reason) => reason,
-            ),
-          ]),
+        expect(operation.status().isPending).toBe(true)
+        finish(value)
+        const [actualResult, nativeResult, rawResult] = await wrap(
+          Promise.allSettled([actual, native, raw]),
         )
+        expect(rawResult).toEqual({ status: 'fulfilled', value })
+        expect(unconverted.data()).toBe(value)
+        expect(unconverted.error()).toBeUndefined()
+        expect(unconverted.status().isFulfilled).toBe(true)
+        expect(rawEvents.rejected).toEqual([])
+        expect(rawEvents.settled.at(-1)).toEqual({ payload: value, params: [input] })
         if (value === ABORTED) {
-          expect(isAbort(actualResult)).toBe(true)
-          expect(isAbort(nativeResult)).toBe(true)
+          expect(actualResult.status).toBe('rejected')
+          expect(nativeResult.status).toBe('rejected')
+          if (actualResult.status === 'rejected' && nativeResult.status === 'rejected') {
+            expect(isAbort(actualResult.reason)).toBe(true)
+            expect(isAbort(nativeResult.reason)).toBe(true)
+            expect(actualEvents.settled.at(-1)).toEqual({
+              error: actualResult.reason,
+              params: [input],
+            })
+            expect(nativeEvents.settled.at(-1)).toEqual({
+              error: nativeResult.reason,
+              params: [input],
+            })
+          }
+          // Cancellation settles, but does not add another onReject event.
+          expect(actualEvents.rejected).toEqual([failure])
+          expect(nativeEvents.rejected).toEqual([failure])
           expect(operation.data()).toBe(7)
+        } else if (value === failure) {
+          expect(actualResult).toEqual({ status: 'rejected', reason: failure })
+          expect(nativeResult).toEqual({ status: 'rejected', reason: failure })
+          if (actualResult.status === 'rejected' && nativeResult.status === 'rejected') {
+            expect(actualResult.reason).toBe(failure)
+            expect(nativeResult.reason).toBe(failure)
+          }
+          expect(actualEvents.rejected).toEqual([failure])
+          expect(nativeEvents.rejected).toEqual([failure])
+          expect(actualEvents.settled.at(-1)).toEqual({ error: failure, params: [input] })
+          expect(nativeEvents.settled.at(-1)).toEqual({ error: failure, params: [input] })
+          expect(operation.status().isRejected).toBe(true)
         } else {
-          expect(actualResult).toBe(value)
-          expect(nativeResult).toBe(value)
+          expect(actualResult).toEqual({ status: 'fulfilled', value })
+          expect(nativeResult).toEqual({ status: 'fulfilled', value })
+          expect(actualEvents.settled.at(-1)).toEqual({ payload: value, params: [input] })
+          expect(nativeEvents.settled.at(-1)).toEqual({ payload: value, params: [input] })
+          expect(operation.status().isFulfilled).toBe(true)
         }
+        expect(actualEvents.settled).toHaveLength(previousSettled + 1)
+        expect(nativeEvents.settled).toHaveLength(previousSettled + 1)
+        expect(rawEvents.settled).toHaveLength(previousSettled + 1)
         if (value === failure) expect(operation.error()).toBe(failure)
         expect(snapshot(operation)).toEqual(snapshot(control))
         expect(operation.pending()).toBe(0)
@@ -110,9 +168,10 @@ describe('Result conversion into native Reatom async state', () => {
           expect(signal.aborted).toBe(false)
         }
       }, 'result.signal').extend(withAsyncData({ initState: 0 }))
-      const result = await wrap(operation().catch((reason) => reason))
+      const [result] = await wrap(Promise.allSettled([operation()]))
       expect(observed).toBeInstanceOf(AbortSignal)
-      expect(isAbort(result)).toBe(true)
+      expect(result.status).toBe('rejected')
+      if (result.status === 'rejected') expect(isAbort(result.reason)).toBe(true)
       expect(operation.error()).toBeUndefined()
     }),
   )
@@ -132,12 +191,13 @@ describe('Result conversion into native Reatom async state', () => {
           ),
         )
       }, 'result.callerAbort').extend(withAsyncData({ initState: 0 }))
-      const pending = operation().catch((reason) => reason)
+      const pending = Promise.allSettled([operation()])
       operation.abort()
       finish(7)
-      const result = await wrap(pending)
+      const [result] = await wrap(pending)
       expect(signal?.aborted).toBe(true)
-      expect(isAbort(result)).toBe(true)
+      expect(result.status).toBe('rejected')
+      if (result.status === 'rejected') expect(isAbort(result.reason)).toBe(true)
       expect(operation.data()).toBe(0)
       expect(operation.error()).toBeUndefined()
       expect(operation.pending()).toBe(0)
