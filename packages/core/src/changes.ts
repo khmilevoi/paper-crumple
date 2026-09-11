@@ -27,6 +27,7 @@ export function createChanges(): ChangePublisher {
   const revisions = Array.from({ length: areas.length }, () => 0)
   let dirty = 0
   let depth = 0
+  let generation = 0
 
   function mark(area: ChangeArea): void {
     const index = areas.indexOf(area)
@@ -35,6 +36,7 @@ export function createChanges(): ChangePublisher {
   }
 
   function flush(): void {
+    const startGeneration = generation
     while (dirty !== 0) {
       const pending = dirty
       dirty = 0
@@ -50,6 +52,7 @@ export function createChanges(): ChangePublisher {
           } catch (thrown) {
             rethrowFromMicrotask(thrown)
           }
+          if (generation !== startGeneration) return
         }
       }
     }
@@ -88,6 +91,7 @@ export function createChanges(): ChangePublisher {
   }
 
   function clear(): void {
+    generation += 1
     for (let index = 0; index < areas.length; index += 1) {
       listeners[index]?.clear()
       listeners[index] = undefined

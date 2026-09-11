@@ -148,3 +148,21 @@ it('flushes a pending batch in finally while preserving an operation exception',
   ).toThrow(SyntaxError)
   expect(delivered).toHaveBeenCalledTimes(1)
 })
+
+it('does not deliver a later pending area after clear and resubscription', () => {
+  const changes = createChanges()
+  const seen: string[] = []
+  changes.subscribe('content', () => {
+    seen.push('content')
+    changes.clear()
+    changes.subscribe('state', () => seen.push('state-new'))
+  })
+  changes.subscribe('state', () => seen.push('state-old'))
+
+  changes.batch(() => {
+    changes.emit('content')
+    changes.emit('state')
+  })
+
+  expect(seen).toEqual(['content'])
+})
