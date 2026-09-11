@@ -262,7 +262,11 @@ export function createTargetViewController<S extends BindingStage>(
     requestOptions?.signal?.addEventListener('abort', abort, { once: true })
     requestError = null
     replaced()
+    // The predecessor's synchronous onEnd may have aborted this signal before registration.
+    if (requestOptions?.signal?.aborted) abort()
     if (!current.current()) {
+      requestOptions?.signal?.removeEventListener('abort', abort)
+      current.signal.removeEventListener('abort', abortResponse)
       resolveResponse(ABORTED)
       return response
     }

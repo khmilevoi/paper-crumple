@@ -348,3 +348,51 @@ it('request cancellation returns ABORTED and never applies its acquired result',
   expect(controller.pending).toBe(false)
   scene.dispose()
 })
+
+it('predecessor onEnd cannot hide cancellation of the incoming request signal', async () => {
+  const stage = await makeReactiveStage()
+  const scene = createSceneController(async () => stage)
+  await scene.ensure()
+  const incoming = new AbortController()
+  const listen = vi.spyOn(incoming.signal, 'addEventListener')
+  const unlisten = vi.spyOn(incoming.signal, 'removeEventListener')
+  const add = vi.spyOn(stage, 'add')
+  const onStart = vi.fn()
+  let joined: ReturnType<ReturnType<typeof createViewController>['request']> | undefined
+  const controller = createViewController({
+    scene,
+    key: 'a',
+    source: '/a.png',
+    onChange() {},
+    onStart,
+    onEnd() {
+      if (controller.requested !== 'c') return
+      joined = controller.request('c', '/c.png')
+      incoming.abort()
+    },
+  })
+  controller.attach({ canvas: makeReactiveCanvas() })
+  await controller.request()
+  const predecessor = controller.request('b', '/b.png')
+  expect(controller.read().pending?.run).not.toBe(null)
+  const next = controller.request('c', '/c.png', { signal: incoming.signal })
+  try {
+    expect(incoming.signal.aborted).toBe(true)
+    expect(controller.pending).toBe(false)
+    expect(controller.requestGeneration).toBe(3)
+    expect(joined).toBe(next)
+    expect(await next).toBe(ABORTED)
+    expect(await predecessor).toBe(ABORTED)
+    expect(onStart).toHaveBeenCalledTimes(1)
+    expect(add.mock.calls.some(([source]) => source === '/c.png')).toBe(false)
+    expect(controller.view?.sprite?.key).toBe('a')
+    for (const [event, listener] of listen.mock.calls) {
+      if (event === 'abort') expect(unlisten).toHaveBeenCalledWith(event, listener)
+    }
+    expect(stage.disposed).toBe(false)
+  } finally {
+    controller.stop()
+    scene.dispose()
+    await Promise.all([predecessor, next])
+  }
+})
