@@ -1,5 +1,27 @@
 # Usage: `@paper-crumple/react`
 
+## Optional Reatom models
+
+`@paper-crumple/react` works without Reatom. For application logic outside React,
+the independent [`@paper-crumple/reatom` guide](../packages/reatom/README.md) shows
+`reatomScene`, `scene.view`, native async data/error and a wrapped event handler.
+Render a Blit model with `<Crumple value={picture.render()} />` inside a
+`reatomComponent`. No `PaperScene` or `useCrumple` is needed for this model: its stable
+ref owns attachment. Ordinary render updates preserve the raw View. Unmount detaches
+it and cancels its operation, while the explicit model owner later calls
+`scene.dispose()` to release shared resources. Remount creates a new raw View.
+
+Use Reatom's actual `reatomContext.Provider` when the application owns a custom
+frame, and create the model in that same frame before render. Independent frames
+need separate model instances. Existing React hooks retain their own lifecycle and
+must not manage the same View alongside the Reatom model.
+
+Read `picture.ready.error()` for initial attachment failures and `picture.swap.error()`
+for swap failures. Native result/error atoms permit separate components; UI-launched
+promises still need an explicit `.catch`, with native abort handled as cancellation.
+Desired source/options are distinct from shown/applied state, and frame progress is
+opt-in. See the guide for source pinning, aggregate reports and disposal details.
+
 Status: **written from the design, reconciled against the shipped package.** `@paper-crumple/react`
 is built, merged, and consumed by `examples/playground` — the first real consumer. Every hook,
 component, option and return type below was taken from

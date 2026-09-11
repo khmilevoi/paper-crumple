@@ -1,5 +1,14 @@
 # Usage: the `@paper-crumple` package family
 
+For implemented reactive application models, see
+[`@paper-crumple/reatom`](../packages/reatom/README.md). Its scene/resource/view/run
+models use Reatom v1001 with independent native data/error subscriptions. It requires
+core and Reatom peers, and does not import React, paper or motion. Supply your own
+stage factory; optionally render its Blit view with the independent React package's
+`<Crumple value={picture.render()} />`. The model owner disposes the scene explicitly.
+The guide covers desired versus applied state, initial/swap errors, cancellation,
+partial aggregate results, opt-in frame progress and borrowed-source pinning.
+
 Status: **derived from the design, not from an implementation.** Nothing here has been compiled or
 run — the packages do not exist yet. Every call, option and return type below is taken from
 `docs/superpowers/specs/2026-08-26-paper-crumple-packages-design.md`, with the section it comes from

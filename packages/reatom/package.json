@@ -35,7 +35,6 @@
   "scripts": {
     "build": "tsdown"
   },
-  "dependencies": {},
   "peerDependencies": {
     "@paper-crumple/core": "workspace:^",
     "@reatom/core": "^1001.3.0",
@@ -48,7 +47,13 @@
   },
   "devDependencies": {
     "@paper-crumple/core": "workspace:*",
+    "@paper-crumple/react": "workspace:*",
     "@reatom/core": "1001.3.0",
+    "@reatom/react": "1001.0.1",
+    "@types/react": "19.2.18",
+    "@types/react-dom": "19.2.7",
+    "react": "19.2.8",
+    "react-dom": "19.2.8",
     "typescript": "catalog:"
   }
 }

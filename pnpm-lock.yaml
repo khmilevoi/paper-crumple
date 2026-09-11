@@ -171,9 +171,27 @@ importers:
       '@paper-crumple/core':
         specifier: workspace:*
         version: link:../core
+      '@paper-crumple/react':
+        specifier: workspace:*
+        version: link:../react
       '@reatom/core':
         specifier: 1001.3.0
         version: 1001.3.0
+      '@reatom/react':
+        specifier: 1001.0.1
+        version: 1001.0.1(@reatom/core@1001.3.0)(react-dom@19.2.8(react@19.2.8))(react@19.2.8)
+      '@types/react':
+        specifier: 19.2.18
+        version: 19.2.18
+      '@types/react-dom':
+        specifier: 19.2.7
+        version: 19.2.7(@types/react@19.2.18)
+      react:
+        specifier: 19.2.8
+        version: 19.2.8
+      react-dom:
+        specifier: 19.2.8
+        version: 19.2.8(react@19.2.8)
       typescript:
         specifier: 'catalog:'
         version: 5.9.3
@@ -498,6 +516,13 @@ packages:
 
   '@reatom/core@1001.3.0':
     resolution: {integrity: sha512-M8pZM6sWIQLIJZVaMI//tqadppk5GHV1MMjDZ0q5g3yxF1sXQs5ftgAxnitxAlP/ViwYWKxyrQI/8q1A3DeaNA==}
+
+  '@reatom/react@1001.0.1':
+    resolution: {integrity: sha512-xU5diWeNIrVmJs5a5G6RTPOAz3OhPTtT7iqswPKJs5tGEahf2tCWo25JKEALv79pG0eqTGGJ5W/k7llweOhe3g==}
+    peerDependencies:
+      '@reatom/core': ^1001.3.0
+      react: '>=18.2.0'
+      react-dom: '>=18.2.0'
 
   '@rolldown/binding-android-arm-eabi@1.2.6':
     resolution: {integrity: sha512-b+jTcARdTiFLI6jB4a5XjTm0RWd6KcRfQj/I2356fxUZemiho9zQLxo0RtCuMDAyKcLo6cEltkgbQp6d1+sjjQ==}
@@ -2427,6 +2452,12 @@ snapshots:
       '@standard-schema/spec': 1.1.0
     optionalDependencies:
       idb-keyval: 6.3.0
+
+  '@reatom/react@1001.0.1(@reatom/core@1001.3.0)(react-dom@19.2.8(react@19.2.8))(react@19.2.8)':
+    dependencies:
+      '@reatom/core': 1001.3.0
+      react: 19.2.8
+      react-dom: 19.2.8(react@19.2.8)
 
   '@rolldown/binding-android-arm-eabi@1.2.6':
     optional: true
