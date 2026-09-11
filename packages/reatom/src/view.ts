@@ -211,7 +211,24 @@ function createView<S extends BindingStage>(
     if (seq !== requestSequence) return toAsyncValue<Sprite>(ABORTED)
     return request(next, options(), knobs(), seq)
   }, `${name}.swap`).extend(withAsyncData({ initState: null as Sprite | null }), reserveRequest)
+  let automaticAttachment: AbortController | undefined
+  const autoReady = bind(() => {
+    if (
+      disposed ||
+      scope.controller.disposed ||
+      target === null ||
+      automaticAttachment === attachment ||
+      (controller.view === null && scope.controller.stage !== null)
+    )
+      return
+    // Adoption and request publication share this notification. Reserve before ready()
+    // so its synchronous request publication cannot recursively start another action.
+    automaticAttachment = attachment
+    void ready().catch(() => {})
+  }, owner)
+  const offAutoReady = controller.subscribeReplacement(autoReady)
   let canvas: HTMLCanvasElement | null = null
+  let canvasTarget: TargetFor<S> | null = null
   const attach = bind((next: TargetFor<S> | null) => {
     if (disposed || scope.controller.disposed) return
     if (next === target && controller.view !== null) return
@@ -223,22 +240,35 @@ function createView<S extends BindingStage>(
     previous.abort()
     if (attachment !== current || disposed || scope.controller.disposed) return
     controller.attach(next)
-    if (attachment === current && next !== null) void ready().catch(() => {})
+    // A reentrant attach can return before the core adopts its queued View. The
+    // replacement signal above starts that target only once adoption succeeds.
+    if (attachment === current) autoReady()
   }, owner)
   const ref = bind((next: HTMLCanvasElement | null) => {
     if (next === canvas && controller.view !== null) return
     const settings = options()
-    attach(
-      next === null
-        ? null
-        : ({ canvas: next, size: 'managed', fit: settings.fit, tag: settings.tag } as TargetFor<S>),
+    if (next === null) canvasTarget = null
+    else if (
+      canvasTarget === null ||
+      !('canvas' in canvasTarget) ||
+      canvasTarget.canvas !== next ||
+      canvasTarget.fit !== settings.fit ||
+      canvasTarget.tag !== settings.tag
     )
+      canvasTarget = {
+        canvas: next,
+        size: 'managed',
+        fit: settings.fit,
+        tag: settings.tag,
+      } as TargetFor<S>
+    attach(canvasTarget)
   }, owner)
   const dispose = action(() => {
     assertOwner()
     if (disposed) return
     disposed = true
     target = null
+    offAutoReady()
     attachment.abort()
     controller.dispose()
   }, `${name}.dispose`)
