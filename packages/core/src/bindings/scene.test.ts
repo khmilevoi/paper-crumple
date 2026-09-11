@@ -1,6 +1,7 @@
 import { expect, it, vi } from 'vitest'
 import { ABORTED, isAborted } from '../index.js'
-import type { StageEvent } from '../index.js'
+import type { BlitStage, StageEvent } from '../index.js'
+import { createChanges } from '../changes.js'
 import { createStage } from '../stage.js'
 import { fakeSheet, fakeMotion, stageEnv } from '../testing/fake-slots.js'
 import { makeReactiveCanvas, makeReactiveStage } from '../testing/reactive-stage.js'
@@ -158,6 +159,56 @@ it('context loss exposes the actual error, invalidates ensure, and retains owner
   expect(states).toEqual(['failed'])
   scene.dispose()
   expect(stage.disposed).toBe(true)
+})
+
+it('a refusal reentered from the loss notification cannot replace its actual raw cause', async () => {
+  let lose = () => {}
+  const stage = await createStage(
+    { sheet: fakeSheet(), motion: fakeMotion(), maxSize: 384, present: 'blit' },
+    stageEnv({
+      onContextLost: (fn) => {
+        lose = fn
+        return () => {}
+      },
+    }),
+  )
+  if (stage instanceof Error || isAborted(stage)) return expect.fail('stage setup refused')
+
+  // Exercise the early lifecycle ordering used by React's stage double. Keep the real raw
+  // stage's loss event/error sequence, commands and refusal payloads underneath this source.
+  const changes = createChanges()
+  const bindingStage = Object.create(stage) as BlitStage
+  Object.defineProperty(bindingStage, 'changes', { value: changes })
+  const offEarly = stage.on('lost', () => changes.emit('lifecycle'))
+  const offRaw = stage.changes.subscribe('lifecycle', () => changes.emit('lifecycle'))
+  const scene = createSceneController(async () => bindingStage)
+  const errors: StageEvent<'error'>[] = []
+  scene.onError((event) => errors.push(event))
+  await scene.ensure()
+  const terminal: Array<Error | null> = []
+  let refusal: ReturnType<typeof stage.prepare> | undefined
+  let requested = false
+  scene.subscribe(() => {
+    if (scene.status !== 'failed' || !scene.lost) return
+    terminal.push(scene.error)
+    if (requested) return
+    requested = true
+    refusal = stage.prepare('missing')
+  })
+  lose()
+  const refused = await refusal
+  expect(refused).toBeInstanceOf(Error)
+  const actualLoss = errors.find((event) => !event.observed)?.error
+  expect(actualLoss?.name).toBe('GlError')
+  expect(scene.error).toBe(actualLoss)
+  expect(await scene.ensure()).toBe(actualLoss)
+  expect(terminal).toEqual([actualLoss])
+  expect(errors.filter((event) => event.observed)).toEqual([
+    { error: refused, observed: true, view: null },
+  ])
+  offEarly()
+  offRaw()
+  scene.dispose()
 })
 
 it.each(['return', 'reject'] as const)(

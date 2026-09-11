@@ -61,12 +61,12 @@ export function createSceneController<S extends BindingStage>(
       return
     }
     if (!owned?.lost) return
-    // Lifecycle notification can precede the loss error; replace its fallback once only.
-    lossCause ??= cause ?? null
-    const next =
-      lossCause ??
-      error ??
-      new GlError('the WebGL2 context was lost; dispose this stage and build a new one')
+    // Loss emits its own raw error in the same stack. An early lifecycle notification may
+    // invalidate live access, but must not call subscribers or abort listeners before that cause.
+    live = null
+    if (cause === undefined) return
+    lossCause ??= cause
+    const next = lossCause
     const changed = status !== 'failed' || error !== next
     status = 'failed'
     lost = true
@@ -84,6 +84,7 @@ export function createSceneController<S extends BindingStage>(
     if (status === 'disposed') return Promise.resolve(ABORTED)
     if (status === 'failed') return Promise.resolve(error ?? ABORTED)
     if (live !== null) return Promise.resolve(live)
+    if (owned !== null) return Promise.resolve(ABORTED)
     status = 'building'
     // Install the promise before publishing: a synchronous subscriber can call ensure again.
     pending = Promise.resolve()
@@ -117,12 +118,18 @@ export function createSceneController<S extends BindingStage>(
         offs.push(built.changes.subscribe('lifecycle', () => invalidate()))
         offs.push(
           built.on('error', (event) => {
-            invalidate(built.lost ? event.error : undefined)
+            // Refusals are observed returns, not the stage's orphaned context-loss cause.
+            invalidate(
+              built.lost && !event.observed && event.view === null ? event.error : undefined,
+            )
             dispatch(event)
           }),
         )
         if (built.lost) {
-          invalidate()
+          // This loss happened before subscription; there is no future cause event to wait for.
+          invalidate(
+            new GlError('the WebGL2 context was lost; dispose this stage and build a new one'),
+          )
           return error ?? ABORTED
         }
         live = built
