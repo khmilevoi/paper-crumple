@@ -16,6 +16,97 @@ import { asBitmap, fakeBitmap } from '../../core/src/testing/fake-source.js'
 import { reatomScene } from './scene.js'
 import { deferred, isolated, sceneFixture } from './testing.js'
 
+it(
+  'blocks source claims during replacement and restores the old descriptor after failure',
+  isolated(async () => {
+    const { stage } = await wrap(sceneFixture())
+    const scene = reatomScene({ name: 'replacement.claim', create: async () => stage })
+    const oldSource = async () => asBitmap(fakeBitmap({ width: 40 }))
+    const resource = scene.resource({ name: 'resource', key: 'shared', source: oldSource })
+    await wrap(resource.prepare())
+    const entered = deferred<void>()
+    const image = deferred<ImageBitmap>()
+    const newSource = () => {
+      entered.resolve()
+      return image.promise
+    }
+    const replacement = resource.replace(newSource).catch((error: unknown) => error)
+    await wrap(entered.promise)
+    resource.source.set(() => oldSource)
+    const oldPrepare = resource.prepare().catch((error: unknown) => error)
+    image.reject(new Error('replacement failed'))
+    expect(await wrap(replacement)).toBeInstanceOf(Error)
+    expect(await wrap(oldPrepare)).toBeInstanceOf(Error)
+    expect(resource.prepare.error()?.message).toContain('replacement')
+    expect(scene.resource({ name: 'alias', key: 'shared', source: oldSource })).toBe(resource)
+    const restored = await wrap(resource.prepare())
+    expect(restored.rect.w).toBe(40)
+    expect(() => scene.resource({ name: 'invalid', key: 'shared', source: newSource })).toThrow(
+      'replace',
+    )
+    scene.dispose()
+  }),
+)
+
+it(
+  'a prepare started before explicit replacement cannot register the replaced source as its own',
+  isolated(async () => {
+    const { stage } = await wrap(sceneFixture())
+    const scene = reatomScene({ name: 'replacement.settlement', create: async () => stage })
+    const a = async () => asBitmap(fakeBitmap({ width: 40 }))
+    const b = async () => asBitmap(fakeBitmap({ width: 80 }))
+    const resource = scene.resource({ name: 'resource', key: 'shared', source: a })
+    await wrap(resource.prepare())
+    const old = resource.prepare().catch((error: unknown) => error)
+    const replacement = await wrap(resource.replace(b))
+    expect(isAbort(await wrap(old))).toBe(true)
+    expect(resource.prepare.error()).toBeUndefined()
+    expect(replacement.rect.w).toBe(80)
+    expect(scene.resource({ name: 'alias', key: 'shared', source: b })).toBe(resource)
+    expect(() => scene.resource({ name: 'invalid', key: 'shared', source: a })).toThrow('replace')
+    expect(await wrap(resource.prepare())).toBe(replacement)
+    scene.dispose()
+  }),
+)
+
+it(
+  'refuses a changed desired source while a view owns the original pending acquisition',
+  isolated(async () => {
+    const { stage } = await wrap(sceneFixture())
+    const entered = deferred<void>()
+    const image = deferred<ImageBitmap>()
+    const original = vi.fn(() => {
+      entered.resolve()
+      return image.promise
+    })
+    const changed = vi.fn(async () => asBitmap(fakeBitmap({ width: 80 })))
+    const scene = reatomScene({ name: 'pending.source-identity', create: async () => stage })
+    const resource = scene.resource({ name: 'resource', key: 'shared', source: original })
+    resource.source.set(() => changed)
+    const a = scene.view({ name: 'a', key: 'shared', source: original })
+    a.ref(makeReactiveCanvas())
+    const ready = a.ready()
+    await wrap(entered.promise)
+    const prepare = resource.prepare().catch((error: unknown) => error)
+    for (let i = 0; i < 10; i += 1) await wrap(Promise.resolve())
+    image.resolve(asBitmap(fakeBitmap({ width: 40 })))
+    const sprite = await wrap(ready)
+    expect(await wrap(prepare)).toBeInstanceOf(Error)
+    expect(resource.prepare.error()?.message).toContain('replace')
+    expect(scene.resource({ name: 'alias', key: 'shared', source: original })).toBe(resource)
+    const b = scene.view({ name: 'b', key: 'shared', source: changed })
+    b.ref(makeReactiveCanvas())
+    await wrap(expect(b.ready()).rejects.toThrow('replace'))
+    expect(b.sprite()).toBeNull()
+    expect(sprite.rect.w).toBe(40)
+    resource.source.set(() => original)
+    expect(await wrap(resource.prepare())).toBe(sprite)
+    expect(original).toHaveBeenCalledTimes(1)
+    expect(changed).not.toHaveBeenCalled()
+    scene.dispose()
+  }),
+)
+
 it.each(['initial', 'replacement', 'evicted'] as const)(
   'retained %s suppliers read and resume in the model owner context',
   async (phase) =>

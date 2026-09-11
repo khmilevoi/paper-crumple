@@ -19,14 +19,25 @@ import type { Ready, ResourceOptions, ResourceReplace } from './types.js'
 
 const emptyKnobs: Readonly<Knobs> = Object.freeze({})
 
+interface SourceReplacement {
+  current(): boolean
+  settle(source?: SpriteSource): void
+}
+
 /** Scene-owned model allocation; the public entry point is scene.resource's identity cache. */
 export function createResource<S extends BindingStage>(
   options: ResourceOptions<SpriteSource>,
-  scope: { controller: SceneController<S>; ready: Ready<S>; owner: Frame; assertOwner(): void },
+  scope: {
+    controller: SceneController<S>
+    ready: Ready<S>
+    owner: Frame
+    assertOwner(): void
+    claimSource(key: string, source: SpriteSource): AbortSignal
+    beginReplacement(key: string): SourceReplacement
+  },
 ) {
   const { name, key } = options
   const { controller, owner, assertOwner } = scope
-  let registeredSource = options.source
   let pin = options.pin
   const source = atom<SpriteSource>(() => options.source, `${name}.source`)
   const knobs = atom<Knobs>({}, `${name}.knobs`)
@@ -75,25 +86,30 @@ export function createResource<S extends BindingStage>(
     assertOwner()
     const desiredSource = source()
     const desiredKnobs = knobs()
+    const sourceSignal = scope.claimSource(key, desiredSource)
     const signal = abortVar.require().signal
     const release = cancelWithOwner(controller.signal)
+    const releaseSource = cancelWithOwner(sourceSignal)
     try {
       const stage = await wrap(scope.ready())
       if (controller.stage !== stage) return toAsyncValue<Sprite>(ABORTED)
-      if (stage.get(key) !== undefined && !Object.is(desiredSource, registeredSource)) {
-        return toAsyncValue<Sprite>(
-          new Error(`resource '${key}' changed source; use replace() explicitly`),
-        )
-      }
       const sprite = toAsyncValue<Sprite>(
         await wrap(createAcquisitions(stage).acquire(key, coreSource(desiredSource), pin, signal)),
       )
+      if (
+        controller.stage !== stage ||
+        signal.aborted ||
+        sourceSignal.aborted ||
+        stage.get(key) !== sprite
+      )
+        return toAsyncValue<Sprite>(ABORTED)
       // Dynamic descriptor keys are validated by core's registry, as in the core view binding.
       toAsyncValue(sprite.set(desiredKnobs as never))
-      registeredSource = desiredSource
+      if (signal.aborted || sourceSignal.aborted) return toAsyncValue<Sprite>(ABORTED)
       return sprite
     } finally {
       release()
+      releaseSource()
     }
   }, `${name}.prepare`).extend(withAsyncData({ initState: null as Sprite | null }))
   const replace: ResourceReplace = action(
@@ -102,20 +118,34 @@ export function createResource<S extends BindingStage>(
       const desiredKnobs = knobs()
       const signal = abortVar.require().signal
       const release = cancelWithOwner(controller.signal)
+      let replacement: SourceReplacement | undefined
       try {
         source.set(() => next)
         const stage = await wrap(scope.ready())
         if (controller.stage !== stage) return toAsyncValue<Sprite>(ABORTED)
+        // Missing-key replacement keeps core's refusal without cancelling a pending initial add.
+        if (stage.get(key) !== undefined) replacement = scope.beginReplacement(key)
+        if (signal.aborted || (replacement !== undefined && !replacement.current()))
+          return toAsyncValue<Sprite>(ABORTED)
         if (nextOptions?.pin) stage.pin(key)
         const sprite = toAsyncValue<Sprite>(
           await wrap(stage.replace(key, coreSource(next), { signal })),
         )
-        registeredSource = next
+        if (
+          controller.stage !== stage ||
+          signal.aborted ||
+          stage.get(key) !== sprite ||
+          !replacement?.current()
+        )
+          return toAsyncValue<Sprite>(ABORTED)
+        replacement.settle(next)
         pin = nextOptions?.pin ?? pin
         toAsyncValue(sprite.set(desiredKnobs as never))
+        if (signal.aborted) return toAsyncValue<Sprite>(ABORTED)
         return sprite
       } finally {
         release()
+        replacement?.settle()
       }
     },
     `${name}.replace`,
@@ -125,7 +155,6 @@ export function createResource<S extends BindingStage>(
     return toAsyncValue<void>(controller.stage?.remove(key, removeOptions))
   }, `${name}.remove`)
   return {
-    matchesSource: (next: SpriteSource) => Object.is(next, registeredSource),
     model: {
       key,
       source,

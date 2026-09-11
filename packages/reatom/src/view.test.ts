@@ -9,6 +9,49 @@ import { asBitmap, fakeBitmap } from '../../core/src/testing/fake-source.js'
 
 afterEach(() => vi.unstubAllGlobals())
 
+it.each(['manual detach', 'raw disposal'] as const)(
+  'reuses the stable canvas ref after %s',
+  async (operation) =>
+    isolated(async () => {
+      const { stage } = await wrap(sceneFixture())
+      const scene = reatomScene({ name: 'view.ref-cache', create: async () => stage })
+      const picture = scene.view({ name: 'picture', source: '/a.png' })
+      const canvas = makeReactiveCanvas()
+      const ref = picture.ref
+      ref(canvas)
+      const sprite = await wrap(picture.ready())
+      const original = picture.raw()!
+      if (operation === 'manual detach') picture.attach(null)
+      else original.dispose()
+      expect(picture.raw()).toBeNull()
+      ref(canvas)
+      expect(picture.raw()).not.toBeNull()
+      expect(picture.raw()).not.toBe(original)
+      expect(await wrap(picture.ready())).toBe(sprite)
+      expect(picture.ref).toBe(ref)
+      scene.dispose()
+    })(),
+)
+
+it(
+  'reattaches the identical typed target after its raw View is disposed',
+  isolated(async () => {
+    const { stage } = await wrap(sceneFixture())
+    const scene = reatomScene({ name: 'view.target-cache', create: async () => stage })
+    const picture = scene.view({ name: 'picture', source: '/a.png' })
+    const target = { canvas: makeReactiveCanvas() }
+    picture.attach(target)
+    const sprite = await wrap(picture.ready())
+    const original = picture.raw()!
+    original.dispose()
+    picture.attach(target)
+    expect(picture.raw()).not.toBeNull()
+    expect(picture.raw()).not.toBe(original)
+    expect(await wrap(picture.ready())).toBe(sprite)
+    scene.dispose()
+  }),
+)
+
 it(
   'preserves a reattachment issued by the outgoing initial Run end callback',
   isolated(async () => {

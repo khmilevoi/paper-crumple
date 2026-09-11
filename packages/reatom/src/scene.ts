@@ -125,19 +125,41 @@ export function reatomScene<S extends BindingStage>({ name, create }: SceneOptio
     `${name}.lastEvent`,
   )
   const resources = new Map<string, ReturnType<typeof createResource<S>>>()
-  const viewSources = new Map<string, SpriteSource>()
-  const claimViewSource = (key: string, source: SpriteSource): void => {
-    const resource = resources.get(key)
-    const previous = viewSources.get(key)
-    if (
-      resource !== undefined
-        ? !resource.matchesSource(source)
-        : previous !== undefined && !Object.is(previous, source)
-    )
+  const sourceClaims = new Map<
+    string,
+    { source: SpriteSource; controller: AbortController; replacing: boolean }
+  >()
+  const claimSource = (key: string, source: SpriteSource): AbortSignal => {
+    const previous = sourceClaims.get(key)
+    if (previous?.replacing)
+      return toAsyncValue<AbortSignal>(
+        new Error(
+          `resource '${key}' has a source replacement in progress; await replace() before acquiring it`,
+        ),
+      )
+    if (previous !== undefined && !Object.is(previous.source, source))
       toAsyncValue(
         new Error(`resource '${key}' already exists with another source; use replace() explicitly`),
       )
-    viewSources.set(key, source)
+    const claim = previous ?? { source, controller: new AbortController(), replacing: false }
+    sourceClaims.set(key, claim)
+    return claim.controller.signal
+  }
+  const beginReplacement = (key: string) => {
+    const previous = sourceClaims.get(key)!
+    const claim = { source: previous.source, controller: new AbortController(), replacing: true }
+    sourceClaims.set(key, claim)
+    // Only consumers are cancelled: core still owns any shared acquisition already in flight.
+    previous.controller.abort()
+    const current = () => sourceClaims.get(key) === claim && claim.replacing
+    return {
+      current,
+      settle(source?: SpriteSource) {
+        if (!current()) return
+        claim.source = source ?? previous.source
+        claim.replacing = false
+      },
+    }
   }
   let viewKey = 0
   const view = <Source extends SpriteSource>(options: ViewOptions<S, Source>) => {
@@ -147,24 +169,25 @@ export function reatomScene<S extends BindingStage>({ name, create }: SceneOptio
       ready,
       owner,
       assertOwner,
-      claimSource: claimViewSource,
+      claimSource,
       mintKey: () => `${name}.view:${++viewKey}`,
     })
   }
   const resource = <Source extends SpriteSource>(options: ResourceOptions<Source>) => {
     assertOwner()
-    claimViewSource(options.key, options.source)
+    claimSource(options.key, options.source)
     const found = resources.get(options.key)
     if (found !== undefined) {
-      if (!found.matchesSource(options.source))
-        toAsyncValue(
-          new Error(
-            `resource '${options.key}' already exists with another source; use replace() explicitly`,
-          ),
-        )
       return found.model
     }
-    const entry = createResource(options, { controller, ready, owner, assertOwner })
+    const entry = createResource(options, {
+      controller,
+      ready,
+      owner,
+      assertOwner,
+      claimSource,
+      beginReplacement,
+    })
     resources.set(options.key, entry)
     return entry.model
   }

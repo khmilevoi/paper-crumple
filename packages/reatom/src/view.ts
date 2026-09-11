@@ -49,7 +49,7 @@ function createView<S extends BindingStage>(
     owner: Frame
     assertOwner(): void
     mintKey(): string
-    claimSource(key: string, source: SpriteSource): void
+    claimSource(key: string, source: SpriteSource): AbortSignal
   },
 ) {
   const { name, source: initialSource, createView: factory, ...initialOptions } = config
@@ -157,12 +157,13 @@ function createView<S extends BindingStage>(
       return toAsyncValue<Sprite>(ABORTED)
     const releaseScene = cancelWithOwner(scope.controller.signal)
     const releaseAttachment = cancelWithOwner(current.signal)
+    let releaseSource = () => {}
     try {
       if (scope.controller.stage === null) await wrap(scope.ready())
       if (seq !== requestSequence || current !== attachment || signal.aborted)
         return toAsyncValue<Sprite>(ABORTED)
       const inputs = bindInputs(next, settings)
-      scope.claimSource(inputs.key, next)
+      releaseSource = cancelWithOwner(scope.claimSource(inputs.key, next))
       // Scene validation also recognizes a resource model's explicit replace().
       sourcePairs.set(inputs.key, inputs.source)
       controller.updateOptions(inputs)
@@ -178,6 +179,7 @@ function createView<S extends BindingStage>(
     } finally {
       releaseScene()
       releaseAttachment()
+      releaseSource()
       if (activeRequest === operation) activeRequest = undefined
     }
   }
@@ -207,22 +209,22 @@ function createView<S extends BindingStage>(
     if (seq !== requestSequence) return toAsyncValue<Sprite>(ABORTED)
     return request(next, options(), knobs(), seq)
   }, `${name}.swap`).extend(withAsyncData({ initState: null as Sprite | null }), reserveRequest)
+  let canvas: HTMLCanvasElement | null = null
   const attach = bind((next: TargetFor<S> | null) => {
     if (disposed || scope.controller.disposed) return
-    if (next === target) return
+    if (next === target && controller.view !== null) return
     const previous = attachment
     attachment = new AbortController()
     const current = attachment
     target = next
+    canvas = next !== null && 'canvas' in next ? next.canvas : null
     previous.abort()
     if (attachment !== current || disposed || scope.controller.disposed) return
     controller.attach(next)
     if (attachment === current && next !== null) void ready().catch(() => {})
   }, owner)
-  let canvas: HTMLCanvasElement | null = null
   const ref = bind((next: HTMLCanvasElement | null) => {
-    if (next === canvas) return
-    canvas = next
+    if (next === canvas && controller.view !== null) return
     const settings = options()
     attach(
       next === null
