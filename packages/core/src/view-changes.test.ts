@@ -5,6 +5,132 @@ import { createStage } from './stage.js'
 import { fakeSheet, fakeMotion, stageEnv } from './testing/fake-slots.js'
 import { createFakeTimers } from './testing/fake-timers.js'
 
+it('controller replacement cannot publish terminal view state when the next play is refused', async () => {
+  const stage = await makeReactiveStage()
+  const view = stage.view({ canvas: makeReactiveCanvas() })
+  if (view instanceof Error) return expect.fail('view refused')
+  await view.play(0, 0).done // Install the one-pose empty-view controller.
+  const sprite = await stage.add('/a.png', { key: 'a' })
+  if (sprite instanceof Error || isAborted(sprite)) return expect.fail('add refused')
+  view.show(sprite)
+  let cached = view.state
+  const seen: string[] = []
+  view.changes.subscribe('state', () => {
+    cached = view.state
+    seen.push(view.state)
+  })
+  const before = view.changes.revision('state')
+  expect(await view.play(99, 0).done).toBeInstanceOf(Error)
+  expect(cached).toBe('idle')
+  expect(seen).not.toContain('disposed')
+  expect(view.changes.revision('state')).toBe(before)
+  expect(stage.views).toContain(view)
+  stage.dispose()
+})
+
+it.each(['timer', 'run.stop', 'abort'] as const)(
+  '%s settlement delivers legacy end before an idle observer disposes the view',
+  async (operation) => {
+    const timers = createFakeTimers()
+    const stage = await createStage(
+      { sheet: fakeSheet(), motion: fakeMotion(), maxSize: 384 },
+      stageEnv({ timers }),
+    )
+    if (stage instanceof Error || isAborted(stage)) return expect.fail('stage refused')
+    const sprite = await stage.add('/a.png', { key: 'a' })
+    const view = stage.view({ canvas: makeReactiveCanvas() })
+    if (sprite instanceof Error || isAborted(sprite) || view instanceof Error)
+      return expect.fail('setup refused')
+    view.show(sprite)
+    const gate = new AbortController()
+    const run = view.play(0, 5, { duration: 100, signal: gate.signal })
+    const events: string[] = []
+    view.on('end', () => events.push('end'))
+    view.changes.subscribe('state', () => {
+      if (view.state === 'idle') {
+        events.push('idle')
+        view.dispose()
+      }
+    })
+    if (operation === 'timer') timers.advance(1000)
+    else if (operation === 'run.stop') run.stop()
+    else gate.abort()
+    await run.done
+    expect(events).toEqual(['end', 'idle'])
+    expect(timers.pending).toBe(0)
+    stage.dispose()
+  },
+)
+
+it.each(['stop', 'dispose'] as const)(
+  'a ball observer can %s without a timer being installed afterward',
+  async (operation) => {
+    const timers = createFakeTimers()
+    const stage = await createStage(
+      { sheet: fakeSheet(), motion: fakeMotion(), maxSize: 384 },
+      stageEnv({ timers }),
+    )
+    if (stage instanceof Error || isAborted(stage)) return expect.fail('stage refused')
+    const sprite = await stage.add('/a.png', { key: 'a' })
+    const view = stage.view({ canvas: makeReactiveCanvas() })
+    if (sprite instanceof Error || isAborted(sprite) || view instanceof Error)
+      return expect.fail('setup refused')
+    view.show(sprite)
+    let parked = false
+    view.changes.subscribe('state', () => {
+      if (view.state === 'crumpling.ball') {
+        parked = true
+        view[operation]()
+      }
+    })
+    const run = view.crumpleTo(new Promise(() => {}), { duration: 100 })
+    for (let elapsed = 0; !parked && elapsed < 1000; elapsed += 1) timers.advance(1)
+    expect(parked).toBe(true)
+    expect(timers.pending).toBe(0)
+    expect(isAborted(await run.done)).toBe(true)
+    stage.dispose()
+  },
+)
+
+it.each(['draw', 'refresh', 'step'] as const)(
+  'dirty %s completes pixels and legacy delivery before resource callbacks',
+  async (operation) => {
+    const timers = createFakeTimers()
+    const motion = fakeMotion()
+    const stage = await createStage(
+      { sheet: fakeSheet(), motion, maxSize: 384 },
+      stageEnv({ timers }),
+    )
+    if (stage instanceof Error || isAborted(stage)) return expect.fail('stage refused')
+    const sprite = await stage.add('/a.png', { key: 'a' })
+    const view = stage.view({ canvas: makeReactiveCanvas() })
+    if (sprite instanceof Error || isAborted(sprite) || view instanceof Error)
+      return expect.fail('setup refused')
+    view.show(sprite)
+    view.play(0, 5, { duration: 500 })
+    const drawn = motion.calls.draw.length
+    let steps = 0
+    view.on('step', () => {
+      steps += 1
+    })
+    sprite.set({ sheetEdge: 0.8 } as never)
+    const seen: unknown[] = []
+    const off = sprite.changes.subscribe('resources', () => {
+      off()
+      seen.push([motion.calls.draw.length > drawn, steps])
+      view.dispose()
+    })
+    expect(() => {
+      if (operation === 'draw') view.draw(2)
+      else if (operation === 'refresh') view.refresh()
+      else timers.advance(200)
+    }).not.toThrow()
+    expect(seen).toEqual([[true, operation === 'step' ? 1 : 0]])
+    expect(view.state).toBe('disposed')
+    stage.dispose()
+  },
+)
+
 it('run state observes a live handle, parked and recovery transitions without per-step bumps', async () => {
   const timers = createFakeTimers()
   const stage = await createStage(

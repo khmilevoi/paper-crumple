@@ -1,5 +1,11 @@
-import { ABORTED, GlError, SheetError, ViewError } from '@paper-crumple/core'
-import { createChangeBatch, createChanges } from '../../../core/src/changes.js'
+import { ABORTED, GlError, KnobError, SheetError, ViewError } from '@paper-crumple/core'
+import {
+  createChangeBatch,
+  createChanges,
+  type InternalChangePublisher,
+} from '../../../core/src/changes.js'
+import { createKnobRegistry } from '../../../core/src/knob-registry.js'
+import { INVALIDATION_ORDER, SPRITE_SCOPE, VIEW_SCOPE } from '../../../core/src/invalidation.js'
 import type {
   Aborted,
   AddError,
@@ -10,6 +16,7 @@ import type {
   Events,
   KnobDescriptor,
   KnobValues,
+  Invalidates,
   PlayOptions,
   PlayResult,
   PoseRef,
@@ -104,12 +111,50 @@ function subscribe(listeners: Listeners, event: string, fn: (e: never) => void):
 
 const spriteState = new WeakMap<
   Sprite,
-  { resident: boolean; pinned: boolean; attachCount: number }
+  {
+    resident: boolean
+    pinned: boolean
+    attachCount: number
+    disposed: boolean
+    changes: InternalChangePublisher
+  }
 >()
 
-export function makeFakeSprite(key: string): Sprite {
-  const changes = createChanges()
-  const state = { resident: true, pinned: false, attachCount: 0 }
+type Normalise = (
+  patch: Readonly<Record<string, unknown>>,
+  scope: readonly Invalidates[],
+) => KnobValues | Error
+
+function fakeNormalise(descriptors?: readonly KnobDescriptor[]): Normalise {
+  const registry = createKnobRegistry({ sheet: descriptors ?? [], motion: [] })
+  return (patch, scope) => {
+    if (descriptors !== undefined) return registry.normalise(patch, scope)
+    // Older binding probes intentionally use arbitrary knob names. Give those synthetic sheet
+    // knobs namespaced storage while real shared knobs still use the actual registry resolver.
+    const known: Record<string, unknown> = {}
+    const synthetic: Record<string, string | number | boolean> = {}
+    for (const [key, value] of Object.entries(patch)) {
+      if (!(registry.resolve(key) instanceof Error)) known[key] = value
+      else if (
+        typeof value === 'string' ||
+        typeof value === 'number' ||
+        typeof value === 'boolean'
+      ) {
+        synthetic[key.includes('.') ? key : `sheet.${key}`] = value
+      } else return new KnobError(`invalid fake knob value for ${key}`)
+    }
+    const accepted = registry.normalise(known, scope)
+    return accepted instanceof Error ? accepted : { ...accepted, ...synthetic }
+  }
+}
+
+export function makeFakeSprite(
+  key: string,
+  o?: { group?: ReturnType<typeof createChangeBatch>; normalise?: Normalise },
+): Sprite {
+  const changes = createChanges(o?.group)
+  const normalise = o?.normalise ?? fakeNormalise()
+  const state = { resident: true, pinned: false, attachCount: 0, disposed: false, changes }
   let applied: KnobValues = {}
   const sprite: Sprite = {
     changes,
@@ -128,8 +173,11 @@ export function makeFakeSprite(key: string): Sprite {
     get attachCount() {
       return state.attachCount
     },
-    set: ((patch: KnobValues): SetResult => {
-      applied = Object.freeze({ ...applied, ...patch })
+    set: ((patch: KnobValues) => {
+      if (state.disposed) return new SheetError('this sprite was removed')
+      const accepted = normalise(patch, SPRITE_SCOPE)
+      if (accepted instanceof Error) return accepted as SetResult
+      applied = Object.freeze({ ...applied, ...accepted })
       changes.emit('settings')
       return undefined
     }) as Sprite['set'],
@@ -137,8 +185,6 @@ export function makeFakeSprite(key: string): Sprite {
   spriteState.set(sprite, state)
   return sprite
 }
-
-const makeSprite = makeFakeSprite
 
 const EMPTY_USAGE: ReturnType<BlitStage['usage']> = {
   bytes: 0,
@@ -160,6 +206,8 @@ const EMPTY_USAGE: ReturnType<BlitStage['usage']> = {
 export function createFakeStage(o?: FakeStageOptions): FakeStageHandle {
   const group = createChangeBatch()
   const changes = createChanges(group)
+  const normalise = fakeNormalise(o?.knobs)
+  const makeSprite = (key: string): Sprite => makeFakeSprite(key, { group, normalise })
   let applied: KnobValues = {}
   const calls: FakeCall[] = []
   const warnings: Error[] = []
@@ -278,9 +326,12 @@ export function createFakeStage(o?: FakeStageOptions): FakeStageHandle {
       stop(): void {
         vlog('view.stop')
       },
-      set: ((patch: Readonly<Record<string, unknown>>): SetResult => {
+      set: ((patch: Readonly<Record<string, unknown>>) => {
         vlog('view.set', patch)
-        applied = Object.freeze({ ...applied, ...patch }) as KnobValues
+        if (disposed || viewDisposed) return new GlError('this view is disposed')
+        const accepted = normalise(patch, VIEW_SCOPE)
+        if (accepted instanceof Error) return accepted as SetResult
+        applied = Object.freeze({ ...applied, ...accepted })
         viewChanges.emit('settings')
         return undefined
       }) as View['set'],
@@ -307,7 +358,7 @@ export function createFakeStage(o?: FakeStageOptions): FakeStageHandle {
           viewChanges.emit('content')
           changes.emit('lifecycle')
           changes.emit('resources')
-          group.after(viewChanges.clear)
+          viewChanges.clearAfterBatch()
         })
       },
     }
@@ -403,11 +454,18 @@ export function createFakeStage(o?: FakeStageOptions): FakeStageHandle {
     },
     remove(key) {
       log('remove', key)
-      const state = spriteState.get(sprites.get(key) as Sprite)
-      if (state !== undefined) state.resident = false
-      if (!sprites.delete(key)) return new SheetError(`no record for sprite ${key}`)
-      changes.emit('resources')
-      return undefined
+      return group.batch(() => {
+        const state = spriteState.get(sprites.get(key) as Sprite)
+        if (!sprites.delete(key)) return new SheetError(`no record for sprite ${key}`)
+        if (state !== undefined) {
+          state.resident = false
+          state.disposed = true
+          state.changes.emit('resources')
+          state.changes.clearAfterBatch()
+        }
+        changes.emit('resources')
+        return undefined
+      })
     },
     async mount(item) {
       log('mount', item)
@@ -443,13 +501,16 @@ export function createFakeStage(o?: FakeStageOptions): FakeStageHandle {
     unpin(key): void {
       log('unpin', key)
     },
-    set: ((patch: Readonly<Record<string, unknown>>): SetResult => {
+    set: ((patch: Readonly<Record<string, unknown>>) => {
       log('set', patch)
+      if (disposed) return new GlError('this stage is disposed')
       for (const key of Object.keys(patch)) {
         const refusal = refusals.get(key)
         if (refusal !== undefined) return refusal as SetResult
       }
-      applied = Object.freeze({ ...applied, ...patch }) as KnobValues
+      const accepted = normalise(patch, INVALIDATION_ORDER)
+      if (accepted instanceof Error) return accepted as SetResult
+      applied = Object.freeze({ ...applied, ...accepted })
       changes.emit('settings')
       return undefined
     }) as BlitStage['set'],
@@ -462,12 +523,17 @@ export function createFakeStage(o?: FakeStageOptions): FakeStageHandle {
         stageListeners.clear()
         for (const sprite of sprites.values()) {
           const state = spriteState.get(sprite)
-          if (state !== undefined) state.resident = false
+          if (state !== undefined) {
+            state.resident = false
+            state.disposed = true
+            state.changes.emit('resources')
+            state.changes.clearAfterBatch()
+          }
         }
         sprites.clear()
         changes.emit('lifecycle')
         changes.emit('resources')
-        group.after(changes.clear)
+        changes.clearAfterBatch()
       })
     },
     view(target: BlitTarget) {

@@ -1,6 +1,42 @@
 import { afterEach, expect, it, vi } from 'vitest'
 import { createChanges, createChangeBatch } from './changes.js'
 
+it('unobserved terminal publishers never register delivery or cleanup with the coordinator', () => {
+  const group = createChangeBatch()
+  const changes = createChanges(group)
+  const schedule = vi.spyOn(group, 'schedule')
+  const cleanup = vi.spyOn(group, 'after')
+  const off = changes.subscribe('settings', () => {})
+  off()
+  const iterate = vi.spyOn(Set.prototype, Symbol.iterator)
+  group.batch(() => {
+    changes.emit('lifecycle')
+    changes.clearAfterBatch()
+  })
+  const scans = iterate.mock.calls.length
+  iterate.mockRestore()
+  expect(scans).toBe(0)
+  expect(changes.revision('lifecycle')).toBe(1)
+  expect(schedule).not.toHaveBeenCalled()
+  expect(cleanup).not.toHaveBeenCalled()
+})
+
+it('observed terminal publishers deliver before clearing every remaining subscriber', () => {
+  const group = createChangeBatch()
+  const changes = createChanges(group)
+  const seen: string[] = []
+  changes.subscribe('lifecycle', () => seen.push('terminal'))
+  changes.subscribe('settings', () => seen.push('settings'))
+  group.batch(() => {
+    changes.emit('lifecycle')
+    changes.clearAfterBatch()
+    expect(seen).toEqual([])
+  })
+  expect(seen).toEqual(['terminal'])
+  changes.emit('settings')
+  expect(seen).toEqual(['terminal'])
+})
+
 it('defers only observed publishers across a shared atomic boundary', () => {
   const group = createChangeBatch()
   const a = createChanges(group)

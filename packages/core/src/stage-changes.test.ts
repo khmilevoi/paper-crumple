@@ -1,8 +1,30 @@
-import { expect, it } from 'vitest'
+import { expect, it, vi } from 'vitest'
+import * as changeModule from './changes.js'
 import { isAborted } from './abort.js'
 import { makeReactiveStage, makeReactiveCanvas } from './testing/reactive-stage.js'
 import { createStage } from './stage.js'
 import { fakeSheet, fakeMotion, stageEnv } from './testing/fake-slots.js'
+
+it('raw unobserved disposal does not register publishers for coordinator cleanup', async () => {
+  const group = changeModule.createChangeBatch()
+  const factory = vi.spyOn(changeModule, 'createChangeBatch').mockReturnValue(group)
+  try {
+    const stage = await makeReactiveStage()
+    const sprite = await stage.add('/a.png', { key: 'a' })
+    const view = stage.view({ canvas: makeReactiveCanvas() })
+    if (sprite instanceof Error || isAborted(sprite) || view instanceof Error)
+      return expect.fail('setup refused')
+    view.show(sprite)
+    const cleanup = vi.spyOn(group, 'after')
+    const delivery = vi.spyOn(group, 'schedule')
+    stage.dispose()
+    expect(stage.disposed).toBe(true)
+    expect(cleanup).not.toHaveBeenCalled()
+    expect(delivery).not.toHaveBeenCalled()
+  } finally {
+    factory.mockRestore()
+  }
+})
 
 it('registration, removal, and loss publish accepted raw changes', async () => {
   let lose = () => {}

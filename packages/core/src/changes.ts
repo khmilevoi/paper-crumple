@@ -13,6 +13,11 @@ export interface ChangePublisher extends ChangeSource {
   clear(): void
 }
 
+/** Internal lifecycle operation; deliberately absent from the public barrel interfaces. */
+export interface InternalChangePublisher extends ChangePublisher {
+  clearAfterBatch(): void
+}
+
 const areas: readonly ChangeArea[] = [
   'lifecycle',
   'settings',
@@ -29,7 +34,7 @@ export function createChangeBatch() {
   let depth = 0
   let flushing = false
   function flush(): void {
-    if (depth !== 0 || flushing) return
+    if (depth !== 0 || flushing || (pending.size === 0 && cleanup.size === 0)) return
     flushing = true
     try {
       while (pending.size > 0) {
@@ -65,12 +70,15 @@ export function createChangeBatch() {
   }
 }
 
-export function createChanges(group?: ReturnType<typeof createChangeBatch>): ChangePublisher {
+export function createChanges(
+  group?: ReturnType<typeof createChangeBatch>,
+): InternalChangePublisher {
   const listeners: (Set<() => void> | undefined)[] = Array.from({ length: areas.length })
   const revisions = Array.from({ length: areas.length }, () => 0)
   let dirty = 0
   let depth = 0
   let generation = 0
+  let listenerCount = 0
 
   function mark(area: ChangeArea): void {
     const index = areas.indexOf(area)
@@ -105,12 +113,13 @@ export function createChanges(group?: ReturnType<typeof createChangeBatch>): Cha
     const index = areas.indexOf(area)
     const bucket = listeners[index] ?? new Set<() => void>()
     listeners[index] = bucket
+    if (!bucket.has(listener)) listenerCount += 1
     bucket.add(listener)
     let active = true
     return () => {
       if (!active) return
       active = false
-      bucket.delete(listener)
+      if (bucket.delete(listener)) listenerCount -= 1
       if (bucket.size === 0 && listeners[index] === bucket) {
         listeners[index] = undefined
         dirty &= ~(1 << index)
@@ -141,11 +150,13 @@ export function createChanges(group?: ReturnType<typeof createChangeBatch>): Cha
 
   function clear(): void {
     generation += 1
+    dirty = 0
+    if (listenerCount === 0) return
     for (let index = 0; index < areas.length; index += 1) {
       listeners[index]?.clear()
       listeners[index] = undefined
     }
-    dirty = 0
+    listenerCount = 0
   }
 
   return {
@@ -154,5 +165,9 @@ export function createChanges(group?: ReturnType<typeof createChangeBatch>): Cha
     emit,
     batch: group === undefined ? batch : (operation) => group.batch(() => batch(operation)),
     clear,
+    clearAfterBatch: () => {
+      if (listenerCount === 0 || group === undefined) clear()
+      else group.after(clear)
+    },
   }
 }

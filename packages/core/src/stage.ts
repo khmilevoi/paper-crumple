@@ -4,7 +4,7 @@ import {
   createChangeBatch,
   createChanges,
   type ChangeSource,
-  type ChangePublisher,
+  type InternalChangePublisher,
 } from './changes.js'
 import { createIngestLane, type IngestClass, type IngestSlot } from './ingest-lane.js'
 import { blitPlan, managedBackingStore } from './blit.js'
@@ -470,7 +470,7 @@ export async function createStage(
 
 interface StageParts {
   semanticBatch: ReturnType<typeof createChangeBatch>
-  changes: ChangePublisher
+  changes: InternalChangePublisher
   o: AnyStageOptions
   env: StageEnv
   host: SurfaceHost
@@ -498,7 +498,7 @@ interface StageParts {
 
 /** The stage-side face of a view. Never handed to a consumer; `View` is the public one. */
 interface ViewInternals {
-  readonly changes: ChangePublisher
+  readonly changes: InternalChangePublisher
   owner(): RunOwner | null
   playAs(owner: RunOwner, from: PoseRef, to: PoseRef, o?: PlayOptions): Run<PlayResult>
   stopAs(owner: RunOwner, all: boolean): void
@@ -1243,6 +1243,15 @@ function buildStage(p: StageParts): BuiltStage {
     }
 
     const paint = (next: number): void => {
+      if (needsRenderBatch()) p.semanticBatch.batch(() => paintNow(next))
+      else paintNow(next)
+    }
+
+    function needsRenderBatch(): boolean {
+      return record !== null && (record.front === null || rebuildQueue.dirty(record.key))
+    }
+
+    const paintNow = (next: number): void => {
       if (record === null) return
       // §8.8 — until a rebuild lands the view draws the last front it drew successfully, at the
       // new pose: never a blank frame, never a skipped step.
@@ -1281,6 +1290,7 @@ function buildStage(p: StageParts): BuiltStage {
     // ball index name different poses. `MotionClip.keyFrames.length` is where the count lives
     // and `MotionClip.dwells` is the table — absent, the runner's own `DWELL_MS`.
     let controller: RunController<SpriteRecord> | null = null
+    let replacingController = 0
     let poseCount = 1
     let poseDwells: readonly number[] | undefined = undefined
 
@@ -1303,7 +1313,10 @@ function buildStage(p: StageParts): BuiltStage {
         return record === null ? undefined : paintOnce(record, next)
       },
       frameFor: (next) => record?.clip.keyFrames[next] ?? 0,
+      needsRenderBatch,
       setState: (next) => {
+        // Controller disposal is internal; only view.dispose owns terminal view lifecycle.
+        if (next === 'disposed' && replacingController > 0) return
         if (state === next) return
         state = next
         changes.emit('state')
@@ -1318,12 +1331,14 @@ function buildStage(p: StageParts): BuiltStage {
       const stale = controller
       if (stale !== null && count === poseCount && dwells === poseDwells) return stale
       if (stale !== null) {
-        // Ends any live run with `completed: false` — and announces `'disposed'`, which is the
-        // *controller's* state and not the view's. The view outlives its controllers, so it is
-        // `idle` once this returns; were the announcement left standing, a `play()` the new
-        // controller then refuses (a `PoseError` on a stale `view.pose`, say) would never
-        // overwrite it, and the view would refuse every later call as if it had been disposed.
-        stale.dispose()
+        // End the old run, but suppress its controller-only terminal announcement. The view
+        // remains registered even if the new controller refuses the requested pose.
+        replacingController += 1
+        try {
+          stale.dispose()
+        } finally {
+          replacingController -= 1
+        }
         // The `end` that dispose emitted is allowed to call `play()`. That call re-enters here,
         // installs a controller keyed to this same clip and starts its run on it; a second
         // controller would orphan that run, so the installed one is returned instead.
@@ -1408,11 +1423,17 @@ function buildStage(p: StageParts): BuiltStage {
 
     function playMethod(from: PoseRef, to: PoseRef, o?: PlayOptions): Run<PlayResult> {
       if (p.isDisposed() || state === 'disposed') return settledRun(ABORTED)
-      const run = controllerFor().play(from, to, { ...o, owner: 'view' })
-      return run
+      return p.semanticBatch.batch(() => controllerFor().play(from, to, { ...o, owner: 'view' }))
     }
 
     function crumpleToMethod(
+      target: Sprite | Promise<Sprite | Error | Aborted>,
+      o?: SwapOptions,
+    ): Run<SwapResult> {
+      return p.semanticBatch.batch(() => crumpleToNow(target, o))
+    }
+
+    function crumpleToNow(
       target: Sprite | Promise<Sprite | Error | Aborted>,
       o?: SwapOptions,
     ): Run<SwapResult> {
@@ -1636,7 +1657,7 @@ function buildStage(p: StageParts): BuiltStage {
           changes.emit('state')
           p.changes.emit('lifecycle')
           p.changes.emit('resources')
-          p.semanticBatch.after(changes.clear)
+          changes.clearAfterBatch()
         })
       },
     }
@@ -1644,7 +1665,8 @@ function buildStage(p: StageParts): BuiltStage {
     INTERNALS.set(view, {
       changes,
       owner: () => controller?.owner ?? null,
-      playAs: (owner, from, to, o) => controllerFor().play(from, to, { ...o, owner }),
+      playAs: (owner, from, to, o) =>
+        p.semanticBatch.batch(() => controllerFor().play(from, to, { ...o, owner })),
       stopAs: (owner, all) => controller?.stop({ owner, all }),
       get spriteKey() {
         return record?.key ?? null
@@ -2230,7 +2252,7 @@ function buildStage(p: StageParts): BuiltStage {
     record.front = null
     record.changes.emit('resources')
     p.changes.emit('resources')
-    p.semanticBatch.after(record.changes.clear)
+    record.changes.clearAfterBatch()
     return undefined
   }
 
@@ -2543,12 +2565,12 @@ function buildStage(p: StageParts): BuiltStage {
         for (const record of p.sprites.values()) {
           record.front = null
           record.changes.emit('resources')
-          p.semanticBatch.after(record.changes.clear)
+          record.changes.clearAfterBatch()
         }
         p.sprites.clear()
         p.changes.emit('lifecycle')
         p.changes.emit('resources')
-        p.semanticBatch.after(p.changes.clear)
+        p.changes.clearAfterBatch()
       })
     },
   }

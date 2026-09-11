@@ -32,6 +32,8 @@ const FLAT_POSE_INDEX = 0
 export interface RunHost {
   /** Optional semantic transaction, separate from the synchronous legacy event bus. */
   batch?<T>(operation: () => T): T
+  /** A dirty render may publish resources; ordinary frames avoid a transaction closure. */
+  needsRenderBatch?(): boolean
   /** Emits on the host's own bus, synchronously. `error` is deliberately absent — see below. */
   emit<E extends 'start' | 'step' | 'end'>(event: E, payload: Events[E]): void
   /**
@@ -180,6 +182,10 @@ export function createRunController<T = unknown>(
    * view." The settle follows the `end`, so a `.then` continuation always lands after it.
    */
   function finish(r: LiveRun): void {
+    batch(() => finishNow(r))
+  }
+
+  function finishNow(r: LiveRun): void {
     if (current !== r) return
     const completed = r.reachedTo && !r.errored && !r.cancelled
     detach(r)
@@ -263,6 +269,11 @@ export function createRunController<T = unknown>(
    * its own channel, where a consumer counting steps is not the audience for it.
    */
   function stepOnce(r: LiveRun, step: Step): void {
+    if (host.needsRenderBatch?.() === true) batch(() => stepOnceNow(r, step))
+    else stepOnceNow(r, step)
+  }
+
+  function stepOnceNow(r: LiveRun, step: Step): void {
     const failure = host.render(step.pose)
     host.emit('step', {
       pose: step.pose,
@@ -506,18 +517,20 @@ export function createRunController<T = unknown>(
         if (current === r) stepOnce(r, step)
       },
       onDone: () => {
-        if (current !== r) return
-        // A run that began at the ball entered `crumpling.ball` before its `start`, so it is
-        // already there; re-announcing it would make an observer see the state twice.
-        if (plan.rise.steps.length > 1) host.setState('crumpling.ball')
-        // **Park time is never rescaled**: the hold is `max(scaledBallDwell, timeUntilSettled)`,
-        // and the excess sits entirely at the ball. There is no built-in park timeout; a caller
-        // who needs one passes `signal`.
-        r.parkTimer = host.timers.setTimeoutFn(() => {
-          r.parkTimer = null
-          holdElapsed = true
-          leaveBallIfReady(r, plan)
-        }, plan.hold)
+        batch(() => {
+          if (current !== r) return
+          // A run that began at the ball entered `crumpling.ball` before its `start`, so it is
+          // already there; re-announcing it would make an observer see the state twice.
+          if (plan.rise.steps.length > 1) host.setState('crumpling.ball')
+          // **Park time is never rescaled**: the hold is `max(scaledBallDwell, timeUntilSettled)`,
+          // and the excess sits entirely at the ball. There is no built-in park timeout; a caller
+          // who needs one passes `signal`.
+          r.parkTimer = host.timers.setTimeoutFn(() => {
+            r.parkTimer = null
+            holdElapsed = true
+            leaveBallIfReady(r, plan)
+          }, plan.hold)
+        })
       },
     })
     if (current === r) r.stepper = riseStepper

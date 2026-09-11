@@ -1,5 +1,5 @@
 import type { Rect, Size } from './geometry.js'
-import type { ChangePublisher, ChangeSource } from './changes.js'
+import type { InternalChangePublisher, ChangeSource } from './changes.js'
 import type { Knobs } from './knobs.js'
 import type { KnobDescriptor } from './forward.js'
 import type { KnobSetter, SpriteKnobPatch } from './knob-patch.js'
@@ -38,7 +38,7 @@ export interface Sprite {
 
 /** The stage's own row. Never handed to a consumer; `Sprite` is the read-only face of it. */
 export interface SpriteRecord {
-  readonly changes: ChangePublisher
+  readonly changes: InternalChangePublisher
   readonly key: string
   readonly sprite: Sprite
   source: NormalizedSource
