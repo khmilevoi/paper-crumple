@@ -269,8 +269,14 @@ export function createRunController<T = unknown>(
    * its own channel, where a consumer counting steps is not the audience for it.
    */
   function stepOnce(r: LiveRun, step: Step): void {
-    if (host.needsRenderBatch?.() === true) batch(() => stepOnceNow(r, step))
+    if (host.needsRenderBatch?.() === true) stepOnceBatched(r, step)
     else stepOnceNow(r, step)
+  }
+
+  function stepOnceBatched(r: LiveRun, step: Step): void {
+    // Keep parameter capture in the dirty path: V8 allocates a function context on entry
+    // even when the branch containing a capturing callback is not taken.
+    batch(() => stepOnceNow(r, step))
   }
 
   function stepOnceNow(r: LiveRun, step: Step): void {

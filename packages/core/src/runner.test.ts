@@ -76,6 +76,52 @@ beforeEach(() => {
   h = harness()
 })
 
+it('batches dirty render, step and error together while clean scheduled frames stay unbatched', () => {
+  const timers = createFakeTimers(0)
+  const trace: string[] = []
+  let dirty = false
+  const failure = new GlError('dirty draw failed')
+  const controller = createRunController(
+    {
+      batch: (operation) => {
+        trace.push('batch:start')
+        try {
+          return operation()
+        } finally {
+          trace.push('batch:end')
+        }
+      },
+      needsRenderBatch: () => dirty,
+      render: (pose) => {
+        trace.push(`render:${pose}`)
+        return dirty ? failure : undefined
+      },
+      emit: (event) => {
+        trace.push(event)
+      },
+      reportError: (error) => {
+        expect(error).toBe(failure)
+        trace.push('error')
+      },
+      setState: () => {},
+      frameFor: (pose) => pose,
+      timers,
+    },
+    { poseCount: 6 },
+  )
+  controller.play(0, 5)
+  trace.length = 0
+  dirty = true
+  timers.advance(95)
+  expect(trace).toEqual(['batch:start', 'render:1', 'step', 'error', 'batch:end'])
+  trace.length = 0
+  dirty = false
+  timers.advance(70)
+  expect(trace).toEqual(['render:2', 'step'])
+  controller.dispose()
+  expect(timers.pending).toBe(0)
+})
+
 describe('start is synchronous, and the bound is the microtask (amendment 22)', () => {
   it('emits start before the first microtask, not merely before the first setTimeout', () => {
     // A body that emits `start` after any `await` passes the setTimeout form and fails this one,
