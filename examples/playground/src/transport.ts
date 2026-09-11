@@ -27,6 +27,7 @@ export interface TransportHandle {
   readonly lastStepMs: number | null
   readonly lastDrawMs: number | null
   readonly beginSwap: (key: string) => void
+  readonly retrySwap: (key: string) => void
   readonly cancelSwap: (key: string) => void
   readonly draw: (pose: number) => void
   readonly runFold: (from: PoseRef, to: PoseRef) => Promise<void>
@@ -39,20 +40,29 @@ export function swapDurationFor(fromAudio: number | null | undefined, authored: 
     : authored
 }
 
-type TransportOwner = { readonly kind: 'swap'; readonly key: string } | { readonly kind: 'fold' }
+type SwapOwner = { readonly kind: 'swap'; readonly key: string }
+type TransportOwner = SwapOwner | { readonly kind: 'fold' }
+
+interface PendingRetry {
+  readonly owner: SwapOwner
+  readonly stage: BuiltStage['stage'] | null
+}
 
 export function useTransport(o: TransportOptions): TransportHandle {
   const { audio, observed, onSettle, shown } = o
   const scene = useScene<BuiltStage>()
   const built = scene.status === 'ready' ? scene.meta : null
+  const stage = scene.status === 'ready' ? scene.stage : null
   const dwells = built?.motion.poses?.dwells ?? pc.DWELL_MS
 
   const [direction, setDirection] = useState<TransportDirection>(null)
   const [swapDuration, setSwapDuration] = useState(() => swapSpec(0, dwells).authored)
+  const [retryVersion, setRetryVersion] = useState(0)
   const [lastStepMs, setLastStepMs] = useState<number | null>(null)
   const [lastDrawMs, setLastDrawMs] = useState<number | null>(null)
   const stepAtRef = useRef<number | null>(null)
   const ownerRef = useRef<TransportOwner | null>(null)
+  const pendingRetryRef = useRef<PendingRetry | null>(null)
 
   const beginTransport = useCallback(
     (
@@ -124,15 +134,52 @@ export function useTransport(o: TransportOptions): TransportHandle {
     [drawPose],
   )
 
-  const beginSwap = useCallback(
-    (key: string): void => {
-      const owner: TransportOwner = { kind: 'swap', key }
+  const armSwap = useCallback(
+    (key: string): SwapOwner => {
+      const owner: SwapOwner = { kind: 'swap', key }
       const spec = swapSpec(crumple.pose, dwells)
       const duration = beginTransport(owner, 'folding', spec)
       setSwapDuration(swapDurationFor(duration, spec.authored))
+      return owner
     },
     [beginTransport, crumple.pose, dwells],
   )
+
+  const beginSwap = useCallback(
+    (key: string): void => {
+      armSwap(key)
+    },
+    [armSwap],
+  )
+
+  const retrySwap = useCallback(
+    (key: string): void => {
+      const owner = armSwap(key)
+      pendingRetryRef.current = { owner, stage }
+      setRetryVersion((current) => current + 1)
+    },
+    [armSwap, stage],
+  )
+
+  const retry = crumple.retry
+  // `useCrumple` publishes its latest options in a layout effect. Crossing this passive-effect
+  // boundary guarantees the duration above is committed before its synchronous retry reads it.
+  useEffect(() => {
+    const pendingRetry = pendingRetryRef.current
+    if (pendingRetry === null) return
+    pendingRetryRef.current = null
+    if (ownerRef.current !== pendingRetry.owner) return
+    if (
+      stage !== pendingRetry.stage ||
+      shown.id !== pendingRetry.owner.key ||
+      crumple.requested !== pendingRetry.owner.key ||
+      crumple.status !== 'rolled-back'
+    ) {
+      closeTransport(pendingRetry.owner, false)
+      return
+    }
+    retry()
+  }, [closeTransport, crumple.requested, crumple.status, retry, retryVersion, shown.id, stage])
 
   const cancelSwap = useCallback(
     (key: string): void => {
@@ -208,6 +255,7 @@ export function useTransport(o: TransportOptions): TransportHandle {
     lastStepMs,
     lastDrawMs,
     beginSwap,
+    retrySwap,
     cancelSwap,
     draw,
     runFold,

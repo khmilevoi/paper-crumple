@@ -237,7 +237,7 @@ function Playground({
       setStatus({ ok: true, text: `swapped to ${shown.label}` })
     },
   })
-  const { crumple, dwells, lastStepMs, lastDrawMs, beginSwap, cancelSwap } = transport
+  const { crumple, dwells, lastStepMs, lastDrawMs, beginSwap, retrySwap, cancelSwap } = transport
 
   const sprite = crumple.sprite
 
@@ -369,8 +369,7 @@ function Playground({
           setSource((current) =>
             current.requested.id === target.id ? { ...current, failed: null } : current,
           )
-          beginSwap(target.id)
-          crumple.retry()
+          retrySwap(target.id)
         }
         return
       }
@@ -378,7 +377,7 @@ function Playground({
       setSource((current) => ({ ...current, requested: target, failed: null }))
       setLibrarySample((prev) => nextLibrarySample(prev, target))
     },
-    [beginSwap, crumple, prefetching, setLibrarySample, setSource],
+    [beginSwap, crumple, prefetching, retrySwap, setLibrarySample, setSource],
   )
 
   const onSwap = useCallback(() => {

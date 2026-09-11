@@ -340,6 +340,25 @@ describe('App request outcomes', () => {
     ).toBe(false)
   })
 
+  it('commits the newly armed duration before retrying a rolled-back key', async () => {
+    const audio = audioHarness()
+    audio.beginSequence.mockReturnValueOnce(640).mockReturnValueOnce(undefined)
+    mockedCreateAudio.mockReturnValue(audio.handle)
+    const fake = createFakeStage({ sprites: ['sweater'] })
+    currentDemo = sceneHarness(fake).demo
+    const app = await renderApp()
+
+    await failBrokenSwap(app, fake)
+    const firstSwap = fake.calls.find((call) => call.method === 'view.swapTo')
+    expect((firstSwap?.args[1] as { duration?: number }).duration).toBe(640)
+
+    act(() => buttonNamed(app, 'Swap')?.click())
+    await settle()
+
+    const swaps = fake.calls.filter((call) => call.method === 'view.swapTo')
+    expect((swaps[1]?.args[1] as { duration?: number }).duration).toBe(985)
+  })
+
   it('retains the complete dropped File through rollback and a config rebuild', async () => {
     const audio = audioHarness()
     mockedCreateAudio.mockReturnValue(audio.handle)
