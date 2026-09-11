@@ -1,0 +1,105 @@
+import { rethrowFromMicrotask } from './emitter.js'
+
+export type ChangeArea = 'lifecycle' | 'settings' | 'resources' | 'content' | 'geometry' | 'state'
+
+export interface ChangeSource {
+  subscribe(area: ChangeArea, listener: () => void): () => void
+  revision(area: ChangeArea): number
+}
+
+export interface ChangePublisher extends ChangeSource {
+  emit(area: ChangeArea): void
+  batch<T>(operation: () => T): T
+  clear(): void
+}
+
+const areas: readonly ChangeArea[] = [
+  'lifecycle',
+  'settings',
+  'resources',
+  'content',
+  'geometry',
+  'state',
+]
+
+export function createChanges(): ChangePublisher {
+  const listeners: (Set<() => void> | undefined)[] = Array.from({ length: areas.length })
+  const revisions = Array.from({ length: areas.length }, () => 0)
+  let dirty = 0
+  let depth = 0
+
+  function mark(area: ChangeArea): void {
+    const index = areas.indexOf(area)
+    revisions[index] = (revisions[index] ?? 0) + 1
+    if (listeners[index]?.size) dirty |= 1 << index
+  }
+
+  function flush(): void {
+    while (dirty !== 0) {
+      const pending = dirty
+      dirty = 0
+      for (let index = 0; index < areas.length; index += 1) {
+        if ((pending & (1 << index)) === 0) continue
+        const bucket = listeners[index]
+        if (bucket === undefined || bucket.size === 0) continue
+        const snapshot = [...bucket]
+        for (const listener of snapshot) {
+          if (!bucket.has(listener)) continue
+          try {
+            listener()
+          } catch (thrown) {
+            rethrowFromMicrotask(thrown)
+          }
+        }
+      }
+    }
+  }
+
+  function subscribe(area: ChangeArea, listener: () => void): () => void {
+    const index = areas.indexOf(area)
+    const bucket = listeners[index] ?? new Set<() => void>()
+    listeners[index] = bucket
+    bucket.add(listener)
+    let active = true
+    return () => {
+      if (!active) return
+      active = false
+      bucket.delete(listener)
+      if (bucket.size === 0 && listeners[index] === bucket) {
+        listeners[index] = undefined
+        dirty &= ~(1 << index)
+      }
+    }
+  }
+
+  function emit(area: ChangeArea): void {
+    mark(area)
+    if (depth === 0) flush()
+  }
+
+  function batch<T>(operation: () => T): T {
+    depth += 1
+    try {
+      return operation()
+    } finally {
+      depth -= 1
+      if (depth === 0) flush()
+    }
+  }
+
+  function clear(): void {
+    for (let index = 0; index < areas.length; index += 1) {
+      listeners[index]?.clear()
+      listeners[index] = undefined
+    }
+    dirty = 0
+  }
+
+  return {
+    subscribe,
+    revision: (area) => revisions[areas.indexOf(area)] ?? 0,
+    emit,
+    batch,
+    clear,
+  }
+}
