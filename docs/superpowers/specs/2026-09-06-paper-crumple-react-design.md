@@ -1131,19 +1131,10 @@ into one. That is almost certainly the better behaviour, nobody asked for it, an
 The rest were found by the migration and are named here so the backlog is in one place rather than
 in a findings report:
 
-- **Acquisition timing, `shownAt`, and run cadence.** The binding still does not expose when its
-  `stage.add`/`prepare` work begins or ends, a timestamp for when a sprite is shown, or a snapshot
-  step count/interval. Consumers needing those diagnostics can use `scene.stage` and the raw
-  `crumple.view` seams meanwhile; a stable public shape needs evidence from real use.
-- **Tier-aware knob invalidation.** Every batch that wrote anything bumps `knobEpoch` and every
-  crumple joins `prepare` off it (§4.3), including for a write that expired no front. The tier is
-  public and reachable — `stage.knobs` is `readonly KnobDescriptor[]` (`stage.ts:113`) and
-  `invalidates` is `'draw' | 'front' | 'hull' | 'field'` (`knobs.ts:29`, `:56`) — so this is not
-  blocked on core. What is unsettled is the mapping from a *written key* to the descriptors it spans:
-  a shared key spans several and takes the strongest of them (`knob-registry.ts:156`), and the
-  failure mode of getting that wrong is a join skipped where one was needed, which reads `View.frame`
-  one frame stale and is invisible to a test not looking for it. The win is one microtask and one
-  redraw per write, which a drag pays once a frame. Worth doing on measurement, not on principle.
+- **Acquisition timing and run cadence.** The binding still does not expose when its
+  `stage.add`/`prepare` work begins or ends, or a snapshot step count/interval. Consumers needing
+  those diagnostics can use `scene.stage` and the raw `crumple.view` seams meanwhile; a stable
+  public shape needs evidence from real use.
 - **A swap that hands back its `Run`.** `crumple.swap(spriteKey, src, o?)` beside `play`, returning
   the handle the declarative path cannot (§5.3). The hazard is the reason it is not in v1: two ways
   to change the sprite, one declarative and one not, racing through the same sequence number, and a
@@ -1152,6 +1143,33 @@ in a findings report:
   through the binding's store without effects that trip `react-hooks/set-state-in-effect` (§5.5).
   Publishing a small primitive would make that seam available, but would also freeze its shape; it
   remains deliberately internal today.
+
+The React DX execution schedule records four further deferrals (proposal §8 item 9 and §9.1):
+
+- **#5 — tier-aware knob invalidation / `stage.invalidationOf`.** Every batch that wrote anything
+  still bumps `knobEpoch`, and every crumple joins `prepare` off it (§4.3), even for a draw-only
+  write. This optimization is core-blocked: `registry.invalidationOf(delta)` is internal and the
+  stage exposes no equivalent. Public knob descriptors alone do not provide the registry's
+  normalized mapping from written keys to their strongest invalidation tier, including shared
+  keys. Measure first; if the cost matters, expose `stage.invalidationOf(patch)` from core and
+  bump `knobEpoch` only for batches whose strongest tier is `front` or higher. A draw-tier write
+  already redraws synchronously; skipping a necessary join would leave `View.frame` stale.
+- **Two-to-three renders per drag frame.** The declarative path runs through `setKnobs`, a render,
+  the effect's `stage.set` and `knobEpoch` bump, then the crumple's join/refresh and store bump.
+  This remains a measure-first performance follow-up; the schedule adds no second imperative
+  writer or store redesign to avoid those renders.
+- **`shownAt`.** A landing timestamp paired with the proposed `Scene.readyAt` remains low value
+  until a consumer asks. It would timestamp the bump that makes `shown` current, not measure
+  acquisition or full swap completion: `shown` changes at the ball, while `pending`/`onSettle` now
+  express settlement.
+  The playground already times scene readiness to first successful settlement with `onReady` and
+  `onSettle`; that consumer timing is distinct from a sprite-landing timestamp.
+- **Second sizing layer in `packages/core/src/stage.ts`.** Additional recovery after managed sizing
+  encounters a zero CSS box remains a separate core follow-up. P2 fixed the binding contract with
+  a layout-effect refresh after React commits a non-null frame size. Core's `blitOut` already
+  checks managed sizing on each subsequent blit, but does not arrange an extra draw after a
+  skipped zero box; any explicit retry mechanism is deferred. The schedule chose the binding fix
+  because that is where the frame-commit/redraw pairing was missing.
 
 ## 12. Open questions, and the failure this document keeps making
 
