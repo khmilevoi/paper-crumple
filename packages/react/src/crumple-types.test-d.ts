@@ -90,6 +90,6 @@ test('canvasProps excludes ref, width and height (§6)', () => {
 })
 
 test('<Crumple> takes the instance and nothing else configures it (§2)', () => {
-  expectTypeOf<CrumpleProps['value']>().toEqualTypeOf<Crumple>()
+  expectTypeOf<Crumple>().toExtend<CrumpleProps['value']>()
   expectTypeOf(Crumple).toBeFunction()
 })

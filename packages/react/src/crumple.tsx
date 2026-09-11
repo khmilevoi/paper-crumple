@@ -1,4 +1,5 @@
 import type { CanvasHTMLAttributes, CSSProperties, HTMLAttributes, ReactNode } from 'react'
+import type { RenderValue } from '@paper-crumple/core/bindings'
 import type { CrumpleMethods, CrumpleSnapshot } from './crumple-types.js'
 
 /**
@@ -15,7 +16,7 @@ import type { CrumpleMethods, CrumpleSnapshot } from './crumple-types.js'
 export interface Crumple extends CrumpleSnapshot, CrumpleMethods {}
 
 export interface CrumpleProps extends HTMLAttributes<HTMLDivElement> {
-  value: Crumple
+  value: RenderValue
   /**
    * The escape hatch for the canvas itself. `ref` belongs to `value.ref`; `width` and `height`
    * belong to the stage — the binding is always `'managed'`, under which the core reads

@@ -49,3 +49,4 @@ export type {
 // --- P6: binding-owned callback names (§4.3) ---
 /** Types only: core vocabulary remains imported from `@paper-crumple/core`. */
 export type { CreateStage, StageErrorListener } from './scene-types.js'
+export type { RenderValue, Entrance, ReducedMotion } from '@paper-crumple/core/bindings'

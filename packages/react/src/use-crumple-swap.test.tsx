@@ -132,6 +132,22 @@ test('src changed without spriteKey reports an Error and makes no library call (
   await probe.unmount()
 })
 
+test('source identity history survives a replacement scene stage', async () => {
+  const first = createFakeStage()
+  const second = createFakeStage()
+  const probe = await renderCrumple(
+    { spriteKey: 'a', src: 'original.png' },
+    { scene: readyScene(first.stage) },
+  )
+  await probe.rerender({
+    scene: readyScene(second.stage, { generation: 2 }),
+    options: { spriteKey: 'a', src: 'changed.png' },
+  })
+  expect(probe.current.error).toBeInstanceOf(Error)
+  expect(second.calls.some((call) => call.method === 'add')).toBe(false)
+  await probe.unmount()
+})
+
 test('a, b, then a again with a new src is still caught — the map, not the last pair', async () => {
   const fake = createFakeStage()
   const probe = await renderCrumple(

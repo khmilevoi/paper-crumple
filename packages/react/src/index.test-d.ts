@@ -50,7 +50,7 @@ test('scene.stage narrows to BlitStage once status is checked', () => {
 
 test('useCrumple returns the Crumple the component takes (§2, §6)', () => {
   expectTypeOf(useCrumple<string>).returns.toEqualTypeOf<Crumple>()
-  expectTypeOf<Parameters<typeof Crumple>[0]['value']>().toEqualTypeOf<Crumple>()
+  expectTypeOf<Crumple>().toExtend<Parameters<typeof Crumple>[0]['value']>()
 })
 
 test('the crumple request surface is exported and reads as one snapshot (§2.1, §2.5)', () => {

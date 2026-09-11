@@ -4,6 +4,7 @@
 import type { ReactNode } from 'react'
 import { createElement } from 'react'
 import { expect, test } from 'vitest'
+import { SheetError, type Sprite } from '@paper-crumple/core'
 import { PaperScene } from './scene-context.js'
 import { useCrumple } from './use-crumple.js'
 import { createFakeStage } from './testing/fake-stage.js'
@@ -52,6 +53,53 @@ test('unmount disposes the view, and the instance reads detached again', async (
   )
   await probe.unmount()
   expect(fake.views[0]?.disposed).toBe(true)
+})
+
+test('raw View disposal publishes detached without waiting for a hook method', async () => {
+  const fake = createFakeStage()
+  const probe = await renderCrumple(
+    { spriteKey: 'hero', src: 'hero.png' },
+    { scene: readyScene(fake.stage) },
+  )
+  await probe.run(() => probe.current.view?.dispose())
+  expect(probe.current.view).toBeNull()
+  expect(probe.current.status).toBe('detached')
+  await probe.unmount()
+})
+
+test('requested and error survive detachment and clear when a replacement stage succeeds', async () => {
+  const failure = new SheetError('the first scene could not acquire the source')
+  const first = createFakeStage({ add: async () => failure })
+  let finish!: (sprite: Sprite) => void
+  const pending = new Promise<Sprite>((resolve) => {
+    finish = resolve
+  })
+  const second = createFakeStage({ add: () => pending })
+  const probe = await renderCrumple(
+    { spriteKey: 'hero', src: 'hero.png' },
+    { scene: readyScene(first.stage) },
+  )
+  await probe.rerender({ scene: null })
+  expect(probe.current.requested).toBe('hero')
+  expect(probe.current.error).toBe(failure)
+  await probe.rerender({ scene: readyScene(second.stage, { generation: 2 }) })
+  expect(probe.current.error).toBe(failure)
+  await probe.run(() => finish(second.addSprite('hero')))
+  expect(probe.current.shown).toBe('hero')
+  expect(probe.current.error).toBeNull()
+  await probe.unmount()
+})
+
+test('raw stage loss clears the View even for an externally supplied Scene snapshot', async () => {
+  const fake = createFakeStage()
+  const probe = await renderCrumple(
+    { spriteKey: 'hero', src: 'hero.png' },
+    { scene: readyScene(fake.stage) },
+  )
+  await probe.run(() => fake.lose())
+  expect(probe.current.view).toBeNull()
+  expect(probe.current.status).toBe('detached')
+  await probe.unmount()
 })
 
 test('StrictMode leaves exactly one view and raises no claimed-canvas ViewError (§9)', async () => {
