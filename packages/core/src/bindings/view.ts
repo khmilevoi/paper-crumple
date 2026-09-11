@@ -106,12 +106,9 @@ export function createTargetViewController<S extends BindingStage>(
     const stage = options.scene.stage
     if (disposed || stage === null || stage.disposed || target === null || core.view !== null)
       return
-    if (
-      creating?.stage === stage &&
-      creating.target === target &&
-      creating.generation === attachment
-    )
-      return
+    // A pending factory can already own the Blit canvas claim. Wait for its return
+    // and disposal before creating a replacement, even after detach invalidated it.
+    if (creating !== null) return
     const reservation = { stage, target, generation: ++attachment }
     creating = reservation
     let created: View | Error
@@ -131,6 +128,7 @@ export function createTargetViewController<S extends BindingStage>(
       core.view !== null
     ) {
       if (!(created instanceof Error)) created.dispose()
+      ensureView()
       return
     }
     if (created instanceof Error) {
@@ -486,6 +484,7 @@ export function createViewController(options: ViewControllerOptions<BlitStage>):
     createView: (stage, target) => stage.view(target),
   })
   let canvas: HTMLCanvasElement | null = null
+  let canvasTarget: TargetFor<BlitStage> | null = null
   const update = controller.updateOptions
   return Object.assign(controller, {
     updateOptions(next: Partial<ViewInputs>) {
@@ -495,10 +494,20 @@ export function createViewController(options: ViewControllerOptions<BlitStage>):
     ref(element: HTMLCanvasElement | null) {
       if (element === canvas && (element === null || controller.view !== null)) return
       canvas = element
-      if (element === null) controller.detach()
-      else {
+      if (element === null) {
+        canvasTarget = null
+        controller.detach()
+      } else {
         const current = latest()
-        controller.attach({ canvas: element, size: 'managed', fit: current.fit, tag: current.tag })
+        // Reentrant refs must join the in-flight target instead of invalidating its
+        // canvas claim. Explicit detach still reaches attach and can schedule a new View.
+        if (
+          canvasTarget?.canvas !== element ||
+          canvasTarget.fit !== current.fit ||
+          canvasTarget.tag !== current.tag
+        )
+          canvasTarget = { canvas: element, size: 'managed', fit: current.fit, tag: current.tag }
+        controller.attach(canvasTarget)
       }
     },
   })
