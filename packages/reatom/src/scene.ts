@@ -25,7 +25,8 @@ import { observeExternal, readAtRevision } from './observable.js'
 import { joinReady } from './ready.js'
 import { toAsyncValue } from './result.js'
 import { createResource } from './resource.js'
-import type { Ready, ResourceOptions, SceneOptions, SurfaceSize } from './types.js'
+import { createViewModel } from './view.js'
+import type { Ready, ResourceOptions, SceneOptions, SurfaceSize, ViewOptions } from './types.js'
 
 const emptyKnobs: Readonly<Knobs> = Object.freeze({})
 const emptyDescriptors: StageCommon['knobs'] = Object.freeze([])
@@ -124,8 +125,35 @@ export function reatomScene<S extends BindingStage>({ name, create }: SceneOptio
     `${name}.lastEvent`,
   )
   const resources = new Map<string, ReturnType<typeof createResource<S>>>()
+  const viewSources = new Map<string, SpriteSource>()
+  const claimViewSource = (key: string, source: SpriteSource): void => {
+    const resource = resources.get(key)
+    const previous = viewSources.get(key)
+    if (
+      resource !== undefined
+        ? !resource.matchesSource(source)
+        : previous !== undefined && !Object.is(previous, source)
+    )
+      toAsyncValue(
+        new Error(`resource '${key}' already exists with another source; use replace() explicitly`),
+      )
+    viewSources.set(key, source)
+  }
+  let viewKey = 0
+  const view = <Source extends SpriteSource>(options: ViewOptions<S, Source>) => {
+    assertOwner()
+    return createViewModel<S>(options, {
+      controller,
+      ready,
+      owner,
+      assertOwner,
+      claimSource: claimViewSource,
+      mintKey: () => `${name}.view:${++viewKey}`,
+    })
+  }
   const resource = <Source extends SpriteSource>(options: ResourceOptions<Source>) => {
     assertOwner()
+    claimViewSource(options.key, options.source)
     const found = resources.get(options.key)
     if (found !== undefined) {
       if (!found.matchesSource(options.source))
@@ -144,6 +172,7 @@ export function reatomScene<S extends BindingStage>({ name, create }: SceneOptio
     ready,
     dispose,
     resource,
+    view,
     play,
     knobs,
     lastEvent,

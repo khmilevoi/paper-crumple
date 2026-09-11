@@ -1,6 +1,21 @@
-import type { BindingStage, SceneFactory } from '@paper-crumple/core/bindings'
+import type {
+  BindingStage,
+  SceneFactory,
+  TargetFor,
+  ViewInputs,
+} from '@paper-crumple/core/bindings'
 import type { AsyncDataExt } from '@reatom/core'
-import type { PinFor, Sprite, SpriteSource } from '@paper-crumple/core'
+import type { BlitStage, PinFor, Sprite, SpriteSource, View } from '@paper-crumple/core'
+
+export type ViewSettings = Omit<ViewInputs, 'source' | 'key'> & { key?: string }
+export type ViewOptions<S extends BindingStage, Source extends SpriteSource = SpriteSource> = {
+  name: string
+  source: Source
+} & Omit<ViewSettings, 'pin'> &
+  PinFor<Source> &
+  (S extends BlitStage
+    ? { createView?: never }
+    : { createView: (stage: S, target: TargetFor<S>) => View | Error })
 
 export interface SceneOptions<S extends BindingStage> {
   name: string
