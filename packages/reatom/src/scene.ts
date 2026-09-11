@@ -34,6 +34,10 @@ const emptyKnobs: Readonly<Knobs> = Object.freeze({})
 const emptyDescriptors: StageCommon['knobs'] = Object.freeze([])
 const emptyWarnings: readonly Error[] = Object.freeze([])
 
+// The supported runtimes provide native composition; TS 5.0's DOM types predate it.
+const combineSignals = (signals: AbortSignal[]): AbortSignal =>
+  (AbortSignal as typeof AbortSignal & { any(signals: AbortSignal[]): AbortSignal }).any(signals)
+
 /** Allocate within one model context; readiness is explicit and owns the raw stage lifetime. */
 export function reatomScene<S extends BindingStage>({ name, create }: SceneOptions<S>) {
   const owner = top()
@@ -102,7 +106,7 @@ export function reatomScene<S extends BindingStage>({ name, create }: SceneOptio
     // The signal owns this broadcast's live runs and delayed starts. A stage-wide stop
     // could cancel a newer raw broadcast which has already superseded these runs.
     const signal = options?.signal
-      ? AbortSignal.any([operation.signal, options.signal])
+      ? combineSignals([operation.signal, options.signal])
       : operation.signal
     try {
       return await wrap(stage.play(from, to, { ...options, signal }))

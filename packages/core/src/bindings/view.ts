@@ -114,12 +114,13 @@ export function createTargetViewController<S extends BindingStage>(
     const reservation = { stage, target, generation: ++attachment }
     creationError = null
     creating = reservation
-    let created: View | Error
+    let result: View | Error
     try {
-      created = options.createView(stage, reservation.target)
+      result = options.createView(stage, reservation.target)
     } finally {
       if (creating === reservation) creating = null
     }
+    const created = result
     // Stage.view publishes lifecycle synchronously. Callbacks can detach, dispose, or
     // attach a successor before the factory returns; only this reservation may commit.
     if (
