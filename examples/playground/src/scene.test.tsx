@@ -1,10 +1,11 @@
 // @vitest-environment jsdom
 import { createFakeStage } from '@paper-crumple/react/testing'
+import { percentWidthReserve } from '@paper-crumple/core/unstable'
 import { act } from 'react'
 import { createRoot } from 'react-dom/client'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
-import { buildStage, DEFAULT_CONFIG, type BuiltStage } from './config'
+import { buildStage, configForInitialKnobs, DEFAULT_CONFIG, type BuiltStage } from './config'
 import { useDemoScene } from './scene'
 
 vi.mock('./config', async () => {
@@ -75,6 +76,77 @@ describe('useDemoScene', () => {
       expect.objectContaining({ generation: 1, signal: expect.any(AbortSignal) }),
     )
     expect(fake.calls).toContainEqual({ method: 'set', args: [{ 'sheet.edgeWidth': 25 }] })
+  })
+
+  it('buys enough factory reserve for persisted percent edge knobs before the first add', async () => {
+    const fake = createFakeStage({
+      defaults: { 'sheet.edgeWidth': 5.9, 'sheet.edgeVariance': 0.53 },
+    })
+    mockedBuild.mockResolvedValue(builtFrom(fake.stage))
+    const config = { ...DEFAULT_CONFIG, edgeWidthUnit: 'percent' as const, overscanHeadroom: 0.3 }
+    renderHook(() =>
+      useDemoScene(config, () => {}, {
+        'sheet.edgeWidth': 15,
+        'sheet.edgeVariance': 0.57,
+        'sheet.deckleTex': 0.4,
+      }),
+    )
+    await settle()
+
+    const builtConfig = mockedBuild.mock.calls[0]?.[0]
+    expect(builtConfig).toBeDefined()
+    if (builtConfig === undefined) return
+    const reserved = percentWidthReserve({
+      pct: 0.059,
+      aspect: 1,
+      variance: 0.53,
+      finishTerms: 0,
+      headroom: builtConfig.overscanHeadroom,
+    }).radius
+    const needed = percentWidthReserve({
+      pct: 0.15,
+      aspect: 1,
+      variance: 0.57,
+      finishTerms: 0,
+      headroom: config.overscanHeadroom,
+    }).radius
+    expect(reserved).toBeGreaterThanOrEqual(needed)
+    expect(builtConfig.overscanHeadroom).toBeGreaterThan(config.overscanHeadroom)
+    expect(fake.calls).toContainEqual({ method: 'set', args: [{ 'sheet.edgeWidth': 15 }] })
+    expect(fake.calls).toContainEqual({ method: 'set', args: [{ 'sheet.edgeVariance': 0.57 }] })
+    expect(fake.calls).not.toContainEqual({ method: 'set', args: [{ 'sheet.deckleTex': 0.4 }] })
+  })
+
+  it('covers the portrait endpoint when persisted paper finish terms exceed their defaults', () => {
+    const config = {
+      ...DEFAULT_CONFIG,
+      edgeFinish: 'paper' as const,
+      edgeWidthUnit: 'percent' as const,
+      overscanHeadroom: 0.3,
+    }
+    const builtConfig = configForInitialKnobs(config, {
+      'sheet.edgeWidth': 5.9,
+      'sheet.edgeVariance': 0.53,
+      'sheet.fiberLen': 12,
+      'sheet.deckleWidth': 40,
+    })
+    for (const aspect of [0, 1]) {
+      const reserved = percentWidthReserve({
+        pct: 0.059,
+        aspect,
+        variance: 0.53,
+        finishTerms: 23,
+        headroom: builtConfig.overscanHeadroom,
+      }).radius
+      const needed = percentWidthReserve({
+        pct: 0.059,
+        aspect,
+        variance: 0.53,
+        finishTerms: 88,
+        headroom: config.overscanHeadroom,
+      }).radius
+      expect(reserved, `aspect ${String(aspect)}`).toBeGreaterThanOrEqual(needed)
+    }
   })
 
   it('resets by omitting the controlled keys so stage.defaults restores them', async () => {

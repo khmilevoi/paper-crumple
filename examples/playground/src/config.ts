@@ -1,6 +1,13 @@
 import * as pc from '@paper-crumple/core'
-import { optionsFor, paperSheet } from '@paper-crumple/paper'
+import {
+  defaultsFor,
+  descriptorsFor,
+  edgeParamsFrom,
+  optionsFor,
+  paperSheet,
+} from '@paper-crumple/paper'
 import type { EdgeFinish, EdgeShape, EdgeWidthUnit, PaperSheet } from '@paper-crumple/paper'
+import { overscanRadius, percentWidthReserve } from '@paper-crumple/core/unstable'
 import { tiles } from '@paper-crumple/paper/tiles'
 import { bakedMotion } from '@paper-crumple/motion'
 import pack1x1 from '@paper-crumple/motion/packs/1x1'
@@ -66,6 +73,95 @@ export const DEFAULT_CONFIG: DemoConfig = {
   // widens the SLIDER's live room — a build with no live edge knobs moved pays nothing extra). The
   // samples with a transparent border of their own (every other one) need none of it either way.
   overscanHeadroom: 0.3,
+}
+
+function numberKnob(knobs: pc.Knobs, key: string, fallback: number): number {
+  const value = knobs[`sheet.${key}`]
+  return typeof value === 'number' && Number.isFinite(value) ? value : fallback
+}
+
+/**
+ * A restored hull-tier knob is visible to the first `source()` call, so its factory reserve must
+ * be bought before the stage starts adding sprites. The public config remains the user's desired
+ * spare room; the returned config translates that room from the restored edge values back onto
+ * the library's fixed factory defaults.
+ */
+export function configForInitialKnobs(config: DemoConfig, knobs: pc.Knobs): DemoConfig {
+  const spec = {
+    shape: config.edgeShape,
+    finish: config.edgeFinish,
+    widthUnit: config.edgeWidthUnit,
+  } as const
+  const defaults = defaultsFor(spec)
+  const value = (key: string): number =>
+    numberKnob(knobs, key, typeof defaults[key] === 'number' ? defaults[key] : 0)
+  const radiusFor = (live: boolean, headroom: number, aspect: number): number => {
+    const width = live ? value('edgeWidth') : Number(defaults.edgeWidth)
+    const variance = live ? value('edgeVariance') : Number(defaults.edgeVariance)
+    const finishTerms =
+      spec.finish === 'paper' && width > 0
+        ? 4 * (live ? value('fiberLen') : Number(defaults.fiberLen)) +
+          (live ? value('deckleWidth') : Number(defaults.deckleWidth))
+        : 0
+    if (spec.widthUnit === 'percent') {
+      return percentWidthReserve({
+        pct: Math.max(0, width) / 100,
+        aspect,
+        variance,
+        finishTerms,
+        headroom,
+      }).radius
+    }
+    const values = live
+      ? {
+          ...defaults,
+          edgeWidth: width,
+          edgeVariance: variance,
+          fiberLen: value('fiberLen'),
+          deckleWidth: value('deckleWidth'),
+        }
+      : defaults
+    return (
+      overscanRadius(edgeParamsFrom(spec, values, Math.max(0, width))) * (1 + Math.max(0, headroom))
+    )
+  }
+
+  // For percent widths, cross-multiplying the two fractional-linear radius formulas cancels the
+  // quadratic term, so their difference can change sign only at an endpoint. `0` is the portrait
+  // limit and `1` is square/landscape. The px formula ignores aspect, making the same check inert.
+  const aspects = spec.widthUnit === 'percent' ? [0, 1] : [1]
+  const covers = (headroom: number): boolean =>
+    aspects.every(
+      (aspect) =>
+        radiusFor(false, headroom, aspect) >= radiusFor(true, config.overscanHeadroom, aspect),
+    )
+  if (covers(config.overscanHeadroom)) return config
+
+  let low = Math.max(0, config.overscanHeadroom)
+  let high = Math.max(1, low * 2)
+  while (!covers(high)) high *= 2
+  for (let i = 0; i < 48; i++) {
+    const mid = (low + high) / 2
+    if (!covers(mid)) low = mid
+    else high = mid
+  }
+  return { ...config, overscanHeadroom: high }
+}
+
+/** Drop sheet knobs that do not exist in the selected factory cell before React replays them. */
+export function knobsForConfig(config: DemoConfig, knobs: pc.Knobs): pc.Knobs {
+  const sheetKeys = new Set(
+    descriptorsFor({
+      shape: config.edgeShape,
+      finish: config.edgeFinish,
+      widthUnit: config.edgeWidthUnit,
+    }).map((descriptor) => `sheet.${descriptor.key}`),
+  )
+  const out: Record<string, pc.Knobs[string]> = {}
+  for (const [key, value] of Object.entries(knobs)) {
+    if (!key.startsWith('sheet.') || sheetKeys.has(key)) out[key] = value
+  }
+  return out
 }
 
 /**
