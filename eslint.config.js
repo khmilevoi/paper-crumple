@@ -22,6 +22,7 @@ export function makeEslintConfig(allowedToThrow) {
         'docs/**',
         '.superpowers/**',
         '.claude/**',
+        '.worktrees/**',
       ],
     },
     js.configs.recommended,

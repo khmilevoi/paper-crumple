@@ -9,6 +9,7 @@ const sharedExclude = [
   // every sibling's tests — and the gl project opens a browser page for each, against the
   // ~16 live WebGL2 context cap. eslint.config.js and .prettierignore already exclude both.
   '**/.claude/**',
+  '**/.worktrees/**',
   '**/.superpowers/**',
 ]
 
