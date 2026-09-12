@@ -1,5 +1,29 @@
 import { describe, expect, it } from 'vitest'
-import { hullBandFor, midHigh, midLow, tearAmpsFor, CHEW_REACH } from './edge-derive.js'
+import {
+  hullBandFor,
+  intrinsicEdgeBias,
+  midHigh,
+  midLow,
+  tearAmpsFor,
+  CHEW_REACH,
+} from './edge-derive.js'
+
+describe('intrinsic edge spacing', () => {
+  it('grows continuously from the core thickness into the existing positive-width contour', () => {
+    for (const thickness of [0, 1, 7, 40]) {
+      let previous = intrinsicEdgeBias(0, thickness)
+      expect(previous).toBe(thickness)
+      for (let width = 0.1; width <= 140; width += 0.1) {
+        const bias = intrinsicEdgeBias(width, thickness)
+        expect(bias).toBeGreaterThanOrEqual(previous)
+        expect(bias - previous).toBeLessThanOrEqual(0.100001)
+        expect(bias).toBeLessThanOrEqual(width + thickness)
+        if (width >= 2 * thickness) expect(bias).toBe(width)
+        previous = bias
+      }
+    }
+  })
+})
 
 describe('hullBandFor (design 2026-09-05 §5)', () => {
   it('reproduces the hull defaults to within a tenth of a reference px', () => {

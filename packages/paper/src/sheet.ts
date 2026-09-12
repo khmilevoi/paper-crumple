@@ -1048,7 +1048,7 @@ export function paperSheet(options?: PaperSheetOptions): PaperSheet {
     const raw = numKnob(factoryDefaults, 'edgeWidth', 0)
     const variance = numKnob(factoryDefaults, 'edgeVariance', 0)
     const finishTerms =
-      edgeSpec.finish === 'paper' && raw > 0
+      edgeSpec.shape !== 'none' && edgeSpec.finish === 'paper'
         ? 4 * numKnob(factoryDefaults, 'fiberLen', 0) + numKnob(factoryDefaults, 'deckleWidth', 0)
         : 0
     const widthRef =
@@ -1099,6 +1099,7 @@ export function paperSheet(options?: PaperSheetOptions): PaperSheet {
    * grow with the bucket.
    */
   function widthRefFrom(values: Knobs, artwork: Size, front: Size): number {
+    if (edgeSpec.shape === 'none') return 0
     const raw = Math.max(0, numKnob(values, 'edgeWidth', 0))
     if (edgeSpec.widthUnit === 'px') return raw
     return ((raw / 100) * Math.min(artwork.w, artwork.h) * KNOB_REFERENCE_PX) / front.h

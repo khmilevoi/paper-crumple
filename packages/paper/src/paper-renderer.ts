@@ -70,7 +70,7 @@ import {
   pxScale as pxScaleOf,
   scaleKnob,
 } from '@paper-crumple/core/unstable'
-import { CHEW_REACH, midHigh, tearAmpsFor } from './edge-derive.js'
+import { CHEW_REACH, intrinsicEdgeBias, midHigh, tearAmpsFor } from './edge-derive.js'
 import type { TearAmps } from './edge-derive.js'
 import type { Field, LooseField } from './gl-sdf.js'
 import { defaultsFor } from './paper-knobs.js'
@@ -250,17 +250,18 @@ export function createPaperRenderer(ctx: GlContext): Err | PaperRenderer {
     // the shader here — through the CONTENTS of `r.loose` (`sigmaFor` -> `blurField`), never
     // through a uniform of its own.
     const smooth = r.edgeSpec.shape === 'smooth'
+    const none = r.edgeSpec.shape === 'none'
     const contour: Field = smooth ? (r.paperField ?? r.tight) : r.tight
     const looseTexture = smooth ? contour.target.texture : r.loose.target.texture
     const looseDecode = smooth ? contour.decode : r.loose.decode
-    // §2.5's zero rule, stated once: no rim means nothing to decorate, so the finish knobs stay in
-    // the bag and stop having an effect.
-    const widthRef = Number.isFinite(r.widthRef) && r.widthRef > 0 ? r.widthRef : 0
-    const finishOn = r.edgeSpec.finish === 'paper' && widthRef > 0
+    // Shape 'none' ignores edge values. A paper finish remains active at zero blank spacing.
+    const widthRef = !none && Number.isFinite(r.widthRef) && r.widthRef > 0 ? r.widthRef : 0
+    const finishOn = !none && r.edgeSpec.finish === 'paper'
     // Under `smooth` the polygon already sits at `W (1 +- v)`, so biasing it again would reach
     // `2 W` (§6.1 item 1, and ruling R12's correction to the spec's own table); under `torn` the
-    // bias IS the band (§5).
-    const baseBias = smooth ? 0 : widthRef
+    // bias IS the band (§5). Near zero, add only the intrinsic core not already carried by width.
+    const coreBias = finishOn ? intrinsicEdgeBias(widthRef, edgeNum('deckleWidth')) : widthRef
+    const baseBias = smooth ? coreBias - widthRef : coreBias
 
     // Ruling R3: ONE resolved number per edge knob, above BOTH the derivation and the upload.
     // `uTearAngular` is not an amplitude — `baseAngular` (`paper-shader.ts`) is gated on
@@ -268,20 +269,21 @@ export function createPaperRenderer(ctx: GlContext): Err | PaperRenderer {
     // polygon under `smooth`, chamfering every concavity on a coarse lattice, and would put
     // `farOutside`'s `angTerm` back into the early-out's reach. Zeroing it under `smooth` and
     // zeroing the amplitudes are the same decision and are taken here together.
-    const tearAngular = smooth ? 0 : edgeNum('tearAngular')
-    const chewRef = smooth ? 0 : edgeNum('chew')
+    const tearAngular = smooth || none ? 0 : edgeNum('tearAngular')
+    const chewRef = smooth || none ? 0 : edgeNum('chew')
     // Read twice below — `uFiberLen` and `uFlapReach`'s fringe term — so it is bound once here for
     // the same reason `chewRef` is: two resolutions of one knob are two chances to disagree.
     const fiberLenRef = edgeNum('fiberLen')
-    const amps = smooth
-      ? NO_TEAR
-      : tearAmpsFor({
-          widthRef,
-          variance: edgeNum('edgeVariance'),
-          tearMix: edgeNum('tearMix'),
-          tearAngular,
-          chew: chewRef,
-        })
+    const amps =
+      smooth || none
+        ? NO_TEAR
+        : tearAmpsFor({
+            widthRef,
+            variance: edgeNum('edgeVariance'),
+            tearMix: edgeNum('tearMix'),
+            tearAngular,
+            chew: chewRef,
+          })
     // Ruling R4: the whole OUTWARD reach of the tear, not its low octave alone. `midAmp` reaches
     // out by `midHigh(tearAngular)` per unit (`midAng`'s `+tab * 0.55` branch mixed against
     // `midSmooth`), and the teeth add `CHEW_REACH * chew` on top of both, independently of the
@@ -349,6 +351,7 @@ export function createPaperRenderer(ctx: GlContext): Err | PaperRenderer {
       // ramp `edgeK()` reads, `uBaseBias` the outward offset of the contour source — the same
       // number under `torn`, deliberately different under `smooth` (ruling R12).
       gl.uniform1i(loc('edgeFinish'), finishOn ? 1 : 0)
+      gl.uniform1i(loc('edgeNone'), none ? 1 : 0)
       gl.uniform1f(loc('edgeWidth'), widthRef * pxs)
       gl.uniform1f(loc('baseBias'), baseBias * pxs)
       gl.uniform1f(loc('tearFreq'), edgeNum('tearFreq'))

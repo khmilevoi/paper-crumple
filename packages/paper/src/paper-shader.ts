@@ -215,6 +215,7 @@ uniform float uCrumpleBite;   // how far a rim plate sticks out or sits back, as
 // The CONTOUR is not encoded here at all: it is expressed by which textures the renderer binds
 // (design §6), so this shader never asks where its base field came from.
 uniform int uEdgeFinish;
+uniform int uEdgeNone;
 // There is no separate polygon-field sampler any more. Under 'edgeShape: 'smooth'' the renderer
 // binds the polygon's own field to uSdfTight AND uSdfLoose, which is what makes scrapUnguarded
 // return max(pf, pf) + 0 = pf; a third slot carrying the same texture had no reader left and was
@@ -234,19 +235,13 @@ const float FACET_TILT = 1.15;    // how steeply a fold normal is read as a face
 // crushed sheet is crinkled everywhere — visibly, but never dominantly. One knob cannot be both.
 const float CRINKLE_AMT = 0.05;
 
-// Edge width master ramp. uEdgeWidth is the ONE value that decides whether there is a border at
-// all: every border-only decoration — the tear octaves, the pixel teeth, the fibres, the deckle
-// band — is multiplied by edgeK(), which ramps from 0 at width 0 to 1 at EDGE_K_PX (reference px,
-// so it scales with the sprite like the knob itself). It reads uEdgeWidth and NOT uBaseBias: the
-// ramp is a master gate on the decorations, which exist in every cell, while the bias is only the
-// outward offset of the contour source and is 0 under a polygon contour (see uBaseBias). Below the
-// ramp's top the individual knobs still fine-tune the look; at exactly zero the paper mask IS the
-// artwork alpha, antialiased by the usual 0.6 rendered px and nothing else — design §7's "the
-// sheet IS the artwork". The ramp is a smoothstep rather than a step so dragging the slider
-// through zero never pops. Everything here is uniform-only, so the compiler hoists it out of the
-// pixel.
+// Width ramps the loose envelope, angular shaping and coarse tear octaves down to the PNG
+// silhouette. Fine paper finish uses edgeDetailK instead and survives zero blank spacing.
 const float EDGE_K_PX = 6.0;
 float edgeK() { return smoothstep(0.0, EDGE_K_PX * uPxScale, uEdgeWidth); }
+// Paper finish has its own physical thickness even when blank paper spacing is zero.
+// Keep the old width ramp for the loose envelope and coarse contour shaping.
+float edgeDetailK() { return uEdgeFinish == 1 ? 1.0 : edgeK(); }
 
 // Ball compaction, in ball radii (uBallR == 1). See the "ball compaction" block in main.
 //   BALL_GROW  radius the hole-filling body has grown to by fill 1 — past the plate outline
@@ -580,7 +575,7 @@ float tearOf(vec2 uv, float base, float baseAng, out float shaped) {
   float k = edgeK();
   float tearAmp = uTearAmp * k;
   float midAmp = uMidAmp * k;
-  float chew = uChew * k;
+  float chew = uChew * edgeDetailK();
 
   // Low: the long run. A real tear goes a long way before it turns, so this is the octave that
   // owns the silhouette. Piecewise linear at uTearAngular 1 (straight runs, sharp corners),
@@ -800,14 +795,14 @@ float paperField(vec2 uv, out float fringe, out vec2 nrm) {
   // band and no tear shadow, so the whole frame — four extra scrapBase taps and the reach that
   // bounds them — is skipped for every fragment at once, and every line that touches a finish
   // decoration provably sits under a uEdgeFinish test.
-  float k = edgeK();
+  float k = edgeDetailK();
   if (uEdgeFinish == 1) {
     float reach = max(uFiberLen * STRAND_MULT * k, (uDeckleWidth * k) * 3.0) + 4.0;
     if (abs(shaped) < reach) {
       // The smooth field's normal, tilted toward the run's own direction by the angular blend, so
       // the frame follows the polyline rather than the garment underneath it.
       vec2 nS = edgeNormal(uv);
-      float ang = uTearAngular * k;
+      float ang = uTearAngular * edgeK();
       vec2 n = (ang > 0.0 && dot(angDir, angDir) > 0.5) ? normalize(mix(nS, angDir, ang)) : nS;
       nrm = n;
       vec2 pPx = uv * vec2(uAspect, 1.0) * uPlanePx;
@@ -1786,8 +1781,8 @@ bool farOutside(vec2 uv, float aa) {
   // point inside it (proof block, step 2).
   float angTerm = cell * 0.70710678;
   // 'CHEW_REACH' again, the second of its two uses (the first is tearOf's own 'teeth').
-  float teeth = (uChew * k) * ${glslFloat(CHEW_REACH)};
-  float strandLen = (uFiberLen * k) * STRAND_MULT;
+  float teeth = (uChew * edgeDetailK()) * ${glslFloat(CHEW_REACH)};
+  float strandLen = (uFiberLen * edgeDetailK()) * STRAND_MULT;
   float edge = angTerm + slop + 2.0 * teeth + strandLen * 1.05 + aa;
   return u < -max(gateReach(), edge) && tight + uBaseBias * 0.4 < -edge;
 }
@@ -1864,13 +1859,11 @@ void main() {
   // through the antialiased edge, and nothing else. The blend is skipped at k == 1 so the
   // default render stays bit-identical.
   //
-  // At edgeWidth 0 the ramp bottoms out HERE, which is design 2026-09-05 §7's "the sheet IS the
-  // artwork"; there is no separate branch for it. The old degenerate hull arm wrote exactly this
-  // expression and is deleted rather than re-pointed — edgeK() == 0 makes the mix return its
-  // first operand, which is that same expression, in every cell.
-  float edgeRamp = edgeK();
+  // Clean zero-width edges retain the legacy alpha transition. Paper finish keeps the field;
+  // explicit 'none' bypasses the transition below to preserve fractional PNG coverage exactly.
+  float edgeRamp = edgeDetailK();
   if (edgeRamp < 1.0) field = mix((img.a - 0.5) * 2.0 * max(aa, 0.5), field, edgeRamp);
-  float sheetA = smoothstep(-aa, aa, field);
+  float sheetA = uEdgeNone == 1 ? img.a : smoothstep(-aa, aa, field);
   // The fringe hairs lie OUTSIDE the sheet's own edge and are translucent, so they go over the
   // background with their own alpha rather than into the field: a hair is not more paper, it is
   // a thread of the core with light coming through beside it. With no hair in the pixel this is
@@ -1973,7 +1966,7 @@ void main() {
   // raggeds the boundary at a 4-9 px wavelength. At constant width the band reads as a drawn
   // stroke, and with a smooth inner edge as a vignette; the ragged boundary is what makes it
   // read as a layer that has been pulled away.
-  float deckleK = edgeK();
+  float deckleK = edgeDetailK();
   // Finish-only: a clean cut has no core band and throws no tear shadow (design 2026-09-05 §2.3).
   float deckleWidth = (uEdgeFinish == 1) ? uDeckleWidth * deckleK : 0.0;
   vec2 pPx = nUv * uPlanePx;
@@ -2484,6 +2477,7 @@ export const PAPER_UNIFORMS = Object.freeze({
   ballR: 'uBallR',
   crumpleBite: 'uCrumpleBite',
   edgeFinish: 'uEdgeFinish',
+  edgeNone: 'uEdgeNone',
   sheetCrumple: 'uSheetCrumple',
   sheetTile: 'uSheetTile',
   debug: 'uDebug',

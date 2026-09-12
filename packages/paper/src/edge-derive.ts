@@ -149,6 +149,17 @@ export interface TearAmps {
   readonly midAmp: number
 }
 
+/** A narrow exposed core at zero spacing, smoothly absorbed by the existing border.
+ * The bias is monotonic in width and equals width once it reaches twice the core thickness.
+ * Its extra reach never exceeds deckleWidth, already included in the finish reserve.
+ */
+export function intrinsicEdgeBias(widthRef: number, deckleWidth: number): number {
+  const w = Number.isFinite(widthRef) && widthRef > 0 ? widthRef : 0
+  const d = Number.isFinite(deckleWidth) && deckleWidth > 0 ? deckleWidth : 0
+  if (d === 0 || w >= 2 * d) return w
+  return w + d * (1 - w / (2 * d)) ** 2
+}
+
 /**
  * `torn`: the two octave amplitudes, from the budget left after `chew` has taken its share.
  *

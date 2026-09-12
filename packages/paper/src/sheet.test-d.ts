@@ -14,6 +14,9 @@ import { COMMON_KNOBS, SMOOTH_KNOBS, VARIANCE_KNOB, WIDTH_PX_KNOB } from './pape
 describe('paperSheet satisfies the sheet slot (spec 5.2)', () => {
   it('is assignable to SheetRenderer', () => {
     expectTypeOf(paperSheet()).toMatchTypeOf<SheetRenderer>()
+    expectTypeOf(
+      paperSheet({ edgeShape: 'none', edgeFinish: 'paper' }),
+    ).toMatchTypeOf<SheetRenderer>()
   })
 
   it("carries | Aborted in source()'s union, because it accepts a signal (amendment 1)", () => {

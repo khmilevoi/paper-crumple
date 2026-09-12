@@ -213,6 +213,26 @@ describe('defaultsFor (design 2026-09-05 §2.4)', () => {
 })
 
 describe('edgeParamsFrom (design 2026-09-05 §4.1)', () => {
+  it('reserves the intrinsic finish at zero paper spacing', () => {
+    const p = edgeParamsFrom(spec('torn', 'paper'), {}, 0)
+    expect(p).toEqual({ widthRef: 0, variance: 0.53, fiberLen: 4, deckleWidth: 7 })
+  })
+
+  it('none exposes no edge controls and ignores stale edge values', () => {
+    const s = spec('none', 'paper', 'percent')
+    const keys = descriptorsFor(s).map((d) => d.key)
+    expect(keys).not.toContain('edgeWidth')
+    expect(keys).not.toContain('deckleWidth')
+    expect(keys).not.toContain('chew')
+    expect(keys).toContain('photoCrumple')
+    expect(edgeParamsFrom(s, { edgeWidth: 100, deckleWidth: 40 }, 140)).toEqual({
+      widthRef: 0,
+      variance: 0,
+      fiberLen: 0,
+      deckleWidth: 0,
+    })
+  })
+
   it('zeroes the finish terms under clean, whatever the bag holds', () => {
     const p = edgeParamsFrom(
       spec('torn', 'clean'),

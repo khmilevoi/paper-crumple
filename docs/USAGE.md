@@ -699,10 +699,20 @@ renders, under its raw key, rather than being dropped.
 
 ### The width unit
 
+Choose `paperSheet({ edgeShape: 'none' })` to remove the paper edge and finish completely while
+keeping the artwork's alpha contour and the other sheet and motion effects. In this mode there
+are no edge width, shape or finish knobs.
+
+For `edgeShape: 'torn'` with `edgeFinish: 'paper'`, setting `'sheet.edgeWidth': 0` removes the flat
+paper margin but retains a narrow ragged band directly outside the PNG's alpha contour. Its
+intrinsic thickness comes from `deckleWidth`; the artwork itself is not cut. To turn this band
+off, choose the `none` shape. `torn` with `clean` finish at zero width still follows the alpha
+contour without a paper band.
+
 `edgeWidth` has two faces, picked by the factory's `edgeWidthUnit` (`'px' | 'percent'`, default
 `'px'`): a `reference: 'sprite-px'` descriptor (default `47`, range `0…140`) and a
 `reference: 'artwork-pct'` one (default `5.9`, range `0…15`). Only one of the two descriptors
-exists on a given sheet — the unit picks which — so a panel built from `k.reference` (as the loop
+exists on a smooth or torn sheet — the unit picks which — so a panel built from `k.reference` (as the loop
 above could be, though the snippet above only handles `'sprite-px'`) labels the slider correctly
 without asking the sheet which unit it was built with. `scaleKnob` never interprets
 `'artwork-pct'`; it is a marker for the UI's unit column and for the resolution step inside
@@ -714,7 +724,7 @@ that is both rotation-invariant and gives a 3:1 banner the same relative border 
 than the roughly 3x mismatch a long-side or height base would produce.
 
 One inherited wrinkle worth knowing before you pick `px`: under that unit the working width is
-bucket-dependent for `edgeShape: 'torn'` (the shader's outward bias is `edgeWidth * size.h / 1000`,
+bucket-dependent for `edgeShape: 'torn'` (the paper margin is `edgeWidth * size.h / 1000`,
 so a 512-texel build draws a narrower border than a 1024-texel one) but bucket-fixed for
 `edgeShape: 'smooth'` (the polygon is traced once and carried into every bucket 1:1 in texels).
 `percent` is invariant in both shapes. This is `sprite-px`'s own convention and predates the edge

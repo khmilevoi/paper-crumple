@@ -368,6 +368,7 @@ export const SDF_RES_KNOB: KnobDescriptor = {
  * factory, so a given sheet carries exactly one answer (ruling R5).
  */
 export function descriptorsFor(spec: EdgeSpec): readonly KnobDescriptor[] {
+  if (spec.shape === 'none') return [...COMMON_KNOBS, SDF_RES_KNOB]
   const level: Invalidates = spec.shape === 'smooth' ? 'hull' : 'front'
   const base = spec.widthUnit === 'percent' ? WIDTH_PCT_KNOB : WIDTH_PX_KNOB
   const width: KnobDescriptor = { ...base, invalidates: level }
@@ -395,8 +396,7 @@ export function resolveSdfRes(knobValue: number, frontLongSide: number): number 
  * `paperSheet`'s `build()` / `source()` — because the percent unit's conversion needs the sprite's
  * aspect and the frozen reserve, neither of which a knob bag carries (§3.1).
  *
- * §2.5's zero rule is enforced here as well as in the shader: at `widthRef === 0` the finish terms
- * are zero, so the reserve is one `slop`.
+ * Finish terms remain reserved at zero spacing. Only shape 'none' has a slop-only reserve.
  *
  * Ruling R3: every value this reads from `values` falls back to `defaultsFor(spec)`, never to a
  * bare literal. An incomplete knob bag (a caller that only ever set `edgeWidth`, say) must still
@@ -409,6 +409,7 @@ export function edgeParamsFrom(
   values: Readonly<Record<string, unknown>>,
   widthRef: number,
 ): EdgeParams {
+  if (spec.shape === 'none') return { widthRef: 0, variance: 0, fiberLen: 0, deckleWidth: 0 }
   const defaults = defaultsFor(spec)
   const num = (key: string): number => {
     const v = values[key]
@@ -425,7 +426,7 @@ export function edgeParamsFrom(
     return typeof d === 'number' ? d : NaN
   }
   const w = Number.isFinite(widthRef) && widthRef > 0 ? widthRef : 0
-  const decorated = spec.finish === 'paper' && w > 0
+  const decorated = spec.finish === 'paper'
   return {
     widthRef: w,
     variance: num('edgeVariance'),

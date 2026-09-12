@@ -63,10 +63,16 @@ someone else's megabytes. `tiles` and the pack are both opt-in — `paperSheet()
 ## The edge: shape, finish, width
 
 `paperSheet({ edgeShape, edgeFinish })` are factory options and not knobs, because together they
-pick which set of knobs exists at all. `edgeWidth` — how far the paper reaches past the artwork —
-is a **knob**, present in every combination and animatable to `0`, at which point the silhouette
-collapses onto the artwork's alpha and the finish switches off with it: `edgeWidth = 0` is "just the
-artwork", with no rebuild needed to get there.
+pick which set of knobs exists at all. Choose `edgeShape: 'none'` to disable the paper edge and its
+finish completely, preserving the artwork's alpha contour and the other sheet and motion effects.
+This shape exposes no edge width, shape or finish knobs; `edgeFinish` is ignored.
+
+For `smooth` and `torn`, `edgeWidth` is an animatable **knob** controlling the paper margin.
+At `edgeWidth: 0`, `torn` with `edgeFinish: 'paper'` keeps a narrow ragged band directly outside
+the artwork's alpha contour, without a flat paper strip and without cutting into the image.
+The existing `deckleWidth` controls this intrinsic band; setting it to `0` removes its width.
+To migrate an old zero-width configuration intended to remove all edge decoration, use
+`paperSheet({ edgeShape: 'none' })` instead.
 
 One qualifier on "animatable", because the two shapes pay different prices for it. Under
 `edgeShape: 'torn'` the width is a **front-tier** knob: a new value re-renders the front and nothing
@@ -76,6 +82,7 @@ the stage, and still fine for a handful of steps; not something to drive at 60 H
 
 |                       | `edgeFinish: 'clean'`                            | `edgeFinish: 'paper'`                                                          |
 | --------------------- | ------------------------------------------------ | ------------------------------------------------------------------------------ |
+| `edgeShape: 'none'`   | original alpha contour, no edge                  | original alpha contour, finish ignored                                         |
 | `edgeShape: 'smooth'` | plain cut, no tile needed                        | clean silhouette, deckle band, fibres and tear shadow                          |
 | `edgeShape: 'torn'`   | ragged noise-thresholded contour, no tile needed | the ragged contour plus the paper finish — the mode that reads the paper tiles |
 
@@ -83,7 +90,7 @@ the stage, and still fine for a handful of steps; not something to drive at 60 H
 runs, sharp corners); `edgeFinish: 'clean'` is the default and adds nothing to the rim. Only
 `edgeFinish: 'paper'` reads the `tiles` subpath below.
 
-Each of the four combinations exposes a different count of knobs from the `sheet` slot alone:
+The decorated combinations expose these counts of knobs from the `sheet` slot alone:
 `smooth`/`clean` **24**, `smooth`/`paper` **30**, `torn`/`clean` **28**, `torn`/`paper` **34**
 (design 2026-09-05 §2.4).
 

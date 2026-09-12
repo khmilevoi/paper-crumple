@@ -376,7 +376,7 @@ const scene = usePaperScene(create, [edgeShape, quality], {
 You write the factory call yourself, and **both** parameters you are handed go into it:
 
 ```tsx
-function Gallery({ edgeShape }: { edgeShape: 'torn' | 'smooth' }) {
+function Gallery({ edgeShape }: { edgeShape: 'none' | 'torn' | 'smooth' }) {
   const scene = usePaperScene({
     create: (signal, onError) =>
       pc.paperStage({

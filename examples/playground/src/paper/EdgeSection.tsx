@@ -80,9 +80,8 @@ export interface EdgeSectionProps {
 }
 
 /**
- * "02 Edge": three segmented toggles (shape / finish / width unit) over two always-visible
- * sliders (`edgeWidth`, `edgeVariance`), a shape sub-card, a finish sub-card and the unchanged
- * Shared sub-card.
+ * "02 Edge": a shape selector plus edge controls for smooth and torn. None hides edge-only
+ * settings while retaining the Shared sub-card and the selected finish for a later switch back.
  *
  * Each segment calls `onSpecChange` with the WHOLE spec and rebuilds the stage — `edgeShape`,
  * `edgeFinish` and `edgeWidthUnit` are all factory options (design 2026-09-05 §6.5), exactly as
@@ -197,94 +196,109 @@ export function EdgeSection({
           if (shape !== spec.shape) onSpecChange({ ...spec, shape })
         }}
         options={[
+          { id: 'none', label: 'None', title: 'none — original artwork contour, no edge' },
           { id: 'smooth', label: 'Smooth', title: 'smooth — polygon cut sheet' },
           { id: 'torn', label: 'Torn', title: 'torn — procedural tear' },
         ]}
       />
-      <Segmented
-        fill
-        label="edge finish"
-        value={spec.finish}
-        onChange={(finish) => {
-          if (finish !== spec.finish) onSpecChange({ ...spec, finish })
-        }}
-        options={[
-          { id: 'clean', label: 'Clean', title: 'clean — no paper decoration' },
-          { id: 'paper', label: 'Paper', title: 'paper — deckle, fibres and tear shadow' },
-        ]}
-      />
-      <Segmented
-        fill
-        label="edge width unit"
-        value={spec.widthUnit}
-        onChange={(widthUnit) => {
-          if (widthUnit !== spec.widthUnit) onSpecChange({ ...spec, widthUnit })
-        }}
-        options={[
-          { id: 'px', label: 'px', title: 'px — a fixed sprite-px width' },
-          { id: 'percent', label: '%', title: '% — a percent of the artwork' },
-        ]}
-      />
-
-      {widthKnob !== null && (
+      {spec.shape === 'none' ? (
+        <p className="note">original artwork contour — paper edge and finish are off</p>
+      ) : (
         <>
-          <Slider
-            label="edge width"
-            value={widthValue}
-            min={widthKnob.min}
-            max={widthMax}
-            step={stepOf(widthKnob)}
-            unit={unitOf(widthKnob)}
-            onChange={(v) => {
-              onSet(WIDTH_KEY, v)
+          <Segmented
+            fill
+            label="edge finish"
+            value={spec.finish}
+            onChange={(finish) => {
+              if (finish !== spec.finish) onSpecChange({ ...spec, finish })
             }}
+            options={[
+              { id: 'clean', label: 'Clean', title: 'clean — no paper decoration' },
+              { id: 'paper', label: 'Paper', title: 'paper — deckle, fibres and tear shadow' },
+            ]}
           />
-          {widthValue === 0 && <p className="note">no edge — the sheet renders with no border</p>}
-          {ceilings.widthMax === undefined ? (
-            <p className="note">
-              this build's exact reachable ceiling is not shown under the % unit — see the task-9
-              report; dragging past it still reports the refusal on the status pill
-            </p>
-          ) : (
-            widthMax < widthKnob.max && (
-              <p className="note">
-                capped at {widthMax.toFixed(1)} of its {widthKnob.max} — past this the sheet's
-                frozen reserve refuses (design §8.6)
-              </p>
-            )
+          <Segmented
+            fill
+            label="edge width unit"
+            value={spec.widthUnit}
+            onChange={(widthUnit) => {
+              if (widthUnit !== spec.widthUnit) onSpecChange({ ...spec, widthUnit })
+            }}
+            options={[
+              { id: 'px', label: 'px', title: 'px — a fixed sprite-px width' },
+              { id: 'percent', label: '%', title: '% — a percent of the artwork' },
+            ]}
+          />
+
+          {widthKnob !== null && (
+            <>
+              <Slider
+                label="edge width"
+                value={widthValue}
+                min={widthKnob.min}
+                max={widthMax}
+                step={stepOf(widthKnob)}
+                unit={unitOf(widthKnob)}
+                onChange={(v) => {
+                  onSet(WIDTH_KEY, v)
+                }}
+              />
+              {widthValue === 0 && (
+                <p className="note">
+                  {spec.shape === 'torn' && spec.finish === 'paper'
+                    ? 'torn edge starts at the artwork — no flat paper margin'
+                    : 'no flat paper margin'}
+                </p>
+              )}
+              {ceilings.widthMax === undefined ? (
+                <p className="note">
+                  this build's exact reachable ceiling is not shown under the % unit — see the
+                  task-9 report; dragging past it still reports the refusal on the status pill
+                </p>
+              ) : (
+                widthMax < widthKnob.max && (
+                  <p className="note">
+                    capped at {widthMax.toFixed(1)} of its {widthKnob.max} — past this the sheet's
+                    frozen reserve refuses (design §8.6)
+                  </p>
+                )
+              )}
+            </>
+          )}
+
+          {varianceKnob !== null && (
+            <>
+              <Slider
+                label="edge variance"
+                value={varianceValue}
+                min={varianceKnob.min}
+                max={varianceMax}
+                step={stepOf(varianceKnob)}
+                unit={unitOf(varianceKnob)}
+                onChange={(v) => {
+                  onSet(VARIANCE_KEY, v)
+                }}
+              />
+              {ceilings.varianceMax !== undefined &&
+                Number.isFinite(ceilings.varianceMax) &&
+                varianceMax < varianceKnob.max && (
+                  <p className="note">
+                    capped at {varianceMax.toFixed(2)} of its {varianceKnob.max} — past this the
+                    sheet's frozen reserve refuses (design §8.6)
+                  </p>
+                )}
+            </>
+          )}
+
+          <SubCard title={spec.shape === 'smooth' ? 'Shape — smooth' : 'Shape — torn'}>
+            {sliders(spec.shape === 'smooth' ? SMOOTH_SHAPE_ROWS : TORN_SHAPE_ROWS)}
+          </SubCard>
+
+          {spec.finish === 'paper' && (
+            <SubCard title="Finish — paper">{sliders(FINISH_ROWS)}</SubCard>
           )}
         </>
       )}
-
-      {varianceKnob !== null && (
-        <>
-          <Slider
-            label="edge variance"
-            value={varianceValue}
-            min={varianceKnob.min}
-            max={varianceMax}
-            step={stepOf(varianceKnob)}
-            unit={unitOf(varianceKnob)}
-            onChange={(v) => {
-              onSet(VARIANCE_KEY, v)
-            }}
-          />
-          {ceilings.varianceMax !== undefined &&
-            Number.isFinite(ceilings.varianceMax) &&
-            varianceMax < varianceKnob.max && (
-              <p className="note">
-                capped at {varianceMax.toFixed(2)} of its {varianceKnob.max} — past this the sheet's
-                frozen reserve refuses (design §8.6)
-              </p>
-            )}
-        </>
-      )}
-
-      <SubCard title={spec.shape === 'smooth' ? 'Shape — smooth' : 'Shape — torn'}>
-        {sliders(spec.shape === 'smooth' ? SMOOTH_SHAPE_ROWS : TORN_SHAPE_ROWS)}
-      </SubCard>
-
-      {spec.finish === 'paper' && <SubCard title="Finish — paper">{sliders(FINISH_ROWS)}</SubCard>}
 
       <SubCard title="Shared" muted padded>
         {reliefKnob !== null && (

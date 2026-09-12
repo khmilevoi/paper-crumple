@@ -1290,13 +1290,73 @@ describe('both contour shapes leave a solid annulus (design 2026-09-05 §5.1, §
 })
 
 describe('edgeWidth 0 (design 2026-09-05 §7, §2.5)', () => {
-  it('collapses to the artwork at edgeWidth 0', async () => {
-    const spec: EdgeSpec = { shape: 'torn', finish: 'paper', widthUnit: 'px' }
+  it('none preserves fractional PNG coverage without adding a paper mask', async () => {
+    const alpha = LOGO_ALPHA.map((a) => a * (166 / 255))
+    const r = await cell({ shape: 'none', finish: 'paper', widthUnit: 'px' }, {}, alpha)
+    const placed = artworkAlphaPlane(r.alpha, r.artworkRect, r.size, r.size.w, r.size.h)
+    for (let i = 0; i < placed.length; i++) {
+      expect(Math.abs(r.front[i * 4 + 3] - Math.round(placed[i] * 255))).toBeLessThanOrEqual(1)
+    }
+  }, 300_000)
+
+  it('keeps a visible intrinsic torn rim outside opaque PNG pixels at zero spacing', async () => {
+    for (const widthUnit of ['px', 'percent'] as const) {
+      const spec: EdgeSpec = { shape: 'torn', finish: 'paper', widthUnit }
+      const r = await cell(spec, { edgeWidth: 0 })
+      const alpha = artworkAlphaPlane(r.alpha, r.artworkRect, r.size, r.size.w, r.size.h)
+      let added = 0
+      for (let i = 0; i < alpha.length; i++) {
+        if (alpha[i] === 1) expect(r.front[i * 4 + 3]).toBe(255)
+        if (alpha[i] === 0 && r.front[i * 4 + 3] > 32) added++
+      }
+      expect(added, widthUnit).toBeGreaterThan(100)
+      if (widthUnit === 'px') {
+        const none = await cell({ ...spec, shape: 'none' })
+        const canvas = document.createElement('canvas')
+        canvas.width = 800
+        canvas.height = 440
+        const ctx = canvas.getContext('2d')!
+        ctx.fillStyle = '#343b42'
+        ctx.fillRect(0, 0, canvas.width, canvas.height)
+        ctx.fillStyle = '#ffffff'
+        ctx.font = '18px sans-serif'
+        for (const [index, item] of [none, r].entries()) {
+          ctx.fillText(
+            index === 0 ? 'edgeShape: none' : 'torn + paper, width: 0',
+            index * 400 + 30,
+            32,
+          )
+          const tile = document.createElement('canvas')
+          tile.width = item.size.w
+          tile.height = item.size.h
+          tile
+            .getContext('2d')!
+            .putImageData(
+              new ImageData(new Uint8ClampedArray(item.front), tile.width, tile.height),
+              0,
+              0,
+            )
+          ctx.drawImage(tile, index * 400 + (400 - tile.width) / 2, 65)
+        }
+        await commands
+          .writeFile('.superpowers/edge-zero-comparison.data-url', canvas.toDataURL('image/png'))
+          .catch(() => undefined)
+      }
+    }
+  }, 300_000)
+
+  it('none collapses to the artwork independently of width and finish knobs', async () => {
+    const spec: EdgeSpec = { shape: 'none', finish: 'paper', widthUnit: 'px' }
     const zero = await cell(spec, { edgeWidth: 0 })
     silhouetteMatchesAlpha(zero, 1)
-    const decorated = await cell(spec, { edgeWidth: 0, deckleWidth: 40, fibers: 1, tearShadow: 1 })
+    const decorated = await cell(spec, {
+      edgeWidth: 140,
+      deckleWidth: 40,
+      fibers: 1,
+      tearShadow: 1,
+    })
     const plain = await cell(spec, { edgeWidth: 0, deckleWidth: 0, fibers: 0, tearShadow: 0 })
-    expect(pixelsDiffer(decorated.front, plain.front)).toBe(false) // §2.5's zero rule
+    expect(pixelsDiffer(decorated.front, plain.front)).toBe(false)
     expect(handleOf(zero).hull).toBe(HULL_USE_ALPHA) // no polygon
     expect(handleOf(zero).sdfRes).toBeGreaterThan(0) // the tight field still IS built
   }, 300_000)
@@ -1329,11 +1389,14 @@ describe('the edge is out of the picture at width 0 (design 2026-09-05 §8, guar
    * `paper` cell reserves `fiberLen + deckleWidth` of finish terms and gets a wider margin whatever
    * a later `build()` sets the width to.
    */
-  it('renders the artwork and nothing else, in all four cells at edgeWidth 0', async () => {
+  it('none matches the old clean zero-width artwork in both units and finishes', async () => {
     const reference = await cell(SMOOTH_CLEAN, { edgeWidth: 0 })
     const interior = artworkInterior(reference)
-    for (const spec of ALL_FOUR_CELLS) {
-      const r = await cell(spec, { edgeWidth: 0 })
+    const noneSpecs: EdgeSpec[] = ['px', 'percent'].flatMap((widthUnit) =>
+      ['clean', 'paper'].map((finish) => ({ shape: 'none', finish, widthUnit }) as EdgeSpec),
+    )
+    for (const spec of noneSpecs) {
+      const r = await cell(spec, { edgeWidth: 140 })
       const label = `${JSON.stringify(spec)} @ edgeWidth 0`
       // It is a sheet at all, not an empty front — the assertion the rest of this rests on.
       expect(

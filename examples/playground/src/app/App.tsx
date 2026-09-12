@@ -512,7 +512,8 @@ function Playground({
 
   // --- render -----------------------------------------------------------------------------------
 
-  const edgeChip = `${config.edgeShape} · ${config.edgeFinish}`
+  const edgeChip =
+    config.edgeShape === 'none' ? 'none' : `${config.edgeShape} · ${config.edgeFinish}`
 
   return (
     <div className="page">

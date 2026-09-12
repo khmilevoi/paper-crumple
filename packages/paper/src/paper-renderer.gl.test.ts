@@ -566,7 +566,7 @@ describe('design 2026-09-05 §6: the four-cell binding table', () => {
     s.cleanup()
   })
 
-  it('honours the zero rule: at width 0 the finish is off whatever the spec says (design §2.5)', async () => {
+  it('keeps the paper finish enabled at zero spacing', async () => {
     const s = expectOk(await uniformScene())
     const seen = captureUniforms(s.ctx, s.program, () =>
       s.renderer.renderFront(s.tiles, {
@@ -576,9 +576,27 @@ describe('design 2026-09-05 §6: the four-cell binding table', () => {
         widthRef: 0,
       }),
     )
-    expect(seen.ints.edgeFinish).toBe(0)
+    expect(seen.ints.edgeFinish).toBe(1)
     expect(seen.floats.edgeWidth).toBe(0)
-    expect(seen.floats.baseBias).toBe(0)
+    expect(seen.floats.baseBias).toBeGreaterThan(0)
+    s.cleanup()
+  })
+
+  it('none ignores a stale polygon, width and finish', async () => {
+    const s = expectOk(await uniformScene())
+    const seen = captureUniforms(s.ctx, s.program, () =>
+      s.renderer.renderFront(s.tiles, {
+        ...s.base,
+        paperField: s.polygon,
+        edgeSpec: { shape: 'none', finish: 'paper', widthUnit: 'px' },
+        widthRef: WIDTH_REF,
+      }),
+    )
+    expect(seen.textures.sdfTight).toBe(s.base.tight.target.texture.handle)
+    expect(seen.ints.edgeFinish).toBe(0)
+    for (const key of ['edgeWidth', 'baseBias', 'tearAmp', 'midAmp', 'chew', 'tearAngular']) {
+      expect(seen.floats[key], key).toBe(0)
+    }
     s.cleanup()
   })
 

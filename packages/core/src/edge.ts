@@ -2,12 +2,12 @@
  * The edge vocabulary (design 2026-09-05 §2) and the percent unit's closure (§4.3).
  *
  * Three orthogonal settings replace `EdgeMode`. `shape` and `finish` are factory options because
- * each changes the set of other knobs (spec §6.5); the width is a KNOB, because "no edge" has to
- * be reachable by animating a value to zero without a rebuild.
+ * each changes the set of other knobs (spec §6.5). Width controls spacing; shape 'none' disables
+ * the contour and its finish. A paper finish retains its intrinsic core at zero spacing.
  */
 import { EDGE_SLOP_REFERENCE_PX, RADIUS_CAP_REFERENCE_PX } from './overscan.js'
 
-export type EdgeShape = 'smooth' | 'torn'
+export type EdgeShape = 'none' | 'smooth' | 'torn'
 export type EdgeFinish = 'clean' | 'paper'
 export type EdgeWidthUnit = 'px' | 'percent'
 

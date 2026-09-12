@@ -289,7 +289,12 @@ interface FrontScene {
    * `null`, otherwise through a renderer whose context compiles `fs` in its place — and, with
    * `shadow`, with `uShadow` forced to that value (see `withPaperShader`).
    */
-  readonly render: (spec: EdgeSpec, fs: string | null, shadow?: number) => Uint8Array
+  readonly render: (
+    spec: EdgeSpec,
+    fs: string | null,
+    shadow?: number,
+    width?: number,
+  ) => Uint8Array
   dispose(): void
 }
 
@@ -373,7 +378,7 @@ function frontScene(N: number): FrontScene | Error {
   return {
     ctx,
     front: N,
-    render(spec, fs, shadow) {
+    render(spec, fs, shadow, width) {
       const renderer = rendererFor(fs, shadow)
       expect(GlError.is(renderer), GlError.is(renderer) ? renderer.message : '').toBe(false)
       if (GlError.is(renderer)) return new Uint8Array(0)
@@ -388,7 +393,7 @@ function frontScene(N: number): FrontScene | Error {
         // `uSdf*` slots); under `torn` it is unread and the artwork's own pair is bound.
         paperField: spec.shape === 'smooth' ? paperField : null,
         edgeSpec: spec,
-        widthRef: Number(defaultsFor(spec).edgeWidth),
+        widthRef: width ?? Number(defaultsFor(spec).edgeWidth),
         values: defaultsFor(spec),
         descriptors: descriptorsFor(spec),
       })
@@ -456,6 +461,18 @@ describe('PAPER_FS early-outs on the bench-style front (renderFront, explicit fi
           `${a[0]} and ${b[0]} rendered the same front`,
         ).not.toEqual([])
       }
+    }
+    scene.dispose()
+  }, 120_000)
+
+  it('preserves early-out parity for zero-width paper and none', () => {
+    const scene = frontScene(256)
+    if (scene instanceof Error) return expect.fail(scene.message)
+    for (const shape of ['torn', 'none'] as const) {
+      const spec: EdgeSpec = { shape, finish: 'paper', widthUnit: 'px' }
+      const on = scene.render(spec, null, undefined, 0)
+      const off = scene.render(spec, PAPER_FS_OFF, undefined, 0)
+      expect(firstDifferences(on, off, scene.front), shape).toEqual([])
     }
     scene.dispose()
   }, 120_000)

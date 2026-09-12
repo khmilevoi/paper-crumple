@@ -142,7 +142,7 @@ export function decodeState(hash: string): { config: DemoConfig; knobs: Knobs } 
   const edgeShape = parseLiteral<EdgeShape>(
     params,
     'edgeShape',
-    ['smooth', 'torn'],
+    ['none', 'smooth', 'torn'],
     DEFAULT_CONFIG.edgeShape,
   )
   if (edgeShape instanceof Error) return edgeShape

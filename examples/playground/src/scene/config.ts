@@ -87,6 +87,7 @@ function numberKnob(knobs: pc.Knobs, key: string, fallback: number): number {
  * the library's fixed factory defaults.
  */
 export function configForInitialKnobs(config: DemoConfig, knobs: pc.Knobs): DemoConfig {
+  if (config.edgeShape === 'none') return config
   const spec = {
     shape: config.edgeShape,
     finish: config.edgeFinish,
@@ -99,7 +100,7 @@ export function configForInitialKnobs(config: DemoConfig, knobs: pc.Knobs): Demo
     const width = live ? value('edgeWidth') : Number(defaults.edgeWidth)
     const variance = live ? value('edgeVariance') : Number(defaults.edgeVariance)
     const finishTerms =
-      spec.finish === 'paper' && width > 0
+      spec.finish === 'paper'
         ? 4 * (live ? value('fiberLen') : Number(defaults.fiberLen)) +
           (live ? value('deckleWidth') : Number(defaults.deckleWidth))
         : 0
