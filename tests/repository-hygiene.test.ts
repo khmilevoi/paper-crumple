@@ -59,7 +59,7 @@ describe('the root manifest', () => {
     )
     // `check` is everything CI runs, level 2 included, and it builds first. Every published
     // package's exports map points at ./dist, so NodeNext cannot resolve one from a sibling
-    // package until that dist exists (spec 10.4). All four published packages are filtered in:
+    // package until that dist exists (spec 10.4). All five published packages are filtered in:
     // core was alone only while paper and motion had no buildable entries, and wave 4 gave them
     // theirs — paper's src/tiles.ts and motion's src/packs/*.ts. @paper-crumple/react is there
     // because its exports map points at ./dist like its siblings', so nothing can resolve it
@@ -68,11 +68,11 @@ describe('the root manifest', () => {
     // `typecheck`: it is the only consumer of `artworkCssPx` and the built packages above, so it
     // needs their dists too and would otherwise never run in CI.
     expect(scripts.check).toBe(
-      'turbo run build --filter=@paper-crumple/core --filter=@paper-crumple/paper --filter=@paper-crumple/motion --filter=@paper-crumple/react && pnpm lint && pnpm format:check && pnpm typecheck && pnpm --filter @paper-crumple/playground typecheck && pnpm test && pnpm test:gl',
+      'turbo run build --filter=@paper-crumple/core --filter=@paper-crumple/paper --filter=@paper-crumple/motion --filter=@paper-crumple/react --filter=@paper-crumple/reatom && pnpm lint && pnpm format:check && pnpm typecheck && pnpm --filter @paper-crumple/playground typecheck && pnpm test && pnpm test:gl',
     )
     // The build leads. A lane that typechecks before those dists exist is the bug this guards.
     expect(scripts.check.split(' && ')[0]).toBe(
-      'turbo run build --filter=@paper-crumple/core --filter=@paper-crumple/paper --filter=@paper-crumple/motion --filter=@paper-crumple/react',
+      'turbo run build --filter=@paper-crumple/core --filter=@paper-crumple/paper --filter=@paper-crumple/motion --filter=@paper-crumple/react --filter=@paper-crumple/reatom',
     )
   })
 

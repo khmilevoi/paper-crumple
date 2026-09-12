@@ -1,3 +1,4 @@
+import { makeFakeSprite } from './testing/fake-stage.js'
 /**
  * @vitest-environment jsdom
  */
@@ -20,22 +21,26 @@ function stubReducedMotion(matches: boolean): void {
   )
 }
 
-test('a spriteKey change fires exactly one swapTo, under the caller s key (§5.3)', async () => {
+test('a spriteKey change starts one animation and acquires under the caller s key (§5.3)', async () => {
   const fake = createFakeStage()
   const probe = await renderCrumple(
     { spriteKey: 'a', src: 'a.png', duration: 800 },
     { scene: readyScene(fake.stage) },
   )
   await probe.rerender({ options: { spriteKey: 'b', src: 'b.png', duration: 800 } })
-  const swaps = fake.calls.filter((c) => c.method === 'view.swapTo')
+  const swaps = fake.calls.filter((c) => c.method === 'view.crumpleTo')
   expect(swaps).toHaveLength(1)
-  expect(swaps[0]?.args[0]).toBe('b.png')
-  expect(swaps[0]?.args[1]).toMatchObject({ key: 'b', duration: 800 })
+  expect(swaps[0]?.args[0]).toBeInstanceOf(Promise)
+  await expect(swaps[0]?.args[0]).resolves.toMatchObject({ key: 'b' })
+  expect(swaps[0]?.args[1]).toMatchObject({ duration: 800 })
+  expect(
+    fake.calls.find((c) => c.method === 'add' && c.args[0] === 'b.png')?.args[1],
+  ).toMatchObject({ key: 'b' })
   expect(probe.current.requested).toBe('b')
   await probe.unmount()
 })
 
-test('a spriteKey change reaches swapTo in the commit that observed it (§5.3)', async () => {
+test('a spriteKey change starts crumpleTo in the commit that observed it (§5.3)', async () => {
   const fake = createFakeStage()
   const probe = await renderCrumple(
     { spriteKey: 'a', src: 'a.png' },
@@ -44,11 +49,11 @@ test('a spriteKey change reaches swapTo in the commit that observed it (§5.3)',
   const before = fake.calls.length
   await probe.rerender({ options: { spriteKey: 'b', src: 'b.png' } })
   // The driver is not an `async` function and settles in a `.then`: no `await` may ever sit above
-  // the `swapTo` call, because `start` is emitted synchronously inside it and an
+  // the `crumpleTo` call, because `start` is emitted synchronously inside it and an
   // `AudioContext.resume()` in a start handler only runs inside the gesture because of that. This
   // asserts the call happened in the same commit; the guarantee itself is structural, so read the
   // driver before changing it.
-  expect(fake.calls.slice(before).map((c) => c.method)).toContain('view.swapTo')
+  expect(fake.calls.slice(before).map((c) => c.method)).toContain('view.crumpleTo')
   await probe.unmount()
 })
 
@@ -60,11 +65,11 @@ test('a second change supersedes the first and aborts its signal (§5.3, §9)', 
   )
   await probe.rerender({ options: { spriteKey: 'b', src: 'b.png' } })
   const firstSignal = (
-    fake.calls.find((c) => c.method === 'view.swapTo')?.args[1] as { signal?: AbortSignal }
+    fake.calls.find((c) => c.method === 'view.crumpleTo')?.args[1] as { signal?: AbortSignal }
   ).signal
   await probe.rerender({ options: { spriteKey: 'c', src: 'c.png' } })
   expect(firstSignal?.aborted).toBe(true)
-  expect(fake.calls.filter((c) => c.method === 'view.swapTo')).toHaveLength(2)
+  expect(fake.calls.filter((c) => c.method === 'view.crumpleTo')).toHaveLength(2)
   await probe.unmount()
 })
 
@@ -131,6 +136,22 @@ test('src changed without spriteKey reports an Error and makes no library call (
   await probe.unmount()
 })
 
+test('source identity history survives a replacement scene stage', async () => {
+  const first = createFakeStage()
+  const second = createFakeStage()
+  const probe = await renderCrumple(
+    { spriteKey: 'a', src: 'original.png' },
+    { scene: readyScene(first.stage) },
+  )
+  await probe.rerender({
+    scene: readyScene(second.stage, { generation: 2 }),
+    options: { spriteKey: 'a', src: 'changed.png' },
+  })
+  expect(probe.current.error).toBeInstanceOf(Error)
+  expect(second.calls.some((call) => call.method === 'add')).toBe(false)
+  await probe.unmount()
+})
+
 test('a, b, then a again with a new src is still caught — the map, not the last pair', async () => {
   const fake = createFakeStage()
   const probe = await renderCrumple(
@@ -154,7 +175,7 @@ test('a resident key swaps with no add of the binding s own (§5.3, §9)', async
   const before = fake.calls.filter((c) => c.method === 'add').length
   await probe.rerender({ options: { spriteKey: 'b', src: 'b.png' } })
   expect(fake.calls.filter((c) => c.method === 'add')).toHaveLength(before)
-  expect(fake.calls.filter((c) => c.method === 'view.swapTo')).toHaveLength(1)
+  expect(fake.calls.filter((c) => c.method === 'view.crumpleTo')).toHaveLength(1)
   await probe.unmount()
 })
 
@@ -169,7 +190,7 @@ test('a key whose acquisition is in flight is joined with crumpleTo, not swapTo 
   expect(fake.calls.filter((c) => c.method === 'view.crumpleTo')).toHaveLength(1)
   expect(fake.calls.filter((c) => c.method === 'view.swapTo')).toHaveLength(0)
   expect(fake.calls.filter((c) => c.method === 'add')).toHaveLength(1)
-  gate.resolve({ key: 'b' } as Sprite)
+  gate.resolve(makeFakeSprite('b'))
   await flush()
   await first.unmount()
   await second.unmount()
@@ -187,6 +208,7 @@ test('under reduce the swap is show(), and the query is read at the swap not at 
   await probe.rerender({ options: { spriteKey: 'b', src: 'b.png' } })
   await flush()
   expect(fake.calls.filter((c) => c.method === 'view.swapTo')).toHaveLength(0)
+  expect(fake.calls.filter((c) => c.method === 'view.crumpleTo')).toHaveLength(0)
   expect(fake.calls.filter((c) => c.method === 'view.show')).toHaveLength(2)
   expect(probe.current.shown).toBe('b')
   await probe.unmount()
@@ -213,5 +235,16 @@ test('a refused degraded swap reaches crumple.error and onError (ruling 1)', asy
   await flush()
   expect(probe.current.error).toBe(refused)
   expect(onError).toHaveBeenCalledTimes(1)
+  await probe.unmount()
+})
+
+test('sprite is on the snapshot, so a consumer never reaches for the raw view (§2.4)', async () => {
+  const fake = createFakeStage({ sprites: ['a'] })
+  const probe = await renderCrumple(
+    { spriteKey: 'a', src: 'a.png' },
+    { scene: readyScene(fake.stage) },
+  )
+  expect(probe.current.sprite?.key).toBe('a')
+  expect(probe.current.sprite).toBe(probe.current.view?.sprite)
   await probe.unmount()
 })

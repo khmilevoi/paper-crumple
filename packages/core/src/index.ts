@@ -84,6 +84,7 @@ export type {
 } from './knobs.js'
 export { INVALIDATION_ORDER } from './invalidation.js'
 export type { Flatten, KnobValue, KnobsAt, KnobsOf } from './knob-types.js'
+export type { KnobPrimitive, KnobValues } from './knob-registry.js'
 export { SHARED_KNOBS } from './shared-knobs.js'
 export type { SharedKnobs } from './shared-knobs.js'
 export type {
@@ -125,6 +126,8 @@ export type { DisplaySizeRequest, FrontCapRequest } from './resolution.js'
 // to the package: P9 imports them from './source.js' by relative path, exactly as it imports the
 // front LRU, because `add`'s public shape is P9's to design.
 export type { BitmapSupplier, PinFor, PinnedSource, SpriteSource } from './source.js'
+// Stage, View and Sprite expose semantic revisions without replacing the animation event bus.
+export type { ChangeArea, ChangePublisher, ChangeSource } from './changes.js'
 
 // --- P9: the stage, the sprites and the views (§4, §7.3, §8.4, §8.8, §10.6) ---
 export { paperStage } from './stage.js'

@@ -1,0 +1,259 @@
+import { expect, it, vi } from 'vitest'
+import { ABORTED, isAborted } from '../index.js'
+import type { BlitStage, StageEvent } from '../index.js'
+import { createChanges } from '../changes.js'
+import { createStage } from '../stage.js'
+import { fakeSheet, fakeMotion, stageEnv } from '../testing/fake-slots.js'
+import { makeReactiveCanvas, makeReactiveStage } from '../testing/reactive-stage.js'
+import { createSceneController } from './scene.js'
+
+it('ensure shares its exact pending promise and publishes each lifecycle transition once', async () => {
+  const stage = await makeReactiveStage()
+  let land!: (value: typeof stage) => void
+  const result = new Promise<typeof stage>((resolve) => {
+    land = resolve
+  })
+  const create = vi.fn(() => result)
+  const scene = createSceneController(create)
+  const states: string[] = []
+  scene.subscribe(() => states.push(scene.status))
+  const a = scene.ensure()
+  const b = scene.ensure()
+  expect(a).toBe(b)
+  land(stage)
+  expect(await a).toBe(stage)
+  expect(await scene.ensure()).toBe(stage)
+  expect(create).toHaveBeenCalledTimes(1)
+  scene.dispose()
+  scene.dispose()
+  expect(states).toEqual(['building', 'ready', 'disposed'])
+  expect(stage.disposed).toBe(true)
+  expect(scene.stage).toBe(null)
+})
+
+it('disposal cleans a late stage even when its factory ignored the abort signal', async () => {
+  const stage = await makeReactiveStage()
+  let land!: (value: typeof stage) => void
+  const result = new Promise<typeof stage>((resolve) => {
+    land = resolve
+  })
+  const scene = createSceneController(() => result)
+  const pending = scene.ensure()
+  scene.dispose()
+  expect(scene.signal.aborted).toBe(true)
+  land(stage)
+  expect(await pending).toBe(ABORTED)
+  expect(stage.disposed).toBe(true)
+  expect(scene.stage).toBe(null)
+  expect(await scene.ensure()).toBe(ABORTED)
+})
+
+it('reentrant ensure during ready and disposal shares the pending promise until settlement', async () => {
+  const stage = await makeReactiveStage()
+  const scene = createSceneController(async () => stage)
+  let duringReady: ReturnType<typeof scene.ensure> | undefined
+  let duringDisposal: ReturnType<typeof scene.ensure> | undefined
+  scene.subscribe(() => {
+    if (scene.status === 'ready') {
+      duringReady = scene.ensure()
+      stage.dispose()
+    } else if (scene.status === 'disposed') {
+      duringDisposal = scene.ensure()
+    }
+  })
+  const pending = scene.ensure()
+  expect(await pending).toBe(ABORTED)
+  expect(duringReady).toBe(pending)
+  expect(duringDisposal).toBe(pending)
+  expect(await duringReady).toBe(ABORTED)
+  expect(await duringDisposal).toBe(ABORTED)
+  expect(scene.stage).toBe(null)
+  expect(await scene.ensure()).toBe(ABORTED)
+})
+
+it('direct raw stage disposal clears the live reference and makes ensure terminal', async () => {
+  const stage = await makeReactiveStage()
+  const create = vi.fn(async () => stage)
+  const scene = createSceneController(create)
+  await scene.ensure()
+  const states: string[] = []
+  scene.subscribe(() => states.push(scene.status))
+  stage.dispose()
+  expect(scene.status).toBe('disposed')
+  expect(scene.stage).toBe(null)
+  expect(scene.signal.aborted).toBe(true)
+  expect(await scene.ensure()).toBe(ABORTED)
+  expect(create).toHaveBeenCalledTimes(1)
+  scene.dispose()
+  expect(states).toEqual(['disposed'])
+})
+
+it.each(['owner', 'raw'] as const)(
+  'disposed is false until %s disposal and true in its notification',
+  async (owner) => {
+    const stage = await makeReactiveStage()
+    const scene = createSceneController(async () => stage)
+    expect(scene.disposed).toBe(false)
+    await scene.ensure()
+    expect(scene.disposed).toBe(false)
+    const terminal: boolean[] = []
+    scene.subscribe(() => terminal.push(scene.disposed))
+    if (owner === 'owner') scene.dispose()
+    else stage.dispose()
+    expect(scene.disposed).toBe(true)
+    expect(terminal).toEqual([true])
+    scene.dispose()
+    expect(terminal).toEqual([true])
+  },
+)
+
+it('a factory returning an already disposed stage cannot publish readiness', async () => {
+  const stage = await makeReactiveStage()
+  stage.dispose()
+  const scene = createSceneController(async () => stage)
+  expect(await scene.ensure()).toBe(ABORTED)
+  expect(scene.status).toBe('disposed')
+  expect(scene.stage).toBe(null)
+})
+
+it('context loss exposes the actual error, invalidates ensure, and retains owner cleanup', async () => {
+  let lose = () => {}
+  const stage = await createStage(
+    { sheet: fakeSheet(), motion: fakeMotion(), maxSize: 384, present: 'blit' },
+    stageEnv({
+      onContextLost: (fn) => {
+        lose = fn
+        return () => {}
+      },
+    }),
+  )
+  if (stage instanceof Error || isAborted(stage)) return expect.fail('stage setup refused')
+  const create = vi.fn(async () => stage)
+  const scene = createSceneController(create)
+  const errors: StageEvent<'error'>[] = []
+  scene.onError((event) => errors.push(event))
+  await scene.ensure()
+  const states: string[] = []
+  scene.subscribe(() => states.push(scene.status))
+  lose()
+  lose()
+  expect(scene.stage).toBe(null)
+  expect(scene.status).toBe('failed')
+  expect(scene.lost).toBe(true)
+  expect(scene.error).toBe(errors[0]?.error)
+  expect(await scene.ensure()).toBe(scene.error)
+  expect(create).toHaveBeenCalledTimes(1)
+  expect(states).toEqual(['failed'])
+  expect(errors).toHaveLength(1)
+  const originalCause = scene.error
+  const prepareRefusal = await stage.prepare('missing')
+  const addRefusal = await stage.add('/late.png', { key: 'late' })
+  const viewRefusal = stage.view({ canvas: makeReactiveCanvas() })
+  expect(errors.slice(1)).toEqual([
+    { error: prepareRefusal, observed: true, view: null },
+    { error: addRefusal, observed: true, view: null },
+    { error: viewRefusal, observed: true, view: null },
+  ])
+  expect(scene.error).toBe(originalCause)
+  expect(await scene.ensure()).toBe(originalCause)
+  expect(states).toEqual(['failed'])
+  scene.dispose()
+  expect(stage.disposed).toBe(true)
+})
+
+it('a refusal reentered from the loss notification cannot replace its actual raw cause', async () => {
+  let lose = () => {}
+  const stage = await createStage(
+    { sheet: fakeSheet(), motion: fakeMotion(), maxSize: 384, present: 'blit' },
+    stageEnv({
+      onContextLost: (fn) => {
+        lose = fn
+        return () => {}
+      },
+    }),
+  )
+  if (stage instanceof Error || isAborted(stage)) return expect.fail('stage setup refused')
+
+  // Exercise the early lifecycle ordering used by React's stage double. Keep the real raw
+  // stage's loss event/error sequence, commands and refusal payloads underneath this source.
+  const changes = createChanges()
+  const bindingStage = Object.create(stage) as BlitStage
+  Object.defineProperty(bindingStage, 'changes', { value: changes })
+  const offEarly = stage.on('lost', () => changes.emit('lifecycle'))
+  const offRaw = stage.changes.subscribe('lifecycle', () => changes.emit('lifecycle'))
+  const scene = createSceneController(async () => bindingStage)
+  const errors: StageEvent<'error'>[] = []
+  scene.onError((event) => errors.push(event))
+  await scene.ensure()
+  const terminal: Array<Error | null> = []
+  let refusal: ReturnType<typeof stage.prepare> | undefined
+  let requested = false
+  scene.subscribe(() => {
+    if (scene.status !== 'failed' || !scene.lost) return
+    terminal.push(scene.error)
+    if (requested) return
+    requested = true
+    refusal = stage.prepare('missing')
+  })
+  lose()
+  const refused = await refusal
+  expect(refused).toBeInstanceOf(Error)
+  const actualLoss = errors.find((event) => !event.observed)?.error
+  expect(actualLoss?.name).toBe('GlError')
+  expect(scene.error).toBe(actualLoss)
+  expect(await scene.ensure()).toBe(actualLoss)
+  expect(terminal).toEqual([actualLoss])
+  expect(errors.filter((event) => event.observed)).toEqual([
+    { error: refused, observed: true, view: null },
+  ])
+  offEarly()
+  offRaw()
+  scene.dispose()
+})
+
+it.each(['return', 'reject'] as const)(
+  'factory %s Error is a terminal value, not a rejection',
+  async (mode) => {
+    const error = new Error('factory failed')
+    const create = vi.fn(() => (mode === 'return' ? Promise.resolve(error) : Promise.reject(error)))
+    const scene = createSceneController(create)
+    expect(await scene.ensure()).toBe(error)
+    expect(scene.status).toBe('failed')
+    expect(scene.error).toBe(error)
+    expect(await scene.ensure()).toBe(error)
+    expect(create).toHaveBeenCalledTimes(1)
+    scene.dispose()
+  },
+)
+
+it('factory ABORTED settles terminally without inventing an Error', async () => {
+  const create = vi.fn(async (): Promise<typeof ABORTED> => ABORTED)
+  const scene = createSceneController(create)
+  expect(await scene.ensure()).toBe(ABORTED)
+  expect(scene.error).toBe(null)
+  expect(scene.status).toBe('disposed')
+  expect(await scene.ensure()).toBe(ABORTED)
+  expect(create).toHaveBeenCalledTimes(1)
+})
+
+it('factory error forwarding ends at landing, and disposal releases raw listeners', async () => {
+  const stage = await makeReactiveStage()
+  let preMount!: (event: StageEvent<'error'>) => void
+  const scene = createSceneController(async (_signal, onError) => {
+    preMount = onError
+    return stage
+  })
+  const heard = vi.fn()
+  scene.onError(heard)
+  const pending = scene.ensure()
+  await Promise.resolve()
+  const event = { error: new Error('warning'), observed: false, view: null }
+  preMount(event)
+  await pending
+  expect(heard).toHaveBeenCalledTimes(1)
+  preMount(event)
+  expect(heard).toHaveBeenCalledTimes(1)
+  scene.dispose()
+  preMount(event)
+  expect(heard).toHaveBeenCalledTimes(1)
+})

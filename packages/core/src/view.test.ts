@@ -3,24 +3,9 @@ import { isAborted } from './abort.js'
 import { GlError, SheetError, ViewError } from './errors.js'
 import { createStage } from './stage.js'
 import { fakeGlContext, fakeMotion, fakeSheet, stageEnv } from './testing/fake-slots.js'
+import { makeReactiveCanvas as destCanvas } from './testing/reactive-stage.js'
 
 /** The smallest object `size: 'managed'` and the blit need out of a destination canvas. */
-function destCanvas(css = { width: 150, height: 75 }) {
-  const ops: string[] = []
-  const ctx2d = {
-    clearRect: (...a: number[]) => ops.push(`clearRect(${a.join(',')})`),
-    drawImage: (...a: unknown[]) => ops.push(`drawImage(${a.slice(1).join(',')})`),
-  }
-  const canvas = {
-    width: 300,
-    height: 150,
-    ops,
-    getContext: (id: string) => (id === '2d' ? ctx2d : null),
-    getBoundingClientRect: () => ({ width: css.width, height: css.height }),
-  }
-  return canvas as unknown as HTMLCanvasElement & { ops: string[] }
-}
-
 async function blitStage(over: Parameters<typeof fakeMotion>[0] = {}) {
   const sheet = fakeSheet()
   const motion = fakeMotion(over)

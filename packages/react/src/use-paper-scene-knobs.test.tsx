@@ -2,8 +2,7 @@
  * @vitest-environment jsdom
  */
 import { expect, test, vi } from 'vitest'
-import type { BlitStage } from '@paper-crumple/core'
-import type { KnobValue } from './scene-types.js'
+import type { BlitStage, Knobs } from '@paper-crumple/core'
 import { usePaperScene } from './use-paper-scene.js'
 import { createFakeStage, type FakeStageHandle } from './testing/fake-stage.js'
 import { deferred } from './testing/deferred.js'
@@ -28,7 +27,7 @@ test('every declared knob is written once, one stage.set per key (§4.3)', async
 
 test('only changed keys reach stage.set (§9)', async () => {
   const fake = createFakeStage()
-  let knobs: Readonly<Record<string, KnobValue>> = { a: 1, b: 2 }
+  let knobs: Knobs = { a: 1, b: 2 }
   const harness = await renderHook(() =>
     usePaperScene({ create: async () => fake.stage, deps: [1], knobs }),
   )
@@ -44,7 +43,7 @@ test('only changed keys reach stage.set (§9)', async () => {
 
 test('a new object with identical values writes nothing', async () => {
   const fake = createFakeStage()
-  let knobs: Readonly<Record<string, KnobValue>> = { a: 1 }
+  let knobs: Knobs = { a: 1 }
   const harness = await renderHook(() =>
     usePaperScene({ create: async () => fake.stage, deps: [1], knobs }),
   )
@@ -67,7 +66,7 @@ test('a batch with one invalid key still writes the valid ones (§9)', async () 
   await harness.unmount()
 })
 
-test('a refused key is reported through onError as an observed error', async () => {
+test('a refused key is reported through onError as an unobserved error (§0.3)', async () => {
   const onError = vi.fn()
   const refusal = new Error('unknown knob b')
   const fake = createFakeStage()
@@ -82,13 +81,13 @@ test('a refused key is reported through onError as an observed error', async () 
   )
   await flush()
   expect(onError).toHaveBeenCalledTimes(1)
-  expect(onError).toHaveBeenCalledWith({ error: refusal, observed: true, view: null })
+  expect(onError).toHaveBeenCalledWith({ error: refusal, observed: false, view: null })
   await harness.unmount()
 })
 
 test('knobEpoch is bumped once per batch that wrote, and never by a build', async () => {
   const fake = createFakeStage()
-  let knobs: Readonly<Record<string, KnobValue>> = {}
+  let knobs: Knobs = {}
   const harness = await renderHook(() =>
     usePaperScene({ create: async () => fake.stage, deps: [1], knobs }),
   )
@@ -129,7 +128,7 @@ test('a rebuild is not a reset: every moved knob is carried onto the new stage (
   const second = createFakeStage()
   let deps: readonly unknown[] = [1]
   let next = first
-  let knobs: Readonly<Record<string, KnobValue>> = { a: 1 }
+  let knobs: Knobs = { a: 1 }
   const harness = await renderHook(() =>
     usePaperScene({ create: async () => next.stage, deps, knobs }),
   )
@@ -177,7 +176,7 @@ test('a key added in the same render that changes deps is a live write, reported
   second.refuseKnob('b', refusal)
   let deps: readonly unknown[] = [1]
   let next = first
-  let knobs: Readonly<Record<string, KnobValue>> = { a: 1 }
+  let knobs: Knobs = { a: 1 }
   const harness = await renderHook(() =>
     usePaperScene({ create: async () => next.stage, deps, knobs, onError }),
   )
@@ -201,14 +200,14 @@ test('a key added in the same render that changes deps is a live write, reported
   await harness.rerender()
   await flush()
   expect(onError).toHaveBeenCalledTimes(1)
-  expect(onError).toHaveBeenCalledWith({ error: refusal, observed: true, view: null })
+  expect(onError).toHaveBeenCalledWith({ error: refusal, observed: false, view: null })
   await harness.unmount()
 })
 
 test('nothing is written before the stage is ready, or after it is lost', async () => {
   const fake = createFakeStage()
   const gate = deferred<BlitStage>()
-  let knobs: Readonly<Record<string, KnobValue>> = { a: 1 }
+  let knobs: Knobs = { a: 1 }
   const harness = await renderHook(() =>
     usePaperScene({ create: () => gate.promise, deps: [1], knobs }),
   )
@@ -236,5 +235,64 @@ test('omitting knobs entirely writes nothing and never bumps knobEpoch', async (
   await flush()
   expect(setCalls(fake)).toHaveLength(0)
   expect(harness.result.current.knobEpoch).toBe(0)
+  await harness.unmount()
+})
+
+test('onKnobRefused names the key, the value and the error (§3.3)', async () => {
+  const onKnobRefused = vi.fn()
+  const refusal = new Error('unknown knob b')
+  const fake = createFakeStage()
+  fake.refuseKnob('b', refusal)
+  const harness = await renderHook(() =>
+    usePaperScene({
+      create: async () => fake.stage,
+      deps: [1],
+      knobs: { a: 1, b: 2 },
+      onKnobRefused,
+    }),
+  )
+  await flush()
+  expect(onKnobRefused).toHaveBeenCalledTimes(1)
+  expect(onKnobRefused).toHaveBeenCalledWith('b', 2, refusal)
+  await harness.unmount()
+})
+
+test('onKnobRefused stays silent for a carry-forward refusal, like onError (§4.1)', async () => {
+  const onKnobRefused = vi.fn()
+  const first = createFakeStage()
+  const second = createFakeStage()
+  second.refuseKnob('b', new Error('this slot set does not declare b'))
+  let deps: readonly unknown[] = [1]
+  let next = first
+  const harness = await renderHook(() =>
+    usePaperScene({ create: async () => next.stage, deps, knobs: { a: 1, b: 2 }, onKnobRefused }),
+  )
+  await flush()
+  expect(onKnobRefused).not.toHaveBeenCalled()
+
+  deps = [2]
+  next = second
+  await harness.rerender()
+  await flush()
+  expect(onKnobRefused).not.toHaveBeenCalled()
+  await harness.unmount()
+})
+
+test('a refused key reaches both channels, onError first', async () => {
+  const order: string[] = []
+  const refusal = new Error('unknown knob b')
+  const fake = createFakeStage()
+  fake.refuseKnob('b', refusal)
+  const harness = await renderHook(() =>
+    usePaperScene({
+      create: async () => fake.stage,
+      deps: [1],
+      knobs: { b: 2 },
+      onError: () => order.push('onError'),
+      onKnobRefused: () => order.push('onKnobRefused'),
+    }),
+  )
+  await flush()
+  expect(order).toEqual(['onError', 'onKnobRefused'])
   await harness.unmount()
 })

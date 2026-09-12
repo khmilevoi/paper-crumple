@@ -28,13 +28,14 @@ interface Manifest {
 const HOMEPAGE = 'https://github.com/paper-crumple/paper-crumple/tree/main/packages/core#readme'
 
 const SUBPATHS: Record<string, string[]> = {
-  core: ['.', './unstable'],
+  core: ['.', './unstable', './bindings'],
   paper: ['.', './tiles'],
   motion: ['.', './packs/2x3', './packs/1x1', './packs/3x2'],
-  react: ['.'],
+  react: ['.', './testing'],
+  reatom: ['.'],
 }
 
-const PUBLISHED = ['core', 'paper', 'motion', 'react'] as const
+const PUBLISHED = ['core', 'paper', 'motion', 'react', 'reatom'] as const
 const manifests = new Map<string, Manifest>(
   PUBLISHED.map((dir) => [dir, readJson<Manifest>(`packages/${dir}/package.json`)]),
 )
@@ -153,6 +154,25 @@ describe('the pending changesets', () => {
 })
 
 describe('the core duplication hazard (§10.4)', () => {
+  it('keeps core and the proven Reatom version as adapter peers and development dependencies', () => {
+    const manifest = manifests.get('reatom')!
+    expect(manifest.peerDependencies?.['@paper-crumple/core']).toBe('workspace:^')
+    expect(manifest.devDependencies?.['@paper-crumple/core']).toBe('workspace:*')
+    expect(manifest.peerDependencies?.['@reatom/core']).toBe('^1001.3.0')
+    expect(manifest.devDependencies?.['@reatom/core']).toBe('1001.3.0')
+    for (const name of ['react', 'react-dom', '@paper-crumple/paper', '@paper-crumple/motion']) {
+      expect(manifest.peerDependencies?.[name]).toBeUndefined()
+      expect(manifest.dependencies?.[name]).toBeUndefined()
+    }
+    // React is a pinned test-only dependency for real Provider integration.
+    expect(manifest.devDependencies?.react).toBe('19.2.8')
+    expect(manifest.devDependencies?.['react-dom']).toBe('19.2.8')
+    expect(manifest.devDependencies?.['@reatom/react']).toBe('1001.0.1')
+    for (const name of ['@paper-crumple/paper', '@paper-crumple/motion']) {
+      expect(manifest.devDependencies?.[name]).toBeUndefined()
+    }
+  })
+
   it('makes core a peer of both slots, with a devDependency for workspace resolution', () => {
     for (const slot of ['paper', 'motion'] as const) {
       const manifest = manifests.get(slot)!

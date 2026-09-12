@@ -32,6 +32,7 @@ import {
   checkReserve,
 } from '@paper-crumple/paper'
 import { dimsForLongSide, frontForArtwork } from '../../../packages/paper/src/handle.ts'
+import { hullBandFor } from '../../../packages/paper/src/edge-derive.ts'
 import { boundsExtent, hullBounds } from '../../../packages/paper/src/hull-shape.ts'
 import {
   checkGuardBand,
@@ -94,10 +95,11 @@ function hullParams(front, texel) {
   const values = defaultsFor(EDGE_MODE)
   const pxScale = front / KNOB_REFERENCE_PX
   const k = pxScale / texel
-  const angularity = values.angularity
+  const band = hullBandFor(values.edgeWidth, values.edgeVariance)
+  const angularity = Number.isFinite(values.angularity) ? values.angularity : 0
   return {
-    minDist: values.minDist * k,
-    maxDist: values.maxDist * k,
+    minDist: band.minDist * k,
+    maxDist: band.maxDist * k,
     angularity,
     seed: values.seed,
     tolerance: toleranceFor(angularity) * k,
@@ -323,8 +325,8 @@ function ingestOp(c, cpuBranch) {
   const sdfRes = resolveSdfRes(values.sdfRes ?? 0, frontLongSide)
   // Steps 5-8 are GL (pools, resample, buildField, blurField): stood in for.
   // Step 9: the CPU field, the hull, the rect, the guard band.
-  const pxScale = front.h / KNOB_REFERENCE_PX
-  const k = pxScale / texel
+  const params = hullParams(front.h, texel)
+  const { k } = params
   const knobKey = hullCacheKey(knobDescriptors, values)
   const cacheKey = { spriteKey, sdfRes, knobKey }
   let hull = c.cache.get(cacheKey)
@@ -337,25 +339,22 @@ function ingestOp(c, cpuBranch) {
       field: cpu,
       width: field.w,
       height: field.h,
-      minDist: values.minDist * k,
-      maxDist: values.maxDist * k,
-      angularity: values.angularity,
+      minDist: params.minDist,
+      maxDist: params.maxDist,
+      angularity: params.angularity,
       seed: values.seed,
-      tolerance: toleranceFor(values.angularity) * k,
-      wavelength: DISTANCE_WAVELENGTH_PX * k,
-      sampleStep: HULL_SAMPLE_PX / texel,
+      tolerance: params.tolerance,
+      wavelength: params.wavelength,
+      sampleStep: params.sampleStep,
     })
     hull = built.hull
     c.cache.set(cacheKey, hull)
   }
   const bounds = hullBounds(hull)
   let box = boundsExtent(bounds, field.w, field.h)
-  // Fix round 1: the old `EdgeParams.maxDist` subtraction assumed the hull's own trace already
-  // reached `maxDist` and only the slop was left over (design pre-2026-09-05's `r_hull =
-  // maxDist + slop`). The new radius has no `maxDist` term at all (design 2026-09-05 §2.3: W
-  // replaces `thickness`, and the hull trace is no longer part of the margin formula), so the
-  // whole reserved radius is the margin beyond the traced bounds now.
-  const beyond = overscanRadius(edgeParams) * k
+  // `source()` reserves the traced band plus the clean finish's slop. The polygon already
+  // reaches `widthRef * (1 + variance)`, so only the remainder grows its guard-band reach.
+  const beyond = (overscanRadius(edgeParams) - edgeParams.widthRef * (1 + edgeParams.variance)) * k
   const reach = reachRect(bounds, beyond, field, front)
   const frontBox = scaleBox(box, texel)
   const frontRect = sheetRectFromExtent(frontBox, front.w, front.h)

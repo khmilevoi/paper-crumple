@@ -1,4 +1,11 @@
-import { ABORTED, GlError, SheetError, ViewError } from '@paper-crumple/core'
+import { ABORTED, GlError, KnobError, SheetError, ViewError } from '@paper-crumple/core'
+import {
+  createChangeBatch,
+  createChanges,
+  type InternalChangePublisher,
+} from '../../../core/src/changes.js'
+import { createKnobRegistry } from '../../../core/src/knob-registry.js'
+import { INVALIDATION_ORDER, SPRITE_SCOPE, VIEW_SCOPE } from '../../../core/src/invalidation.js'
 import type {
   Aborted,
   AddError,
@@ -8,6 +15,8 @@ import type {
   EventName,
   Events,
   KnobDescriptor,
+  KnobValues,
+  Invalidates,
   PlayOptions,
   PlayResult,
   PoseRef,
@@ -43,7 +52,10 @@ export interface FakeViewHandle {
   readonly target: BlitTarget
   /** A view's bus carries `start`, `step` and `end` only — an `error` takes the stage's bus. */
   emit<E extends 'start' | 'step' | 'end'>(event: E, payload: Events[E]): void
-  /** Settle the run most recently returned by `play`, `swapTo` or `crumpleTo`. */
+  /**
+   * Settles the run most recently returned by `play`, `swapTo` or `crumpleTo`.
+   * This cannot select an older overlapping run; only the latest run is controllable.
+   */
   settleRun(result: PlayResult | SwapResult): void
   setState(state: ViewState): void
   setFrame(frame: ViewFrame | null): void
@@ -69,6 +81,10 @@ export interface FakeStageOptions {
   /** Sprite keys resident before the binding does anything. */
   readonly sprites?: readonly string[]
   readonly knobs?: readonly KnobDescriptor[]
+  /** `stage.defaults` (§3.4): every descriptor's default under its **namespaced** path. The fake
+   *  has no registry to derive these from `knobs`, which carries slot-local keys with no path, so
+   *  a test that needs them states them. Frozen and handed out by identity, like core's. */
+  readonly defaults?: KnobValues
   readonly prepare?: (key: string) => Promise<Sprite | AddError | Aborted>
   readonly add?: (
     src: SpriteSource,
@@ -93,23 +109,109 @@ function subscribe(listeners: Listeners, event: string, fn: (e: never) => void):
   }
 }
 
-function makeSprite(key: string): Sprite {
-  return {
-    key,
-    frontSize: { w: 256, h: 256 },
-    rect: { x: 0, y: 0, w: 256, h: 256 },
-    pinned: false,
-    attachCount: 0,
-    set: ((): SetResult => undefined) as Sprite['set'],
+const spriteState = new WeakMap<
+  Sprite,
+  {
+    resident: boolean
+    pinned: boolean
+    attachCount: number
+    disposed: boolean
+    changes: InternalChangePublisher
+  }
+>()
+
+type Normalise = (
+  patch: Readonly<Record<string, unknown>>,
+  scope: readonly Invalidates[],
+) => KnobValues | Error
+
+function fakeNormalise(descriptors?: readonly KnobDescriptor[]): Normalise {
+  const registry = createKnobRegistry({ sheet: descriptors ?? [], motion: [] })
+  return (patch, scope) => {
+    if (descriptors !== undefined) return registry.normalise(patch, scope)
+    // Older binding probes intentionally use arbitrary knob names. Give those synthetic sheet
+    // knobs namespaced storage while real shared knobs still use the actual registry resolver.
+    const known: Record<string, unknown> = {}
+    const synthetic: Record<string, string | number | boolean> = {}
+    for (const [key, value] of Object.entries(patch)) {
+      if (!(registry.resolve(key) instanceof Error)) known[key] = value
+      else if (
+        typeof value === 'string' ||
+        typeof value === 'number' ||
+        typeof value === 'boolean'
+      ) {
+        synthetic[key.includes('.') ? key : `sheet.${key}`] = value
+      } else return new KnobError(`invalid fake knob value for ${key}`)
+    }
+    const accepted = registry.normalise(known, scope)
+    return accepted instanceof Error ? accepted : { ...accepted, ...synthetic }
   }
 }
 
-/** `usage()` is never called by the binding; the shape is not worth a hand-built literal. */
-const EMPTY_USAGE = {} as unknown as ReturnType<BlitStage['usage']>
+export function makeFakeSprite(
+  key: string,
+  o?: { group?: ReturnType<typeof createChangeBatch>; normalise?: Normalise },
+): Sprite {
+  const changes = createChanges(o?.group)
+  const normalise = o?.normalise ?? fakeNormalise()
+  const state = { resident: true, pinned: false, attachCount: 0, disposed: false, changes }
+  let applied: KnobValues = {}
+  const sprite: Sprite = {
+    changes,
+    get resident() {
+      return state.resident
+    },
+    get appliedKnobs() {
+      return applied
+    },
+    key,
+    frontSize: { w: 256, h: 256 },
+    rect: { x: 0, y: 0, w: 256, h: 256 },
+    get pinned() {
+      return state.pinned
+    },
+    get attachCount() {
+      return state.attachCount
+    },
+    set: ((patch: KnobValues) => {
+      if (state.disposed) return new SheetError('this sprite was removed')
+      const accepted = normalise(patch, SPRITE_SCOPE)
+      if (accepted instanceof Error) return accepted as SetResult
+      applied = Object.freeze({ ...applied, ...accepted })
+      changes.emit('settings')
+      return undefined
+    }) as Sprite['set'],
+  }
+  spriteState.set(sprite, state)
+  return sprite
+}
 
+const EMPTY_USAGE: ReturnType<BlitStage['usage']> = {
+  bytes: 0,
+  reclaimable: 0,
+  unreclaimable: 0,
+  fronts: 0,
+  pinned: 0,
+  attached: 0,
+  handles: 0,
+}
+
+/**
+ * Creates a non-throwing `BlitStage` test double with call logs and controllable views.
+ *
+ * Requires a DOM environment because the fake creates `stage.surface.canvas` with
+ * `document.createElement('canvas')`. The fake does not model core's live `view.run` getter:
+ * `view.run` is always `null`, and `FakeViewHandle.settleRun` controls only the latest run.
+ */
 export function createFakeStage(o?: FakeStageOptions): FakeStageHandle {
+  const group = createChangeBatch()
+  const changes = createChanges(group)
+  const normalise = fakeNormalise(o?.knobs)
+  const makeSprite = (key: string): Sprite => makeFakeSprite(key, { group, normalise })
+  let applied: KnobValues = {}
   const calls: FakeCall[] = []
   const warnings: Error[] = []
+  const defaults: KnobValues = Object.freeze({ ...o?.defaults })
   const sprites = new Map<string, Sprite>()
   const refusals = new Map<string, Error>()
   const viewHandles: FakeViewHandle[] = []
@@ -140,6 +242,8 @@ export function createFakeStage(o?: FakeStageOptions): FakeStageHandle {
   }
 
   function makeView(target: BlitTarget): FakeViewHandle {
+    const viewChanges = createChanges(group)
+    let applied: KnobValues = {}
     const viewCalls: FakeCall[] = []
     const viewListeners: Listeners = new Map()
     let sprite: Sprite | null = null
@@ -165,6 +269,10 @@ export function createFakeStage(o?: FakeStageOptions): FakeStageHandle {
     }
 
     const view: View = {
+      changes: viewChanges,
+      get appliedKnobs() {
+        return applied
+      },
       get pose(): number {
         return pose
       },
@@ -189,6 +297,8 @@ export function createFakeStage(o?: FakeStageOptions): FakeStageHandle {
       show(next: Sprite | null): InstanceType<typeof SheetError> | undefined {
         vlog('view.show', next)
         sprite = next
+        viewChanges.emit('content')
+        viewChanges.emit('geometry')
         return undefined
       },
       refresh(): void {
@@ -216,8 +326,13 @@ export function createFakeStage(o?: FakeStageOptions): FakeStageHandle {
       stop(): void {
         vlog('view.stop')
       },
-      set: ((patch: Readonly<Record<string, unknown>>): SetResult => {
+      set: ((patch: Readonly<Record<string, unknown>>) => {
         vlog('view.set', patch)
+        if (disposed || viewDisposed) return new GlError('this view is disposed')
+        const accepted = normalise(patch, VIEW_SCOPE)
+        if (accepted instanceof Error) return accepted as SetResult
+        applied = Object.freeze({ ...applied, ...accepted })
+        viewChanges.emit('settings')
         return undefined
       }) as View['set'],
       on: (<E extends EventName>(event: E, fn: (e: Events[E]) => void) =>
@@ -234,8 +349,17 @@ export function createFakeStage(o?: FakeStageOptions): FakeStageHandle {
         vlog('view.dispose')
         viewDisposed = true
         state = 'disposed'
+        sprite = null
         claimed.delete(target.canvas)
         viewListeners.clear()
+        viewChanges.batch(() => {
+          viewChanges.emit('lifecycle')
+          viewChanges.emit('state')
+          viewChanges.emit('content')
+          changes.emit('lifecycle')
+          changes.emit('resources')
+          viewChanges.clearAfterBatch()
+        })
       },
     }
 
@@ -253,20 +377,31 @@ export function createFakeStage(o?: FakeStageOptions): FakeStageHandle {
         latest?.settle(result as never)
       },
       setState(next): void {
+        if (state === next) return
         state = next
+        viewChanges.emit('state')
       },
       setFrame(next): void {
         frame = next
+        viewChanges.emit('geometry')
       },
     }
   }
 
   const stage: BlitStage = {
+    changes,
+    get disposed() {
+      return disposed
+    },
+    get appliedKnobs() {
+      return applied
+    },
     get warnings(): readonly Error[] {
       return warnings
     },
     caps: { floatRT: true, maxTextureSize: 4096, timer: false },
     knobs: o?.knobs ?? [],
+    defaults,
     get lost(): boolean {
       return lost
     },
@@ -287,6 +422,7 @@ export function createFakeStage(o?: FakeStageOptions): FakeStageHandle {
       if (o?.add !== undefined) return o.add(src as SpriteSource, opts as AddOptions<SpriteSource>)
       const sprite = makeSprite(opts.key)
       sprites.set(opts.key, sprite)
+      changes.emit('resources')
       return sprite
     },
     async addAll(entries) {
@@ -294,6 +430,7 @@ export function createFakeStage(o?: FakeStageOptions): FakeStageHandle {
       return entries.map((entry) => {
         const sprite = makeSprite(entry.key)
         sprites.set(entry.key, sprite)
+        changes.emit('resources')
         return sprite
       })
     },
@@ -305,6 +442,7 @@ export function createFakeStage(o?: FakeStageOptions): FakeStageHandle {
       log('replace', key, src)
       const sprite = makeSprite(key)
       sprites.set(key, sprite)
+      changes.emit('resources')
       return sprite
     },
     async prepare(key) {
@@ -316,8 +454,18 @@ export function createFakeStage(o?: FakeStageOptions): FakeStageHandle {
     },
     remove(key) {
       log('remove', key)
-      if (!sprites.delete(key)) return new SheetError(`no record for sprite ${key}`)
-      return undefined
+      return group.batch(() => {
+        const state = spriteState.get(sprites.get(key) as Sprite)
+        if (!sprites.delete(key)) return new SheetError(`no record for sprite ${key}`)
+        if (state !== undefined) {
+          state.resident = false
+          state.disposed = true
+          state.changes.emit('resources')
+          state.changes.clearAfterBatch()
+        }
+        changes.emit('resources')
+        return undefined
+      })
     },
     async mount(item) {
       log('mount', item)
@@ -338,7 +486,7 @@ export function createFakeStage(o?: FakeStageOptions): FakeStageHandle {
     },
     batch(fn) {
       log('batch')
-      return fn()
+      return group.batch(fn)
     },
     budget(opts): void {
       log('budget', opts)
@@ -353,20 +501,40 @@ export function createFakeStage(o?: FakeStageOptions): FakeStageHandle {
     unpin(key): void {
       log('unpin', key)
     },
-    set: ((patch: Readonly<Record<string, unknown>>): SetResult => {
+    set: ((patch: Readonly<Record<string, unknown>>) => {
       log('set', patch)
+      if (disposed) return new GlError('this stage is disposed')
       for (const key of Object.keys(patch)) {
         const refusal = refusals.get(key)
         if (refusal !== undefined) return refusal as SetResult
       }
+      const accepted = normalise(patch, INVALIDATION_ORDER)
+      if (accepted instanceof Error) return accepted as SetResult
+      applied = Object.freeze({ ...applied, ...accepted })
+      changes.emit('settings')
       return undefined
     }) as BlitStage['set'],
     dispose(): void {
       if (disposed) return
       log('dispose')
-      disposed = true
-      for (const handle of viewHandles) handle.view.dispose()
-      stageListeners.clear()
+      group.batch(() => {
+        disposed = true
+        for (const handle of viewHandles) handle.view.dispose()
+        stageListeners.clear()
+        for (const sprite of sprites.values()) {
+          const state = spriteState.get(sprite)
+          if (state !== undefined) {
+            state.resident = false
+            state.disposed = true
+            state.changes.emit('resources')
+            state.changes.clearAfterBatch()
+          }
+        }
+        sprites.clear()
+        changes.emit('lifecycle')
+        changes.emit('resources')
+        changes.clearAfterBatch()
+      })
     },
     view(target: BlitTarget) {
       log('view', target)
@@ -381,6 +549,10 @@ export function createFakeStage(o?: FakeStageOptions): FakeStageHandle {
       claimed.add(target.canvas)
       const handle = makeView(target)
       viewHandles.push(handle)
+      changes.batch(() => {
+        changes.emit('lifecycle')
+        changes.emit('resources')
+      })
       return handle.view
     },
     resize(w, h) {
@@ -408,7 +580,9 @@ export function createFakeStage(o?: FakeStageOptions): FakeStageHandle {
       emitTo(stageListeners, event, payload)
     },
     lose(): void {
+      if (lost || disposed) return
       lost = true
+      changes.emit('lifecycle')
       emitTo(stageListeners, 'lost', { view: null })
       emitTo(stageListeners, 'error', {
         error: new GlError('the WebGL2 context was lost; dispose this stage and build a new one'),
@@ -418,6 +592,7 @@ export function createFakeStage(o?: FakeStageOptions): FakeStageHandle {
     },
     pushWarning(warning): void {
       warnings.push(warning)
+      changes.emit('lifecycle')
     },
     refuseKnob(key, error): void {
       refusals.set(key, error)
@@ -425,6 +600,7 @@ export function createFakeStage(o?: FakeStageOptions): FakeStageHandle {
     addSprite(key): Sprite {
       const sprite = makeSprite(key)
       sprites.set(key, sprite)
+      changes.emit('resources')
       return sprite
     },
   }

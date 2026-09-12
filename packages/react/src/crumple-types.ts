@@ -1,38 +1,18 @@
-import type {
-  Events,
-  Fit,
-  PinFor,
-  PlayOptions,
-  PlayResult,
-  PoseRef,
-  Run,
-  SpriteSource,
-  StageEvent,
-  View,
-  ViewFrame,
-  ViewState,
-} from '@paper-crumple/core'
-import type { Scene } from './scene-types.js'
-
-/** `'flat'` is the default: `show()` with no animation, which is the state `stage.mount` leaves. */
-export type Entrance = 'flat' | 'uncrumple'
-
-export type ReducedMotion = 'auto' | 'off'
-
-/** `'detached'` is what `state` reads while no view exists (§5.2). */
-export type CrumpleState = ViewState | 'detached'
-
-/**
- * `frame` already scaled by `frameTo` into the four CSS numbers §6 writes on the wrapper. The
- * arithmetic lives in the hook and not in the component because §2 puts logic in the hook, and
- * because the component is handed only the instance — it never sees `frameTo`.
- */
-export interface CrumpleFrameStyle {
-  readonly width: string
-  readonly height: string
-  readonly left: string
-  readonly top: string
-}
+import type { Events, Fit, PinFor, SpriteSource } from '@paper-crumple/core'
+import type { Entrance, ReducedMotion, CrumpleSettleEvent } from '@paper-crumple/core/bindings'
+import type { Scene, StageErrorListener } from './scene-types.js'
+export type {
+  Entrance,
+  ReducedMotion,
+  CrumpleState,
+  CrumpleStatus,
+  CrumpleFrameStyle,
+  CrumpleArtworkStyle,
+  CrumplePending,
+  CrumpleSettleEvent,
+  CrumpleSnapshot,
+  CrumpleMethods,
+} from '@paper-crumple/core/bindings'
 
 export type CrumpleOptions<S extends SpriteSource> = {
   spriteKey: string
@@ -62,36 +42,11 @@ export type CrumpleOptions<S extends SpriteSource> = {
   onStart?: (e: Events['start']) => void
   onEnd?: (e: Events['end']) => void
   /** A `StageEvent`, not an `Events` member — errors never reach a view's own bus (§5.5). */
-  onError?: (e: StageEvent<'error'>) => void
+  onError?: StageErrorListener
+  /**
+   * Exactly once per request that reaches an outcome — animated end, degraded show, rollback.
+   * Never for a superseded or unmounted request (§2.1). This, and not `onEnd`, is what a consumer
+   * branches a "swap finished" on: the reduced path emits no `end` at all.
+   */
+  onSettle?: (e: CrumpleSettleEvent) => void
 } & PinFor<S>
-
-/** The reactive half of a `Crumple`, rebuilt as one cached object per store bump (§5.5). */
-export interface CrumpleSnapshot {
-  readonly state: CrumpleState
-  /** The swap is parked at the ball, waiting on its target. Maintained by the binding, because
-   *  `crumpling.ball` is set between two emissions and is never observable (§5.5). */
-  readonly parked: boolean
-  /** 0 while detached — `'flat'`, the pose a view is born at. */
-  readonly pose: number
-  readonly shown: string | null
-  readonly requested: string | null
-  readonly error: Error | null
-  readonly frame: ViewFrame | null
-  readonly frameStyle: CrumpleFrameStyle | null
-  /** Raw, so an unforeseen scenario stays reachable. */
-  readonly view: View | null
-}
-
-/** The methods a `Crumple` carries on top of its snapshot. Merged into the interface in
- *  `crumple.tsx`, which is also where the component of the same name lives. */
-export interface CrumpleMethods {
-  /** Identity-stable per §2.1, and that is load-bearing: React re-invokes a callback ref whose
-   *  identity changed, which here means disposing the view and rebuilding it every render. */
-  readonly ref: (el: HTMLCanvasElement | null) => void
-  /** `null` while detached. The `Run` is returned rather than swallowed: it is the only handle
-   *  that carries `stop()` and the settled result. Never `async` — `start` is emitted
-   *  synchronously inside `view.play`, and a wrapper is exactly where that is lost. */
-  play(from: PoseRef, to: PoseRef, o?: PlayOptions): Run<PlayResult> | null
-  stop(): void
-  refresh(): void
-}

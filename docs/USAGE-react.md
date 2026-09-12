@@ -1,5 +1,27 @@
 # Usage: `@paper-crumple/react`
 
+## Optional Reatom models
+
+`@paper-crumple/react` works without Reatom. For application logic outside React,
+the independent [`@paper-crumple/reatom` guide](../packages/reatom/README.md) shows
+`reatomScene`, `scene.view`, native async data/error and a wrapped event handler.
+Render a Blit model with `<Crumple value={picture.render()} />` inside a
+`reatomComponent`. No `PaperScene` or `useCrumple` is needed for this model: its stable
+ref owns attachment. Ordinary render updates preserve the raw View. Unmount detaches
+it and cancels its operation, while the explicit model owner later calls
+`scene.dispose()` to release shared resources. Remount creates a new raw View.
+
+Use Reatom's actual `reatomContext.Provider` when the application owns a custom
+frame, and create the model in that same frame before render. Independent frames
+need separate model instances. Existing React hooks retain their own lifecycle and
+must not manage the same View alongside the Reatom model.
+
+Read `picture.ready.error()` for initial attachment failures and `picture.swap.error()`
+for swap failures. Native result/error atoms permit separate components; UI-launched
+promises still need an explicit `.catch`, with native abort handled as cancellation.
+Desired source/options are distinct from shown/applied state, and frame progress is
+opt-in. See the guide for source pinning, aggregate reports and disposal details.
+
 Status: **written from the design, reconciled against the shipped package.** `@paper-crumple/react`
 is built, merged, and consumed by `examples/playground` — the first real consumer. Every hook,
 component, option and return type below was taken from
@@ -18,6 +40,12 @@ not on this document. The four *internal* listings — `useEvent`, `acquire`, th
 branch, and the entrance's three calls — mirror `packages/react/src/use-event.ts`, `acquire.ts` and
 `use-crumple.ts` but are trimmed for reading and are not compiled; treat them as an account of the
 behaviour, not as the code.
+
+The current consumer supplies no exercise for these documented behaviors: `useScene()` without an
+explicit scene, `scene.play`, `entrance: 'uncrumple'`, `onStart`, `reducedMotion: 'off'`,
+`canvasProps`, the `children` placeholder, `pin`/`ImageBitmap`, and SSR. This is consumer-coverage
+status, not a claim that the package tests are absent; the playground coverage work is separately
+owned by P7.
 
 The additive core amendment this document was written to anticipate — a `SwapToOptions` interface
 carrying `key`, which `view.swapTo` takes in place of `SwapOptions` — **has shipped**, with the
@@ -159,8 +187,8 @@ becomes a `useEffect` over a manually mirrored ref, plus `forwardRef`, plus a ha
 live.
 
 `@paper-crumple/react` joins the Changesets `fixed` array with the other three, so all four ship one
-version number. Exports: `.` only. There is no subpath split — packages §3.2's argument for one is
-about asset weight in packs and tiles, and none of it applies to a binding.
+version number. It exports `.` and `./testing`. There is no other subpath split — packages §3.2's
+argument for one is about asset weight in packs and tiles, and none of it applies to a binding.
 
 ## The shape of the API, in one paragraph
 
@@ -184,9 +212,9 @@ prop.
 **`fit` and `tag` are fixed when the view is created, and changing them later does nothing** — `tag`
 is written at `stage.view()` (`packages/core/src/stage.ts:1471`) and `View.tag` is a read-only
 accessor (`view.ts:86`). Because the `ref` that creates the view is identity-stable (next section),
-the creating callback is not re-invoked, so **a changed `fit` or `tag` is silently ignored until the
-view is rebuilt.** Worth knowing before it is discovered: if these must vary, vary the React `key` of
-the component that owns them.
+the creating callback is not re-invoked, so **a changed `fit` or `tag` is ignored and warns once in
+development until the view is rebuilt.** If these must vary, remount the owner under a different
+React `key` to create a view with the new fixed values.
 
 ## 1. Every function this package hands you is identity-stable
 
@@ -229,6 +257,13 @@ What this buys you in practice:
   over a changed `sheet` **does not rebuild**. It is used by the next rebuild `deps` asks for. That
   is §4.1's contract, not an accident of the pattern.
 
+The crumple methods `draw`, `sync`, and `retry`, the crumple option callback `onSettle`, and the
+scene option callbacks `onReady`, `onFailed`, and `onKnobRefused` are identity-stable. `create` and
+`onError` are already `useEvent`-wrapped, so consumer
+`useCallback` wrappers around them are unnecessary. If the installed `react-hooks/exhaustive-deps`
+analyser does not recognise a member expression, destructure the called member first, for example
+`const { stop } = scene`, and use that variable in the dependency array.
+
 **`Scene` is memoised and changes identity only when one of its fields does** (§2.1) — it has to be,
 because it is the value of `<PaperScene value={scene}>` and every `useCrumple` reads it through
 `useScene()`. A fresh identity per render would re-render the whole subtree and re-run every crumple
@@ -245,34 +280,97 @@ a fresh object per render by construction. **Depend on `crumple.shown` or on `cr
 ### `usePaperScene`
 
 ```ts
-interface SceneOptions {
-  /** `onError` is handed DOWN so you can spread it into `paperStage`'s own `onError`. */
-  create: (
-    signal: AbortSignal,
-    onError: (e: pc.StageEvent<'error'>) => void,
-  ) => Promise<pc.BlitStage | Error | pc.Aborted>
-  deps: readonly unknown[]
-  knobs?: Readonly<Record<string, string | number | boolean>>
-  onError?: (e: pc.StageEvent<'error'>) => void
+interface SceneBuild<M> {
+  readonly stage: pc.BlitStage
+  readonly meta: M
 }
 
-interface Scene {
-  readonly status: 'building' | 'ready' | 'failed'
-  readonly stage: pc.BlitStage | null // non-null exactly when status === 'ready'
-  readonly error: Error | null // non-null exactly when status === 'failed'
-  readonly warnings: readonly Error[] // stage.warnings, re-read on every store bump
-  readonly lost: boolean // stage.lost; a lost context also moves status to 'failed'
-  readonly generation: number // bumped on every landed build
-  readonly knobEpoch: number // bumped after every knob batch is written
-  play(
-    from: pc.PoseRef,
-    to: pc.PoseRef,
-    o?: pc.StagePlayOptions,
-  ): Promise<pc.StagePlayReport<pc.View>>
+interface SceneCounters {
+  readonly warnings: readonly Error[]
+  readonly lost: boolean
+  readonly generation: number
+  readonly knobEpoch: number
+}
+
+interface SceneOptions<M = undefined> {
+  create: (
+    signal: AbortSignal,
+    onError: StageErrorListener,
+  ) => Promise<SceneBuild<M> | pc.BlitStage | Error | pc.Aborted>
+  deps: readonly unknown[]
+  knobs?: pc.Knobs
+  onError?: StageErrorListener
+  onReady?: (
+    build: SceneBuild<M>,
+    info: { generation: number; signal: AbortSignal },
+  ) => void
+  onFailed?: (error: Error, info: { lost: boolean; generation: number }) => void
+  onKnobRefused?: (key: string, value: pc.Knobs[string], error: Error) => void
+}
+
+type SceneSnapshot<M = undefined> = SceneCounters &
+  (
+    | { readonly status: 'building'; readonly stage: null; readonly meta: null; readonly error: null }
+    | { readonly status: 'ready'; readonly stage: pc.BlitStage; readonly meta: M; readonly error: null }
+    | { readonly status: 'failed'; readonly stage: null; readonly meta: null; readonly error: Error }
+  )
+
+interface SceneMethods {
+  play(from: pc.PoseRef, to: pc.PoseRef, o?: pc.StagePlayOptions): Promise<pc.StagePlayReport<pc.View>>
   stop(o?: { all?: boolean }): void
 }
 
-function usePaperScene(o: SceneOptions): Scene
+type Scene<M = undefined> = SceneSnapshot<M> & SceneMethods
+type CreateStage<M = undefined> = SceneOptions<M>['create']
+type StageErrorListener = (e: pc.StageEvent<'error'>) => void
+
+function usePaperScene<M = undefined>(options: SceneOptions<M>): Scene<M>
+function usePaperScene<M = undefined>(
+  create: CreateStage<M>,
+  deps: readonly unknown[],
+  options?: Omit<SceneOptions<M>, 'create' | 'deps'>,
+): Scene<M>
+```
+
+`meta` is non-null exactly in the `ready` branch and is cleared beside `stage` on rebuild, failure,
+and context loss. Use it to retain the artifacts that produced the current stage:
+
+```tsx
+type BuildMeta = {
+  sheet: ReturnType<typeof paperSheet>
+  motion: ReturnType<typeof bakedMotion>
+}
+
+const create: CreateStage<BuildMeta> = async (signal, onError) => {
+  const sheet = paperSheet({ tiles })
+  const motion = bakedMotion({ packs: [pack2x3] })
+  const stage = await pc.paperStage({ present: 'blit', cssPx: 512, sheet, motion, signal, onError })
+  if (stage instanceof Error || pc.isAborted(stage)) return stage
+  return { stage, meta: { sheet, motion } }
+}
+
+const scene = usePaperScene(create, [], {
+  onReady: ({ meta }, { signal }) => {
+    if (!signal.aborted) console.info('scene ready', meta.sheet)
+  },
+  onFailed: (error, { lost }) => console.error(lost ? 'context lost' : 'build failed', error),
+})
+```
+
+`onReady` fires synchronously after the ready bump and before React re-renders. Its signal aborts on
+rebuild or unmount; no cleanup return is used. `onFailed` covers returned or thrown `create` errors,
+duplicate-core failure, and context loss. Its generation is the lost build when `lost: true`, and
+otherwise the last successful generation.
+
+`onKnobRefused(key, value, error)` is the key-carrying callback for a refused declarative write;
+`onError` still receives the stage event. For a synchronous escape hatch, use `scene.stage.set(...)`.
+The positional overload is the `react-hooks/exhaustive-deps`-checkable form:
+
+```tsx
+const scene = usePaperScene(create, [edgeShape, quality], {
+  knobs,
+  onKnobRefused: (key, value, error) => console.warn('knob refused', key, value, error),
+})
 ```
 
 You write the factory call yourself, and **both** parameters you are handed go into it:
@@ -492,13 +590,34 @@ type CrumpleOptions<S extends pc.SpriteSource> = {
   reducedMotion?: 'auto' | 'off' // default 'auto'
   onStart?: (e: pc.Events['start']) => void
   onEnd?: (e: pc.Events['end']) => void
+  onSettle?: (e: CrumpleSettleEvent) => void
   /** A `pc.StageEvent`, not a `pc.Events` member — errors never reach a view's own bus. */
   onError?: (e: pc.StageEvent<'error'>) => void
 } & pc.PinFor<S>
 
+interface CrumpleSettleEvent {
+  readonly key: string
+  readonly error: Error | null
+  readonly reduced: boolean
+}
+
 interface Crumple {
   readonly ref: (el: HTMLCanvasElement | null) => void
   readonly state: pc.ViewState | 'detached'
+  readonly status:
+    | 'detached'
+    | 'empty'
+    | 'acquiring'
+    | 'shown'
+    | 'playing'
+    | 'swapping'
+    | 'rolled-back'
+  readonly sprite: pc.Sprite | null
+  readonly pending:
+    | { readonly key: string; readonly phase: 'acquiring'; readonly run: null }
+    | { readonly key: string; readonly phase: 'entering'; readonly run: pc.Run<pc.PlayResult> }
+    | { readonly key: string; readonly phase: 'swapping'; readonly run: pc.Run<pc.SwapResult> }
+    | null
   /** The swap is parked at the ball, waiting on its target. */
   readonly parked: boolean
   readonly pose: number // 0 while detached — 'flat', the pose a view is born at
@@ -509,9 +628,13 @@ interface Crumple {
   /** `frame` already scaled by `frameTo` into the four CSS numbers <Crumple> writes on the
    *  wrapper. `null` when `frameTo` was absent or no front is resident. */
   readonly frameStyle: { width: string; height: string; left: string; top: string } | null
+  readonly artworkStyle: { readonly width: string; readonly height: string } | null
   readonly view: pc.View | null // raw, so an unforeseen scenario stays reachable
   play(from: pc.PoseRef, to: pc.PoseRef, o?: pc.PlayOptions): pc.Run<pc.PlayResult> | null
   stop(): void
+  draw(pose: pc.PoseRef): void
+  sync(): void
+  retry(): void
   refresh(): void
 }
 
@@ -528,6 +651,16 @@ with the `AssetError` the core raises for a source no re-supplier can be derived
 const bitmap = useCrumple({ spriteKey: 'hero', src: myImageBitmap, pin: true })
 //                                                                 ^ required, and the compiler says so
 ```
+
+`File` is a `Blob`, so it may be passed directly as `src`; do not create an object URL:
+
+```tsx
+function useDroppedPaper(file: File, dropId: number): Crumple {
+  return useCrumple({ spriteKey: `dropped-${dropId}`, src: file })
+}
+```
+
+Keep a unique key because two files with the same filename can still be different pictures.
 
 The qualifier is the core's own: a source widened to the whole `SpriteSource` union — read out of a
 data model rather than written at the call site — passes the tuple test and reaches the runtime check
@@ -561,12 +694,40 @@ wrapped in one** (§5.1). `start` is emitted synchronously inside `view.play`, a
 is exactly where that guarantee is lost; an `AudioContext.resume()` in a start handler only runs
 inside the user gesture because of it (packages §7.1).
 
+`pending` is the request for the current `(view, spriteKey)` until it settles, and is `null` when idle.
+`onSettle` fires exactly once for a request that reaches animated completion, degraded show, or rollback,
+and never for a superseded or unmounted request. `CrumpleSettleEvent.reduced` says whether reduced-motion
+accommodation applied to that request, not merely whether an animation happened.
+
+During an animated swap, core adopts the target at the ball. Therefore `shown` and `sprite` become the
+target while descent is still running; neither means “settled”. Read `pending` or handle `onSettle` for
+that decision. `parked` is true for the wait at the ball and is cleared on end, stop/supersession, and
+disposal. It is safe for the swap spinner now; reduced motion never parks because it degrades to `show()`.
+
+**Compare against `crumple.requested`, never `crumple.shown`.** `shown` can be the target from the ball
+onward and can differ after rollback; `requested` records the key the driver already considered.
+
+Use `onSettle` for transport completion:
+
+```tsx
+const crumple = useCrumple({
+  spriteKey: selected.id,
+  src: selected.src,
+  onSettle: ({ key, error, reduced }) => {
+    console.info('request settled', { key, failed: error !== null, reduced })
+  },
+})
+```
+
+Keep `onEnd` for consumers that genuinely need the view-run event; do not combine animated `onEnd`
+with an effect over `shown` to infer request settlement.
+
 `requested` and `shown` are separate because they genuinely diverge (§5.1). A swap whose target fails
 **rolls back to the previous sprite** — `state === 'crumpling.recover'`, and the `Run<SwapResult>`
 returns the target's Error — so the prop says B while the canvas shows A. The instance reports both
 and the Error, which also reaches your `onError` with `observed: true`, since it is on
-`crumple.error` as well. And **it does not retry.** A retry policy inside an animation library would be a
-network policy nobody asked for; if you want one, change `spriteKey` again.
+`crumple.error` as well. **The binding does not retry automatically; for an explicit retry, call
+`crumple.retry()`.**
 
 **`error` reports the last settled run, and is cleared when the next one starts** — on `start`, not
 on `end` (§5.1). That is the difference between a field you can render and one you cannot: a rollback
@@ -576,7 +737,8 @@ mean "something once went wrong", which is not a state any UI has a rendering fo
 
 ## 5. Reactive state, and why it is not event-driven
 
-`state`, `parked`, `pose`, `shown`, `requested`, `error`, `frame`, `frameStyle` and `view` are served
+`state`, `status`, `parked`, `pose`, `shown`, `sprite`, `requested`, `pending`, `error`, `frame`,
+`frameStyle`, `artworkStyle` and `view` are served
 through `useSyncExternalStore`, over a store **the binding versions on every call it makes into the
 core** (§5.5) — `view.show`, `view.draw`, `view.refresh`, `view.play`, `view.stop`, `view.swapTo`,
 `view.crumpleTo`, view creation and disposal, and the settlement of a `stage.prepare` — **and** on
@@ -622,29 +784,46 @@ pose a view is born at. `PoseRef` is an input type only (packages §10.1), so `c
 is rejected by TypeScript — the good case — and silently never true in JavaScript. Compare against a
 resolved index, or pass a reported one straight back into `play`, which is what it is for.
 
-**`onStart`, `onEnd` and `onError` are dispatched from those same subscriptions** (§5.5), through §2.1's
-`useEvent` — never their own `view.on` calls. Subscribing per callback would put your function's
+`status` is derived, with `rolled-back` meaning `error !== null && requested !== shown`; it complements
+rather than replaces core `state`. `sprite` is read in the same snapshot pass as `shown`, removing the
+need to read `crumple.view?.sprite` during render.
+
+**`onStart`, `onEnd` and `onError` are dispatched from those subscriptions; `onSettle` is emitted by
+request settlement** (§5.5). All callbacks use §2.1's `useEvent` — never their own `view.on` calls.
+Subscribing per callback would put your function's
 identity in the effect's dependencies, so an inline arrow would tear down and re-attach every render;
 omitting it from the dependencies is the stale-closure bug that replaces it. The convention has
 neither.
 
 ### Imperative access
 
-`play` / `stop` / `refresh` cover the view and `scene.stage` covers everything else. `crumple.view` is
-the raw `pc.View`, deliberately exposed so an unforeseen scenario stays reachable (§5.1) —
-`view.draw(pose)` for scroll-driven scrubbing, `view.once`, `view.set`:
+`play` / `stop` / `draw` / `sync` / `retry` cover the common imperative paths and `scene.stage` covers
+everything else. `crumple.view` is the raw `pc.View`, deliberately exposed so an unforeseen scenario
+stays reachable (§5.1) — `view.once`, `view.set`, and other unforeseen calls. `view.on('step', handler)`
+is the correct run-cadence seam; no snapshot `step` field is promised.
 
 ```tsx
+if (crumple.view === null) return
+const audio = new Audio('/fold.mp3')
+void audio.play()
 const run = crumple.play('flat', 'ball', { duration: 900 })
-if (run !== null) {
-  const r = await run // `Run` is a thenable; awaiting it is awaiting the settled result
-  if (r === pc.ABORTED) return // abort first, as its own early return (packages §10.5)
-  if (r instanceof Error) report(r) // PlayResult = undefined | PoseError | Aborted
-}
+if (run === null) return // assertion guard: the render snapshot said a view existed
+const result = await run
+if (result === pc.ABORTED) return
+if (result instanceof Error) console.error(result)
 
 crumple.stop() // freezes at the current pose and issues NO draw — a cancel path must not render
-crumple.refresh() // one redraw at the current pose: no run, no events
+crumple.draw(pose) // one draw and one snapshot bump; no-op while detached
+crumple.sync() // re-read after an otherwise-raw view call, without drawing
+crumple.retry() // retry the current rolled-back key without key-away-and-back
 ```
+
+Gate side effects before calling `play`: a `null` return is too late to undo audio or another side
+effect. It means the view was detached and nothing else.
+
+The binding reports no acquisition or ready-to-first-sprite timing. `onReady` is scene-ready timing,
+`onStart` occurs after the sprite is resident, and neither measures the front bake; there is no
+`shownAt` field.
 
 `crumple.play` supersedes whatever the view was doing, including a `scene.play` wave — collisions are
 decided by scope, not by method, and the narrower scope wins (packages §4.4).
@@ -654,13 +833,15 @@ decided by scope, not by method, and the narrower scope wins (packages §4.4).
 **`spriteKey` is the trigger.** The swap fires when it changes; `src` is read as the source for the
 new key, and nothing else about the render causes a swap.
 
-**A request for the key already shown is refused before anything observable happens**, and that is
-worth knowing before you build a transport on top of it: the hook returns before `requested` moves,
+**A request for the key already considered by the driver is refused before anything observable happens**,
+and that is worth knowing before you build a transport on top of it: the hook returns before
+`requested` moves,
 before its sequence number advances, and before any library call — so no `add`, no run, no
 `start` / `end`, and **no change to the snapshot at all**. From the outside "the request produced
-silence" and "the request was never considered" are the same thing. If you arm state when you ask for
-a swap — a spinner, a fold direction, an audio sequence — make the same-key check yourself, before
-you arm it.
+silence" and "the request was never considered" are the same thing. The check is against
+`crumple.requested`, not `crumple.shown`: after a rollback, the requested key can still be the failed
+target while the shown key is the previous sprite. If you arm state when you ask for a swap — a
+spinner, a fold direction, an audio sequence — make the same-key check yourself, before you arm it.
 
 ```tsx
 function Hero({ selected }: { selected: Item }) {
@@ -890,8 +1071,8 @@ is also why nothing downstream of it needs a reduced-motion branch of its own.**
 `entrance` is irrelevant under `reduce`: an `entrance: 'uncrumple'` under `reduce` is `'flat'` (§5.3).
 
 Two consequences for your own UI. A view parked at `'ball'` and pulsing is motion, so under `reduce`
-the honest indicator is a static one somewhere else — and `crumple.parked` will never become true, so
-branch that spinner on `shown === null` instead. And because `show()` emits nothing at all
+the honest indicator is a static one somewhere else — and `crumple.parked` will never become true because
+reduced motion degrades to `show()`. Use `shown === null` for the loading placeholder. And because `show()` emits nothing at all
 (§5.5), the only reason your placeholder lifts on this path is that the binding versions its own
 store; there is no event behind it.
 
@@ -944,10 +1125,19 @@ On every change the hook diffs it against the last applied map and writes **only
 attempted. Re-sending the whole object every render is therefore free, which is what lets you keep the
 knobs in ordinary React state.
 
-**Only the keys *present* in the object are ever written, and removing one does not reset it.** The
-binding does not know a key's default and does not go looking for it, so a key you drop keeps
-whatever value it last had on the stage. A "reset everything" affordance is therefore your own: write
-the defaults out explicitly rather than emptying the object.
+After a key has been applied, omitting it from the next `knobs` object writes `stage.defaults[key]`.
+Undeclared keys are silently skipped, and the batch produces one `knobEpoch` bump. Flat keys use the
+bare key for a shared binding; slot-local bindings use `namespace.key`.
+
+```tsx
+const [knobs, setKnobs] = useState<pc.Knobs>({})
+const scene = usePaperScene({ create, deps, knobs })
+
+<button onClick={() => setKnobs({})}>Reset knobs</button>
+```
+
+For a synchronous refusal path, keep `scene.stage.set({ [key]: value })`. The declarative path costs
+the React render/effect cycle; it does not promise a synchronous result from `knobs`.
 
 **The one-call-per-key rule is what makes "one bad key does not abandon the batch" true** rather than
 a wish. `normalise` returns on the first invalid key and writes nothing
@@ -1004,12 +1194,17 @@ return <Crumple value={hero} className="hero" />
 
 That is the whole manoeuvre. The hook computes `crumple.frameStyle` — `frame`'s two boxes under the
 one scale `frameTo / max(artwork.w, artwork.h)`, as four CSS strings — and `<Crumple>` spreads it onto
-the wrapper. Be clear about which rectangle those four numbers describe: `width` and `height` are the
-**drawn box** — the paper, which overflows the picture by however far the edge knobs reach — and
-`left` / `top` are the negative artwork offset under the same scale, so the *artwork* lands where the
-wrapper would otherwise have sat. `frameStyle` is not the artwork's own rectangle; if that is what
-you need — to size a layout slot the paper hangs out of, say — compute it from `crumple.frame`
-yourself, as the paragraph below describes. It is recomputed after every swap and after a hull-tier
+the wrapper. `frameStyle` is the paper box written to `<Crumple>`'s wrapper, while `artworkStyle` is
+the artwork rectangle for the surrounding layout under the same scale and the same `null` convention.
+Use it directly for a surrounding slot rather than recomputing the artwork box manually:
+
+```tsx
+<div className="hero-slot" style={crumple.artworkStyle ?? undefined}>
+  <Crumple value={crumple} className="hero-paper" />
+</div>
+```
+
+Both styles are recomputed after every swap and after a hull-tier
 re-source has landed — the
 `knobEpoch` join under [Knobs](#9-knobs). Omit `frameTo` — the default — and `frameStyle` is `null`, the wrapper is left
 alone, and `frame` is still reported: that is the grid's case.
@@ -1030,13 +1225,9 @@ Threading it through `SceneOptions` would have meant stating the number twice an
 copies to agree. Naming it where it is used makes framing an **explicit request** rather than a
 behaviour keyed on how a stage the binding never saw was built.
 
-If the wrapper is not the element you want sized, do it by hand from `crumple.frame`. `ViewFrame` is
-`{ box, artwork }`: the box the view draws into and where the unpadded artwork lands inside it, both
-in that box's pixels, `null` until a front is resident (`packages/core/src/view.ts:93`). It **remembers
-nothing and needs nothing remembered** — it reports the view's current frame, so read it again after
-every swap and on every `knobEpoch` change. `frameArtwork` in `examples/playground/src/framing.ts` is
-the reference implementation — the four multiplications by one scale that `heroSlotStyle`
-(`examples/playground/src/hero.ts`) applies to size the hero slot.
+`ViewFrame` remains available for inspection: it is `{ box, artwork }`, the box the view draws into and
+where the unpadded artwork lands inside it, both in that box's pixels, `null` until a front is resident
+(`packages/core/src/view.ts:93`).
 
 ## 11. What `<Crumple>` renders
 
@@ -1075,8 +1266,8 @@ the expensive way, in the pre-migration hero implementation — a canvas with no
 layout size from those attributes, the two feed each other, and the element grows by
 `devicePixelRatio` per blit until it hits the front size. Every box around the canvas is sized off
 `crumple.frame` today rather than off the canvas's own attributes — `value.frameStyle` for the
-wrapper, `heroSlotStyle` (`examples/playground/src/hero.ts`) and the `frameArtwork` it calls
-(`examples/playground/src/framing.ts`) for the playground's own layout slot — so the loop has nothing
+wrapper, `heroSlotStyle` (`examples/playground/src/scene/hero.ts`) and the `frameArtwork` it calls
+(`examples/playground/src/scene/framing.ts`) for the playground's own layout slot — so the loop has nothing
 to feed on. The exclusion is safe to state absolutely only because `'manual'` is not offered.
 
 
@@ -1149,12 +1340,53 @@ From §11, and each is deferred with a reason rather than forgotten:
   mounting the `Crumple` that will show the key — see [the acquisition
   shape](#the-acquisition-shape-behind-every-sprite).
 - **Audio.** `@paper-crumple/audio` is still deferred by packages §3.4.
-- **A test double for your own components.** The package's own suite runs against a fake `BlitStage`
-  and a StrictMode-aware harness, but none of that is exported (`packages/react/src/index.ts`) —
-  it is test scaffolding, and nothing in the published graph imports it. Unit-testing a component
-  built on these hooks therefore means either a real WebGL2 context or an injectable seam of your
-  own around `create`, which is what the playground did.
-
 And two things that are the *application's* job rather than the binding's (§10): generating a knob
 panel from the runtime descriptors — a control panel built from `stage.knobs` is an application, not a
 binding — and the audio wiring in a `start` handler.
+
+## 15. Testing
+
+The pure testing subpath exports these public values and types:
+
+```ts
+import {
+  buildingScene,
+  createFakeStage,
+  deferred,
+  detachedCrumple,
+  failedScene,
+  readyScene,
+  type FakeCall,
+  type FakeStageHandle,
+  type FakeStageOptions,
+  type FakeViewHandle,
+} from '@paper-crumple/react/testing'
+```
+
+`createFakeStage` needs a DOM because it creates a canvas. Put
+`/** @vitest-environment jsdom */` at the top of a Vitest file. Testing Library configures
+React's act environment; bare `act` users should set:
+
+```ts
+;(globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true
+```
+
+`matchMedia` is guarded and needs no stub unless the test exercises `reducedMotion: 'auto'` with
+reduction enabled. The fake has two deliberate limitations: `view.run` always reads `null`, and
+`FakeViewHandle.settleRun` controls only the latest run.
+
+For example, assert the calls relevant to the behavior under test:
+
+```ts
+const fake = createFakeStage({ sprites: ['hero'] })
+const scene = readyScene(fake.stage)
+
+// Render the consumer under <PaperScene value={scene}> with the test renderer of your choice.
+expect(fake.calls.filter(({ method }) => method === 'add')).toHaveLength(0)
+expect(fake.calls.filter(({ method }) => method === 'view')).toHaveLength(1)
+```
+
+`render`, `renderHook`, `renderCrumple`, and `flush` are internal and are not exported. The testing
+helpers may add fields within a major version but never remove fields within that major. Consumers
+should assert the calls and fields relevant to their behavior rather than exact-object equality over
+every helper field.

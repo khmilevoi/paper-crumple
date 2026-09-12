@@ -76,6 +76,7 @@ export interface AddStats {
 }
 
 export interface StormResult {
+  readonly observation?: { readonly before: ObservationCounts; readonly after: ObservationCounts }
   /** 0 is the cold storm (shaders, pools and the decode path warm up); 1.. are timed. */
   readonly iteration: number
   /** First swap call → the last view's `end`; for `idle`, the window itself. */
@@ -188,6 +189,7 @@ export interface RowSummary {
 }
 
 export interface RowResult {
+  readonly observationCleanup?: ObservationCounts
   readonly name: string
   readonly cadence: Cadence
   readonly source: SourceKind
@@ -224,6 +226,15 @@ export interface RowResult {
   /** The plan's flat per-row contract, over the better timed storm. */
   readonly summary: RowSummary
   readonly note?: string
+}
+
+export interface ObservationCounts {
+  readonly mode: string
+  readonly activeStepSubscriptions: number
+  readonly activeSemanticSubscriptions: number
+  readonly semanticPublications: number
+  readonly progressPublications: number
+  readonly frameReads: number
 }
 
 export interface SmoothMeta {

@@ -4,6 +4,7 @@ export default defineConfig({
   entry: {
     index: 'src/index.ts',
     unstable: 'src/unstable.ts',
+    bindings: 'src/bindings.ts',
   },
   format: ['esm'],
   platform: 'browser',

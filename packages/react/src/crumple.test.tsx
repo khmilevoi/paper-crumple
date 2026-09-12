@@ -5,31 +5,12 @@ import { createElement } from 'react'
 import { renderToStaticMarkup } from 'react-dom/server'
 import { expect, test, vi } from 'vitest'
 import { Crumple } from './crumple.js'
-import type { Crumple as CrumpleValue } from './crumple.js'
+import { detachedCrumple } from './testing/crumple-fixtures.js'
 import { render } from './testing/render.js'
-
-function instance(o?: Partial<CrumpleValue>): CrumpleValue {
-  return {
-    state: 'detached',
-    parked: false,
-    pose: 0,
-    shown: null,
-    requested: null,
-    error: null,
-    frame: null,
-    frameStyle: null,
-    view: null,
-    ref: () => {},
-    play: () => null,
-    stop: () => {},
-    refresh: () => {},
-    ...o,
-  }
-}
 
 test('a positioned wrapper, a canvas inside it, and the ref on the canvas (§6)', async () => {
   const ref = vi.fn()
-  const harness = await render(createElement(Crumple, { value: instance({ ref }) }))
+  const harness = await render(createElement(Crumple, { value: detachedCrumple({ ref }) }))
   const wrapper = harness.container.firstElementChild as HTMLElement
   expect(wrapper.tagName).toBe('DIV')
   expect(wrapper.style.position).toBe('relative')
@@ -42,7 +23,7 @@ test('a positioned wrapper, a canvas inside it, and the ref on the canvas (§6)'
 test('DOM props land on the wrapper', async () => {
   const onClick = vi.fn()
   const harness = await render(
-    createElement(Crumple, { value: instance(), className: 'tile', onClick }),
+    createElement(Crumple, { value: detachedCrumple(), className: 'tile', onClick }),
   )
   const wrapper = harness.container.firstElementChild as HTMLElement
   expect(wrapper.className).toBe('tile')
@@ -53,13 +34,13 @@ test('DOM props land on the wrapper', async () => {
 
 test('children are layered over the canvas while shown is null, and go when it is not (§6)', async () => {
   const harness = await render(
-    createElement(Crumple, { value: instance() }, createElement('span', null, 'loading')),
+    createElement(Crumple, { value: detachedCrumple() }, createElement('span', null, 'loading')),
   )
   expect(harness.container.textContent).toBe('loading')
   await harness.rerender(
     createElement(
       Crumple,
-      { value: instance({ shown: 'hero' }) },
+      { value: detachedCrumple({ shown: 'hero' }) },
       createElement('span', null, 'loading'),
     ),
   )
@@ -70,7 +51,7 @@ test('children are layered over the canvas while shown is null, and go when it i
 test('frameStyle is spread onto the wrapper and beats the consumer s own style (§6)', async () => {
   const harness = await render(
     createElement(Crumple, {
-      value: instance({
+      value: detachedCrumple({
         frameStyle: { width: '230.4px', height: '230.4px', left: '-19.2px', top: '-19.2px' },
       }),
       style: { width: '10px', background: 'red' },
@@ -86,7 +67,7 @@ test('frameStyle is spread onto the wrapper and beats the consumer s own style (
 
 test('a null frameStyle leaves the consumer s size alone', async () => {
   const harness = await render(
-    createElement(Crumple, { value: instance(), style: { width: '10px' } }),
+    createElement(Crumple, { value: detachedCrumple(), style: { width: '10px' } }),
   )
   const wrapper = harness.container.firstElementChild as HTMLElement
   expect(wrapper.style.width).toBe('10px')
@@ -96,7 +77,7 @@ test('a null frameStyle leaves the consumer s size alone', async () => {
 test('canvasProps reach the canvas and never the wrapper', async () => {
   const harness = await render(
     createElement(Crumple, {
-      value: instance(),
+      value: detachedCrumple(),
       className: 'tile',
       canvasProps: { className: 'inner', 'aria-hidden': true },
     }),
@@ -110,7 +91,7 @@ test('canvasProps reach the canvas and never the wrapper', async () => {
 })
 
 test('the canvas takes the wrapper s box in CSS, and nobody writes width or height (§6)', async () => {
-  const harness = await render(createElement(Crumple, { value: instance() }))
+  const harness = await render(createElement(Crumple, { value: detachedCrumple() }))
   const canvas = harness.container.querySelector('canvas')
   expect(canvas?.style.width).toBe('100%')
   expect(canvas?.style.height).toBe('100%')
@@ -125,7 +106,7 @@ test('the server render is the placeholder branch, so hydration agrees (§8)', (
   // (a ref callback is a client-only concept). The detached instance's `shown` is `null`, so the
   // server markup must carry the placeholder's text and must not claim a sprite via `shown`.
   const markup = renderToStaticMarkup(
-    createElement(Crumple, { value: instance() }, createElement('span', null, 'skeleton')),
+    createElement(Crumple, { value: detachedCrumple() }, createElement('span', null, 'skeleton')),
   )
   expect(markup).toContain('skeleton')
   expect(markup).toContain('<canvas')

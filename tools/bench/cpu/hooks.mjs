@@ -8,6 +8,8 @@ const packages = resolvePath(here, '../../../packages')
 const BARRELS = new Map([
   ['@paper-crumple/core', resolvePath(packages, 'core/src/index.ts')],
   ['@paper-crumple/core/unstable', resolvePath(packages, 'core/src/unstable.ts')],
+  ['@paper-crumple/core/bindings', resolvePath(packages, 'core/src/bindings.ts')],
+  ['@paper-crumple/reatom', resolvePath(packages, 'reatom/src/index.ts')],
   ['@paper-crumple/paper', resolvePath(packages, 'paper/src/index.ts')],
   ['@paper-crumple/paper/tiles', resolvePath(packages, 'paper/src/tiles.ts')],
   ['@paper-crumple/motion', resolvePath(packages, 'motion/src/index.ts')],

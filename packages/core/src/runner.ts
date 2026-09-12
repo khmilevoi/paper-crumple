@@ -30,6 +30,10 @@ const FLAT_POSE_INDEX = 0
 
 /** Everything the runner needs from whoever owns the pixels. P9 implements this on a `View`. */
 export interface RunHost {
+  /** Optional semantic transaction, separate from the synchronous legacy event bus. */
+  batch?<T>(operation: () => T): T
+  /** A dirty render may publish resources; ordinary frames avoid a transaction closure. */
+  needsRenderBatch?(): boolean
   /** Emits on the host's own bus, synchronously. `error` is deliberately absent — see below. */
   emit<E extends 'start' | 'step' | 'end'>(event: E, payload: Events[E]): void
   /**
@@ -47,7 +51,10 @@ export interface RunHost {
 }
 
 export interface PlayOptions {
-  /** One multiplier over the traversed dwells (§7.2). Clamped at zero; never negative. */
+  /** Wall time in **milliseconds** for the whole traversal, not a multiplier: the authored dwell
+   *  cadence is rescaled into it, so `play('flat', 'ball', { duration: 585 })` finishes at t = 585
+   *  (§7.2). Clamped at zero; never negative. A `duration` shorter than the blocking GPU cost is
+   *  legal — the run overruns and no pose is skipped. */
   duration?: number
   signal?: AbortSignal
 }
@@ -106,6 +113,7 @@ export interface RunControllerConfig {
 type LiveSettleValue = undefined | Aborted | AddError
 
 interface LiveRun {
+  readonly run: Run<PlayResult | SwapResult>
   readonly owner: RunOwner
   readonly from: number
   readonly to: number
@@ -121,6 +129,7 @@ interface LiveRun {
 }
 
 export interface RunController<T = unknown> {
+  readonly run: Run<PlayResult | SwapResult> | null
   /** The live run's owner, or `null` when the host is idle. §4.4 compares against this. */
   readonly owner: RunOwner | null
   readonly live: boolean
@@ -147,6 +156,7 @@ export function createRunController<T = unknown>(
   const dwells = config.dwells ?? DWELL_MS
   const { poseCount } = config
   let current: LiveRun | null = null
+  const batch = host.batch ?? (<R>(operation: () => R): R => operation())
   let disposed = false
   /** Up for the whole of `supersede`; `play` and `crumple` refuse to install a run while it is. */
   let superseding = false
@@ -172,6 +182,10 @@ export function createRunController<T = unknown>(
    * view." The settle follows the `end`, so a `.then` continuation always lands after it.
    */
   function finish(r: LiveRun): void {
+    batch(() => finishNow(r))
+  }
+
+  function finishNow(r: LiveRun): void {
     if (current !== r) return
     const completed = r.reachedTo && !r.errored && !r.cancelled
     detach(r)
@@ -255,6 +269,17 @@ export function createRunController<T = unknown>(
    * its own channel, where a consumer counting steps is not the audience for it.
    */
   function stepOnce(r: LiveRun, step: Step): void {
+    if (host.needsRenderBatch?.() === true) stepOnceBatched(r, step)
+    else stepOnceNow(r, step)
+  }
+
+  function stepOnceBatched(r: LiveRun, step: Step): void {
+    // Keep parameter capture in the dirty path: V8 allocates a function context on entry
+    // even when the branch containing a capturing callback is not taken.
+    batch(() => stepOnceNow(r, step))
+  }
+
+  function stepOnceNow(r: LiveRun, step: Step): void {
     const failure = host.render(step.pose)
     host.emit('step', {
       pose: step.pose,
@@ -314,6 +339,7 @@ export function createRunController<T = unknown>(
       if (record !== null) cancel(record)
     })
     const r: LiveRun = {
+      run: handle.run,
       owner,
       from,
       to,
@@ -389,6 +415,7 @@ export function createRunController<T = unknown>(
       if (record !== null) cancel(record)
     })
     const r: LiveRun = {
+      run: handle.run,
       owner,
       from,
       // Every crumple ends flat: `to` is 0 and `via` marks the ball it rose through.
@@ -435,6 +462,10 @@ export function createRunController<T = unknown>(
     let holdElapsed = false
 
     function leaveBallIfReady(run: LiveRun, swap: SwapPlan): void {
+      batch(() => leaveBall(run, swap))
+    }
+
+    function leaveBall(run: LiveRun, swap: SwapPlan): void {
       const settled = outcome
       if (current !== run || leftBall || !holdElapsed || settled === null) return
       leftBall = true
@@ -492,18 +523,20 @@ export function createRunController<T = unknown>(
         if (current === r) stepOnce(r, step)
       },
       onDone: () => {
-        if (current !== r) return
-        // A run that began at the ball entered `crumpling.ball` before its `start`, so it is
-        // already there; re-announcing it would make an observer see the state twice.
-        if (plan.rise.steps.length > 1) host.setState('crumpling.ball')
-        // **Park time is never rescaled**: the hold is `max(scaledBallDwell, timeUntilSettled)`,
-        // and the excess sits entirely at the ball. There is no built-in park timeout; a caller
-        // who needs one passes `signal`.
-        r.parkTimer = host.timers.setTimeoutFn(() => {
-          r.parkTimer = null
-          holdElapsed = true
-          leaveBallIfReady(r, plan)
-        }, plan.hold)
+        batch(() => {
+          if (current !== r) return
+          // A run that began at the ball entered `crumpling.ball` before its `start`, so it is
+          // already there; re-announcing it would make an observer see the state twice.
+          if (plan.rise.steps.length > 1) host.setState('crumpling.ball')
+          // **Park time is never rescaled**: the hold is `max(scaledBallDwell, timeUntilSettled)`,
+          // and the excess sits entirely at the ball. There is no built-in park timeout; a caller
+          // who needs one passes `signal`.
+          r.parkTimer = host.timers.setTimeoutFn(() => {
+            r.parkTimer = null
+            holdElapsed = true
+            leaveBallIfReady(r, plan)
+          }, plan.hold)
+        })
       },
     })
     if (current === r) r.stepper = riseStepper
@@ -534,15 +567,18 @@ export function createRunController<T = unknown>(
   }
 
   return {
+    get run() {
+      return current?.run ?? null
+    },
     get owner() {
       return current?.owner ?? null
     },
     get live() {
       return current !== null
     },
-    play,
-    crumple,
-    stop,
-    dispose,
+    play: (from, to, o) => batch(() => play(from, to, o)),
+    crumple: (from, target, o) => batch(() => crumple(from, target, o)),
+    stop: (o) => batch(() => stop(o)),
+    dispose: () => batch(dispose),
   }
 }

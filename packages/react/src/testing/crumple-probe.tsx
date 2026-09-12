@@ -1,42 +1,12 @@
-import type { BlitStage, SpriteSource } from '@paper-crumple/core'
+import type { SpriteSource } from '@paper-crumple/core'
 import { act, createElement, type ReactNode } from 'react'
 import type { Crumple } from '../crumple.js'
 import type { CrumpleOptions } from '../crumple-types.js'
 import type { Scene } from '../scene-types.js'
 import { useCrumple } from '../use-crumple.js'
 import { flush, render, type Harness } from './render.js'
-
-/** A `Scene` literal, so a crumple test needs no `usePaperScene` and no factory. */
-export function readyScene(
-  stage: BlitStage,
-  o?: { generation?: number; knobEpoch?: number },
-): Scene {
-  return {
-    status: 'ready',
-    stage,
-    error: null,
-    warnings: [],
-    lost: false,
-    generation: o?.generation ?? 1,
-    knobEpoch: o?.knobEpoch ?? 0,
-    play: async () => ({ started: [], skipped: [], failed: [], completed: false }),
-    stop: () => {},
-  }
-}
-
-export function buildingScene(): Scene {
-  return {
-    status: 'building',
-    stage: null,
-    error: null,
-    warnings: [],
-    lost: false,
-    generation: 0,
-    knobEpoch: 0,
-    play: async () => ({ started: [], skipped: [], failed: [], completed: false }),
-    stop: () => {},
-  }
-}
+import { buildingScene } from './scene-fixtures.js'
+export { buildingScene, readyScene } from './scene-fixtures.js'
 
 /** One instance, not one per render: a fresh identity per render would be a different test. */
 const BUILDING: Scene = buildingScene()

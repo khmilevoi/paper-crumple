@@ -7,6 +7,7 @@ dist/
 docs/superpowers/
 coverage/
 .claude/worktrees/
+.worktrees/
 test-results/
 playwright-report/
 # Benchmark output (tools/bench/cpu writes cpu.json and .cpuprofile files here).
@@ -22,3 +23,6 @@ examples/playground/public/audio/
 # The GL bench writes its JSON and CPU profiles here (`pnpm bench:gl`, BENCH_OUT).
 tools/bench/out/
 .superpowers
+.claude/settings.local.json
+.claude/*.tmp
+.codex/

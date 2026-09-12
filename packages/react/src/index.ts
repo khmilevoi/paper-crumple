@@ -19,7 +19,8 @@
 export { PaperScene, useScene } from './scene-context.js'
 export type { PaperSceneProps } from './scene-context.js'
 export { usePaperScene } from './use-paper-scene.js'
-export type { KnobValue, Scene, SceneOptions, SceneSnapshot, SceneStatus } from './scene-types.js'
+export type { Scene, SceneOptions, SceneSnapshot, SceneStatus } from './scene-types.js'
+export type { SceneBuild, SceneCounters, SceneMethods } from './scene-types.js'
 
 // --- P3: the crumple (§5, §6) ---
 /** One specifier, and deliberately: `crumple.tsx` declares both the component and the interface of
@@ -34,3 +35,18 @@ export type {
   CrumpleSnapshot,
   CrumpleState,
 } from './crumple-types.js'
+
+// --- P4: the crumple request surface (§2.1, §2.3, §2.5) ---
+/** Types only: this plan adds no runtime export, which is why `index.test.ts`'s
+ *  `Object.keys(api)` assertion is untouched by it. */
+export type {
+  CrumpleArtworkStyle,
+  CrumplePending,
+  CrumpleSettleEvent,
+  CrumpleStatus,
+} from './crumple-types.js'
+
+// --- P6: binding-owned callback names (§4.3) ---
+/** Types only: core vocabulary remains imported from `@paper-crumple/core`. */
+export type { CreateStage, StageErrorListener } from './scene-types.js'
+export type { RenderValue, Entrance, ReducedMotion } from '@paper-crumple/core/bindings'

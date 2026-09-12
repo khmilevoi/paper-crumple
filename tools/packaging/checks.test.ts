@@ -5,6 +5,7 @@ import {
   checkPackUrls,
   checkPackedManifest,
   checkTiles,
+  checkSourceMaps,
 } from './checks.mjs'
 
 const core = PACKAGES.find((p) => p.dir === 'core')!
@@ -20,9 +21,53 @@ const coreNames = [
   'package/dist/unstable.js',
   'package/dist/unstable.js.map',
   'package/dist/unstable.d.ts',
+  'package/dist/bindings.js',
+  'package/dist/bindings.js.map',
+  'package/dist/bindings.d.ts',
 ]
 
 describe('checkEntries', () => {
+  it('permits the generated core facade to omit its own map', () => {
+    expect(
+      checkEntries(
+        core,
+        coreNames.filter((name) => name !== 'package/dist/index.js.map'),
+      ),
+    ).toEqual([])
+  })
+  it('checks the Reatom package entry and rejects missing declarations', () => {
+    const reatom = PACKAGES.find((p) => p.dir === 'reatom')!
+    expect(reatom).toBeDefined()
+    const names = [
+      'package/package.json',
+      'package/LICENSE',
+      'package/README.md',
+      'package/dist/index.js',
+      'package/dist/index.js.map',
+      'package/dist/index.d.ts',
+    ]
+    expect(checkEntries(reatom, names)).toEqual([])
+    expect(
+      checkEntries(
+        reatom,
+        names.filter((name) => !name.endsWith('.d.ts')),
+      ),
+    ).toEqual(['@paper-crumple/reatom: missing package/dist/index.d.ts'])
+    expect(
+      checkEntries(
+        reatom,
+        names.filter((name) => !name.endsWith('.js.map')),
+      ),
+    ).toEqual(['@paper-crumple/reatom: missing package/dist/index.js.map'])
+  })
+  it('requires the stable bindings entry in the published core tarball', () => {
+    expect(
+      checkEntries(
+        core,
+        coreNames.filter((name) => name !== 'package/dist/bindings.js'),
+      ),
+    ).toEqual(['@paper-crumple/core: missing package/dist/bindings.js'])
+  })
   it('accepts the required set plus tsdown’s content-hashed shared chunks', () => {
     const withChunks = [
       ...coreNames,
@@ -50,6 +95,53 @@ describe('checkEntries', () => {
     expect(checkEntries(core, [...coreNames, 'package/.npmignore'])).toEqual([
       '@paper-crumple/core: unexpected entry package/.npmignore',
     ])
+  })
+})
+
+describe('checkSourceMaps', () => {
+  const entry = (name: string, text: string) => ({
+    name: `package/dist/${name}`,
+    data: Buffer.from(text),
+  })
+  const map = JSON.stringify({ version: 3, sources: ['../src/stage.ts'], mappings: 'AAAA' })
+  const chunk = entry(
+    'stage-12345678.js',
+    'export const stage = 1;\n//# sourceMappingURL=stage-12345678.js.map',
+  )
+  const facade = entry(
+    'index.js',
+    'import { stage } from "./stage-12345678.js";\nexport { stage };',
+  )
+  it('accepts only a declaration-only core facade with mapped executable chunks', () => {
+    expect(checkSourceMaps(core, [facade, chunk, entry('stage-12345678.js.map', map)])).toEqual([])
+  })
+  it('requires maps for executable facade code and every shared chunk', () => {
+    expect(checkSourceMaps(core, [entry('index.js', 'export const stage = 1;')])).toEqual([
+      '@paper-crumple/core: missing source map for package/dist/index.js',
+    ])
+    expect(checkSourceMaps(core, [facade, chunk])).toEqual([
+      '@paper-crumple/core: missing source map for package/dist/stage-12345678.js',
+    ])
+  })
+  it('rejects empty maps and a facade pointing at an absent chunk', () => {
+    expect(checkSourceMaps(core, [chunk, entry('stage-12345678.js.map', '{}')])).toEqual([
+      '@paper-crumple/core: invalid source map package/dist/stage-12345678.js.map',
+    ])
+    expect(checkSourceMaps(core, [facade])).toEqual([
+      '@paper-crumple/core: missing source map for package/dist/index.js',
+    ])
+  })
+  it('does not extend the facade exception to other packages or side-effect imports', () => {
+    expect(
+      checkSourceMaps(paper, [facade, chunk, entry('stage-12345678.js.map', map)])[0],
+    ).toContain('index.js')
+    expect(
+      checkSourceMaps(core, [
+        entry('index.js', 'import "./stage-12345678.js";'),
+        chunk,
+        entry('stage-12345678.js.map', map),
+      ])[0],
+    ).toContain('index.js')
   })
 })
 
@@ -135,7 +227,7 @@ describe('checkPackedManifest', () => {
       ...base,
       name: '@paper-crumple/core',
       peerDependencies: { typescript: '>=5.0' },
-      exports: { '.': {}, './unstable': {} },
+      exports: { '.': {}, './unstable': {}, './bindings': {} },
     }
 
     expect(checkPackedManifest(core, coreManifest)).toEqual([])
@@ -146,7 +238,7 @@ describe('checkPackedManifest', () => {
       ...base,
       name: '@paper-crumple/core',
       peerDependencies: { typescript: '>=5.0', '@paper-crumple/core': '^1.0.0' },
-      exports: { '.': {}, './unstable': {} },
+      exports: { '.': {}, './unstable': {}, './bindings': {} },
     }
 
     expect(checkPackedManifest(core, coreManifest)).toEqual([

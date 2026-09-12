@@ -1,4 +1,6 @@
 import type { Aborted } from './abort.js'
+import type { ChangeSource } from './changes.js'
+import type { Knobs } from './knobs.js'
 import type { SheetError } from './errors.js'
 import type { KnobDescriptor } from './forward.js'
 import type { Rect, Size } from './geometry.js'
@@ -70,6 +72,9 @@ export interface ViewFrame {
  * panel, sharing one front texture. That is why the pose belongs to the view.
  */
 export interface View {
+  readonly changes: ChangeSource
+  /** Local accepted overrides; sprite and stage values are read separately. */
+  readonly appliedKnobs: Readonly<Knobs>
   // --- the accessors the design already assumes (amendment 14) ---
   /** The **resolved numeric index** — the value §4.5 tells a caller to pass to
    *  `play(view.pose, 'flat')`. `PoseRef` is an input type only. */

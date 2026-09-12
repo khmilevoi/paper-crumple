@@ -149,9 +149,11 @@ export async function runScenario(scenario, options = {}) {
     minMs: sorted[0],
     p10Ms: quantile(sorted, 0.1),
     p90Ms: quantile(sorted, 0.9),
+    p95Ms: quantile(sorted, 0.95),
     opsPerSec: medianMs > 0 ? 1000 / medianMs : Infinity,
     alloc,
     profile: profilePath,
+    ...(scenario.evidence === undefined ? {} : { evidence: scenario.evidence(ctx) }),
   }
 }
 
@@ -188,11 +190,12 @@ export function formatTable(results) {
     fmtMs(r.medianMs),
     fmtMs(r.meanMs),
     fmtMs(r.p90Ms),
+    fmtMs(r.p95Ms),
     fmtOps(r.opsPerSec),
     String(r.iterations),
     fmtBytes(r.alloc),
   ])
-  const head = ['scenario', 'median ms', 'mean ms', 'p90 ms', 'ops/s', 'n', 'alloc/op']
+  const head = ['scenario', 'median ms', 'mean ms', 'p90 ms', 'p95 ms', 'ops/s', 'n', 'alloc/op']
   const widths = head.map((h, i) => Math.max(h.length, ...rows.map((row) => row[i].length)))
   const line = (cells) =>
     cells.map((c, i) => (i === 0 ? c.padEnd(widths[i]) : c.padStart(widths[i]))).join('  ')

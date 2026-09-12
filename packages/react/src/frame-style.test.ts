@@ -1,6 +1,6 @@
 import type { ViewFrame } from '@paper-crumple/core'
 import { expect, test } from 'vitest'
-import { frameStyleFor } from './frame-style.js'
+import { artworkStyleFor, frameStyleFor } from './frame-style.js'
 
 /** The paper reaches 20px past the picture on every side, at pose 0. */
 const FRAME: ViewFrame = {
@@ -45,4 +45,25 @@ test('a frame with no artwork lays out zero boxes rather than NaN ones', () => {
     left: '0px',
     top: '0px',
   })
+})
+
+test('artworkStyle is the artwork box under the same one scale as frameStyle (§2.3)', () => {
+  // scale = 192 / 200 = 0.96, and the artwork long side is what frameTo names, so it lands on it.
+  expect(artworkStyleFor(FRAME, 192)).toEqual({ width: '192px', height: '192px' })
+})
+
+test('artworkStyle keeps the artwork s aspect, not the paper box s', () => {
+  const wide: ViewFrame = { box: { w: 400, h: 200 }, artwork: { x: 50, y: 25, w: 300, h: 150 } }
+  // scale = 150 / 300 = 0.5
+  expect(artworkStyleFor(wide, 150)).toEqual({ width: '150px', height: '75px' })
+})
+
+test('artworkStyle follows frameStyle s null convention exactly (§2.3)', () => {
+  expect(artworkStyleFor(FRAME, undefined)).toBeNull()
+  expect(artworkStyleFor(null, 192)).toBeNull()
+})
+
+test('a frame with no artwork lays out a zero artwork box rather than a NaN one', () => {
+  const empty: ViewFrame = { box: { w: 240, h: 240 }, artwork: { x: 0, y: 0, w: 0, h: 0 } }
+  expect(artworkStyleFor(empty, 192)).toEqual({ width: '0px', height: '0px' })
 })

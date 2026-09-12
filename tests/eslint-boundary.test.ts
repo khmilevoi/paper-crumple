@@ -32,6 +32,13 @@ describe('the no-throw rule (§10.8)', () => {
 })
 
 describe('the boundary allowlist', () => {
+  it('allows the Reatom Result boundary and forbids throws in neighboring source', async () => {
+    const allowed = await lint(THROWING_SOURCE, 'packages/reatom/src/result.ts')
+    const forbidden = await lint(THROWING_SOURCE, 'packages/reatom/src/other.ts')
+    expect(allowed.messages.filter((m) => m.ruleId === 'no-restricted-syntax')).toHaveLength(0)
+    expect(forbidden.messages.filter((m) => m.ruleId === 'no-restricted-syntax')).toHaveLength(1)
+  })
+
   it('turns the rule off for a file it names, and only for that file', async () => {
     const config = makeEslintConfig(['packages/core/src/allowed.ts']) as Linter.Config[]
     const allowed = await lint(THROWING_SOURCE, 'packages/core/src/allowed.ts', config)

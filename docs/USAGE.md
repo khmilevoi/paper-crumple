@@ -1,5 +1,14 @@
 # Usage: the `@paper-crumple` package family
 
+For implemented reactive application models, see
+[`@paper-crumple/reatom`](../packages/reatom/README.md). Its scene/resource/view/run
+models use Reatom v1001 with independent native data/error subscriptions. It requires
+core and Reatom peers, and does not import React, paper or motion. Supply your own
+stage factory; optionally render its Blit view with the independent React package's
+`<Crumple value={picture.render()} />`. The model owner disposes the scene explicitly.
+The guide covers desired versus applied state, initial/swap errors, cancellation,
+partial aggregate results, opt-in frame progress and borrowed-source pinning.
+
 Status: **derived from the design, not from an implementation.** Nothing here has been compiled or
 run — the packages do not exist yet. Every call, option and return type below is taken from
 `docs/superpowers/specs/2026-08-26-paper-crumple-packages-design.md`, with the section it comes from
@@ -684,7 +693,7 @@ runtime descriptors — `sheet.knobs` and `motion.knobs` off a live build — ge
 without a hand-written list. Where the snippet reads `k.ui?.label`, the demo does not lean on the
 descriptors for it: `paper` declares no `ui` on any descriptor, while `motion` declares one on all
 six, so a panel that only ever consulted `k.ui?.label` would render half its rows unlabelled. The
-label table `k.ui?.label` falls back to here lives in `examples/playground/src/labels.ts`, keyed by
+label table `k.ui?.label` falls back to here lives in `examples/playground/src/controls/labels.ts`, keyed by
 the same namespaced patch key this section derives above — and a key the table doesn't cover still
 renders, under its raw key, rather than being dropped.
 

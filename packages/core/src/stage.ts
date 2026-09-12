@@ -1,5 +1,11 @@
 import { ABORTED, isAborted, type Aborted } from './abort.js'
 import { attempt } from './attempt.js'
+import {
+  createChangeBatch,
+  createChanges,
+  type ChangeSource,
+  type InternalChangePublisher,
+} from './changes.js'
 import { createIngestLane, type IngestClass, type IngestSlot } from './ingest-lane.js'
 import { blitPlan, managedBackingStore } from './blit.js'
 import {
@@ -101,6 +107,11 @@ export type AddOptions<S extends SpriteSource> = {
 
 /** Everything not specific to a surface mode (amendment 8). */
 export interface StageCommon {
+  readonly changes: ChangeSource
+  /** Terminal flag, already true during the final lifecycle notification. */
+  readonly disposed: boolean
+  /** Accepted overrides at this scope, keyed by the registry's namespaced paths. */
+  readonly appliedKnobs: Readonly<Knobs>
   // --- degradation, capabilities and the two channels (§4.0, §4.6, amendment 14, amendment 16) ---
   /** Degradation is a value, not a rejection: a paper tile that failed to fetch leaves a usable
    *  stage that renders without grain. */
@@ -111,6 +122,15 @@ export interface StageCommon {
   /** `readonly KnobDescriptor[]` at runtime, so a JS consumer gets ranges, kinds and labels from
    *  the same descriptors that generate the types (§10.6). */
   readonly knobs: readonly KnobDescriptor[]
+  /** Every descriptor's default under its own **namespaced** path — the same frozen object the
+   *  registry builds once at mount, handed out by identity so a consumer can use it as an effect
+   *  dependency (§3.4). `knobs` carries slot-local keys with no path, so a consumer holding a knob
+   *  key had no way to ask what its default was; this is that answer. These are the registry's own
+   *  paths, and they are not all the spelling `set()` takes: a **shared** knob — core's own
+   *  (`core.paperColor`), or any slot descriptor that declares `binds` — is written back through
+   *  the bare shared key (`paperColor`), which is what writes every bound descriptor at once.
+   *  Every other path (`sheet.grain`) is written back exactly as it is keyed here. */
+  readonly defaults: KnobValues
   /** The synchronous form of the `lost` event: a `useEffect` that runs after the event has
    *  already fired has no other way to ask (amendment 16). */
   readonly lost: boolean
@@ -368,6 +388,8 @@ export async function createStage(
   // Created before the LRU so `release` below can read it: §8.8 makes the LRU the stage's, and
   // `budget` must be right before the first add().
   const sprites = new Map<string, SpriteRecord>()
+  const semanticBatch = createChangeBatch()
+  const changes = createChanges(semanticBatch)
   /** Keys whose `add()` is in flight. A live key is refused whether or not it has finished. */
   const reserved = new Set<string>()
 
@@ -380,6 +402,8 @@ export async function createStage(
       // destroys the sprite, its hull entry and its key.
       o.sheet.releaseFront(record.front)
       record.front = null
+      record.changes.emit('resources')
+      changes.emit('resources')
     },
   })
 
@@ -403,6 +427,8 @@ export async function createStage(
     dpr,
     artworkLongSide,
     warnings,
+    semanticBatch,
+    changes,
     isLost: () => lost,
     isDisposed: () => disposed,
     markLost: () => {
@@ -417,17 +443,21 @@ export async function createStage(
   const unsubscribe = (
     env.onContextLost ?? ((fn) => defaultOnContextLost(host.surface.canvas, fn))
   )(() => {
-    if (lost) return
-    lost = true
-    // Its own channel (amendment 16): this is the single failure whose documented response is
-    // "dispose and rebuild everything" rather than "log it", and recognising it by sifting
-    // GlErrors out of the general error stream means matching on a message. §4.6's `error`
-    // emission stays and the channel is additive to it.
-    bus.emit('lost', { view: null } as never)
-    policy.orphan(
-      new GlError('the WebGL2 context was lost; dispose this stage and build a new one'),
-      null,
-    )
+    if (lost || disposed) return
+    semanticBatch.batch(() => {
+      lost = true
+      changes.emit('lifecycle')
+      changes.emit('resources')
+      // Its own channel (amendment 16): this is the single failure whose documented response is
+      // "dispose and rebuild everything" rather than "log it", and recognising it by sifting
+      // GlErrors out of the general error stream means matching on a message. §4.6's `error`
+      // emission stays and the channel is additive to it.
+      bus.emit('lost', { view: null } as never)
+      policy.orphan(
+        new GlError('the WebGL2 context was lost; dispose this stage and build a new one'),
+        null,
+      )
+    })
   })
   teardown.push(unsubscribe)
 
@@ -439,6 +469,8 @@ export async function createStage(
 }
 
 interface StageParts {
+  semanticBatch: ReturnType<typeof createChangeBatch>
+  changes: InternalChangePublisher
   o: AnyStageOptions
   env: StageEnv
   host: SurfaceHost
@@ -466,6 +498,7 @@ interface StageParts {
 
 /** The stage-side face of a view. Never handed to a consumer; `View` is the public one. */
 interface ViewInternals {
+  readonly changes: InternalChangePublisher
   owner(): RunOwner | null
   playAs(owner: RunOwner, from: PoseRef, to: PoseRef, o?: PlayOptions): Run<PlayResult>
   stopAs(owner: RunOwner, all: boolean): void
@@ -476,6 +509,7 @@ const INTERNALS = new WeakMap<View, ViewInternals>()
 function internals(v: View): ViewInternals {
   return (
     INTERNALS.get(v) ?? {
+      changes: createChanges(),
       owner: () => null,
       playAs: () => settledRun(undefined),
       stopAs: () => {},
@@ -571,6 +605,21 @@ function buildStage(p: StageParts): BuiltStage {
    * frozen reserve is one ("re-add required"), and no rebuild can re-add.
    */
   function rebuildFront(record: SpriteRecord): AddError | undefined {
+    return p.semanticBatch.batch(() => rebuildFrontNow(record))
+  }
+
+  function frontChanged(record: SpriteRecord): void {
+    record.changes.emit('resources')
+    record.changes.emit('geometry')
+    p.changes.emit('resources')
+    for (const v of viewsShowing(record.key)) {
+      const changes = internals(v).changes
+      changes.emit('geometry')
+      changes.emit('content')
+    }
+  }
+
+  function rebuildFrontNow(record: SpriteRecord): AddError | undefined {
     // A re-source in flight for this key builds at the knob values current when it lands, so
     // there is nothing to do now: sixty set() calls inside one decode are one rebuild.
     if (resourcing.has(record.key)) return undefined
@@ -590,6 +639,7 @@ function buildStage(p: StageParts): BuiltStage {
     if (record.front !== null) p.o.sheet.releaseFront(record.front)
     record.front = front
     insertFront(record)
+    frontChanged(record)
     return undefined
   }
 
@@ -704,26 +754,28 @@ function buildStage(p: StageParts): BuiltStage {
     // amendment 10 — a `200` on the conditional re-supply: the bytes moved under a key that
     // promised they would not. The fresh handle traced its own hull, so the new artwork cannot
     // inherit the old torn edge; the warning is what remains to be said.
-    if ('freshness' in got && got.freshness === 'changed') warnReplaced(key)
-    const previous = record.handle
-    record.handle = handle
-    // This run is over before the rebuild, so a build that finds the slot taken again — an
-    // `add()` that landed inside the same window — schedules its own re-source instead of
-    // being swallowed by this one's in-flight entry.
-    resourcing.delete(key)
-    const failed = rebuildFront(record)
-    // The previous handle goes back only now, with the new one in hand and built from: a
-    // released handle cannot be built from, and the view was drawing from this record the
-    // whole time the decode was out.
-    p.o.sheet.release(previous)
-    if (failed !== undefined) return failed
-    // Whatever the queue still held for this key just landed, at the current values.
-    rebuildQueue.forget(key)
-    // §8.8 — an idle view redraws now; a running one picks the new front up at its next step.
-    // Snapshotted for the same reason `invalidateSpriteAt` snapshots: a re-show under a refresh
-    // appends to the live set, and the loop would follow it round.
-    for (const v of [...viewsShowing(key)]) if (v.state === 'idle') v.refresh()
-    return undefined
+    return p.semanticBatch.batch(() => {
+      if ('freshness' in got && got.freshness === 'changed') warnReplaced(key)
+      const previous = record.handle
+      record.handle = handle
+      // This run is over before the rebuild, so a build that finds the slot taken again — an
+      // `add()` that landed inside the same window — schedules its own re-source instead of
+      // being swallowed by this one's in-flight entry.
+      resourcing.delete(key)
+      const failed = rebuildFront(record)
+      // The previous handle goes back only now, with the new one in hand and built from: a
+      // released handle cannot be built from, and the view was drawing from this record the
+      // whole time the decode was out.
+      p.o.sheet.release(previous)
+      if (failed !== undefined) return failed
+      // Whatever the queue still held for this key just landed, at the current values.
+      rebuildQueue.forget(key)
+      // §8.8 — an idle view redraws now; a running one picks the new front up at its next step.
+      // Snapshotted for the same reason `invalidateSpriteAt` snapshots: a re-show under a refresh
+      // appends to the live set, and the loop would follow it round.
+      for (const v of [...viewsShowing(key)]) if (v.state === 'idle') v.refresh()
+      return undefined
+    })
   }
 
   // §10.6's policy is P9's, applied to `stage.play`'s report: a mid-run draw failure reaches the
@@ -972,6 +1024,7 @@ function buildStage(p: StageParts): BuiltStage {
           're-supplier could be derived from, so the LRU may not evict them',
       ),
     )
+    p.changes.emit('lifecycle')
   }
 
   const dead = (): InstanceType<typeof GlError> | undefined =>
@@ -1127,6 +1180,7 @@ function buildStage(p: StageParts): BuiltStage {
   }
 
   function createViewObject(t: ViewTarget, targetFor: TargetRule): View {
+    const changes = createChanges(p.semanticBatch)
     // §7.1 — a view's own listeners run first, in registration order; the stage re-emits
     // synchronously after the last returns, with `view` filled in. The bus's `relay` is the one
     // hook that runs after the last listener regardless of when that listener was registered; a
@@ -1195,6 +1249,8 @@ function buildStage(p: StageParts): BuiltStage {
      * drift apart.
      */
     function attachRecord(next: SpriteRecord | null): void {
+      if (record === next) return
+      const previous = record
       if (record !== null) {
         record.attachCount -= 1
         p.lru.detach(record.key)
@@ -1206,9 +1262,22 @@ function buildStage(p: StageParts): BuiltStage {
         p.lru.attach(record.key)
         indexShow(view, record.key)
       }
+      previous?.changes.emit('resources')
+      next?.changes.emit('resources')
+      changes.emit('content')
+      changes.emit('geometry')
     }
 
     const paint = (next: number): void => {
+      if (needsRenderBatch()) p.semanticBatch.batch(() => paintNow(next))
+      else paintNow(next)
+    }
+
+    function needsRenderBatch(): boolean {
+      return record !== null && (record.front === null || rebuildQueue.dirty(record.key))
+    }
+
+    const paintNow = (next: number): void => {
       if (record === null) return
       // §8.8 — until a rebuild lands the view draws the last front it drew successfully, at the
       // new pose: never a blank frame, never a skipped step.
@@ -1247,9 +1316,9 @@ function buildStage(p: StageParts): BuiltStage {
     // ball index name different poses. `MotionClip.keyFrames.length` is where the count lives
     // and `MotionClip.dwells` is the table — absent, the runner's own `DWELL_MS`.
     let controller: RunController<SpriteRecord> | null = null
+    let replacingController = 0
     let poseCount = 1
     let poseDwells: readonly number[] | undefined = undefined
-    let currentRun: Run<PlayResult | SwapResult> | null = null
 
     const host: RunHost = {
       emit: (event, payload) => bus.emit(event, payload as never),
@@ -1270,9 +1339,15 @@ function buildStage(p: StageParts): BuiltStage {
         return record === null ? undefined : paintOnce(record, next)
       },
       frameFor: (next) => record?.clip.keyFrames[next] ?? 0,
+      needsRenderBatch,
       setState: (next) => {
+        // Controller disposal is internal; only view.dispose owns terminal view lifecycle.
+        if (next === 'disposed' && replacingController > 0) return
+        if (state === next) return
         state = next
+        changes.emit('state')
       },
+      batch: p.semanticBatch.batch,
       timers: p.timers,
     }
 
@@ -1282,12 +1357,14 @@ function buildStage(p: StageParts): BuiltStage {
       const stale = controller
       if (stale !== null && count === poseCount && dwells === poseDwells) return stale
       if (stale !== null) {
-        // Ends any live run with `completed: false` — and announces `'disposed'`, which is the
-        // *controller's* state and not the view's. The view outlives its controllers, so it is
-        // `idle` once this returns; were the announcement left standing, a `play()` the new
-        // controller then refuses (a `PoseError` on a stale `view.pose`, say) would never
-        // overwrite it, and the view would refuse every later call as if it had been disposed.
-        stale.dispose()
+        // End the old run, but suppress its controller-only terminal announcement. The view
+        // remains registered even if the new controller refuses the requested pose.
+        replacingController += 1
+        try {
+          stale.dispose()
+        } finally {
+          replacingController -= 1
+        }
         // The `end` that dispose emitted is allowed to call `play()`. That call re-enters here,
         // installs a controller keyed to this same clip and starts its run on it; a second
         // controller would orphan that run, so the installed one is returned instead.
@@ -1401,17 +1478,17 @@ function buildStage(p: StageParts): BuiltStage {
 
     function playMethod(from: PoseRef, to: PoseRef, o?: PlayOptions): Run<PlayResult> {
       if (p.isDisposed() || state === 'disposed') return settledRun(ABORTED)
-      const run = controllerFor().play(from, to, { ...o, owner: 'view' })
-      // Cache the run only when the controller installed it and it is still live: a call refused
-      // from inside a supersession (or one the signal aborted first) hands back a run that has
-      // already settled, and `view.run` must not report that one while the run that superseded
-      // it is the live one. A one-pose run that finished synchronously has already nulled this
-      // from its own `end`.
-      currentRun = controllerFor().live ? run : null
-      return run
+      return p.semanticBatch.batch(() => controllerFor().play(from, to, { ...o, owner: 'view' }))
     }
 
     function crumpleToMethod(
+      raw: Sprite | Promise<Sprite | Error | Aborted>,
+      o?: SwapOptions,
+    ): Run<SwapResult> {
+      return p.semanticBatch.batch(() => crumpleToNow(raw, o))
+    }
+
+    function crumpleToNow(
       raw: Sprite | Promise<Sprite | Error | Aborted>,
       o?: SwapOptions,
     ): Run<SwapResult> {
@@ -1423,7 +1500,6 @@ function buildStage(p: StageParts): BuiltStage {
       // crumple.
       if (record === null) {
         const run = adoptImmediately(target)
-        currentRun = run
         return run
       }
       // §4.5 — a sprite is attached if it is shown by a non-disposed view **or** is the pending
@@ -1453,8 +1529,6 @@ function buildStage(p: StageParts): BuiltStage {
       // forever, and a held front is unevictable (§4.5). The release is idempotent, so the normal
       // path (adopt at the ball, then the run settles) still releases exactly once.
       void run.done.then(held)
-      // As in `playMethod`: only a run the controller installed and still holds.
-      currentRun = controllerFor().live ? run : null
       return run
     }
 
@@ -1514,6 +1588,10 @@ function buildStage(p: StageParts): BuiltStage {
     }
 
     const view: View = {
+      changes,
+      get appliedKnobs() {
+        return Object.freeze({ ...viewLayer })
+      },
       get pose() {
         return pose
       },
@@ -1524,7 +1602,7 @@ function buildStage(p: StageParts): BuiltStage {
         return record?.sprite ?? null
       },
       get run() {
-        return controller?.live === true ? currentRun : null
+        return controller?.run ?? null
       },
       tag: t.tag,
       get idealSize() {
@@ -1568,9 +1646,14 @@ function buildStage(p: StageParts): BuiltStage {
               )
             : undefined
         }
-        attachRecord(sprite === null ? null : findRecord(sprite))
-        state = 'idle'
-        paint(0)
+        p.semanticBatch.batch(() => {
+          if (decision.endsLiveRun) controller?.stop({ all: true })
+          if (p.isDisposed() || state === 'disposed' || controller?.live === true) return
+          attachRecord(sprite === null ? null : findRecord(sprite))
+          state = 'idle'
+          pose = 0
+          paint(0)
+        })
         return undefined
       },
 
@@ -1594,14 +1677,20 @@ function buildStage(p: StageParts): BuiltStage {
       swapTo: swapToMethod,
       stop: stopMethod,
       set: ((patch: Readonly<Record<string, unknown>>) => {
-        const layer: Record<string, KnobPrimitive> = { ...viewLayer }
-        const failed = applyPatch(patch, VIEW_SCOPE, layer)
-        if (failed !== undefined) return failed
-        viewLayer = layer
-        viewVersion += 1
-        // Draw class: no rebuild, one redraw at the current pose.
-        if (state === 'idle') view.refresh()
-        return undefined
+        const gone = dead()
+        if (gone !== undefined || state === 'disposed')
+          return gone ?? new ViewError('this view is disposed')
+        return p.semanticBatch.batch(() => {
+          const layer: Record<string, KnobPrimitive> = { ...viewLayer }
+          const failed = applyPatch(patch, VIEW_SCOPE, layer)
+          if (failed !== undefined) return failed
+          viewLayer = layer
+          viewVersion += 1
+          // Draw class: no rebuild, one redraw at the current pose.
+          if (state === 'idle') view.refresh()
+          changes.emit('settings')
+          return undefined
+        })
       }) as never,
 
       on: (event, fn) => bus.on(event, fn as never),
@@ -1609,32 +1698,33 @@ function buildStage(p: StageParts): BuiltStage {
 
       dispose() {
         if (state === 'disposed') return
-        // §4.6: ends a live run with `completed: false` before the sprite is detached and the
-        // bus is cleared — or the `end` `dispose()` owes it would never reach a listener.
-        controller?.dispose()
-        state = 'disposed'
-        attachRecord(null)
-        // The last projection holds a `SpriteRecord` and its bag. A disposed view the consumer
-        // still holds would otherwise keep both alive for as long as it does.
-        motionCache = null
-        if ('canvas' in t) claimed.delete(t.canvas)
-        bus.clear()
-        const at = views.indexOf(view)
-        if (at >= 0) views.splice(at, 1)
+        p.semanticBatch.batch(() => {
+          // §4.6: ends a live run with `completed: false` before the sprite is detached and the
+          // bus is cleared — or the `end` `dispose()` owes it would never reach a listener.
+          controller?.dispose()
+          state = 'disposed'
+          attachRecord(null)
+          // The last projection holds a `SpriteRecord` and its bag. A disposed view the consumer
+          // still holds would otherwise keep both alive for as long as it does.
+          motionCache = null
+          if ('canvas' in t) claimed.delete(t.canvas)
+          bus.clear()
+          const at = views.indexOf(view)
+          if (at >= 0) views.splice(at, 1)
+          changes.emit('lifecycle')
+          changes.emit('state')
+          p.changes.emit('lifecycle')
+          p.changes.emit('resources')
+          changes.clearAfterBatch()
+        })
       },
     }
 
-    // `currentRun` is cleared once the run that produced it has actually ended, which is what
-    // lets `view.run` report `null` at exactly the moment §4.5 says the view returns to `idle`.
-    // Registered here, before any consumer's handler, so that a handler reading `view.run` from
-    // `end` already sees `null` — §7.1's "`run` set to `null` before it emits `end`".
-    bus.on('end', () => {
-      currentRun = null
-    })
-
     INTERNALS.set(view, {
+      changes,
       owner: () => controller?.owner ?? null,
-      playAs: (owner, from, to, o) => controllerFor().play(from, to, { ...o, owner }),
+      playAs: (owner, from, to, o) =>
+        p.semanticBatch.batch(() => controllerFor().play(from, to, { ...o, owner })),
       stopAs: (owner, all) => controller?.stop({ owner, all }),
       get spriteKey() {
         return record?.key ?? null
@@ -1761,7 +1851,15 @@ function buildStage(p: StageParts): BuiltStage {
     // exist until after `sprite` is built. `record` itself is assigned exactly once, so it stays
     // `const` and only the box's property is written.
     const box: { record?: SpriteRecord } = {}
+    const changes = createChanges(p.semanticBatch)
     const sprite: Sprite = {
+      changes,
+      get resident() {
+        return box.record?.front != null
+      },
+      get appliedKnobs() {
+        return Object.freeze({ ...box.record?.knobs })
+      },
       key,
       get frontSize() {
         return {
@@ -1779,21 +1877,28 @@ function buildStage(p: StageParts): BuiltStage {
         return box.record?.attachCount ?? 0
       },
       set: ((patch: Readonly<Record<string, unknown>>) => {
+        const gone = dead()
+        if (gone !== undefined) return gone
         const current = box.record
         if (current === undefined) return undefined
-        const before = { ...current.knobs }
-        const layer: Record<string, KnobPrimitive> = { ...current.knobs }
-        const failed = applyPatch(patch, SPRITE_SCOPE, layer)
-        if (failed !== undefined) return failed
-        current.knobs = layer
-        const cache = cacheFor(current)
-        cache.version += 1
-        cache.empty = Object.keys(layer).length === 0
-        invalidateSprite(current, delta(before, layer))
-        return undefined
+        if (p.sprites.get(key) !== current) return new SheetError('this sprite was removed')
+        return p.semanticBatch.batch(() => {
+          const before = { ...current.knobs }
+          const layer: Record<string, KnobPrimitive> = { ...current.knobs }
+          const failed = applyPatch(patch, SPRITE_SCOPE, layer)
+          if (failed !== undefined) return failed
+          current.knobs = layer
+          const cache = cacheFor(current)
+          cache.version += 1
+          cache.empty = Object.keys(layer).length === 0
+          invalidateSprite(current, delta(before, layer))
+          changes.emit('settings')
+          return undefined
+        })
       }) as never,
     }
     const record: SpriteRecord = {
+      changes,
       key,
       sprite,
       source,
@@ -1893,17 +1998,20 @@ function buildStage(p: StageParts): BuiltStage {
       return ABORTED
     }
 
-    p.sprites.set(opts.key, built)
-    p.lru.insert({
-      key: opts.key,
-      bytes: built.front?.bytes ?? 0,
-      reclaimable: source.reclaimable,
+    return p.semanticBatch.batch(() => {
+      p.sprites.set(opts.key, built)
+      p.lru.insert({
+        key: opts.key,
+        bytes: built.front?.bytes ?? 0,
+        reclaimable: source.reclaimable,
+      })
+      if (opts.pin === true) {
+        built.pinned = true
+        p.lru.pin(opts.key)
+      }
+      p.changes.emit('resources')
+      return built.sprite
     })
-    if (opts.pin === true) {
-      built.pinned = true
-      p.lru.pin(opts.key)
-    }
-    return built.sprite
   }
 
   async function addAll(
@@ -1942,6 +2050,7 @@ function buildStage(p: StageParts): BuiltStage {
           'was rebuilt and its hull entry invalidated',
       ),
     )
+    p.changes.emit('lifecycle')
   }
 
   async function prepare(
@@ -2093,6 +2202,7 @@ function buildStage(p: StageParts): BuiltStage {
       settleReplace = resolve
     })
     resourcing.set(key, replacing)
+    p.semanticBatch.batch(() => frontChanged(record))
     const built = await buildSprite(
       key,
       source,
@@ -2115,6 +2225,7 @@ function buildStage(p: StageParts): BuiltStage {
         p.lru.remove(key)
         rebuildQueue.forget(key)
       }
+      if (alive) p.semanticBatch.batch(() => frontChanged(record))
       settleReplace(undefined)
       return ABORTED
     }
@@ -2123,6 +2234,7 @@ function buildStage(p: StageParts): BuiltStage {
         p.sprites.delete(key)
         p.lru.remove(key)
       }
+      if (alive) p.semanticBatch.batch(() => frontChanged(record))
       settleReplace(built)
       return p.policy.returned(built, null)
     }
@@ -2141,21 +2253,31 @@ function buildStage(p: StageParts): BuiltStage {
 
     // The key, the pins and the attachments survive, so a reference the application holds does
     // too. Only the source-derived halves are replaced.
-    record.source = built.source
-    record.handle = built.handle
-    record.fit = built.fit
-    record.clip = built.clip
-    record.front = built.front
-    // The same restore `rebuildFront` makes, and for the same reason — a front the budget dropped
-    // inside the replace window takes its slot with it. Guarded on the slot being new, so a slot
-    // that survived is not attached a second time.
-    insertFront(record)
-    warnReplaced(key)
-    settleReplace(undefined)
-    return record.sprite
+    return p.semanticBatch.batch(() => {
+      record.source = built.source
+      record.handle = built.handle
+      record.fit = built.fit
+      record.clip = built.clip
+      record.front = built.front
+      // The same restore `rebuildFront` makes, and for the same reason — a front the budget dropped
+      // inside the replace window takes its slot with it. Guarded on the slot being new, so a slot
+      // that survived is not attached a second time.
+      insertFront(record)
+      warnReplaced(key)
+      frontChanged(record)
+      settleReplace(undefined)
+      return record.sprite
+    })
   }
 
   function remove(key: string, o?: { detach?: true }): InstanceType<typeof SheetError> | undefined {
+    return p.semanticBatch.batch(() => removeNow(key, o))
+  }
+
+  function removeNow(
+    key: string,
+    o?: { detach?: true },
+  ): InstanceType<typeof SheetError> | undefined {
     if (p.isDisposed()) return undefined // React runs cleanups child-first (§4.6)
     const record = p.sprites.get(key)
     if (record === undefined) return undefined
@@ -2186,6 +2308,10 @@ function buildStage(p: StageParts): BuiltStage {
     p.sprites.delete(key)
     p.lru.remove(key)
     rebuildQueue.forget(key)
+    record.front = null
+    record.changes.emit('resources')
+    p.changes.emit('resources')
+    record.changes.clearAfterBatch()
     return undefined
   }
 
@@ -2327,9 +2453,17 @@ function buildStage(p: StageParts): BuiltStage {
   }
 
   const stage = {
+    changes: p.changes,
+    get disposed() {
+      return p.isDisposed()
+    },
+    get appliedKnobs() {
+      return Object.freeze({ ...stageLayer })
+    },
     warnings: p.warnings,
     caps: p.ctx.caps,
     knobs: p.registry.descriptors,
+    defaults: p.registry.defaults(),
     get lost() {
       return p.isLost()
     },
@@ -2339,7 +2473,20 @@ function buildStage(p: StageParts): BuiltStage {
     get surface() {
       return p.host.surface
     },
-    resize: (w: number, h: number) => p.host.resize(w, h),
+    resize: (w: number, h: number) => {
+      const gone = dead()
+      if (gone !== undefined) return gone
+      const beforeW = p.host.surface.width
+      const beforeH = p.host.surface.height
+      const failed = p.host.resize(w, h)
+      if (
+        failed === undefined &&
+        (beforeW !== p.host.surface.width || beforeH !== p.host.surface.height)
+      ) {
+        p.changes.emit('resources')
+      }
+      return failed
+    },
     on: <E extends EventName>(event: E, fn: (e: StageEvent<E>) => void) => p.bus.on(event, fn),
     once: <E extends EventName>(event: E, fn: (e: StageEvent<E>) => void) => p.bus.once(event, fn),
 
@@ -2351,18 +2498,20 @@ function buildStage(p: StageParts): BuiltStage {
       // `fn` is the consumer's, so it may throw; the flag has to come back down either way or
       // every later `batch` takes the nested no-op path and draws outside any scope.
       try {
-        return p.ctx.scope(() => fn())
+        return p.semanticBatch.batch(() => p.ctx.scope(() => fn()))
       } finally {
         batching = false
       }
     },
 
     budget: (o: { bytes?: number }) => {
-      if (o.bytes !== undefined) {
-        budgetedBytes = o.bytes
-        p.lru.setBudget(o.bytes)
-        checkUnreclaimable()
-      }
+      p.semanticBatch.batch(() => {
+        if (o.bytes !== undefined) {
+          budgetedBytes = o.bytes
+          p.lru.setBudget(o.bytes)
+          checkUnreclaimable()
+        }
+      })
     },
     usage: () => ({
       ...p.lru.usage(),
@@ -2381,15 +2530,23 @@ function buildStage(p: StageParts): BuiltStage {
     }),
     pin: (key: string) => {
       const record = p.sprites.get(key)
-      if (record === undefined) return
-      record.pinned = true
-      p.lru.pin(key)
+      if (record === undefined || record.pinned || p.isDisposed()) return
+      p.semanticBatch.batch(() => {
+        record.pinned = true
+        p.lru.pin(key)
+        record.changes.emit('resources')
+        p.changes.emit('resources')
+      })
     },
     unpin: (key: string) => {
       const record = p.sprites.get(key)
-      if (record === undefined) return
-      record.pinned = false
-      p.lru.unpin(key)
+      if (record === undefined || !record.pinned || p.isDisposed()) return
+      p.semanticBatch.batch(() => {
+        record.pinned = false
+        p.lru.unpin(key)
+        record.changes.emit('resources')
+        p.changes.emit('resources')
+      })
     },
 
     add: add as never,
@@ -2429,31 +2586,51 @@ function buildStage(p: StageParts): BuiltStage {
       if (targetFor instanceof Error) return p.policy.returned(targetFor, null)
       const created = createViewObject(t, targetFor)
       views.push(created)
+      p.changes.batch(() => {
+        p.changes.emit('lifecycle')
+        p.changes.emit('resources')
+      })
       return created
     },
     play: stagePlayMethod,
     stop: stageStopMethod,
     mount: mountMethod as never,
     set: ((patch: Readonly<Record<string, unknown>>) => {
-      const before = { ...stageLayer }
-      const failed = applyPatch(patch, INVALIDATION_ORDER, stageLayer)
-      if (failed !== undefined) return failed
-      stageVersion += 1
-      invalidate(delta(before, stageLayer))
-      return undefined
+      const gone = dead()
+      if (gone !== undefined) return gone
+      return p.semanticBatch.batch(() => {
+        const before = { ...stageLayer }
+        const failed = applyPatch(patch, INVALIDATION_ORDER, stageLayer)
+        if (failed !== undefined) return failed
+        stageVersion += 1
+        invalidate(delta(before, stageLayer))
+        p.changes.emit('settings')
+        return undefined
+      })
     }) as never,
 
     dispose() {
       if (p.isDisposed()) return
-      p.markDisposed()
-      // Views first — §4.6's teardown order — then the slots, then the context, then the surface.
-      for (const v of [...views]) (v as unknown as { dispose(): void }).dispose()
-      views.length = 0
-      // §8.10 — queued ingests settle ABORTED and close what they own; the running one is told.
-      lane.dispose()
-      p.lru.clear()
-      p.bus.clear()
-      while (p.teardown.length > 0) p.teardown.pop()?.()
+      p.semanticBatch.batch(() => {
+        p.markDisposed()
+        // Views first — §4.6's teardown order — then the slots, then the context, then the surface.
+        for (const v of [...views]) (v as unknown as { dispose(): void }).dispose()
+        views.length = 0
+        // §8.10 — queued ingests settle ABORTED and close what they own; the running one is told.
+        lane.dispose()
+        p.lru.clear()
+        p.bus.clear()
+        while (p.teardown.length > 0) p.teardown.pop()?.()
+        for (const record of p.sprites.values()) {
+          record.front = null
+          record.changes.emit('resources')
+          record.changes.clearAfterBatch()
+        }
+        p.sprites.clear()
+        p.changes.emit('lifecycle')
+        p.changes.emit('resources')
+        p.changes.clearAfterBatch()
+      })
     },
   }
 

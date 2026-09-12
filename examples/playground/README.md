@@ -10,7 +10,7 @@ pnpm --filter @paper-crumple/playground dev   # builds the three packages, then 
 
 The whole page is a literal port of `Paper Crumple Control Panel v2.dc.html`, the Claude Design
 mockup this demo is built to — same header, same stage, same transport, same five numbered
-sections, same copy, same colours and spacing. `src/styles.css` is that file's inline styles moved
+sections, same copy, same colours and spacing. `src/app/styles.css` is that file's inline styles moved
 onto a class per node, value for value; where the two disagree, this repository is wrong.
 
 React, and not the hand-written DOM this demo used to be, for one reason: the mockup is itself a
@@ -25,7 +25,7 @@ where they appear:
   faith;
 - **the numbered sections after "05"** — the engine declares about forty knobs and the mockup
   curates about twenty of them, so the rest keep a home here, grouped by the library's own
-  taxonomy (`src/labels.ts`) and drawn with the same row primitives, followed by the `DemoConfig`
+  taxonomy (`src/controls/labels.ts`) and drawn with the same row primitives, followed by the `DemoConfig`
   factory options.
 
 Everything else the pre-port playground carried and the mockup does not — the six-tile broadcast
@@ -34,23 +34,33 @@ controls — is gone.
 
 ## How it is put together
 
-| file             | what it owns                                                                                 |
-| ---------------- | -------------------------------------------------------------------------------------------- |
-| `src/main.tsx`   | the React root, and the duplicate-core check that must run before it                         |
-| `src/ui/App.tsx` | all page state, the playback and swap paths, and the diagnostics figures                     |
-| `src/ui/*.tsx`   | one component per node group of the mockup                                                   |
-| `src/scene.ts`   | the stage lifecycle over `usePaperScene`: build, dispose, and the knob carry-over on rebuild |
-| `src/hero.ts`    | the one hero view over `useCrumple`: entrance, swap and the frame style the slot renders     |
-| `src/stage.ts`   | prefetching the other samples, and the renderer string the diagnostics footer uses           |
-| `src/config.ts`  | `DemoConfig` — everything §6.5 calls a factory option — and `buildStage`                     |
-| `src/knobs.ts`   | descriptor collection, keyed the way `stage.set` wants                                       |
-| `src/audio.ts`   | the sound controller, headless: a snapshot plus a subscription                               |
-| `src/state.ts`   | the URL fragment, encoded and decoded                                                        |
+The code is grouped by domain: each folder keeps its behavior, components, and tests together.
+
+| location           | what it owns                                                                    |
+| ------------------ | ------------------------------------------------------------------------------- |
+| `src/main.tsx`     | React root and the duplicate-core check                                         |
+| `src/app/`         | page composition, header, share-link state, and page styles                     |
+| `src/scene/`       | factory configuration, scene lifecycle, hero view, and canvas framing           |
+| `src/source/`      | sample library, dropped sources, rebuild policy, prefetch, and source picker    |
+| `src/playback/`    | fold, swap, scrub, keyboard, timing behavior, and pose controls                 |
+| `src/sound/`       | audio controller and sound controls                                             |
+| `src/paper/`       | edge reserve ceilings, edge controls, and look/debug controls                   |
+| `src/controls/`    | shared control primitives, knob descriptors, labels, and extra library controls |
+| `src/diagnostics/` | metric formatting, renderer information, and diagnostics strip                  |
+| `src/edge-grid/`   | standalone edge-grid diagnostic page                                            |
+
+`App` composes the domains; source policies and diagnostic calculations live with their owners.
 
 **Factory options rebuild; knobs do not.** That split (§6.5) is why `scene.ts`'s `useDemoScene`
-depends on exactly `config`: a knob write goes straight to the live stage and costs one draw. A
+depends on exactly `config`: a knob write goes straight to the live stage and costs one draw. The
+completed build is carried in `scene.meta`, while `scene.stage.defaults` supplies the live
+defaults; the playground does not need a sidecar build object or an explicit default expansion. A
 rebuild is not a reset — every knob a reader moved away from its default is carried onto the new
-stage, and any key the new slot set no longer declares is skipped.
+stage, and any key the new slot set no longer declares is skipped. Dropped files remain direct
+`File`/`Blob` sources and are reclaimable without object URLs.
+
+Scene readiness and failure are callback-driven: `App` handles the `onReady` and `onFailed`
+callbacks exposed by `useDemoScene` instead of polling scene state.
 
 The address bar is always a live share link: every landed rebuild and every knob write rewrites the
 fragment with `replaceState`, so dragging a slider adds no history entries.
@@ -80,7 +90,7 @@ sound, or a request for one, before being asked is hostile.
 The clips live in `examples/playground/public/audio/`, which is **gitignored**: they came from the
 throwaway spike this library was ported from and are not this repository's to redistribute. So the
 folder is absent on a fresh clone, and everything about that path is a first-class state rather
-than a failure — `src/audio.ts` degrades to silence and says so in the readout box, naming where
+than a failure — `src/sound/audio.ts` degrades to silence and says so in the readout box, naming where
 the assets come from. The fold still runs; it is simply quiet.
 
 To hear it, copy the spike's `assets/audio/` (five `.wav` files plus `manifest.json`) into
@@ -117,3 +127,15 @@ Every narrowed Error the page observes — a refused knob write, a stage build t
 that 404'd and rolled back, an audio asset that is not there — goes to the header's status pill and
 nowhere else. That is the mockup's own error channel (its `statusBad` branch carries exactly this
 kind of message), and a second log panel beside it would only be one more thing to keep in sync.
+
+## Tests
+
+```sh
+# Playground tests only, using the repository's unit project
+pnpm --filter @paper-crumple/playground test
+
+# The repository-wide unit and type suite; this also sweeps playground tests
+pnpm test
+```
+
+DOM hook tests opt into jsdom per file and use `@paper-crumple/react/testing` for full-interface fakes.

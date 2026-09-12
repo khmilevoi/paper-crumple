@@ -8,6 +8,7 @@ import {
   checkPackUrls,
   checkPackedManifest,
   checkTiles,
+  checkSourceMaps,
 } from './checks.mjs'
 import { readTarEntries } from './tar.mjs'
 
@@ -153,6 +154,7 @@ function main() {
     if (manifest === undefined) continue
 
     failures.push(...checkEntries(spec, names))
+    failures.push(...checkSourceMaps(spec, entries))
     failures.push(...checkPackedManifest(spec, manifest))
     if (spec.dir === 'motion') failures.push(...checkPackUrls(entries))
     if (spec.dir === 'paper') failures.push(...checkTiles(entries, tiles))

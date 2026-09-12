@@ -50,6 +50,7 @@ describe('the deprecation stub at the freed unscoped name', () => {
         '@paper-crumple/paper',
         '@paper-crumple/motion',
         '@paper-crumple/react',
+        '@paper-crumple/reatom',
       ],
     ])
     expect(config).not.toMatch(/"paper-crumple"/)
